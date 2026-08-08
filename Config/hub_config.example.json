@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "hub_name": "Local AI Hub",
+  "bind_host": "127.0.0.1",
+  "api_port": 8765,
+  "mcp_transport": "stdio",
+  "mcp_http_port": null,
+  "max_heavy_gpu_jobs": 1,
+  "idle_unload_seconds": 900,
+  "model_load_policy": "on_demand",
+  "auto_start_heavy_services": false,
+  "overwrite_source": false,
+  "ffmpeg_path": "${FFMPEG_PATH}",
+  "ffprobe_path": "${FFPROBE_PATH}",
+  "output_root": "${LOCAL_AI_OUTPUT}",
+  "temp_root": "${LOCAL_AI_TEMP}",
+  "log_root": "${LOCAL_AI_LOGS}",
+  "shared_cache_roots": ["${LOCAL_AI_CACHE}"]
+}

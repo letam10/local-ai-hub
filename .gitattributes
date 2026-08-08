@@ -18,3 +18,4 @@
 *.wav binary
 *.mp3 binary
 *.mp4 binary
+patches/**/*.patch whitespace=-trailing-space

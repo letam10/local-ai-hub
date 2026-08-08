@@ -1,0 +1,15 @@
+{
+  "local_ai_home": "${LOCAL_AI_HOME}",
+  "python_executable": "${PYTHON_EXECUTABLE}",
+  "local_ai_environment": "${LOCAL_AI_ENV}",
+  "sam2_home": "${SAM2_HOME}",
+  "animesr_home": "${ANIMESR_HOME}",
+  "whisper_home": "${WHISPER_HOME}",
+  "whisper_python": "${WHISPER_PYTHON}",
+  "ffmpeg_path": "${FFMPEG_PATH}",
+  "ffprobe_path": "${FFPROBE_PATH}",
+  "airi_executable": "${AIRI_EXECUTABLE}",
+  "cache_root": "${LOCAL_AI_CACHE}",
+  "output_root": "${LOCAL_AI_OUTPUT}",
+  "temp_root": "${LOCAL_AI_TEMP}"
+}

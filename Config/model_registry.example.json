@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "models": [
+    {"id": "animesr-v2", "engine": "AnimeSR", "model_name": "AnimeSR v2", "version": "unknown", "source": "https://github.com/TencentARC/AnimeSR", "local_path": "${ANIMESR_MODEL_HOME}", "file_size": null, "precision": "configured locally", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": null, "last_verified": null},
+    {"id": "sam2.1-hiera-small", "engine": "SAM 2", "model_name": "sam2.1-hiera-small", "version": "unknown", "source": "https://github.com/facebookresearch/sam2", "local_path": "${SAM2_MODEL_HOME}", "file_size": null, "precision": "configured locally", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": null, "last_verified": null},
+    {"id": "faster-whisper-large-v3", "engine": "Faster-Whisper", "model_name": "large-v3", "version": "unknown", "source": "https://github.com/SYSTRAN/faster-whisper", "local_path": "${WHISPER_MODEL_HOME}", "file_size": null, "precision": "configured locally", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": null, "last_verified": null}
+  ]
+}

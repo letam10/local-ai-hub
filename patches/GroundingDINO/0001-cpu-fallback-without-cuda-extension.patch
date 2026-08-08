@@ -1,0 +1,25 @@
+diff --git a/groundingdino/models/GroundingDINO/ms_deform_attn.py b/groundingdino/models/GroundingDINO/ms_deform_attn.py
+index 489d501..85b116f 100644
+--- a/groundingdino/models/GroundingDINO/ms_deform_attn.py
++++ b/groundingdino/models/GroundingDINO/ms_deform_attn.py
+@@ -28,6 +28,7 @@ from torch.nn.init import constant_, xavier_uniform_
+ try:
+     from groundingdino import _C
+ except:
++    _C = None
+     warnings.warn("Failed to load custom C++ ops. Running on CPU mode Only!")
+ 
+ 
+@@ -327,7 +328,11 @@ class MultiScaleDeformableAttention(nn.Module):
+                 )
+             )
+     
+-        if torch.cuda.is_available() and value.is_cuda:
++        # The upstream CUDA extension requires a local CUDA Toolkit/nvcc at
++        # build time.  PyTorch wheels can still provide CUDA at runtime, so
++        # use the reference PyTorch implementation when that extension is
++        # unavailable instead of dereferencing an undefined _C module.
++        if _C is not None and torch.cuda.is_available() and value.is_cuda:
+             halffloat = False
+             if value.dtype == torch.float16:
+                 halffloat = True

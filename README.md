@@ -55,7 +55,7 @@ The loopback API is `http://127.0.0.1:8765`. Read-only routes include `/health`,
 
 ```powershell
 python Scripts/diagnose.py
-python Scripts/api_smoke.py
+python Scripts/api_smoke.py --image <local-image>
 python MCP/mcp_smoke.py
 ```
 
