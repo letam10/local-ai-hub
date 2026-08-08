@@ -1,0 +1,108 @@
+# Local AI Hub repository safety rules
+# This repository tracks source, wrappers, examples and documentation only.
+
+# Machine-local runtime trees (never commit these).
+/Models/
+/Environments/
+/Cache/
+/Temp/
+/Output/
+/Backups/
+/Logs/
+/Runtimes/
+
+# Upstream clones stay outside the main repository. First-party wrappers live
+# under Adapters/runners and patches/ instead.
+/Services/GroundingDINO/
+/Services/OmniParser/
+/Services/PaddleOCR/
+/Services/Qwen3-TTS/
+/Services/Seed-VC/
+
+# Machine-specific configuration. Only example templates are tracked.
+/Config/*.json
+!/Config/*.example.json
+
+# Python, Node and tool-generated files.
+**/__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+node_modules/
+dist/
+build/
+*.egg-info/
+
+# Model weights and other large binary artifacts.
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+*.gguf
+*.bin
+*.pkl
+*.pickle
+*.npz
+*.npy
+*.dll
+*.lib
+*.pyd
+*.so
+
+# Input/output media and personal voice references.
+*.wav
+*.flac
+*.mp3
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.webm
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+
+# Secrets and credentials (including names commonly used by model tooling).
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.p12
+credentials*
+secrets*
+token*
+api_key*
+**/credentials*
+**/secrets*
+**/token*
+**/api_key*
+*.sqlite
+*.sqlite3
+*.db
+
+# Logs, temporary files and local state.
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+.DS_Store
+Thumbs.db
+
+# Existing local reports can contain host paths or runtime state. Add a
+# deliberately sanitized report or the migration report explicitly when ready.
+/Reports/*.md
+!/Reports/GITHUB_MIGRATION_REPORT.md
+
+# Never let a nested Git metadata directory become part of the parent repo.
+**/.git/
