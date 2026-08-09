@@ -2,12 +2,65 @@
   "schema_version": 1,
   "generated_from": "Local AI Hub local installation audit on 2026-08-08",
   "dependencies": [
-    {"name": "GroundingDINO", "repository": "https://github.com/IDEA-Research/GroundingDINO", "commit_sha": "856dde20aee659246248e20734ef9ba5214f5e44", "version": "0.1.0", "local_install_strategy": "clone outside this repository; apply reviewed wrapper/patch", "patch_path": "patches/GroundingDINO"},
-    {"name": "OmniParser", "repository": "https://github.com/microsoft/OmniParser", "commit_sha": "354021201345a96178360b28733573e27269f2de", "version": "v2", "local_install_strategy": "clone outside this repository; apply reviewed wrapper/patch", "patch_path": "patches/OmniParser"},
-    {"name": "PaddleOCR", "repository": "https://github.com/PaddlePaddle/PaddleOCR", "commit_sha": "2661c7c0ef5c613e8f93c6e93b2e052399f0f854", "version": "3.7.0 / PaddleOCR-VL 1.6", "local_install_strategy": "clone outside this repository; apply reviewed wrapper/patch", "patch_path": "patches/PaddleOCR"},
-    {"name": "Qwen3-TTS", "repository": "https://github.com/QwenLM/Qwen3-TTS", "commit_sha": "022e286b98fbec7e1e916cb940cdf532cd9f488e", "version": "0.1.1", "local_install_strategy": "clone outside this repository; apply reviewed wrapper/patch", "patch_path": "patches/Qwen3-TTS"},
-    {"name": "Seed-VC", "repository": "https://github.com/Plachtaa/seed-vc", "commit_sha": "51383efd921027683c89e5348211d93ff12ac2a8", "version": "official tiny preset", "local_install_strategy": "clone outside this repository; apply reviewed wrapper/patch", "patch_path": "patches/Seed-VC"},
-    {"name": "RF-DETR", "repository": "https://github.com/roboflow/rf-detr", "commit_sha": null, "version": "1.7.1", "local_install_strategy": "install from the official source outside this repository; verify and record a commit before release", "patch_path": null},
-    {"name": "Faster-Whisper", "repository": "https://github.com/SYSTRAN/faster-whisper", "commit_sha": null, "version": "1.1.0", "local_install_strategy": "reuse/configure the existing local environment; do not vendor it", "patch_path": null}
+    {
+      "name": "GroundingDINO",
+      "repository": "https://github.com/IDEA-Research/GroundingDINO",
+      "commit_sha": "856dde20aee659246248e20734ef9ba5214f5e44",
+      "version": "0.1.0",
+      "local_install_strategy": "clone outside this repository; apply reviewed wrapper/patch",
+      "patch_path": "patches/GroundingDINO"
+    },
+    {
+      "name": "OmniParser",
+      "repository": "https://github.com/microsoft/OmniParser",
+      "commit_sha": "354021201345a96178360b28733573e27269f2de",
+      "version": "v2",
+      "local_install_strategy": "clone outside this repository; apply reviewed wrapper/patch",
+      "patch_path": "patches/OmniParser"
+    },
+    {
+      "name": "PaddleOCR",
+      "repository": "https://github.com/PaddlePaddle/PaddleOCR",
+      "commit_sha": "2661c7c0ef5c613e8f93c6e93b2e052399f0f854",
+      "version": "3.7.0 / PaddleOCR-VL 1.6",
+      "local_install_strategy": "clone outside this repository; apply reviewed wrapper/patch",
+      "patch_path": "patches/PaddleOCR"
+    },
+    {
+      "name": "Qwen3-TTS",
+      "repository": "https://github.com/QwenLM/Qwen3-TTS",
+      "commit_sha": "022e286b98fbec7e1e916cb940cdf532cd9f488e",
+      "version": "0.1.1",
+      "local_install_strategy": "clone outside this repository; apply reviewed wrapper/patch",
+      "patch_path": "patches/Qwen3-TTS"
+    },
+    {
+      "name": "Seed-VC",
+      "repository": "https://github.com/Plachtaa/seed-vc",
+      "commit_sha": "51383efd921027683c89e5348211d93ff12ac2a8",
+      "version": "official tiny preset",
+      "local_install_strategy": "clone outside this repository; apply reviewed wrapper/patch",
+      "patch_path": "patches/Seed-VC"
+    },
+    {
+      "name": "RF-DETR",
+      "repository": "https://github.com/roboflow/rf-detr",
+      "commit_sha": null,
+      "version": "1.7.1",
+      "local_install_strategy": "install from the official source outside this repository; verify and record a commit before release",
+      "patch_path": null,
+      "verification_status": "unresolved",
+      "verification_note": "The installed package version does not identify one upstream Git commit; no verified local repository metadata is tracked."
+    },
+    {
+      "name": "Faster-Whisper",
+      "repository": "https://github.com/SYSTRAN/faster-whisper",
+      "commit_sha": null,
+      "version": "1.1.0",
+      "local_install_strategy": "reuse/configure the existing local environment; do not vendor it",
+      "patch_path": null,
+      "verification_status": "unresolved",
+      "verification_note": "The reused local environment does not provide verified upstream Git commit metadata."
+    }
   ]
 }
