@@ -154,7 +154,7 @@ def launch(application_id: str) -> tuple[int, dict[str, Any]]:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             shell=False,
-            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
     except OSError as exc:
         return 500, {"status": "error", "application": application_id, "error": str(exc)}

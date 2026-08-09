@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.services.artifact_store import publicize
+
 from .config import BASE_DIR
 
 
@@ -43,7 +45,14 @@ def _save() -> None:
 _load()
 
 
-def create_job(tool: str, input_data: Any, *, output: str | None = None, device: str | None = None) -> dict[str, Any]:
+def create_job(
+    tool: str,
+    input_data: Any,
+    *,
+    output: str | None = None,
+    device: str | None = None,
+    resume_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     with _lock:
         job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         record = {
@@ -58,7 +67,8 @@ def create_job(tool: str, input_data: Any, *, output: str | None = None, device:
             "finished_at": None,
             "device": device,
             "error": None,
-            "resume_data": None,
+            "resume_data": resume_data if resume_data is not None else (dict(input_data) if isinstance(input_data, dict) else None),
+            "result": None,
         }
         _jobs[job_id] = record
         _save()
@@ -75,15 +85,46 @@ def update_job(job_id: str, **changes: Any) -> dict[str, Any] | None:
         return dict(record)
 
 
-def get_job(job_id: str) -> dict[str, Any] | None:
+def get_job_internal(job_id: str) -> dict[str, Any] | None:
     with _lock:
         record = _jobs.get(job_id)
         return dict(record) if record else None
 
 
+def public_job(record: dict[str, Any]) -> dict[str, Any]:
+    """Return the durable job state without private machine paths or inputs."""
+
+    allowed = {
+        "id",
+        "tool",
+        "status",
+        "progress",
+        "created_at",
+        "started_at",
+        "finished_at",
+        "device",
+        "error",
+        "message",
+        "result",
+        "resumable",
+    }
+    result = {key: value for key, value in record.items() if key in allowed and value is not None}
+    if "result" in result:
+        result["result"] = publicize(result["result"])
+    if result.get("error"):
+        result["error"] = publicize(result["error"])
+    result["resumable"] = bool(record.get("resume_data")) and record.get("status") in {"cancelled", "failed"}
+    return result
+
+
+def get_job(job_id: str) -> dict[str, Any] | None:
+    record = get_job_internal(job_id)
+    return public_job(record) if record else None
+
+
 def list_jobs() -> list[dict[str, Any]]:
     with _lock:
-        return [dict(item) for item in sorted(_jobs.values(), key=lambda value: value.get("created_at", ""), reverse=True)]
+        return [public_job(item) for item in sorted(_jobs.values(), key=lambda value: value.get("created_at", ""), reverse=True)]
 
 
 def active_heavy_jobs() -> list[dict[str, Any]]:

@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 
@@ -18,6 +19,19 @@ ROOT = Path(__file__).resolve().parents[2]
 HOST = "127.0.0.1"
 PORT = 8765
 UI_URL = f"http://{HOST}:{PORT}/ui/"
+
+
+def _no_console_flags() -> int:
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+
+
+def _hidden_startupinfo() -> subprocess.STARTUPINFO | None:
+    if os.name != "nt":
+        return None
+    info = subprocess.STARTUPINFO()
+    info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    info.wShowWindow = subprocess.SW_HIDE
+    return info
 
 
 def _api_ready() -> bool:
@@ -41,7 +55,8 @@ def ensure_api(timeout_seconds: float = 12.0) -> None:
         env={**os.environ, "PYTHONPATH": str(ROOT), "LOCALAIHUB_ROOT": str(ROOT)},
         stdout=log,
         stderr=subprocess.STDOUT,
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        creationflags=_no_console_flags(),
+        startupinfo=_hidden_startupinfo(),
     )
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -49,6 +64,18 @@ def ensure_api(timeout_seconds: float = 12.0) -> None:
             return
         time.sleep(0.2)
     raise RuntimeError(f"Local AI Hub API did not become ready at {HOST}:{PORT}.")
+
+
+def close_owned_idle_backends() -> None:
+    """Ask the API process to stop only idle backends that it owns."""
+
+    request = urllib.request.Request(f"http://{HOST}:{PORT}/api/lifecycle/close", data=b"{}", method="POST", headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=4):
+            pass
+    except OSError:
+        # Closing the desktop shell must not fail if the loopback API already stopped.
+        return
 
 
 def main() -> int:
@@ -79,6 +106,7 @@ def main() -> int:
                 pass
 
         webview.start(maximize, gui="edgechromium", debug=False)
+        close_owned_idle_backends()
         return 0
     except Exception as exc:  # pragma: no cover - native GUI errors are host-specific
         print(f"Local AI Hub desktop shell failed: {exc}", file=sys.stderr)

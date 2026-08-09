@@ -1,14 +1,17 @@
+"""Truthful control plane and direct-workflow dispatch for Local AI Hub V3."""
+
 from __future__ import annotations
 
-import json
 import os
 import re
 import socket
-import subprocess
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from src.services.artifact_store import resolve
+from src.services.job_manager.manager import JobContext, job_manager
+from src.services.tool_smoke import passed as smoke_passed
 
 from .config import BASE_DIR, component, components, hub_config
 from .gpu import gpu_policy, query_gpu
@@ -20,6 +23,9 @@ TOOL_COMPONENTS = {
     "detect_objects": "rfdetr",
     "ground_objects": "groundingdino",
     "segment_image": "sam2",
+    "segment_from_box": "sam2",
+    "segment_from_points": "sam2",
+    "segment_from_text": "sam2",
     "track_video_object": "sam2",
     "ocr_document": "paddleocr_vl",
     "transcribe_media": "whisper",
@@ -30,90 +36,73 @@ TOOL_COMPONENTS = {
     "convert_voice": "seed_vc",
     "upscale_anime_video": "animesr",
     "probe_media": "ffmpeg",
+    "run_media_operation": "ffmpeg",
+    "generate_flux": "comfyui",
+    "generate_qwen_image": "comfyui",
 }
 
-TOOL_STATUS_VALUES = {
-    "operational",
-    "partial",
-    "queue_only",
-    "unavailable",
-    "planned",
-    "error",
+TOOL_STATUS_VALUES = {"operational", "partial", "queue_only", "unavailable", "planned", "error"}
+READY_COMPONENT_STATUSES = {"installed", "running", "partial"}
+SMOKE_ELIGIBLE_TOOLS = {
+    "parse_screen",
+    "detect_objects",
+    "ground_objects",
+    "segment_image",
+    "segment_from_box",
+    "segment_from_points",
+    "track_video_object",
+    "ocr_document",
+    "transcribe_media",
+    "create_subtitled_video",
+    "text_to_speech",
+    "design_voice",
+    "clone_voice",
+    "convert_voice",
+    "upscale_anime_video",
+    "generate_flux",
+    "generate_qwen_image",
 }
 
-READY_COMPONENT_STATUSES = {"installed", "running"}
-
+# A direct adapter stays partial until its bounded functional smoke records a
+# completion.  The UI may still submit it; the result remains truthful.
 TOOL_CAPABILITIES = {
-    "parse_screen": {
-        "tool_status": "partial",
-        "reason": "The OmniParser adapter exists, but no bounded functional backend smoke test is recorded.",
-    },
-    "detect_objects": {
-        "tool_status": "partial",
-        "reason": "The RF-DETR adapter exists, but no bounded functional backend smoke test is recorded.",
-    },
-    "ground_objects": {
-        "tool_status": "partial",
-        "reason": "The Grounding DINO adapter exists, but no bounded functional backend smoke test is recorded.",
-    },
-    "segment_image": {
-        "tool_status": "unavailable",
-        "reason": "Direct SAM 2 backend adapter has not been verified; the existing application is GUI-only.",
-    },
-    "track_video_object": {
-        "tool_status": "unavailable",
-        "reason": "Direct SAM 2 backend adapter has not been verified; the existing application is GUI-only.",
-    },
-    "ocr_document": {
-        "tool_status": "partial",
-        "reason": "The PaddleOCR-VL adapter exists, but no bounded functional backend smoke test is recorded.",
-    },
-    "transcribe_media": {
-        "tool_status": "partial",
-        "reason": "The Faster-Whisper adapter exists, but no bounded functional backend smoke test is recorded.",
-    },
-    "create_subtitled_video": {
-        "tool_status": "unavailable",
-        "reason": "Subtitle-video output muxing has not been verified.",
-    },
-    "text_to_speech": {
-        "tool_status": "partial",
-        "reason": "The Qwen3-TTS adapter exists, but no bounded functional backend smoke test is recorded.",
-    },
-    "design_voice": {
-        "tool_status": "partial",
-        "reason": "The Qwen3-TTS adapter exists, but no bounded functional backend smoke test is recorded.",
-    },
-    "clone_voice": {
-        "tool_status": "partial",
-        "reason": "The Qwen3-TTS adapter exists, but no bounded functional backend smoke test is recorded.",
-    },
-    "convert_voice": {
-        "tool_status": "partial",
-        "reason": "The Seed-VC adapter exists, but no bounded functional backend smoke test is recorded.",
-    },
-    "upscale_anime_video": {
-        "tool_status": "partial",
-        "reason": "The managed Anime Upscale Studio executor is registered, but no bounded local inference smoke is recorded; launch the verified desktop workflow for execution.",
-    },
-    "probe_media": {
-        "tool_status": "operational",
-        "reason": "The allowlisted FFprobe route uses the configured canonical FFmpeg runtime when installed.",
-    },
+    "parse_screen": ("partial", "OmniParser direct worker đã cấu hình; chưa có smoke V3 được ghi nhận."),
+    "detect_objects": ("partial", "RF-DETR direct worker đã cấu hình; chưa có smoke V3 được ghi nhận."),
+    "ground_objects": ("partial", "Grounding DINO direct worker đã cấu hình; chưa có smoke V3 được ghi nhận."),
+    "segment_image": ("partial", "SAM2 direct worker đã cấu hình; chưa có smoke V3 được ghi nhận."),
+    "segment_from_box": ("partial", "SAM2 box workflow đã cấu hình; chưa có smoke V3 được ghi nhận."),
+    "segment_from_points": ("partial", "SAM2 point workflow đã cấu hình; chưa có smoke V3 được ghi nhận."),
+    "segment_from_text": ("partial", "Grounding DINO → SAM2 workflow đã cấu hình; chưa có smoke V3 được ghi nhận."),
+    "track_video_object": ("partial", "SAM2 video tracking đã cấu hình; chưa có smoke V3 được ghi nhận."),
+    "ocr_document": ("partial", "PaddleOCR-VL direct worker đã cấu hình; chưa có smoke V3 được ghi nhận."),
+    "transcribe_media": ("partial", "Whisper direct worker đã cấu hình; chưa có smoke V3 được ghi nhận."),
+    "create_subtitled_video": ("partial", "Workflow Whisper + FFmpeg đã cấu hình; chưa có smoke V3 được ghi nhận."),
+    "text_to_speech": ("partial", "Qwen3-TTS direct worker đã cấu hình; chưa có smoke V3 được ghi nhận."),
+    "design_voice": ("partial", "Qwen3-TTS Voice Design đã cấu hình; chưa có smoke V3 được ghi nhận."),
+    "clone_voice": ("partial", "Qwen3-TTS Voice Clone đã cấu hình; chưa có smoke V3 được ghi nhận."),
+    "convert_voice": ("partial", "Seed-VC direct worker đã cấu hình; chưa có smoke V3 được ghi nhận."),
+    "upscale_anime_video": ("partial", "AnimeSR direct worker đã cấu hình; smoke bị hoãn nếu môi trường đang phục vụ job người dùng."),
+    "probe_media": ("operational", "FFprobe canonical là thao tác đọc-only đã có smoke bounded."),
+    "run_media_operation": ("partial", "FFmpeg allowlist đã cấu hình; mỗi thao tác ghi output cần smoke V3 riêng."),
+    "generate_flux": ("partial", "FLUX workflow gọi trực tiếp ComfyUI API; chưa có smoke generation V3 được ghi nhận."),
+    "generate_qwen_image": ("partial", "Qwen Image workflow gọi trực tiếp ComfyUI API; chưa có smoke generation V3 được ghi nhận."),
 }
-
-HEAVY_GPU_LOCK = threading.Lock()
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _path_exists(value: str | None) -> bool:
-    return bool(value) and Path(os.path.expandvars(value)).exists()
+def _path_exists(value: object) -> bool:
+    if not isinstance(value, str) or not value or value.startswith("${"):
+        return False
+    try:
+        return Path(os.path.expandvars(value)).exists()
+    except OSError:
+        return False
 
 
-def _port_open(port: int | None, host: str = "127.0.0.1") -> bool:
+def _port_open(port: object, host: str = "127.0.0.1") -> bool:
     if not port:
         return False
     try:
@@ -123,14 +112,11 @@ def _port_open(port: int | None, host: str = "127.0.0.1") -> bool:
         return False
 
 
-def _configured_component_status(item: dict[str, Any]) -> str:
-    value = item.get("component_status") or item.get("status") or "unknown"
-    return str(value).strip().lower()
+def _configured_status(item: dict[str, Any]) -> str:
+    return str(item.get("component_status") or item.get("status") or "unknown").strip().lower()
 
 
-def _public_component_text(value: object, fallback: str) -> str:
-    """Keep component summaries useful without leaking machine-local paths."""
-
+def _safe_text(value: object, fallback: str) -> str:
     if not isinstance(value, str):
         return fallback
     text = value.strip()
@@ -139,76 +125,68 @@ def _public_component_text(value: object, fallback: str) -> str:
     return text
 
 
-def _observed_component_status(item: dict[str, Any]) -> str:
-    executable = item.get("executable")
-    path = item.get("path")
-    configured_status = _configured_component_status(item)
+def _observed_status(item: dict[str, Any]) -> str:
+    configured = _configured_status(item)
     if _port_open(item.get("port")):
         return "running"
-    executable_exists = bool(executable and _path_exists(executable))
-    path_exists = bool(path and _path_exists(path))
-    if configured_status in {"planned", "not_installed"} and not executable_exists:
-        return configured_status
-    if executable_exists or path_exists:
-        environment = item.get("environment")
-        if environment and not _path_exists(environment):
-            return "partial"
-        if item.get("adapter") == "registered-engine":
+    executable = item.get("executable")
+    path = item.get("path")
+    env = item.get("environment")
+    executable_exists = _path_exists(executable)
+    environment_exists = _path_exists(env)
+    has_runtime = executable_exists or _path_exists(path)
+    if configured == "not_installed" and not executable_exists and not environment_exists:
+        return "not_installed"
+    if configured == "planned" and not has_runtime:
+        return "planned" if configured == "planned" else "not_installed"
+    if has_runtime:
+        if env and not _path_exists(env):
             return "partial"
         return "installed"
-    if configured_status in {"planned", "not_installed"}:
-        return "planned"
-    if configured_status == "error":
-        return "error"
+    if configured in {"external_system_app", "external_managed", "reused"}:
+        return "partial"
     return "missing"
 
 
 def component_statuses() -> list[dict[str, Any]]:
-    statuses: list[dict[str, Any]] = []
+    result: list[dict[str, Any]] = []
     for item in components():
-        observed = _observed_component_status(item)
-        statuses.append({
+        observed = _observed_status(item)
+        result.append({
             "id": item.get("id"),
             "name": item.get("name") or item.get("id"),
             "kind": item.get("kind") or "component",
             "version": item.get("version") or "unknown",
-            "adapter": _public_component_text(item.get("adapter"), "configured"),
-            "source": _public_component_text(item.get("source"), "local configuration"),
+            "adapter": _safe_text(item.get("adapter"), "configured"),
+            "source": _safe_text(item.get("source"), "local configuration"),
             "port": item.get("port"),
-            "configured_component_status": _configured_component_status(item),
+            "configured_component_status": _configured_status(item),
             "component_status": observed,
             "status": observed,
-            "observed_status": observed,
         })
-    return statuses
+    return result
 
 
 def health() -> dict[str, Any]:
-    config = hub_config()
-    output_root = Path(config.get("output_root", BASE_DIR / "Output"))
-    usage = None
-    try:
-        disk = os.statvfs(output_root)  # type: ignore[attr-defined]
-        usage = {"free_bytes": disk.f_bavail * disk.f_frsize, "total_bytes": disk.f_blocks * disk.f_frsize}
-    except (AttributeError, OSError):
-        try:
-            import shutil
+    import shutil
 
-            total, used, free = shutil.disk_usage(output_root)
-            usage = {"free_bytes": free, "total_bytes": total, "used_bytes": used}
-        except OSError:
-            usage = None
+    config = hub_config()
+    try:
+        total, used, free = shutil.disk_usage(Path(config.get("output_root", BASE_DIR / "Output")))
+        disk: dict[str, int] | None = {"free_bytes": free, "total_bytes": total, "used_bytes": used}
+    except OSError:
+        disk = None
+    active = [item for item in list_jobs() if item.get("status") in {"starting", "running", "cancelling"}]
     return {
         "status": "healthy",
         "service": "Local AI Hub",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "time": _now(),
         "bind": f"{config.get('bind_host', '127.0.0.1')}:{config.get('api_port', 8765)}",
-        "disk": usage,
+        "disk": disk,
         "gpu": query_gpu(),
         "gpu_policy": gpu_policy(config),
-        "active_api_heavy_requests": int(HEAVY_GPU_LOCK.locked()),
-        "active_jobs": len([item for item in list_jobs() if item.get("status") in {"starting", "running"}]),
+        "active_jobs": len(active),
         "loaded_models": [],
     }
 
@@ -216,34 +194,21 @@ def health() -> dict[str, Any]:
 def _tool_readiness(tool: str, statuses: dict[str, dict[str, Any]]) -> dict[str, Any]:
     component_id = TOOL_COMPONENTS[tool]
     component_item = statuses.get(component_id, {})
-    component_status = component_item.get("component_status", "missing")
-    capability = TOOL_CAPABILITIES[tool]
-    tool_status = capability["tool_status"]
-    reason = capability["reason"]
-
-    if tool_status not in TOOL_STATUS_VALUES:
-        return {
-            "component": component_id,
-            "component_status": component_status,
-            "tool_status": "error",
-            "reason": f"Unsupported configured tool status: {tool_status}.",
-        }
-    if tool_status not in {"unavailable", "planned", "error"} and component_status not in READY_COMPONENT_STATUSES:
+    component_status = str(component_item.get("component_status") or "missing")
+    tool_status, reason = TOOL_CAPABILITIES[tool]
+    if component_status not in READY_COMPONENT_STATUSES and tool_status not in {"operational"}:
         tool_status = "unavailable"
-        reason = f"{component_item.get('name', component_id)} component is {component_status}; the local backend cannot accept calls."
-    return {
-        "component": component_id,
-        "component_status": component_status,
-        "tool_status": tool_status,
-        "reason": reason,
-    }
+        reason = f"{component_item.get('name', component_id)} đang ở trạng thái {component_status}; worker không thể nhận job."
+    elif tool_status == "partial" and tool in SMOKE_ELIGIBLE_TOOLS and smoke_passed(tool):
+        tool_status = "operational"
+        reason = "Đã có một direct job bounded hoàn tất trên máy này; trạng thái được lưu cục bộ, không chứa đường dẫn hoặc dữ liệu input."
+    return {"component": component_id, "component_status": component_status, "tool_status": tool_status, "reason": reason}
 
 
 def tool_catalog() -> list[dict[str, Any]]:
-    statuses = {item["id"]: item for item in component_statuses() if item.get("id")}
+    statuses = {str(item["id"]): item for item in component_statuses() if item.get("id")}
     tools = []
     for name, component_id in TOOL_COMPONENTS.items():
-        item = statuses.get(component_id, {})
         readiness = _tool_readiness(name, statuses)
         tools.append({
             "name": name,
@@ -251,160 +216,183 @@ def tool_catalog() -> list[dict[str, Any]]:
             "component_status": readiness["component_status"],
             "tool_status": readiness["tool_status"],
             "status": readiness["tool_status"],
-            "description": f"Allowlisted Local AI Hub tool backed by {item.get('name', component_id)}.",
+            "description": f"Allowlisted Local AI Hub workflow backed by {component_id}.",
             "reason": readiness["reason"],
         })
     tools.extend([
-        {
-            "name": "get_health",
-            "component": "local_ai_api",
-            "component_status": "running",
-            "tool_status": "operational",
-            "status": "operational",
-            "description": "Return Hub health and GPU policy.",
-            "reason": "Control-plane route served by the running Hub API.",
-        },
-        {
-            "name": "list_models",
-            "component": "local_ai_api",
-            "component_status": "running",
-            "tool_status": "operational",
-            "status": "operational",
-            "description": "Return the model registry.",
-            "reason": "Control-plane route served by the running Hub API.",
-        },
+        {"name": "get_health", "component": "local_ai_api", "component_status": "running", "tool_status": "operational", "status": "operational", "description": "Return Hub health.", "reason": "Loopback control-plane route."},
+        {"name": "list_models", "component": "local_ai_api", "component_status": "running", "tool_status": "operational", "status": "operational", "description": "Return safe model inventory.", "reason": "Loopback control-plane route."},
     ])
     return tools
 
 
-def probe_media(input_path: str) -> dict[str, Any]:
-    config = hub_config()
-    source = Path(os.path.expandvars(input_path)).expanduser()
-    if not source.exists() or not source.is_file():
-        return {"status": "error", "error": f"Input file does not exist: {source}"}
-    ffprobe = Path(config.get("ffprobe_path", ""))
-    if not ffprobe.exists():
-        return {"status": "error", "error": f"Configured ffprobe does not exist: {ffprobe}"}
-    command = [str(ffprobe), "-v", "error", "-show_format", "-show_streams", "-of", "json", str(source)]
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {"status": "error", "error": str(exc)}
-    if result.returncode != 0:
-        return {"status": "error", "error": result.stderr.strip() or "ffprobe failed", "returncode": result.returncode}
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        return {"status": "error", "error": f"ffprobe returned invalid JSON: {exc}"}
-    streams = data.get("streams", [])
-    return {
-        "status": "completed",
-        "path": str(source),
-        "format": data.get("format", {}),
-        "streams": streams,
-        "stream_count": len(streams),
-    }
-
-
-def _unavailable(
-    tool: str,
-    component_id: str,
-    reason: str | None = None,
-    readiness: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    item = component(component_id) or {}
-    if readiness is None:
-        statuses = {entry["id"]: entry for entry in component_statuses() if entry.get("id")}
-        readiness = _tool_readiness(tool, statuses)
+def _unavailable(tool: str, readiness: dict[str, Any], reason: str | None = None) -> dict[str, Any]:
     return {
         "status": "unavailable",
         "tool": tool,
-        "component": component_id,
+        "component": readiness["component"],
         "component_status": readiness["component_status"],
         "tool_status": readiness["tool_status"],
-        "reason": reason or readiness["reason"] or f"{item.get('name', component_id)} is not ready for a backend call.",
+        "reason": reason or readiness["reason"],
     }
 
 
-def _run_heavy(tool: str, operation: Any) -> tuple[int, dict[str, Any]]:
-    config = hub_config()
-    if int(config.get("max_heavy_gpu_jobs", 1)) < 1:
-        return 503, {"status": "unavailable", "tool": tool, "reason": "Heavy GPU execution is disabled by configuration."}
-    if not HEAVY_GPU_LOCK.acquire(blocking=False):
-        return 409, {"status": "busy", "tool": tool, "reason": "The single heavy-GPU slot is occupied; retry after the current request completes."}
-    try:
-        result = operation()
-        return (200 if result.get("status") == "completed" else 400), result
-    finally:
-        HEAVY_GPU_LOCK.release()
+def _resolve_assets(payload: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    # Public loopback requests use opaque artifact IDs.  Raw workstation paths
+    # are never accepted from the browser/API surface; internal composition
+    # between already-resolved workers happens below this boundary.
+    raw_path_fields = {"path", "secondary_path", "reference_audio", "source", "target", "input_image", "input_paths"}
+    if any(field in payload and payload[field] not in (None, "", []) for field in raw_path_fields):
+        return dict(payload), "Dùng artifact ID do Hub tạo thay vì gửi đường dẫn cục bộ."
+    value = dict(payload)
+    fields = {
+        "asset_id": "path",
+        "input_asset_id": "path",
+        "secondary_asset_id": "secondary_path",
+        "reference_asset_id": "reference_audio",
+        "source_asset_id": "source",
+        "target_asset_id": "target",
+        "input_image_asset_id": "input_image",
+    }
+    for artifact_field, target_field in fields.items():
+        artifact_id = value.get(artifact_field)
+        if artifact_id is None:
+            continue
+        if not isinstance(artifact_id, str):
+            return value, "Artifact ID không hợp lệ."
+        path = resolve(artifact_id)
+        if path is None:
+            return value, "Artifact Hub không còn tồn tại hoặc không thuộc vùng an toàn."
+        value[target_field] = str(path)
+    list_fields = {
+        "input_asset_ids": "input_paths",
+    }
+    for artifact_field, target_field in list_fields.items():
+        artifact_ids = value.get(artifact_field)
+        if artifact_ids is None:
+            continue
+        if not isinstance(artifact_ids, list) or not artifact_ids or not all(isinstance(item, str) for item in artifact_ids):
+            return value, "Danh sách artifact Hub không hợp lệ."
+        paths = [resolve(item) for item in artifact_ids]
+        if any(path is None for path in paths):
+            return value, "Một hoặc nhiều artifact Hub không còn tồn tại hoặc không thuộc vùng an toàn."
+        value[target_field] = [str(path) for path in paths if path is not None]
+    return value, None
 
 
-def dispatch_tool(tool: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-    component_id = TOOL_COMPONENTS.get(tool)
-    if component_id is None:
-        return 404, {"status": "error", "error": f"Unknown allowlisted tool: {tool}"}
-
-    statuses = {entry["id"]: entry for entry in component_statuses() if entry.get("id")}
-    readiness = _tool_readiness(tool, statuses)
-    if readiness["tool_status"] in {"unavailable", "planned", "error"}:
-        return 503, _unavailable(tool, component_id, readiness=readiness)
-
-    if tool == "probe_media":
-        path = payload.get("path")
-        if not isinstance(path, str) or not path:
-            return 400, {"status": "error", "error": "Expected JSON field 'path'."}
-        result = probe_media(path)
-        return (200 if result.get("status") == "completed" else 400), result
-    if tool == "detect_objects":
-        from src.modules.vision.backend.rfdetr_adapter import detect
-
-        return _run_heavy(tool, lambda: detect(str(payload.get("path", "")), float(payload.get("threshold", 0.5))))
-    if tool == "ground_objects":
-        from src.modules.vision.backend.groundingdino_adapter import ground
-
-        prompt = str(payload.get("prompt", "person . object ."))
-        return _run_heavy(tool, lambda: ground(str(payload.get("path", "")), prompt, float(payload.get("box_threshold", 0.35)), float(payload.get("text_threshold", 0.25))))
+def _run_operation(tool: str, payload: dict[str, Any], context: JobContext | None = None) -> dict[str, Any]:
     if tool == "parse_screen":
         from src.modules.vision.backend.omniparser_adapter import parse
 
-        return _run_heavy(tool, lambda: parse(str(payload.get("path", "")), float(payload.get("box_threshold", 0.05))))
+        return parse(str(payload.get("path", "")), float(payload.get("box_threshold", 0.05)), context)
+    if tool == "detect_objects":
+        from src.modules.vision.backend.rfdetr_adapter import detect
+
+        return detect(str(payload.get("path", "")), float(payload.get("threshold", 0.5)), context)
+    if tool == "ground_objects":
+        from src.modules.vision.backend.groundingdino_adapter import ground
+
+        return ground(str(payload.get("path", "")), str(payload.get("prompt", "")), float(payload.get("box_threshold", 0.35)), float(payload.get("text_threshold", 0.25)), context)
+    if tool == "segment_from_text":
+        from src.modules.sam2.backend import adapter as sam2
+        from src.modules.vision.backend.groundingdino_adapter import ground
+
+        grounded = ground(
+            str(payload.get("path", "")),
+            str(payload.get("prompt", "")),
+            float(payload.get("box_threshold", 0.35)),
+            float(payload.get("text_threshold", 0.25)),
+            context,
+        )
+        if grounded.get("status") != "completed":
+            return grounded
+        candidates = grounded.get("grounded")
+        if not isinstance(candidates, list) or not candidates:
+            return {"status": "error", "error": "Grounding DINO không trả box nào cho prompt này."}
+        raw_box = candidates[0].get("box_normalized_cxcywh") if isinstance(candidates[0], dict) else None
+        if not isinstance(raw_box, list) or len(raw_box) != 4:
+            return {"status": "error", "error": "Grounding DINO không trả normalized box hợp lệ."}
+        cx, cy, width, height = [float(item) for item in raw_box]
+        return sam2.segment_from_box({**payload, "box": [cx - width / 2, cy - height / 2, cx + width / 2, cy + height / 2], "normalized_box": True}, context)
+    if tool in {"segment_image", "segment_from_box", "segment_from_points", "track_video_object"}:
+        from src.modules.sam2.backend import adapter as sam2
+
+        method = {
+            "segment_image": sam2.segment_image,
+            "segment_from_box": sam2.segment_from_box,
+            "segment_from_points": sam2.segment_from_points,
+            "track_video_object": sam2.track_video,
+        }[tool]
+        return method(payload, context)
     if tool == "ocr_document":
         from src.modules.ocr.backend.adapter import parse
 
-        return _run_heavy(tool, lambda: parse(str(payload.get("path", ""))))
-    if tool == "text_to_speech":
-        from src.modules.voice.backend.qwen3_tts_adapter import synthesize
-
-        return _run_heavy(tool, lambda: synthesize(payload))
-    if tool in {"design_voice", "clone_voice"}:
-        from src.modules.voice.backend.qwen3_tts_adapter import synthesize
-
-        request = {**payload, "operation": tool}
-        return _run_heavy(tool, lambda: synthesize(request))
-    if tool == "convert_voice":
-        from src.modules.voice.backend.seed_vc_adapter import convert
-
-        return _run_heavy(tool, lambda: convert(payload))
-    if tool == "upscale_anime_video":
-        return 503, _unavailable(
-            tool,
-            component_id,
-            "AnimeSR execution is exposed through the managed desktop application until a bounded local inference fixture is approved; no fake queue record is created.",
-            readiness=readiness,
-        )
+        return parse(str(payload.get("path", "")), context)
     if tool == "transcribe_media":
         from src.modules.whisper.backend.adapter import transcribe
 
-        return _run_heavy(tool, lambda: transcribe(payload))
+        return transcribe(payload, context)
     if tool == "create_subtitled_video":
-        return 503, _unavailable(tool, component_id, "Existing ASR is connected for transcript JSON/SRT; subtitle video muxing is not enabled until its output contract is verified.")
-    if tool in {"segment_image", "track_video_object"}:
-        return 503, _unavailable(tool, component_id, "Existing SAM 2 is currently exposed as a GUI; direct backend adapter is not yet verified.")
-    return 503, _unavailable(tool, component_id)
+        from src.modules.whisper.backend.adapter import transcribe
+        from src.modules.media_editor.backend.adapter import run_operation
+
+        transcript = transcribe(payload, context)
+        if transcript.get("status") != "completed":
+            return transcript
+        srt = transcript.get("srt")
+        if not isinstance(srt, str) or not Path(srt).is_file():
+            return {"status": "error", "error": "Whisper không tạo SRT để burn subtitle."}
+        return run_operation({"operation": "burn_subtitle", "path": payload.get("path"), "secondary_path": srt}, context)
+    if tool in {"text_to_speech", "design_voice", "clone_voice"}:
+        from src.modules.voice.backend.qwen3_tts_adapter import synthesize
+
+        request = dict(payload)
+        request["operation"] = tool
+        return synthesize(request, context)
+    if tool == "convert_voice":
+        from src.modules.voice.backend.seed_vc_adapter import convert
+
+        return convert(payload, context)
+    if tool == "upscale_anime_video":
+        from src.modules.animesr.backend.adapter import run_animesr
+
+        return run_animesr(payload, context)
+    if tool in {"probe_media", "run_media_operation"}:
+        from src.modules.media_editor.backend.adapter import run_operation
+
+        request = dict(payload)
+        request.setdefault("operation", "probe" if tool == "probe_media" else "transcode")
+        return run_operation(request, context)
+    if tool in {"generate_flux", "generate_qwen_image"}:
+        from src.modules.image_generation.backend.comfyui import generate
+
+        return generate("flux" if tool == "generate_flux" else "qwen", payload, context)
+    return {"status": "error", "error": "Tool Hub không được allowlist."}
+
+
+def submit_tool(tool: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    component_id = TOOL_COMPONENTS.get(tool)
+    if component_id is None:
+        return 404, {"status": "error", "error": "Tool Hub không được allowlist."}
+    statuses = {str(item["id"]): item for item in component_statuses() if item.get("id")}
+    readiness = _tool_readiness(tool, statuses)
+    if readiness["tool_status"] in {"unavailable", "planned", "error"}:
+        return 503, _unavailable(tool, readiness)
+    request, error = _resolve_assets(payload)
+    if error:
+        return 400, {"status": "error", "error": error}
+    record = job_manager.submit(tool, request, lambda item, context: _run_operation(tool, item, context), device="gpu" if tool not in {"probe_media", "run_media_operation"} else None, heavy=tool != "probe_media")
+    return 202, {"status": "queued", "job": get_job(record["id"])}
+
+
+def dispatch_tool(tool: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """Compatibility endpoint: submit a real Hub job rather than a fake result."""
+
+    return submit_tool(tool, payload)
 
 
 def get_job_or_error(job_id: str) -> tuple[int, dict[str, Any]]:
     record = get_job(job_id)
     if record is None:
-        return 404, {"status": "error", "error": f"Unknown job: {job_id}"}
+        return 404, {"status": "error", "error": "Không tìm thấy job Hub."}
     return 200, record
