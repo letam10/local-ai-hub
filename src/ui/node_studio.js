@@ -18,7 +18,7 @@ import {
 const LOCAL_PREFIX = "local-ai-hub-graph-v5";
 const LEGACY_PREFIX = "local-ai-hub-node-studio-v1";
 const MAX_HISTORY = 60;
-const PRESET_BY_SCOPE = { image: "image_create_upscale", sam2: "sam2_segment", media: "media_encode", animesr: "animesr_pipeline" };
+const PRESET_BY_SCOPE = { image: "image_create_upscale", sam2: "sam2_segment", media: "video_creative_pipeline", animesr: "animesr_pipeline" };
 const TYPE_COLORS = {
   IMAGE: "#cf7cff", MASK: "#42c6a0", VIDEO: "#f17c8e", AUDIO: "#f1ad5f",
   TEXT: "#6c8cff", NUMBER: "#a9c6ff", BOOLEAN: "#e5d66a", MODEL: "#e291c7", METADATA: "#8794ad",

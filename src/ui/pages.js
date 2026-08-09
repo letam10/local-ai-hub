@@ -44,6 +44,18 @@ const imageWorkflowRail = (state) => {
     </div>
   </section>`;
 };
+const videoWorkflowRail = (state) => {
+  const transform = tool(state, "run_media_operation");
+  const upscale = tool(state, "upscale_anime_video");
+  return `<section class="video-workflow-rail" aria-label="Video workflow">
+    <div class="video-workflow-rail__intro"><div><span class="eyebrow">VIDEO CREATIVE</span><h2>Luồng video trong Hub</h2><p>Chọn template để nối video artifact hoặc prompt → transform/generation → upscale → interpolate → encode → preview/export.</p></div><span class="tag">job · progress · provenance</span></div>
+    <div class="video-workflow-rail__steps">
+      <article><span>01</span><strong>Transform</strong><small>FFmpeg allowlist</small>${statusPill(transform.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Mở template</button></article>
+      <article><span>02</span><strong>Upscale / FPS</strong><small>FFmpeg fallback · AnimeSR</small>${statusPill(upscale.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Mở template</button></article>
+      <article><span>03</span><strong>Prompt Generate</strong><small>Backend video chưa có</small>${statusPill("unavailable")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Xem contract</button></article>
+    </div>
+  </section>`;
+};
 
 function artifacts(value, found = []) {
   if (!value) return found;
@@ -191,7 +203,7 @@ function renderImage(state) {
 
 function renderMedia(state) {
   const item = component(state, "ffmpeg");
-  return heading("MEDIA", "Trình biên tập media", "FFmpeg/FFprobe chạy bằng danh sách lệnh cho phép ở chế độ ẩn, không có ô shell và không ghi đè media nguồn.", statusPill(tool(state, "run_media_operation").tool_status || item.component_status || "missing")) + `
+  return heading("MEDIA", "Trình biên tập media", "FFmpeg/FFprobe chạy bằng danh sách lệnh cho phép ở chế độ ẩn, không có ô shell và không ghi đè media nguồn.", statusPill(tool(state, "run_media_operation").tool_status || item.component_status || "missing")) + videoWorkflowRail(state) + `
     <div class="workspace-grid workspace-grid--two">
       ${card("Thao tác video và ảnh", `<form data-job-form data-tool="run_media_operation" class="stack">${file("Media đầu vào chính", "asset_id", "audio/*,video/*,image/*")}${files("Đầu vào bổ sung (ghép / chuỗi ảnh)", "input_asset_ids", "video/*,image/*")}${file("Audio hoặc phụ đề thứ hai", "secondary_asset_id", "audio/*,.srt,.ass")}${field("Thao tác", `<select name="operation"><option value="probe">Đọc metadata</option><option value="trim">Cắt đầu/cuối</option><option value="concat">Ghép video</option><option value="resize">Đổi kích thước video</option><option value="crop">Cắt khung video</option><option value="rotate">Xoay video</option><option value="fps">FPS</option><option value="transcode">Chuyển mã</option><option value="extract_audio">Tách audio</option><option value="replace_audio">Thay audio</option><option value="mux">Mux audio/video</option><option value="burn_subtitle">Chèn phụ đề</option><option value="extract_frames">Tách frame</option><option value="image_sequence_video">Chuỗi ảnh → video</option><option value="image_resize">Đổi kích thước ảnh</option><option value="image_crop">Cắt khung ảnh</option><option value="image_rotate">Xoay ảnh</option><option value="image_flip">Lật ảnh</option><option value="image_convert">Đổi định dạng ảnh</option><option value="image_compress">Nén ảnh</option></select>`)}<div class="form-grid">${field("Bắt đầu", `<input name="start" type="number" min="0" step="0.1" value="0" />`)}${field("Kết thúc", `<input name="end" type="number" min="0.1" step="0.1" value="5" />`)}${field("Chiều rộng", `<input name="width" type="number" min="2" value="1280" />`)}${field("Chiều cao", `<input name="height" type="number" min="-2" value="-2" />`)}${field("FPS", `<input name="fps" type="number" min="1" value="30" />`)}${field("Xoay", `<select name="degrees"><option value="90">90°</option><option value="180">180°</option><option value="270">270°</option></select>`)}${field("Lật", `<select name="axis"><option value="horizontal">Ngang</option><option value="vertical">Dọc</option></select>`)}${field("Định dạng ảnh", `<select name="format"><option value="png">PNG</option><option value="jpg">JPG</option><option value="webp">WEBP</option></select>`)}</div><div class="form-actions">${button("Chạy FFmpeg", "button--primary")}</div>${formResult("media-result")}</form>`)}
       ${card("An toàn thao tác", `<ul class="notice-list"><li>Kết quả tạo trong vùng Output/Media của Hub.</li><li>Đọc metadata là read-only; tác vụ ghi file đi qua Job Manager.</li><li>Ghép video và chuỗi ảnh chỉ nhận artifact đã tải lên Hub, rồi tạo manifest Temp ngắn hạn; không nhận raw shell/path list.</li></ul><div class="tag-list"><span class="tag">Cắt</span><span class="tag">Ghép</span><span class="tag">Crop</span><span class="tag">Xoay</span><span class="tag">Mux</span><span class="tag">Chèn phụ đề</span><span class="tag">Frames</span></div>`, "", "card--flat")}
@@ -246,7 +258,7 @@ export function renderPage(route, state) {
   const nodeCopy = {
     image: "Compose FLUX/Qwen, SAM2 mask và image transforms trong cùng graph; preset JSON được track, workflow cá nhân autosave local.",
     sam2: "Advanced workflow: Grounding DINO → SAM2 → mask/composite/export. GPU nodes chỉ chạy khi bấm Run Graph.",
-    media: "Build Trim/Crop/Audio/Interpolation/Encode graphs. Encode chỉ hiện capability FFmpeg thực tế.",
+    media: "Build video creative graph: input/prompt → transform hoặc generation contract → upscale/interpolate → encode → preview/export. Encode chỉ hiện capability FFmpeg thực tế.",
     animesr: "Advanced order do bạn chọn: Load → AnimeSR → Frame Interpolation → Encode. AnimeSR/RIFE vẫn partial cho tới smoke riêng.",
   };
   const nodeScope = Object.prototype.hasOwnProperty.call(nodeCopy, route) ? route : null;

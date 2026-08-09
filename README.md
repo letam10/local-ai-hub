@@ -208,4 +208,7 @@ dùng `node-run.v2`, còn job công khai dùng `job.v2`. Các trường `reason`
 Xem [tài liệu Node Image Studio Milestone 1](docs/NODE_IMAGE_STUDIO_MILESTONE_1.md)
 và [bản đồ kiến trúc/thư mục](docs/ARCHITECTURE.md) để biết ownership, route,
 template, cấu hình mẫu và cách chạy kiểm thử bounded. Milestone 2 (workflow
-video) chỉ bắt đầu sau khi Milestone 1 được QA xác nhận đạt.
+video) đã được mở sau PASS của Milestone 1; xem [Video Creative Workflow
+Milestone 2](docs/VIDEO_CREATIVE_WORKFLOW_MILESTONE_2.md). Generation video vẫn
+hiển thị `unavailable` cho tới khi backend local có bounded smoke; transform và
+FFmpeg fallback được cung cấp như đường đi thực tế.

@@ -47,6 +47,17 @@ thái từng node, `next_action` và provenance an toàn; public job dùng
 `unavailable` luôn có `reason` và `action`, được hiển thị ở palette, Inspector,
 queue và lỗi job; không được giả nhận backend là hoạt động.
 
+## Video Creative Workflow
+
+Milestone 2 dùng cùng DAG/job contract cho luồng `Video artifact + prompt tuỳ
+chọn → Video Transform → Video Upscale → Frame Interpolation → Encode →
+Preview → Save → Export`. `video_transform` chỉ nhận operation trong allowlist
+FFmpeg; `video_upscale` có fallback `ffmpeg_scale` và metadata
+`ai_upscaler=false`. Node `video_generate` được hiển thị để giữ contract prompt-
+to-video nhưng trả `unavailable` có hướng dẫn vì chưa có adapter generation
+local đã smoke. Chi tiết template và ma trận backend nằm ở
+[Video Creative Workflow Milestone 2](VIDEO_CREATIVE_WORKFLOW_MILESTONE_2.md).
+
 ## API và kiểm thử
 
 Các route Node Studio chính:
