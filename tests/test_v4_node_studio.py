@@ -23,6 +23,23 @@ class _Context:
         self.progress_updates.append((value, message))
 
 
+class _MediaOwner:
+    def __init__(self, job_id: str) -> None:
+        self.job_id = job_id
+        self.cancelled = False
+        self.processes: list[object] = []
+
+    def attach_process(self, process: object, _label: str) -> None:
+        self.processes.append(process)
+
+    def detach_process(self, process: object) -> None:
+        if process in self.processes:
+            self.processes.remove(process)
+
+    def progress(self, _value: int, _message: str | None = None) -> None:
+        return None
+
+
 class NodeStudioSchemaTests(unittest.TestCase):
     def test_default_workflow_presets_are_trackable_and_valid(self) -> None:
         from src.services.node_studio.schema import validate_graph
@@ -318,6 +335,101 @@ class NodeStudioContractTests(unittest.TestCase):
         command_text = " ".join(command)
         self.assertIn("trunc(iw*2.0/2)*2", command_text)
         self.assertIn("-c:a", command)
+
+    def test_resize_commands_preserve_ffmpeg_aspect_sentinel(self) -> None:
+        from src.modules.media_editor.backend import adapter
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ffmpeg = root / "ffmpeg.exe"
+            source = root / "source.mp4"
+            target = root / "target.mp4"
+            ffmpeg.write_bytes(b"")
+            source.write_bytes(b"input")
+            with patch.object(adapter, "_paths", return_value=(ffmpeg, None)):
+                video_command = adapter._command({"operation": "resize", "width": 16, "height": -2}, source, target)
+                image_command = adapter._command({"operation": "image_resize", "width": 16, "height": -2}, source, target)
+        assert video_command is not None
+        assert image_command is not None
+        self.assertIn("scale=16:-2", video_command)
+        self.assertIn("scale=16:-2", image_command)
+
+    def test_default_video_resize_sentinel_preserves_aspect_through_upscale(self) -> None:
+        from src.modules.media_editor.backend import adapter
+        from src.services import artifact_store
+        from src.services.node_studio import engine as node_engine
+
+        ffmpeg, ffprobe = adapter._paths()
+        if ffmpeg is None or not ffmpeg.is_file() or ffprobe is None or not ffprobe.is_file():
+            self.skipTest("Canonical FFmpeg/ffprobe is not installed")
+
+        job_id = "test_video_resize_sentinel"
+        log_paths = [ROOT / "Logs" / "workers" / f"ffmpeg_{operation}_{job_id}.log" for operation in ("resize", "video_upscale")]
+        template = json.loads((ROOT / "workflows" / "video_creative_pipeline.json").read_text(encoding="utf-8"))
+        transform_data = next(item["data"] for item in template["nodes"] if item["type"] == "video_transform")
+        self.assertEqual(transform_data.get("height"), -2)
+        try:
+            with TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "input.mp4"
+                seed = adapter.run_hidden(
+                    [
+                        str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y",
+                        "-f", "lavfi", "-i", "color=c=blue:s=16x16:r=4", "-t", "1",
+                        "-pix_fmt", "yuv420p", "-c:v", "libx264", str(source),
+                    ],
+                    capture_output=True,
+                    timeout=30,
+                    check=False,
+                )
+                self.assertEqual(seed.returncode, 0, seed.stderr.decode("utf-8", errors="replace"))
+
+                output_root = root / "output"
+                owner = _MediaOwner(job_id)
+                upload_root = root / "uploads"
+                index_path = root / "artifacts.json"
+                with (
+                    patch.object(artifact_store, "UPLOAD_ROOT", upload_root),
+                    patch.object(artifact_store, "OUTPUT_ROOT", output_root),
+                    patch.object(artifact_store, "INDEX_PATH", index_path),
+                    patch.object(adapter, "OUTPUT_ROOT", output_root),
+                    patch.object(node_engine, "OUTPUT_ROOT", output_root),
+                ):
+                    uploaded = artifact_store.stage_upload("input.mp4", source.read_bytes(), "video/mp4")
+                    graph = json.loads(json.dumps(template))
+                    for node in graph["nodes"]:
+                        if node["type"] == "load_video":
+                            node["data"]["asset_id"] = uploaded["id"]
+                        elif node["type"] == "video_transform":
+                            node["data"]["width"] = 16
+                        elif node["type"] == "frame_interpolate":
+                            node["data"]["mode"] = "off"
+                        elif node["type"] == "encode":
+                            node["data"].update({"codec": "libx264", "prefer_gpu": False, "preset": "ultrafast"})
+
+                    def execute_tool(tool: str, payload: dict, context: _MediaOwner) -> dict:
+                        if tool == "run_media_operation":
+                            return adapter.run_operation(payload, context)
+                        raise AssertionError(f"Unexpected tool in bounded graph: {tool}")
+
+                    result = node_engine.execute_graph(graph, owner, execute_tool)
+                    self.assertEqual(result.get("status"), "completed", result)
+                    self.assertEqual(len(result.get("nodes", [])), 9)
+                    upscale_node = next(item for item in result["nodes"] if item["id"] == "upscale")
+                    upscale_artifact = upscale_node["output"]["video"]["id"]
+                    upscale_path = artifact_store.resolve(upscale_artifact)
+                    self.assertIsNotNone(upscale_path)
+                    details = adapter.probe(str(upscale_path))
+
+                self.assertEqual(details.get("status"), "completed", details)
+                video_stream = next(stream for stream in details["streams"] if stream.get("codec_type") == "video")
+                self.assertEqual((video_stream["width"], video_stream["height"]), (32, 32))
+
+            self.assertFalse(owner.processes, "FFmpeg child processes must be detached after the bounded smoke")
+        finally:
+            node_engine.node_cache.clear()
+            for path in log_paths:
+                path.unlink(missing_ok=True)
 
     def test_graph_run_provenance_is_public_and_deduplicated(self) -> None:
         from src.services.node_studio.state import GraphRunRegistry

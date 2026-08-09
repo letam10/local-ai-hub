@@ -25,6 +25,8 @@ Node mới:
 
 - `video_transform`: nhận `VIDEO` và prompt `TEXT` tuỳ chọn, chỉ cho phép
   `resize`, `crop`, `rotate`, `fps`, `transcode` qua FFmpeg allowlist.
+- Với `resize`, `height=-2` được giữ nguyên như sentinel bảo toàn tỷ lệ của
+  FFmpeg; template vì vậy không làm méo tỷ lệ khung hình.
 - `video_upscale`: nhận `VIDEO`, chọn `ffmpeg_scale` hoặc `animesr`; fallback
   FFmpeg được gắn metadata `ai_upscaler=false`, không gọi nhầm là AI upscale.
 - `video_generate`: prompt `TEXT` bắt buộc, status `unavailable` cho đến khi

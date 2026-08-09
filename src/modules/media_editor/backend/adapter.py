@@ -54,6 +54,15 @@ def _integer(value: Any, default: int) -> int:
         return default
 
 
+def _dimension(value: Any, default: int, *, preserve_aspect_sentinel: bool = False) -> int:
+    """Normalize a pixel dimension while retaining FFmpeg's aspect sentinels."""
+
+    parsed = _integer(value, default)
+    if preserve_aspect_sentinel and parsed in {-1, -2}:
+        return parsed
+    return max(2, parsed)
+
+
 def _encoder_names(output: str) -> set[str]:
     names: set[str] = set()
     for line in output.splitlines():
@@ -402,8 +411,8 @@ def _command(payload: dict[str, Any], source: Path, target: Path) -> list[str] |
         end = max(start + 0.05, float(payload.get("end", start + 5.0)))
         return [str(ffmpeg), "-hide_banner", "-y", "-ss", str(start), "-to", str(end), "-i", str(source), "-c", "copy", str(target)]
     if operation == "resize":
-        width = max(2, int(payload.get("width", 1280)))
-        height = max(2, int(payload.get("height", -2)))
+        width = _dimension(payload.get("width", 1280), 1280)
+        height = _dimension(payload.get("height", -2), -2, preserve_aspect_sentinel=True)
         return [*prefix, "-vf", f"scale={width}:{height}", "-c:a", "copy", str(target)]
     if operation == "crop":
         width = max(2, int(payload.get("width", 720)))
@@ -444,7 +453,9 @@ def _command(payload: dict[str, Any], source: Path, target: Path) -> list[str] |
     if operation == "extract_frames":
         return [*prefix, str(target)]
     if operation == "image_resize":
-        return [*prefix, "-vf", f"scale={max(2, int(payload.get('width', 1920)))}:{max(2, int(payload.get('height', -2)))}", str(target)]
+        width = _dimension(payload.get("width", 1920), 1920)
+        height = _dimension(payload.get("height", -2), -2, preserve_aspect_sentinel=True)
+        return [*prefix, "-vf", f"scale={width}:{height}", str(target)]
     if operation == "image_upscale":
         scale = max(2.0, min(4.0, float(payload.get("scale", 2))))
         return [*prefix, "-vf", f"scale=trunc(iw*{scale}/2)*2:trunc(ih*{scale}/2)*2", str(target)]
