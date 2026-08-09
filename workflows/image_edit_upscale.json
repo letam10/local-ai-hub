@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "image-edit-upscale",
+  "title": "Image — Edit / Image-to-Image → Upscale",
+  "description": "Tải ảnh artifact, chỉnh bằng prompt Qwen Image rồi phóng ảnh và lưu kết quả.",
+  "scope": "image",
+  "stage": "image-foundation",
+  "requires": ["image artifact", "ComfyUI + Qwen Image workflow"],
+  "nodes": [
+    {"id": "input", "type": "load_image", "position": {"x": 70, "y": 220}, "data": {"asset_id": ""}},
+    {"id": "prompt", "type": "prompt_text", "position": {"x": 70, "y": 430}, "data": {"text": "Giữ bố cục, đổi ánh sáng ấm và nền sạch"}},
+    {"id": "edit", "type": "image_edit", "position": {"x": 400, "y": 250}, "data": {"width": 768, "height": 768, "steps": 20, "seed": 42, "negative_prompt": ""}},
+    {"id": "upscale", "type": "image_upscale", "position": {"x": 760, "y": 250}, "data": {"scale": 2}},
+    {"id": "preview", "type": "preview_image", "position": {"x": 1060, "y": 250}, "data": {}},
+    {"id": "save", "type": "save_image", "position": {"x": 1350, "y": 250}, "data": {}}
+  ],
+  "edges": [
+    {"id": "input_to_edit", "source": {"node": "input", "port": "image"}, "target": {"node": "edit", "port": "image"}},
+    {"id": "prompt_to_edit", "source": {"node": "prompt", "port": "text"}, "target": {"node": "edit", "port": "prompt"}},
+    {"id": "edit_to_upscale", "source": {"node": "edit", "port": "image"}, "target": {"node": "upscale", "port": "image"}},
+    {"id": "upscale_to_preview", "source": {"node": "upscale", "port": "image"}, "target": {"node": "preview", "port": "image"}},
+    {"id": "preview_to_save", "source": {"node": "preview", "port": "image"}, "target": {"node": "save", "port": "image"}}
+  ],
+  "groups": []
+}

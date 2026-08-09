@@ -21,7 +21,7 @@ from src.shared.utils.adapter_common import configured_path, unavailable
 VIDEO_OPS = {
     "trim", "cut", "concat", "resize", "crop", "rotate", "fps", "transcode", "extract_audio", "replace_audio", "mux", "burn_subtitle", "extract_frames", "image_sequence_video", "frame_interpolate", "encode",
 }
-IMAGE_OPS = {"image_resize", "image_crop", "image_rotate", "image_flip", "image_convert", "image_compress", "image_levels"}
+IMAGE_OPS = {"image_resize", "image_upscale", "image_crop", "image_rotate", "image_flip", "image_convert", "image_compress", "image_levels"}
 _ENCODER_CACHE_LOCK = threading.RLock()
 _ENCODER_CACHE: dict[str, Any] | None = None
 
@@ -442,6 +442,9 @@ def _command(payload: dict[str, Any], source: Path, target: Path) -> list[str] |
         return [*prefix, str(target)]
     if operation == "image_resize":
         return [*prefix, "-vf", f"scale={max(2, int(payload.get('width', 1920)))}:{max(2, int(payload.get('height', -2)))}", str(target)]
+    if operation == "image_upscale":
+        scale = max(2.0, min(4.0, float(payload.get("scale", 2))))
+        return [*prefix, "-vf", f"scale=trunc(iw*{scale}/2)*2:trunc(ih*{scale}/2)*2", str(target)]
     if operation == "image_crop":
         return [*prefix, "-vf", f"crop={max(2, int(payload.get('width', 720)))}:{max(2, int(payload.get('height', 720)))}:{max(0, int(payload.get('x', 0)))}:{max(0, int(payload.get('y', 0)))}", str(target)]
     if operation == "image_rotate":

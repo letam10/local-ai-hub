@@ -22,9 +22,10 @@ ToolExecutor = Callable[[str, dict[str, Any], Any], dict[str, Any]]
 
 
 class NodeFailure(RuntimeError):
-    def __init__(self, message: str, *, status: str = "failed") -> None:
+    def __init__(self, message: str, *, status: str = "failed", next_action: str | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.next_action = next_action
 
 
 @dataclass(frozen=True)
@@ -233,6 +234,7 @@ def _media_result(result: dict[str, Any], *, expected_output: str) -> dict[str, 
 def _run_media(node_type: str, data: dict[str, Any], inputs: dict[str, Any], context: Any, execute_tool: ToolExecutor) -> dict[str, Any]:
     operations = {
         "image_resize": "image_resize",
+        "image_upscale": "image_upscale",
         "image_crop": "image_crop",
         "image_rotate": "image_rotate",
         "image_flip": "image_flip",
@@ -447,7 +449,7 @@ def _run_node(definition: NodeDefinition, data: dict[str, Any], inputs: dict[str
         before = _input_artifact(inputs, "a")
         after = _input_artifact(inputs, "b")
         return {"a": before, "b": after, "comparison": {"before": before, "after": after}}
-    if runner == "media":
+    if runner in {"media", "image_upscale"}:
         return _run_media(definition.type, data, inputs, context, execute_tool)
     if runner == "frame_interpolate":
         return _run_frame_interpolate(data, inputs, context, execute_tool)
@@ -553,13 +555,15 @@ def execute_graph(graph: dict[str, Any], context: Any, execute_tool: ToolExecuto
             context.progress(progress, f"Node Studio: {index + 1}/{total} node hoàn tất.")
     except NodeFailure as exc:
         message = str(publicize(str(exc)))
-        graph_runs.update_node(str(context.job_id), node_id, status=exc.status, progress=0, message=message, error=message)
-        graph_runs.finish(str(context.job_id), status=exc.status, error=message)
-        return {"status": "unavailable" if exc.status == "unavailable" else "error", "error": message, "failed_node": node_id, "nodes": public_nodes}
+        definition = get_definition(str(node.get("type") or ""))
+        next_action = exc.next_action or (definition.status_action if definition and definition.status != "operational" else None)
+        graph_runs.update_node(str(context.job_id), node_id, status=exc.status, progress=0, message=message, error=message, next_action=next_action)
+        graph_runs.finish(str(context.job_id), status=exc.status, error=message, next_action=next_action)
+        return {"status": "unavailable" if exc.status == "unavailable" else "error", "error": message, "next_action": next_action, "failed_node": node_id, "nodes": public_nodes}
     except Exception as exc:  # pragma: no cover - protects the background job thread
         message = str(publicize(str(exc)))
-        graph_runs.update_node(str(context.job_id), node_id, status="failed", progress=0, message=message, error=message)
-        graph_runs.finish(str(context.job_id), status="failed", error=message)
-        return {"status": "error", "error": message, "failed_node": node_id, "nodes": public_nodes}
+        graph_runs.update_node(str(context.job_id), node_id, status="failed", progress=0, message=message, error=message, next_action="Kiểm tra log job và cấu hình backend rồi thử lại.")
+        graph_runs.finish(str(context.job_id), status="failed", error=message, next_action="Kiểm tra log job và cấu hình backend rồi thử lại.")
+        return {"status": "error", "error": message, "next_action": "Kiểm tra log job và cấu hình backend rồi thử lại.", "failed_node": node_id, "nodes": public_nodes}
     graph_runs.finish(str(context.job_id), status="completed")
     return {"status": "completed", "graph_id": value.get("id"), "draft": bool(draft), "nodes": public_nodes}

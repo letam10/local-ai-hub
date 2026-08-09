@@ -56,6 +56,7 @@ def create_job(
     with _lock:
         job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         record = {
+            "contract_version": "job.v2",
             "id": job_id,
             "tool": tool,
             "input": input_data,
@@ -69,6 +70,7 @@ def create_job(
             "error": None,
             "resume_data": resume_data if resume_data is not None else (dict(input_data) if isinstance(input_data, dict) else None),
             "result": None,
+            "next_action": None,
         }
         _jobs[job_id] = record
         _save()
@@ -96,6 +98,7 @@ def public_job(record: dict[str, Any]) -> dict[str, Any]:
 
     allowed = {
         "id",
+        "contract_version",
         "tool",
         "status",
         "progress",
@@ -105,6 +108,7 @@ def public_job(record: dict[str, Any]) -> dict[str, Any]:
         "device",
         "error",
         "message",
+        "next_action",
         "result",
         "resumable",
     }

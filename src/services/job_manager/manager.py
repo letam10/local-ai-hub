@@ -105,12 +105,21 @@ class HubJobManager:
             if context.cancelled or result.get("status") == "cancelled":
                 update_job(job_id, status="cancelled", progress=0, finished_at=_now(), result=result, message="Tác vụ đã được hủy.")
             elif result.get("status") == "completed":
-                update_job(job_id, status="completed", progress=100, finished_at=_now(), result=result, message="Hoàn tất.")
+                update_job(job_id, status="completed", progress=100, finished_at=_now(), result=result, message="Hoàn tất.", next_action=result.get("next_action"))
                 record_completed(tool)
             elif result.get("status") == "unavailable":
-                update_job(job_id, status="unavailable", progress=0, finished_at=_now(), result=result, error=result.get("reason"), message="Backend chưa khả dụng.")
+                update_job(
+                    job_id,
+                    status="unavailable",
+                    progress=0,
+                    finished_at=_now(),
+                    result=result,
+                    error=result.get("error") or result.get("reason") or "Backend chưa khả dụng.",
+                    message=result.get("next_action") or "Backend chưa khả dụng.",
+                    next_action=result.get("next_action"),
+                )
             else:
-                update_job(job_id, status="failed", progress=0, finished_at=_now(), result=result, error=result.get("error") or result.get("reason") or "Worker không hoàn tất.", message="Không thể hoàn tất tác vụ.")
+                update_job(job_id, status="failed", progress=0, finished_at=_now(), result=result, error=result.get("error") or result.get("reason") or "Worker không hoàn tất.", message="Không thể hoàn tất tác vụ.", next_action=result.get("next_action"))
         except Exception as exc:  # pragma: no cover - guards background threads
             update_job(job_id, status="failed", progress=0, finished_at=_now(), error=str(exc), message="Worker Hub gặp lỗi không mong đợi.")
         finally:

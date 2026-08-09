@@ -407,7 +407,14 @@ def submit_graph(graph: object, *, draft: bool = False) -> tuple[int, dict[str, 
         heavy=heavy,
     )
     graph_runs.begin(record["id"], normalized)
-    return 202, {"status": "queued", "job": get_job(record["id"]), "validation": {"order": validation["order"]}}
+    return 202, {
+        "status": "queued",
+        "contract_version": "node-run.v2",
+        "graph_id": normalized.get("id"),
+        "heavy": heavy,
+        "job": get_job(record["id"]),
+        "validation": {"order": validation["order"]},
+    }
 
 
 def dispatch_tool(tool: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:

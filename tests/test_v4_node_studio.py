@@ -237,10 +237,54 @@ class NodeStudioContractTests(unittest.TestCase):
 
         self.assertEqual(set(PORT_TYPES), {"IMAGE", "MASK", "VIDEO", "AUDIO", "TEXT", "NUMBER", "BOOLEAN", "MODEL", "METADATA"})
         required = {
-            "load_image", "flux_generate", "qwen_image", "comfyui_workflow", "sam2_segment", "grounding_dino", "rfdetr_detect", "image_compare",
+            "load_image", "flux_generate", "qwen_image", "image_edit", "image_upscale", "comfyui_workflow", "sam2_segment", "grounding_dino", "rfdetr_detect", "image_compare",
             "load_video", "probe_media", "trim_cut", "concat", "extract_audio", "replace_audio", "subtitle_burn", "frame_interpolate", "encode", "animesr_upscale",
         }
         self.assertTrue(required.issubset(NODE_DEFINITIONS))
+
+    def test_image_nodes_publish_typed_availability_contract(self) -> None:
+        from src.services.node_studio.registry import NODE_DEFINITIONS, registry_payload
+
+        for node_type in ("flux_generate", "qwen_image", "image_edit", "image_upscale"):
+            definition = NODE_DEFINITIONS[node_type].public()
+            self.assertEqual(definition["availability"]["status"], definition["status"])
+            self.assertTrue(definition["availability"]["reason"])
+            self.assertTrue(definition["availability"]["action"])
+
+        payload = registry_payload("image")
+        self.assertEqual(payload["contract_version"], "node-studio.v2")
+        self.assertEqual(set(payload["availability"]["counts"]), {"operational", "partial", "unavailable"})
+        self.assertIn("image_upscale", {item["type"] for item in payload["nodes"]})
+
+    def test_image_templates_cover_generate_edit_upscale_and_export(self) -> None:
+        from src.services.node_studio.schema import validate_graph
+
+        create = json.loads((ROOT / "workflows" / "image_create_upscale.json").read_text(encoding="utf-8"))
+        edit = json.loads((ROOT / "workflows" / "image_edit_upscale.json").read_text(encoding="utf-8"))
+        self.assertTrue(validate_graph(create, require_runnable=True)["valid"])
+        edit_validation = validate_graph(edit)
+        self.assertTrue(edit_validation["valid"], edit_validation["errors"])
+        self.assertIn("image_edit", {item["type"] for item in edit["nodes"]})
+        self.assertIn("image_upscale", {item["type"] for item in create["nodes"]})
+        self.assertEqual(edit["nodes"][0]["data"]["asset_id"], "")
+        edge_targets = {(item["target"]["node"], item["target"]["port"]) for item in edit["edges"]}
+        self.assertIn(("edit", "image"), edge_targets)
+
+    def test_graph_run_provenance_is_public_and_deduplicated(self) -> None:
+        from src.services.node_studio.state import GraphRunRegistry
+
+        registry = GraphRunRegistry()
+        artifact_id = "artifact_" + "a" * 32
+        registry.begin("job_provenance", {"id": "image-test", "nodes": [{"id": "upscale", "type": "image_upscale"}]})
+        output = {"image": {"id": artifact_id, "name": "result.png", "media_type": "image/png", "path": r"D:\private\result.png"}, "copy": {"id": artifact_id}}
+        registry.update_node("job_provenance", "upscale", status="completed", progress=100, output=output, next_action="Kiểm tra preview.")
+        registry.finish("job_provenance", status="completed")
+        snapshot = registry.snapshot("job_provenance")
+        assert snapshot is not None
+        self.assertEqual(snapshot["contract_version"], "node-run.v2")
+        self.assertEqual(len(snapshot["provenance"]), 1)
+        self.assertNotIn("D:\\private", str(snapshot))
+        self.assertEqual(snapshot["next_action"], "Kiểm tra preview.")
 
     def test_ui_and_api_keep_node_studio_offline_and_bounded(self) -> None:
         ui = (ROOT / "src" / "ui" / "node_studio.js").read_text(encoding="utf-8")
@@ -254,6 +298,8 @@ class NodeStudioContractTests(unittest.TestCase):
         self.assertNotIn("chooseOutput", ui)
         self.assertNotIn("connectInput", ui)
         self.assertIn("/api/node-studio/run", api)
+        self.assertIn("/api/node-studio/availability", api)
+        self.assertIn("contract_version", api)
         self.assertIn("cycle_detected", schema)
         self.assertNotIn("cdn", ui.lower())
 

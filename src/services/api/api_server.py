@@ -109,7 +109,15 @@ def _preset_summaries() -> list[dict]:
             continue
         if not isinstance(value, dict):
             continue
-        result.append({"id": path.stem, "title": str(value.get("title") or path.stem), "scope": str(value.get("scope") or "all")})
+        requires = value.get("requires") if isinstance(value.get("requires"), list) else []
+        result.append({
+            "id": path.stem,
+            "title": str(value.get("title") or path.stem),
+            "description": str(value.get("description") or ""),
+            "scope": str(value.get("scope") or "all"),
+            "stage": str(value.get("stage") or "core"),
+            "requires": [str(item) for item in requires if isinstance(item, str)],
+        })
     return result
 
 
@@ -281,6 +289,26 @@ class HubHandler(BaseHTTPRequestHandler):
 
             scope = parse_qs(parsed.query).get("scope", [""])[0]
             self._write(200, registry_payload(scope if isinstance(scope, str) else None))
+        elif normalized == "/api/node-studio/availability":
+            from src.services.node_studio.registry import registry_payload
+
+            scope = parse_qs(parsed.query).get("scope", [""])[0]
+            payload = registry_payload(scope if isinstance(scope, str) else None)
+            self._write(200, {
+                "status": "completed",
+                "contract_version": payload["contract_version"],
+                "scope": payload["scope"],
+                "availability": payload["availability"],
+                "nodes": [
+                    {
+                        "type": item["type"],
+                        "title": item["title"],
+                        "status": item["status"],
+                        "availability": item["availability"],
+                    }
+                    for item in payload["nodes"]
+                ],
+            })
         elif normalized == "/api/node-studio/presets":
             self._write(200, {"status": "completed", "presets": _preset_summaries()})
         elif normalized.startswith("/api/node-studio/presets/"):
