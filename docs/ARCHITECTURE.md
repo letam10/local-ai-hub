@@ -77,4 +77,48 @@ Kiểm tra mục tiêu trong lúc phát triển:
 
 Ở cuối milestone mới chạy một lượt full bounded suite, HTTP/UI smoke và image
 workflow smoke nếu backend local đã sẵn sàng. Không benchmark, không chạy
-inference lặp, không tải model và không thay đổi CUDA/NVIDIA driver.
+  inference lặp, không tải model và không thay đổi CUDA/NVIDIA driver.
+
+## Milestone 3 — Unified Creative UX
+
+Milestone 3 giữ nguyên các ownership trên và bổ sung một lớp UX/productivity chung:
+
+- `src/ui/pages.js` là composition layer cho workspace header, `workspace-state`,
+  workflow rail, Jobs history và artifact preview/save/export. Page không gọi worker
+  trực tiếp.
+- `src/ui/app.js` là state/event layer: bootstrap snapshot, navigation drawer, route
+  data, API error/loading banner, preview modal và các thao tác cancel/retry an toàn.
+- `src/ui/node_studio.js` là editor layer: template discovery, Recent, rename/duplicate,
+  local autosave/recovery, import validation, export JSON, unsaved warning và typed
+  canvas. `localStorage` là nơi duy nhất dành cho workflow cá nhân.
+- `src/services/api/core.py` công bố `reason` và `action` cùng `tool_status`; route
+  không nâng `partial` thành `operational` nếu thiếu bounded smoke.
+- `src/services/node_studio/engine.py` công bố provenance theo artifact/node trong
+  `node-run.v2`; `src/services/api/jobs.py` publicize metadata và loại bỏ raw path.
+
+### Workflow lifecycle
+
+```text
+Preset / Recent local
+        → validate graph (node-studio.v2)
+        → edit + autosave local + unsaved fingerprint
+        → Run Graph (job.v2)
+        → queue/progress/cancel/retry
+        → node-run.v2 provenance + artifact preview/save/export
+```
+
+Recent index dùng key `local-ai-hub-workflows-v1:index:{scope}` và tối đa 12 mục.
+Graph key có scope/ID opaque; không ghi workstation path, secret, model weight hay
+output media vào Git. `Lưu local` cập nhật fingerprint xác nhận; autosave chỉ phục hồi
+bản nháp và không thay đổi trạng thái backend.
+
+### Creative limitations
+
+Image Generate/Edit, AnimeSR và các tool direct vẫn có thể là `partial`; video
+generation giữ `unavailable` khi chưa có adapter smoke. Trong thời gian resource
+override, không chạy FFmpeg/NVENC, video generation/transform/upscale/interpolation/
+encode, AnimeSR/RIFE hoặc ComfyUI video. Functional video evidence được ghi
+`deferred due GPU/resource contention` và không được dùng để tuyên bố operational.
+
+Chi tiết UX, contract và lệnh kiểm tra nằm ở
+[MILESTONE_3_UNIFIED_CREATIVE_UX.md](MILESTONE_3_UNIFIED_CREATIVE_UX.md).

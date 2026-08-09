@@ -212,3 +212,56 @@ video) đã được mở sau PASS của Milestone 1; xem [Video Creative Workfl
 Milestone 2](docs/VIDEO_CREATIVE_WORKFLOW_MILESTONE_2.md). Generation video vẫn
 hiển thị `unavailable` cho tới khi backend local có bounded smoke; transform và
 FFmpeg fallback được cung cấp như đường đi thực tế.
+
+## MILESTONE 3 — Unified Creative UX và workflow productivity
+
+Milestone 3 chuẩn hóa Image AI, Media/Video, SAM2 và AnimeSR trong cùng một cửa sổ:
+
+- Workspace header, navigation, loading/empty/error/unavailable state, reason/action,
+  responsive layout và accessibility cơ bản dùng chung.
+- Hub Nodes có template discovery, Recent workflows, rename, duplicate, autosave/recovery,
+  import validation, export JSON và cảnh báo thay đổi chưa lưu. Workflow cá nhân chỉ nằm
+  trong `localStorage` của WebView; preset nguồn vẫn nằm trong `workflows/`.
+- Jobs có filter queue/history, progress, cancel, retry an toàn, `next_action`, provenance
+  theo node và artifact preview/save/export ngay trong Hub.
+- Image Generate/Edit/Upscale và Video Transform/Upscale/Interpolate/Encode/Export đi qua
+  form/graph contract hiện có. Backend chưa smoke luôn giữ `partial` hoặc `unavailable` cùng
+  reason/action; không tuyên bố inference hoạt động giả.
+
+### Bản đồ source và dữ liệu
+
+| Đường dẫn | Chức năng và ownership |
+| --- | --- |
+| `src/app/` | Desktop shell, WebView và bootstrap API; không chứa workflow runtime |
+| `src/ui/` | Pages, navigation, CSS design system, Node Studio, event/API client; không gọi shell |
+| `src/services/api/` | Loopback routes, capability catalog, upload/artifact và public response |
+| `src/services/node_studio/` | Registry typed socket, schema/DAG validator, engine và provenance |
+| `src/services/job_manager/` | Queue, progress, cancel/retry và process ownership |
+| `src/modules/` | Adapter local cho ComfyUI, FFmpeg, SAM2, AnimeSR, Whisper, Vision… |
+| `src/shared/` | Path registry, type và utility dùng chung |
+| `workflows/` | Preset graph JSON được track trong Git; không chứa model/output/path/secret |
+| `Config/*.example.json` | Cấu hình mẫu để setup máy; config local thực tế bị Git ignore |
+| `Output/`, `Temp/`, `Cache/`, `Logs/`, `Reports/` | Dữ liệu runtime, artifact và log local; không commit |
+| `Models/`, `runtime/`, `Runtimes/`, `Environments/` | Model/portable runtime/environment đã cài; không tự di chuyển hoặc copy |
+| `tests/`, `scripts/`, `docs/` | Bounded contract tests, launcher/audit và tài liệu architecture/milestone |
+
+### Phát triển và kiểm tra
+
+```powershell
+cd D:\LocalAIHub
+node --check src\ui\app.js
+node --check src\ui\pages.js
+node --check src\ui\node_studio.js
+python -m unittest -q tests\test_milestone3_contracts.py tests\test_unified_ui.py tests\test_v4_node_studio.py
+python scripts\ci_validate.py
+git diff --check
+```
+
+HTTP/UI smoke chỉ dùng loopback và dữ liệu nhỏ để kiểm tra route, navigation, state card,
+Recent/duplicate/rename và Jobs filter. Milestone 3 không benchmark. Trong resource-safety
+override, không chạy FFmpeg/NVENC, video generation/transform/upscale/interpolation/encode,
+AnimeSR/RIFE hoặc ComfyUI video; functional video re-smoke ghi `deferred due GPU/resource
+contention`.
+
+Xem chi tiết contract tại [MILESTONE_3_UNIFIED_CREATIVE_UX.md](docs/MILESTONE_3_UNIFIED_CREATIVE_UX.md)
+và ownership tại [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
