@@ -13,6 +13,7 @@ const request = async (path, options = {}) => {
 };
 
 export const getHealth = () => request("/health");
+export const getBootstrap = () => request("/api/bootstrap");
 export const getTools = () => request("/tools");
 export const getDashboard = () => request("/api/dashboard");
 export const getStorage = () => request("/api/storage");
@@ -41,6 +42,15 @@ export const resumeJob = (id) => request(`/jobs/${encodeURIComponent(id)}/resume
 export const openArtifact = (id) => request(`/api/artifacts/${encodeURIComponent(id)}/open`, { method: "POST" });
 export const launchApplication = (id) => request(`/api/applications/${encodeURIComponent(id)}/launch`, { method: "POST" });
 export const closeOwnedBackends = () => request("/api/lifecycle/close", { method: "POST" });
+export const scanStorage = () => request("/api/storage/scan", { method: "POST" });
+
+export const getNodeRegistry = (scope) => request(`/api/node-studio/registry?scope=${encodeURIComponent(scope || "")}`);
+export const getNodePresets = () => request("/api/node-studio/presets");
+export const getNodePreset = (id) => request(`/api/node-studio/presets/${encodeURIComponent(id)}`);
+export const validateNodeGraph = (graph, requireRunnable = false) => request("/api/node-studio/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ graph, require_runnable: requireRunnable }) });
+export const getDirtyNodes = (graph, changedNodeIds) => request("/api/node-studio/dirty", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ graph, changed_node_ids: changedNodeIds }) });
+export const runNodeGraph = (graph, draft = false) => request("/api/node-studio/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ graph, draft }) });
+export const getNodeRun = (jobId) => request(`/api/node-studio/runs/${encodeURIComponent(jobId)}`);
 
 export const formatGb = (bytes) => {
   const value = Number(bytes || 0) / (1024 ** 3);

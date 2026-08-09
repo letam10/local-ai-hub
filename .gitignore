@@ -26,6 +26,7 @@
 /Config/layout_migration.local.json
 /Config/local.env.cmd
 !/Config/local.env.example.cmd
+/workflows/*.local.json
 
 # Python, Node and tool-generated files.
 **/__pycache__/

@@ -21,6 +21,12 @@ const file = (label, key, accept = "") => field(label, `<input type="file" data-
 const files = (label, key, accept = "") => field(label, `<input type="file" data-asset-key="${escapeHtml(key)}" multiple ${accept ? `accept="${escapeHtml(accept)}"` : ""} /><div class="file-preview" data-file-preview aria-live="polite"></div>`);
 const button = (text, extra = "") => `<button class="button ${extra}" type="submit">${escapeHtml(text)}</button>`;
 const capability = (name, item, note, direct = {}) => `<div class="capability"><div><strong>${escapeHtml(name)}</strong><p>${escapeHtml(note)}</p>${direct.reason ? `<p>${escapeHtml(direct.reason)}</p>` : ""}</div>${statusPill(direct.tool_status || item.component_status || item.status || "missing")}</div>`;
+const activeTab = (state, module) => state.workspaceTabs?.[module] || "quick";
+const moduleTabs = (state, module) => {
+  const selected = activeTab(state, module);
+  return `<div class="module-tabs" role="tablist" aria-label="${escapeHtml(module)} workspace"><button class="tab ${selected === "quick" ? "is-selected" : ""}" type="button" data-workspace-tab="${escapeHtml(module)}:quick" role="tab" aria-selected="${selected === "quick"}">Quick</button><button class="tab ${selected === "nodes" ? "is-selected" : ""}" type="button" data-workspace-tab="${escapeHtml(module)}:nodes" role="tab" aria-selected="${selected === "nodes"}">Nodes</button></div>`;
+};
+const nodeStudio = (scope, description) => `<section class="node-studio-wrap"><div class="node-studio-intro"><div><strong>Node Studio</strong><p>${escapeHtml(description)}</p></div><span class="tag">offline · typed sockets · DAG</span></div><div data-node-studio data-scope="${escapeHtml(scope)}"></div></section>`;
 
 function artifacts(value, found = []) {
   if (!value) return found;
@@ -192,5 +198,16 @@ function renderSettings(state) {
 
 export function renderPage(route, state) {
   const pages = { dashboard: renderDashboard, airi: renderAiri, vision: renderVision, sam2: renderSam2, ocr: renderOcr, whisper: renderWhisper, voice: renderVoice, image: renderImage, media: renderMedia, animesr: renderAnime, jobs: renderJobs, models: renderModels, settings: renderSettings };
-  return (pages[route] || renderDashboard)(state);
+  const nodeCopy = {
+    image: "Compose FLUX/Qwen, SAM2 mask và image transforms trong cùng graph; preset JSON được track, workflow cá nhân autosave local.",
+    sam2: "Advanced workflow: Grounding DINO → SAM2 → mask/composite/export. GPU nodes chỉ chạy khi bấm Run Graph.",
+    media: "Build Trim/Crop/Audio/Interpolation/Encode graphs. Encode chỉ hiện capability FFmpeg thực tế.",
+    animesr: "Advanced order do bạn chọn: Load → AnimeSR → Frame Interpolation → Encode. AnimeSR/RIFE vẫn partial cho tới smoke riêng.",
+  };
+  const nodeScope = Object.prototype.hasOwnProperty.call(nodeCopy, route) ? route : null;
+  if (nodeScope && activeTab(state, nodeScope) === "nodes") {
+    return `${heading("ADVANCED WORKFLOW", `${nodeScope === "sam2" ? "SAM2" : nodeScope === "animesr" ? "AnimeSR" : nodeScope === "media" ? "Media" : "Image AI"} Nodes`, "Node editor chạy offline trong cửa sổ Local AI Hub.")}${moduleTabs(state, nodeScope)}${nodeStudio(nodeScope, nodeCopy[nodeScope])}`;
+  }
+  const page = (pages[route] || renderDashboard)(state);
+  return nodeScope ? `${moduleTabs(state, nodeScope)}${page}` : page;
 }

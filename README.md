@@ -131,6 +131,22 @@ git diff --check
 ```
 
 Xem thêm [kiến trúc một cửa sổ V3](docs/TRUE_SINGLE_WINDOW_V3.md),
-[filesystem layout V2](docs/FILESYSTEM_LAYOUT_V2.md),
+[Node Studio V4](docs/NODE_STUDIO_V4.md), [filesystem layout V2](docs/FILESYSTEM_LAYOUT_V2.md),
 [migration và rollback](docs/MIGRATION_AND_ROLLBACK.md) và
 [tích hợp AIRI](docs/AIRI_INTEGRATION.md).
+
+## V4 — Node Studio và khởi động nhanh
+
+V4 thêm tab `Nodes` vào Image AI, SAM2, Media và AnimeSR. Node Studio chạy
+offline trong WebView, có typed sockets, DAG validator/cycle detection,
+per-node progress, artifact ID riêng tư, cache theo content hash, autosave
+local, import/export JSON, undo/redo, preview và Cancel thuộc đúng graph job.
+Preset source được theo dõi trong [`workflows/`](workflows/); workflow cá nhân
+ở `localStorage` hoặc tệp `.local.json` bị Git bỏ qua.
+
+Desktop hiện mở loading screen ngay khi tạo WebView rồi khởi động API hidden
+song song. Tất cả subprocess Hub-owned, bao gồm `tasklist`, `nvidia-smi`,
+FFmpeg/FFprobe, worker, ComfyUI và `taskkill`, đi qua helper Windows chung để
+không tạo console. Polling nhanh chỉ refresh health/jobs; GPU, application,
+model và storage dùng cache hoặc chỉ scan theo yêu cầu. Xem chi tiết tại
+[Node Studio V4](docs/NODE_STUDIO_V4.md).

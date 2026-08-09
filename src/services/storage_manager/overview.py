@@ -21,9 +21,10 @@ from src.shared.paths.registry import (
 )
 
 
-_CACHE_SECONDS = 10.0
+_CACHE_SECONDS = 120.0
 _cache_lock = threading.Lock()
 _size_cache: tuple[float, dict[str, Any]] | None = None
+_model_cache: tuple[float, list[dict[str, Any]]] | None = None
 
 
 def _is_reparse_point(entry: os.DirEntry[str]) -> bool:
@@ -92,11 +93,11 @@ def _legacy_records() -> list[dict[str, Any]]:
     return records
 
 
-def storage_summary() -> dict[str, Any]:
+def storage_summary(*, force: bool = False) -> dict[str, Any]:
     global _size_cache
     now = time.monotonic()
     with _cache_lock:
-        if _size_cache and now - _size_cache[0] < _CACHE_SECONDS:
+        if not force and _size_cache and now - _size_cache[0] < _CACHE_SECONDS:
             return _size_cache[1]
 
     usage = os.statvfs(ROOT) if hasattr(os, "statvfs") else None
@@ -141,7 +142,12 @@ def storage_summary() -> dict[str, Any]:
     return result
 
 
-def model_summary() -> list[dict[str, Any]]:
+def model_summary(*, force: bool = False) -> list[dict[str, Any]]:
+    global _model_cache
+    now = time.monotonic()
+    with _cache_lock:
+        if not force and _model_cache and now - _model_cache[0] < _CACHE_SECONDS:
+            return [dict(item) for item in _model_cache[1]]
     value = load_json("model_registry.json", {})
     result: list[dict[str, Any]] = []
     for item in value.get("models", []):
@@ -167,4 +173,6 @@ def model_summary() -> list[dict[str, Any]]:
             "size": _bytes_record(size),
             "load_policy": "on_demand",
         })
+    with _cache_lock:
+        _model_cache = (now, [dict(item) for item in result])
     return result

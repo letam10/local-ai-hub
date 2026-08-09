@@ -6,14 +6,16 @@ owns the native window; capability and runtime state remain in the loopback API.
 
 from __future__ import annotations
 
+import html
 import os
-import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
 
+from src.services.process_manager.windows import popen_hidden
 
 ROOT = Path(__file__).resolve().parents[2]
 HOST = "127.0.0.1"
@@ -21,23 +23,10 @@ PORT = 8765
 UI_URL = f"http://{HOST}:{PORT}/ui/"
 
 
-def _no_console_flags() -> int:
-    return getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-
-
-def _hidden_startupinfo() -> subprocess.STARTUPINFO | None:
-    if os.name != "nt":
-        return None
-    info = subprocess.STARTUPINFO()
-    info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    info.wShowWindow = subprocess.SW_HIDE
-    return info
-
-
 def _api_ready() -> bool:
     try:
-        with socket.create_connection((HOST, PORT), timeout=0.35):
-            return True
+        with urllib.request.urlopen(f"http://{HOST}:{PORT}/health", timeout=0.35) as response:
+            return response.status == 200
     except OSError:
         return False
 
@@ -48,16 +37,14 @@ def ensure_api(timeout_seconds: float = 12.0) -> None:
     python = os.environ.get("LOCALAIHUB_PYTHON") or sys.executable
     log_path = ROOT / "Logs" / "api_server.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log = log_path.open("a", encoding="utf-8")
-    subprocess.Popen(
-        [python, "-m", "src.services.api.api_server"],
-        cwd=ROOT,
-        env={**os.environ, "PYTHONPATH": str(ROOT), "LOCALAIHUB_ROOT": str(ROOT)},
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        creationflags=_no_console_flags(),
-        startupinfo=_hidden_startupinfo(),
-    )
+    with log_path.open("a", encoding="utf-8") as log:
+        popen_hidden(
+            [python, "-m", "src.services.api.api_server"],
+            cwd=ROOT,
+            env={**os.environ, "PYTHONPATH": str(ROOT), "LOCALAIHUB_ROOT": str(ROOT)},
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         if _api_ready():
@@ -78,6 +65,40 @@ def close_owned_idle_backends() -> None:
         return
 
 
+def _loading_html() -> str:
+    """Return a tiny local screen shown before the loopback API is ready."""
+
+    return """<!doctype html><html lang=\"vi\"><meta charset=\"utf-8\"><title>Local AI Hub</title>
+    <style>html,body{margin:0;height:100%;background:#0b1020;color:#edf2ff;font-family:Segoe UI,system-ui,sans-serif}
+    main{height:100%;display:grid;place-content:center;text-align:center;gap:14px}.mark{margin:auto;display:grid;place-items:center;width:48px;height:48px;border-radius:14px;background:linear-gradient(145deg,#80aaff,#4d7dff);font-weight:800}.spinner{width:18px;height:18px;border:2px solid #34518a;border-top-color:#80aaff;border-radius:50%;animation:s 1s linear infinite;margin:2px auto}@keyframes s{to{transform:rotate(1turn)}}p{margin:0;color:#9aa8c7;font-size:14px}</style>
+    <main><div class=\"mark\">LA</div><strong>Local AI Hub</strong><div class=\"spinner\"></div><p>Đang khởi động dịch vụ cục bộ…</p></main></html>"""
+
+
+def _error_html(message: str) -> str:
+    safe = html.escape(message)
+    return f"""<!doctype html><html lang=\"vi\"><meta charset=\"utf-8\"><title>Local AI Hub</title>
+    <style>html,body{{margin:0;height:100%;background:#0b1020;color:#edf2ff;font-family:Segoe UI,system-ui,sans-serif}}main{{height:100%;display:grid;place-content:center;text-align:center;gap:14px;padding:32px}}p{{max-width:620px;color:#efb2bd;line-height:1.5}}</style>
+    <main><strong>Không thể khởi động Local AI Hub</strong><p>{safe}</p></main></html>"""
+
+
+def _load_ui_when_ready(window: object) -> None:
+    """Wait in a worker thread, leaving the native loading window responsive."""
+
+    try:
+        ensure_api()
+    except Exception as exc:  # pragma: no cover - GUI error rendering is host-specific
+        try:
+            window.load_html(_error_html(str(exc)))  # type: ignore[attr-defined]
+        except Exception:
+            return
+        return
+    try:
+        window.load_url(UI_URL)  # type: ignore[attr-defined]
+    except Exception:
+        # The user can still close the loading window normally if WebView2 fails.
+        return
+
+
 def main() -> int:
     try:
         import webview
@@ -86,10 +107,9 @@ def main() -> int:
         return 2
 
     try:
-        ensure_api()
         window = webview.create_window(
             "Local AI Hub",
-            UI_URL,
+            html=_loading_html(),
             width=1280,
             height=720,
             min_size=(1280, 720),
@@ -97,15 +117,21 @@ def main() -> int:
             confirm_close=True,
         )
 
-        def maximize() -> None:
+        def initialize_window() -> None:
             # WebView2 applies the maximize request after the native handle exists.
             try:
                 window.maximize()
             except Exception:
                 # The window still respects the minimum size if a work area is small.
                 pass
+            threading.Thread(
+                target=_load_ui_when_ready,
+                args=(window,),
+                name="LocalAIHub-API-startup",
+                daemon=True,
+            ).start()
 
-        webview.start(maximize, gui="edgechromium", debug=False)
+        webview.start(initialize_window, gui="edgechromium", debug=False)
         close_owned_idle_backends()
         return 0
     except Exception as exc:  # pragma: no cover - native GUI errors are host-specific

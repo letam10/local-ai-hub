@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "media-encode",
+  "title": "Media — Trim, interpolate, encode",
+  "scope": "media",
+  "nodes": [
+    {"id": "input", "type": "load_video", "position": {"x": 70, "y": 220}, "data": {"asset_id": ""}},
+    {"id": "probe", "type": "probe_media", "position": {"x": 320, "y": 70}, "data": {}},
+    {"id": "trim", "type": "trim_cut", "position": {"x": 320, "y": 260}, "data": {"start": 0, "end": 5}},
+    {"id": "interpolate", "type": "frame_interpolate", "position": {"x": 620, "y": 260}, "data": {"mode": "target_fps", "target_fps": 60, "backend": "ffmpeg_minterpolate"}},
+    {"id": "encode", "type": "encode", "position": {"x": 930, "y": 260}, "data": {"container": "mp4", "codec": "auto", "rate_control": "quality", "quality": 20, "bitrate_kbps": 6000, "max_bitrate_kbps": 9000, "buffer_kbps": 12000, "preset": "medium", "pixel_format": "", "audio_codec": "aac", "audio_bitrate_kbps": 192, "prefer_gpu": true, "multipass": false}},
+    {"id": "preview", "type": "preview_video", "position": {"x": 1240, "y": 260}, "data": {}},
+    {"id": "save", "type": "save_video", "position": {"x": 1510, "y": 260}, "data": {}}
+  ],
+  "edges": [
+    {"id": "input_to_probe", "source": {"node": "input", "port": "video"}, "target": {"node": "probe", "port": "media"}},
+    {"id": "input_to_trim", "source": {"node": "input", "port": "video"}, "target": {"node": "trim", "port": "video"}},
+    {"id": "trim_to_interpolate", "source": {"node": "trim", "port": "video"}, "target": {"node": "interpolate", "port": "video"}},
+    {"id": "interpolate_to_encode", "source": {"node": "interpolate", "port": "video"}, "target": {"node": "encode", "port": "video"}},
+    {"id": "encode_to_preview", "source": {"node": "encode", "port": "video"}, "target": {"node": "preview", "port": "video"}},
+    {"id": "preview_to_save", "source": {"node": "preview", "port": "video"}, "target": {"node": "save", "port": "video"}}
+  ],
+  "groups": []
+}

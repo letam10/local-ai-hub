@@ -205,8 +205,8 @@ def _tool_readiness(tool: str, statuses: dict[str, dict[str, Any]]) -> dict[str,
     return {"component": component_id, "component_status": component_status, "tool_status": tool_status, "reason": reason}
 
 
-def tool_catalog() -> list[dict[str, Any]]:
-    statuses = {str(item["id"]): item for item in component_statuses() if item.get("id")}
+def tool_catalog(component_items: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    statuses = {str(item["id"]): item for item in (component_items if component_items is not None else component_statuses()) if item.get("id")}
     tools = []
     for name, component_id in TOOL_COMPONENTS.items():
         readiness = _tool_readiness(name, statuses)
@@ -383,6 +383,31 @@ def submit_tool(tool: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]
         return 400, {"status": "error", "error": error}
     record = job_manager.submit(tool, request, lambda item, context: _run_operation(tool, item, context), device="gpu" if tool not in {"probe_media", "run_media_operation"} else None, heavy=tool != "probe_media")
     return 202, {"status": "queued", "job": get_job(record["id"])}
+
+
+def submit_graph(graph: object, *, draft: bool = False) -> tuple[int, dict[str, Any]]:
+    """Queue an owned Node Studio DAG without exposing any local path to the UI."""
+
+    from src.services.node_studio.engine import execute_graph
+    from src.services.node_studio.registry import graph_has_heavy_nodes
+    from src.services.node_studio.schema import validate_graph
+    from src.services.node_studio.state import graph_runs
+
+    validation = validate_graph(graph, require_runnable=True)
+    if not validation["valid"]:
+        return 400, {"status": "error", "error": "Graph không hợp lệ.", "validation": {"errors": validation["errors"]}}
+    normalized = validation["graph"]
+    heavy = graph_has_heavy_nodes(normalized)
+    request = {"graph": normalized, "draft": bool(draft)}
+    record = job_manager.submit(
+        "node_graph",
+        request,
+        lambda item, context: execute_graph(item["graph"], context, _run_operation, draft=bool(item.get("draft"))),
+        device="gpu" if heavy else None,
+        heavy=heavy,
+    )
+    graph_runs.begin(record["id"], normalized)
+    return 202, {"status": "queued", "job": get_job(record["id"]), "validation": {"order": validation["order"]}}
 
 
 def dispatch_tool(tool: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:

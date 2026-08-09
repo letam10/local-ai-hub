@@ -9,7 +9,6 @@ stopped.
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import threading
@@ -19,6 +18,12 @@ from pathlib import Path
 from typing import Any, Protocol, Sequence
 
 from src.shared.paths.registry import LOG_ROOT
+from src.services.process_manager.windows import (
+    hidden_startupinfo as _hidden_startupinfo,
+    no_console_flags as _no_console_flags,
+    popen_hidden,
+    run_hidden,
+)
 
 
 class ProcessOwner(Protocol):
@@ -31,16 +36,15 @@ class ProcessOwner(Protocol):
 
 
 def no_console_flags() -> int:
-    return getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    """Compatibility export for the shared CREATE_NO_WINDOW policy."""
+
+    return _no_console_flags()
 
 
 def hidden_startupinfo() -> subprocess.STARTUPINFO | None:
-    if os.name != "nt":
-        return None
-    info = subprocess.STARTUPINFO()
-    info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    info.wShowWindow = subprocess.SW_HIDE
-    return info
+    """Compatibility export for the shared SW_HIDE startup policy."""
+
+    return _hidden_startupinfo()
 
 
 def _safe_log_name(value: str) -> str:
@@ -75,15 +79,12 @@ def terminate_owned_process(process: subprocess.Popen[Any]) -> None:
         pass
     if os.name == "nt":
         try:
-            subprocess.run(
+            run_hidden(
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
                 timeout=12,
-                creationflags=no_console_flags(),
-                startupinfo=hidden_startupinfo(),
             )
         except (OSError, subprocess.SubprocessError):
             return
@@ -105,16 +106,13 @@ def run_json_worker(
     stdout = b""
     with log_path.open("ab") as stderr_handle:
         try:
-            process = subprocess.Popen(
+            process = popen_hidden(
                 [str(item) for item in command],
-                cwd=str(cwd) if cwd else None,
+                cwd=cwd,
                 env=env,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=stderr_handle,
-                shell=False,
-                creationflags=no_console_flags(),
-                startupinfo=hidden_startupinfo(),
             )
         except OSError as exc:
             return {"status": "error", "error": str(exc)}
@@ -165,16 +163,12 @@ def run_command(
     stdout = b""
     with log_path.open("ab") as stderr_handle:
         try:
-            process = subprocess.Popen(
+            process = popen_hidden(
                 [str(item) for item in command],
-                cwd=str(cwd) if cwd else None,
+                cwd=cwd,
                 env=env,
-                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=stderr_handle,
-                shell=False,
-                creationflags=no_console_flags(),
-                startupinfo=hidden_startupinfo(),
             )
         except OSError as exc:
             return -1, str(exc)
@@ -228,16 +222,12 @@ class BackgroundProcessRegistry:
             log_path = _log_path(f"backend_{key}")
             handle = log_path.open("ab")
             try:
-                process = subprocess.Popen(
+                process = popen_hidden(
                     [str(item) for item in command],
-                    cwd=str(cwd),
+                    cwd=cwd,
                     env=env,
-                    stdin=subprocess.DEVNULL,
                     stdout=handle,
                     stderr=subprocess.STDOUT,
-                    shell=False,
-                    creationflags=no_console_flags(),
-                    startupinfo=hidden_startupinfo(),
                 )
             except Exception:
                 handle.close()

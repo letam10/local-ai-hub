@@ -3,27 +3,110 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import re
 import sys
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
-from src.modules.image_generation.backend.comfyui import health as comfy_health
-from src.modules.image_generation.backend.comfyui import shutdown_owned_idle
 from src.services.artifact_store import describe as describe_artifact
 from src.services.artifact_store import open_artifact, resolve as resolve_artifact, stage_upload
 from src.services.job_manager.manager import job_manager
 from src.services.runtime_registry import applications, launch
-from src.services.storage_manager.overview import model_summary, storage_summary
 from src.shared.paths.registry import ROOT
 
 from .config import hub_config
-from .core import component_statuses, get_job_or_error, health, submit_tool, tool_catalog
+from .core import component_statuses, get_job_or_error, health, submit_graph, submit_tool, tool_catalog
 from .jobs import get_job, list_jobs
 
 
 LOG = logging.getLogger("local-ai-hub")
 UI_ROOT = (ROOT / "src" / "ui").resolve()
+WORKFLOW_ROOT = (ROOT / "workflows").resolve()
+_BOOTSTRAP_CACHE_SECONDS = 5.0
+_bootstrap_cache: tuple[float, dict] | None = None
+_bootstrap_lock = threading.RLock()
+_PRESET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
+
+
+def _settings_payload() -> dict:
+    config = hub_config()
+    return {
+        "status": "completed",
+        "settings": {
+            "start_maximized": bool(config.get("start_maximized", True)),
+            "minimum_width": int(config.get("minimum_width", 1280)),
+            "minimum_height": int(config.get("minimum_height", 720)),
+            "model_load_policy": config.get("model_load_policy", "on_demand"),
+            "max_heavy_gpu_jobs": int(config.get("max_heavy_gpu_jobs", 1)),
+            "api_bind": str(config.get("bind_host", "127.0.0.1")),
+            "api_port": int(config.get("api_port", 8765)),
+            "mcp_transport": config.get("mcp_transport", "stdio"),
+            "comfyui_port": int(config.get("comfyui_port", 8188)),
+        },
+    }
+
+
+def _lifecycle_payload() -> dict:
+    # Keep optional image runtime imports out of API startup.
+    from src.modules.image_generation.backend.comfyui import health as comfy_health
+
+    return {"status": "completed", "comfyui": comfy_health()}
+
+
+def _bootstrap_payload(*, force: bool = False) -> dict:
+    """One cached startup snapshot; intentionally excludes models and storage scans."""
+
+    global _bootstrap_cache
+    now = time.monotonic()
+    with _bootstrap_lock:
+        if not force and _bootstrap_cache and now - _bootstrap_cache[0] < _BOOTSTRAP_CACHE_SECONDS:
+            return _bootstrap_cache[1]
+    components = component_statuses()
+    payload = {
+        "status": "completed",
+        "health": health(),
+        "components": components,
+        "applications": applications(),
+        "jobs": list_jobs(),
+        "tools": tool_catalog(components),
+        "settings": _settings_payload()["settings"],
+        "lifecycle": _lifecycle_payload(),
+    }
+    with _bootstrap_lock:
+        _bootstrap_cache = (now, payload)
+    return payload
+
+
+def _preset_summaries() -> list[dict]:
+    if not WORKFLOW_ROOT.is_dir():
+        return []
+    result: list[dict] = []
+    for path in sorted(WORKFLOW_ROOT.glob("*.json")):
+        if path.name.endswith(".local.json"):
+            continue
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(value, dict):
+            continue
+        result.append({"id": path.stem, "title": str(value.get("title") or path.stem), "scope": str(value.get("scope") or "all")})
+    return result
+
+
+def _preset(name: str) -> dict | None:
+    if not _PRESET_NAME.fullmatch(name):
+        return None
+    path = (WORKFLOW_ROOT / f"{name}.json").resolve()
+    try:
+        path.relative_to(WORKFLOW_ROOT)
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 class HubHandler(BaseHTTPRequestHandler):
@@ -111,7 +194,8 @@ class HubHandler(BaseHTTPRequestHandler):
         self._write(201, {"status": "completed", "artifact": artifact})
 
     def do_GET(self) -> None:  # noqa: N802
-        path = unquote(urlparse(self.path).path)
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
         normalized = path.rstrip("/") or "/"
         if path == "/ui":
             self.send_response(302)
@@ -129,9 +213,13 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._write_file(path_value, str(artifact["name"]), str(artifact["media_type"]))
         elif normalized in {"/", "/health"}:
             self._write(200, health())
+        elif normalized == "/api/bootstrap":
+            self._write(200, _bootstrap_payload())
         elif normalized == "/tools":
             self._write(200, {"status": "completed", "tools": tool_catalog()})
         elif normalized == "/models":
+            from src.services.storage_manager.overview import model_summary
+
             self._write(200, {"status": "completed", "models": model_summary()})
         elif normalized == "/components":
             self._write(200, {"status": "completed", "components": component_statuses()})
@@ -140,31 +228,45 @@ class HubHandler(BaseHTTPRequestHandler):
         elif normalized.startswith("/jobs/"):
             self._write(*get_job_or_error(normalized.split("/", 2)[2]))
         elif normalized == "/api/dashboard":
-            self._write(200, {"status": "completed", "health": health(), "components": component_statuses(), "applications": applications(), "jobs": list_jobs()[:8]})
+            self._write(200, _bootstrap_payload())
         elif normalized == "/api/storage":
+            from src.services.storage_manager.overview import storage_summary
+
             self._write(200, storage_summary())
         elif normalized == "/api/models":
+            from src.services.storage_manager.overview import model_summary
+
             self._write(200, {"status": "completed", "models": model_summary()})
         elif normalized == "/api/applications":
             self._write(200, {"status": "completed", "applications": applications()})
         elif normalized == "/api/lifecycle":
-            self._write(200, {"status": "completed", "comfyui": comfy_health()})
+            self._write(200, _lifecycle_payload())
         elif normalized == "/api/settings":
-            config = hub_config()
-            self._write(200, {
-                "status": "completed",
-                "settings": {
-                    "start_maximized": bool(config.get("start_maximized", True)),
-                    "minimum_width": int(config.get("minimum_width", 1280)),
-                    "minimum_height": int(config.get("minimum_height", 720)),
-                    "model_load_policy": config.get("model_load_policy", "on_demand"),
-                    "max_heavy_gpu_jobs": int(config.get("max_heavy_gpu_jobs", 1)),
-                    "api_bind": str(config.get("bind_host", "127.0.0.1")),
-                    "api_port": int(config.get("api_port", 8765)),
-                    "mcp_transport": config.get("mcp_transport", "stdio"),
-                    "comfyui_port": int(config.get("comfyui_port", 8188)),
-                },
-            })
+            self._write(200, _settings_payload())
+        elif normalized == "/api/node-studio/registry":
+            from src.services.node_studio.registry import registry_payload
+
+            scope = parse_qs(parsed.query).get("scope", [""])[0]
+            self._write(200, registry_payload(scope if isinstance(scope, str) else None))
+        elif normalized == "/api/node-studio/presets":
+            self._write(200, {"status": "completed", "presets": _preset_summaries()})
+        elif normalized.startswith("/api/node-studio/presets/"):
+            preset = _preset(normalized.rsplit("/", 1)[-1])
+            if preset is None:
+                self._write(404, {"status": "error", "error": "Không tìm thấy preset workflow Hub."})
+            else:
+                from src.services.node_studio.schema import validate_graph
+
+                validation = validate_graph(preset)
+                self._write(200, {"status": "completed", "graph": validation["graph"], "validation": {"valid": validation["valid"], "errors": validation["errors"]}})
+        elif normalized.startswith("/api/node-studio/runs/"):
+            from src.services.node_studio.state import graph_runs
+
+            run = graph_runs.snapshot(normalized.rsplit("/", 1)[-1])
+            if run is None:
+                self._write(404, {"status": "error", "error": "Chưa có trạng thái Node Studio cho job này."})
+            else:
+                self._write(200, {"status": "completed", "run": run})
         else:
             self._write(404, {"status": "error", "error": "Route not found."})
 
@@ -198,10 +300,31 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._write(202, {"status": "queued", "job": get_job(str(record.get("id", "")))})
             return
         if path == "/api/lifecycle/close":
+            from src.modules.image_generation.backend.comfyui import shutdown_owned_idle
+
             self._write(200, shutdown_owned_idle())
             return
         if path == "/api/storage/scan":
-            self._write(200, storage_summary())
+            from src.services.storage_manager.overview import storage_summary
+
+            self._write(200, storage_summary(force=True))
+            return
+        if path == "/api/node-studio/validate":
+            from src.services.node_studio.schema import validate_graph
+
+            request = self._read_json()
+            validation = validate_graph(request.get("graph"), require_runnable=bool(request.get("require_runnable")))
+            self._write(200, {"status": "completed", "validation": validation})
+            return
+        if path == "/api/node-studio/dirty":
+            from src.services.node_studio.schema import downstream_nodes
+
+            request = self._read_json()
+            self._write(200, {"status": "completed", **downstream_nodes(request.get("graph"), request.get("changed_node_ids"))})
+            return
+        if path == "/api/node-studio/run":
+            request = self._read_json()
+            self._write(*submit_graph(request.get("graph"), draft=bool(request.get("draft"))))
             return
         aliases = {
             "/media/probe": "probe_media",

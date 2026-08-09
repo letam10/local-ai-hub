@@ -80,14 +80,14 @@ class HubJobManager:
             self._runners[record["id"]] = runner
         thread = threading.Thread(
             target=self._run,
-            args=(record["id"], payload, runner, context, heavy),
+            args=(record["id"], tool, payload, runner, context, heavy),
             name=f"LocalAIHub-{tool}-{record['id'][-8:]}",
             daemon=True,
         )
         thread.start()
         return record
 
-    def _run(self, job_id: str, payload: dict[str, Any], runner: Runner, context: JobContext, heavy: bool) -> None:
+    def _run(self, job_id: str, tool: str, payload: dict[str, Any], runner: Runner, context: JobContext, heavy: bool) -> None:
         acquired = False
         try:
             update_job(job_id, status="starting", progress=1, started_at=_now(), message="Đang chuẩn bị worker Hub.")

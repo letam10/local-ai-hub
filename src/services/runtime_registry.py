@@ -12,15 +12,21 @@ import json
 import os
 import re
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
+from src.services.process_manager.windows import popen_hidden, run_hidden
 from src.shared.paths.registry import CONFIG_ROOT, ROOT
 
 
 LOCAL_REGISTRY = CONFIG_ROOT / "application_registry.local.json"
 EXAMPLE_REGISTRY = CONFIG_ROOT / "application_registry.example.json"
 APPLICATION_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_TASKLIST_CACHE_SECONDS = 5.0
+_tasklist_cache: tuple[float, set[str]] | None = None
+_tasklist_lock = threading.RLock()
 
 
 def _read_registry() -> dict[str, Any]:
@@ -49,13 +55,18 @@ def _allowed_arguments(value: object) -> list[str]:
     return [item for item in value if item]
 
 
-def _running_executables() -> set[str]:
+def _running_executables(*, force: bool = False) -> set[str]:
     """Return executable names observed by Windows without accepting user input."""
 
+    global _tasklist_cache
     if os.name != "nt":
         return set()
+    now = time.monotonic()
+    with _tasklist_lock:
+        if not force and _tasklist_cache and now - _tasklist_cache[0] < _TASKLIST_CACHE_SECONDS:
+            return set(_tasklist_cache[1])
     try:
-        result = subprocess.run(
+        result = run_hidden(
             ["tasklist", "/FO", "CSV", "/NH"],
             capture_output=True,
             text=True,
@@ -64,7 +75,7 @@ def _running_executables() -> set[str]:
             timeout=5,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError:
         return set()
     names: set[str] = set()
     for line in result.stdout.splitlines():
@@ -73,6 +84,8 @@ def _running_executables() -> set[str]:
         name = line.split('",', 1)[0].strip('"').casefold()
         if name:
             names.add(name)
+    with _tasklist_lock:
+        _tasklist_cache = (now, set(names))
     return names
 
 
@@ -109,8 +122,8 @@ def _public_entry(entry: dict[str, Any], running: set[str]) -> dict[str, Any]:
     }
 
 
-def applications() -> list[dict[str, Any]]:
-    running = _running_executables()
+def applications(*, force: bool = False) -> list[dict[str, Any]]:
+    running = _running_executables(force=force)
     result: list[dict[str, Any]] = []
     for entry in _read_registry().get("applications", []):
         if not isinstance(entry, dict) or not APPLICATION_ID.fullmatch(str(entry.get("id", ""))):
@@ -147,14 +160,11 @@ def launch(application_id: str) -> tuple[int, dict[str, Any]]:
     if working_directory is None:
         working_directory = executable.parent
     try:
-        process = subprocess.Popen(
+        process = popen_hidden(
             [str(executable), *_allowed_arguments(entry.get("arguments"))],
             cwd=working_directory,
-            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            shell=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
     except OSError as exc:
         return 500, {"status": "error", "application": application_id, "error": str(exc)}

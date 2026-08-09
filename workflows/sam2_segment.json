@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "sam2-segment",
+  "title": "SAM2 — Point segment",
+  "scope": "sam2",
+  "nodes": [
+    {"id": "input", "type": "load_image", "position": {"x": 70, "y": 220}, "data": {"asset_id": ""}},
+    {"id": "points", "type": "point_input", "position": {"x": 70, "y": 440}, "data": {"points": "256,256,1"}},
+    {"id": "segment", "type": "sam2_segment", "position": {"x": 400, "y": 250}, "data": {}},
+    {"id": "preview", "type": "mask_preview", "position": {"x": 740, "y": 250}, "data": {}},
+    {"id": "export", "type": "export_mask", "position": {"x": 1020, "y": 250}, "data": {}}
+  ],
+  "edges": [
+    {"id": "image_to_segment", "source": {"node": "input", "port": "image"}, "target": {"node": "segment", "port": "image"}},
+    {"id": "points_to_segment", "source": {"node": "points", "port": "points"}, "target": {"node": "segment", "port": "points"}},
+    {"id": "mask_to_preview", "source": {"node": "segment", "port": "mask"}, "target": {"node": "preview", "port": "mask"}},
+    {"id": "mask_to_export", "source": {"node": "preview", "port": "mask"}, "target": {"node": "export", "port": "mask"}}
+  ],
+  "groups": []
+}

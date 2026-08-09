@@ -10,23 +10,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from src.services.process_manager.windows import run_hidden
+
 
 def _emit(payload: dict) -> int:
     print(json.dumps(payload, ensure_ascii=False))
     return 0 if payload.get("status") == "completed" else 2
-
-
-def _no_console_flags() -> int:
-    return getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-
-
-def _startupinfo():
-    if os.name != "nt":
-        return None
-    value = subprocess.STARTUPINFO()
-    value.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    value.wShowWindow = subprocess.SW_HIDE
-    return value
 
 
 def main() -> int:
@@ -63,15 +52,13 @@ def main() -> int:
         ffmpeg_home = str(request.get("ffmpeg_home") or "")
         if ffmpeg_home:
             environment["PATH"] = ffmpeg_home + os.pathsep + environment.get("PATH", "")
-        result = subprocess.run(
+        result = run_hidden(
             command,
             cwd=str(runtime),
             capture_output=True,
             timeout=int(request.get("inner_timeout_seconds", 3300)),
             check=False,
             env=environment,
-            creationflags=_no_console_flags(),
-            startupinfo=_startupinfo(),
         )
         videos = sorted(temp_root.rglob("*.mp4"), key=lambda item: item.stat().st_mtime)
         if result.returncode != 0 or not videos:

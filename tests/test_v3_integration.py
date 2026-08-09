@@ -42,8 +42,8 @@ class V3IntegrationContractTests(unittest.TestCase):
         self.assertIn("ComfyUI Advanced", pages)
         self.assertIn("Anime Upscale Studio chỉ là legacy/debug fallback", pages)
         self.assertIn("SAM2 Mask Studio không còn là workflow chính", pages)
-        self.assertIn("getTools", api)
-        self.assertIn("getTools()", app)
+        self.assertIn("getBootstrap", api)
+        self.assertIn("getBootstrap()", app)
         self.assertIn('tool(state, "segment_from_points")', pages)
 
     def test_media_workspace_covers_multifile_and_image_operations(self) -> None:
@@ -67,10 +67,14 @@ class V3IntegrationContractTests(unittest.TestCase):
     def test_workers_are_hidden_and_owned(self) -> None:
         managed = (ROOT / "src" / "services" / "process_manager" / "managed.py").read_text(encoding="utf-8")
         main = (ROOT / "src" / "app" / "main.py").read_text(encoding="utf-8")
-        for source in (managed, main):
-            self.assertIn("CREATE_NO_WINDOW", source)
-            self.assertNotIn("CREATE_NEW_CONSOLE", source)
-        self.assertIn("shell=False", managed)
+        helper = (ROOT / "src" / "services" / "process_manager" / "windows.py").read_text(encoding="utf-8")
+        self.assertIn("CREATE_NO_WINDOW", helper)
+        self.assertIn("CREATE_NEW_PROCESS_GROUP", helper)
+        self.assertIn("SW_HIDE", helper)
+        self.assertNotIn("CREATE_NEW_CONSOLE", helper)
+        self.assertIn("shell", helper)
+        self.assertIn("popen_hidden", managed)
+        self.assertIn("popen_hidden", main)
         self.assertIn("taskkill", managed)
         self.assertIn('"/PID", str(process.pid)', managed)
 
