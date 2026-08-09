@@ -107,19 +107,33 @@ class StartupLifecycleTests(unittest.TestCase):
     def test_concurrent_registration_and_close_is_linearizable(self) -> None:
         context = multiprocessing.get_context("spawn")
         worker = context.Process(target=_run_concurrent_registration_close_probe)
-        worker.start()
+        started = False
+
+        def stop_worker() -> bool:
+            if not worker.is_alive():
+                return True
+            worker.terminate()
+            worker.join(timeout=2)
+            if worker.is_alive():
+                worker.kill()
+                worker.join(timeout=2)
+            return not worker.is_alive()
+
         try:
+            worker.start()
+            started = True
             worker.join(timeout=4)
             if worker.is_alive():
-                worker.terminate()
-                worker.join(timeout=2)
+                if not stop_worker():
+                    self.fail("concurrent lifecycle child could not be stopped after terminate/kill")
                 self.fail("concurrent lifecycle child exceeded its timeout")
             self.assertEqual(worker.exitcode, 0, f"concurrent lifecycle child failed with exit code {worker.exitcode}")
         finally:
-            if worker.is_alive():
-                worker.terminate()
-                worker.join(timeout=2)
-            worker.close()
+            if started:
+                if worker.is_alive() and not stop_worker():
+                    self.fail("concurrent lifecycle child remained alive during cleanup")
+                if not worker.is_alive():
+                    worker.close()
 
 
 if __name__ == "__main__":
