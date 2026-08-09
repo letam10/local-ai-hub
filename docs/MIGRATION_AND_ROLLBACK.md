@@ -1,55 +1,68 @@
-# Migration and Rollback
+# Migration và rollback an toàn
 
-## Preconditions
+## Điều kiện trước khi di chuyển
 
-Run `scripts/migrate_layout_v2.ps1` only after reviewing the ignored local
-manifest. It defaults to `-DryRun`; `-Apply` is explicit and only evaluates
-entries marked `planned`. Do not use it to infer source paths, download models,
-or delete a legacy directory.
+Chạy `scripts/migrate_layout_v2.ps1` chỉ sau khi đã xem manifest cục bộ bị Git
+bỏ qua. Script mặc định là `-DryRun`; `-Apply` chỉ xử lý entry được đánh dấu
+`planned` hoặc `needs_review` nhưng chỉ tự di chuyển classification portable có
+`confidence: high`.
 
-Before a physical move, the manifest must include:
+Trước một physical move, manifest cần có:
 
-- component, source and destination paths;
-- observed size, process references and expected free-space impact;
-- a same-volume atomic-move strategy when possible;
-- a rollback strategy and whether a legacy junction is required; and
-- a bounded launch smoke test to run after the move.
+- component, nguồn và đích rõ ràng;
+- dung lượng quan sát, tiến trình đang tham chiếu và ước tính free space;
+- cùng volume để dùng atomic `Move-Item`, hoặc trạng thái bị chặn;
+- chiến lược rollback và yêu cầu legacy junction;
+- smoke test có giới hạn sẽ thực hiện sau move.
 
-Moves that would copy more than 2 GB, leave less than 4 GB free, target an
-existing destination, or list a process using the source are stopped. A Python
-virtual environment is `external_managed` unless it has an explicit verified
-relocation plan. Installer-managed AIRI is represented by a link/registry entry
-and is never moved manually.
+Script từ chối di chuyển cross-volume, destination đã tồn tại, source đang có
+tiến trình tham chiếu hoặc projected free space dưới 4 GiB. Nó không tự dừng
+tiến trình của người dùng, không sao chép model, không di chuyển venv mù quáng
+và không xoá legacy directory.
 
-## Commands
+## Quy trình chuẩn
 
 ```powershell
-# Default behavior is a non-mutating plan.
+# Chỉ quét inventory/report local; không move hay download.
+python scripts/refresh_final_inventory.py
+
+# Xem kế hoạch không thay đổi hệ thống.
 pwsh -File scripts/migrate_layout_v2.ps1
 
-# Explicitly apply only reviewed, planned entries.
+# Áp dụng các entry đã review.
 pwsh -File scripts/migrate_layout_v2.ps1 -Apply
 
-# Reverse manifest entries that were marked verified by a successful apply.
+# Sau khi từng runtime có smoke test đạt, ghi nhận verify.
+pwsh -File scripts/migrate_layout_v2.ps1 -MarkVerified
+
+# Tạo lại report local sau cùng.
+python scripts/refresh_final_inventory.py
+```
+
+Sau `-Apply`, đường dẫn cũ chỉ nhận junction khi destination tồn tại. Smoke test
+phải dùng executable/engine ở destination canonical và kiểm tra junction cũ
+trỏ đúng vào nó. Chỉ sau đó mới dùng `-MarkVerified`.
+
+## Rollback
+
+Rollback là thao tác vật lý có chủ ý, chỉ dùng khi có nhu cầu khôi phục đã được
+review. Script chỉ rollback entry `verified` hoặc `moved_pending_verification`,
+từ chối ghi đè dữ liệu thật ở legacy source và từ chối thao tác khi có tiến trình
+tham chiếu destination.
+
+```powershell
+# Wrapper tương đương với migrate_layout_v2.ps1 -Rollback
 pwsh -File scripts/rollback_layout_v2.ps1
 ```
 
-## Apply sequence
-
-For each reviewed entry, the script verifies source/destination, records size
-and projected free space, moves on the same volume when possible, verifies the
-destination, updates the local manifest, and optionally creates a legacy
-junction. It never stops arbitrary processes and never deletes a top-level
-legacy folder.
-
-If a move fails, record `migration_partial` in the local manifest and do not
-continue with related components. Restore with the rollback script only after
-checking that the legacy source path is absent and the destination still exists.
+Với entry junction-only, rollback chỉ xóa junction sau khi kiểm tra nó thật sự
+là reparse point. Với entry đã move, rollback xóa junction cũ rồi reverse move
+trong cùng volume. Sau rollback phải làm smoke test lại và tái tạo report.
 
 ## Legacy cleanup
 
-`Reports/LOCAL_LAYOUT_MIGRATION_REPORT.md` is machine-local and ignored. It
-classifies every legacy tree as `safe_to_delete`, `still_referenced`,
-`junction_only`, `not_migrated`, or `external_system_app`. Cleanup is only a
-user-confirmed action after all components pass their bounded smoke tests and
-`still_referenced = 0`; the migration scripts never perform it.
+Không có cleanup tự động. `Reports/LEGACY_AI_PATHS.local.md` phân loại đường
+dẫn thành junction, external managed, user data, cache/unknown hoặc còn cần
+review. Chỉ người dùng mới có thể cho phép cleanup sau khi tất cả launcher và
+backend liên quan đã có bounded smoke test; không xóa USER_DATA,
+SYSTEM_MANAGED, UNKNOWN hoặc bất kỳ path nào còn được tham chiếu.
