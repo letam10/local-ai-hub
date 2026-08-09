@@ -23,8 +23,13 @@ async def main() -> int:
             tools = await session.list_tools()
             health = await session.call_tool("get_health", {})
             models = await session.call_tool("list_models", {})
-            print(json.dumps({"tool_count": len(tools.tools), "health": str(health), "models": str(models)}, ensure_ascii=False, indent=2))
-    return 0
+            result = {
+                "tool_count": len(tools.tools),
+                "health_ok": not bool(getattr(health, "isError", False)),
+                "models_ok": not bool(getattr(models, "isError", False)),
+            }
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result["health_ok"] and result["models_ok"] else 1
 
 
 if __name__ == "__main__":

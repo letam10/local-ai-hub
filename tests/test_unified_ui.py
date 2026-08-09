@@ -102,6 +102,14 @@ class UnifiedUiTests(unittest.TestCase):
         self.assertIn("FILE_ATTRIBUTE_REPARSE_POINT", source)
         self.assertIn("_is_reparse_point(entry)", source)
 
+    def test_control_plane_summaries_do_not_expose_machine_paths(self) -> None:
+        from src.services.api.core import component_statuses
+        from src.services.storage_manager.overview import model_summary
+
+        for record in [*component_statuses(), *model_summary()]:
+            self.assertFalse({"path", "executable", "environment", "model", "local_path"} & set(record))
+            self.assertFalse(any(isinstance(value, str) and re.match(r"^[A-Za-z]:[\\/]", value) for value in record.values()))
+
 
 if __name__ == "__main__":
     unittest.main()

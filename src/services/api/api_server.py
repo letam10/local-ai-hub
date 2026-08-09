@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from .config import hub_config, models
+from .config import hub_config
 from .core import component_statuses, dispatch_tool, get_job_or_error, health, tool_catalog
 from .jobs import list_jobs
 from src.services.runtime_registry import applications, launch
@@ -84,7 +84,7 @@ class HubHandler(BaseHTTPRequestHandler):
         elif normalized == "/tools":
             self._write(200, {"status": "completed", "tools": tool_catalog()})
         elif normalized == "/models":
-            self._write(200, {"status": "completed", "models": models()})
+            self._write(200, {"status": "completed", "models": model_summary()})
         elif normalized == "/components":
             self._write(200, {"status": "completed", "components": component_statuses()})
         elif normalized == "/jobs":

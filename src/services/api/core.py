@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 import threading
@@ -9,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import BASE_DIR, component, components, hub_config, models
+from .config import BASE_DIR, component, components, hub_config
 from .gpu import gpu_policy, query_gpu
 from .jobs import get_job, list_jobs
 
@@ -127,6 +128,17 @@ def _configured_component_status(item: dict[str, Any]) -> str:
     return str(value).strip().lower()
 
 
+def _public_component_text(value: object, fallback: str) -> str:
+    """Keep component summaries useful without leaking machine-local paths."""
+
+    if not isinstance(value, str):
+        return fallback
+    text = value.strip()
+    if not text or re.match(r"^[A-Za-z]:[\\/]", text) or text.startswith("\\\\"):
+        return fallback
+    return text
+
+
 def _observed_component_status(item: dict[str, Any]) -> str:
     executable = item.get("executable")
     path = item.get("path")
@@ -156,7 +168,13 @@ def component_statuses() -> list[dict[str, Any]]:
     for item in components():
         observed = _observed_component_status(item)
         statuses.append({
-            **item,
+            "id": item.get("id"),
+            "name": item.get("name") or item.get("id"),
+            "kind": item.get("kind") or "component",
+            "version": item.get("version") or "unknown",
+            "adapter": _public_component_text(item.get("adapter"), "configured"),
+            "source": _public_component_text(item.get("source"), "local configuration"),
+            "port": item.get("port"),
             "configured_component_status": _configured_component_status(item),
             "component_status": observed,
             "status": observed,
