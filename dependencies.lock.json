@@ -70,6 +70,20 @@
       "local_install_strategy": "install in the ignored Hub environment; use Microsoft Edge WebView2 on Windows",
       "patch_path": null,
       "verification_status": "pinned-for-desktop-shell"
+    },
+    {
+      "name": "LiteGraph.js",
+      "repository": "https://github.com/jagenjo/litegraph.js",
+      "commit_sha": "0555a2f2a3df5d4657593c6d45eb192359888195",
+      "version": "release",
+      "local_install_strategy": "pinned offline frontend files under src/ui/vendor; no upstream repository is vendored",
+      "patch_path": null,
+      "license_path": "src/ui/vendor/LITEGRAPH-LICENSE.txt",
+      "sha256": {
+        "src/ui/vendor/litegraph.js": "439afa04c666e0d56aa4a3467d678361758905b740a6f2b1102d2664afea6813",
+        "src/ui/vendor/litegraph.css": "565cee8d54e7dfd16295f0ec7b19f910a739c0f42d5263198e3416a38a6006b3"
+      },
+      "verification_status": "pinned-offline-frontend"
     }
   ]
 }

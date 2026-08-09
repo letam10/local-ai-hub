@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-ai-hub.invalid/schemas/comfyui-bridge-v1.json",
+  "title": "Local AI Hub ComfyUI bridge workflow",
+  "type": "object",
+  "required": ["schema_version", "id", "title", "kind"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$" },
+    "title": { "type": "string", "maxLength": 160 },
+    "description": { "type": "string", "maxLength": 500 },
+    "kind": { "enum": ["quick_api", "raw_comfy_api"] },
+    "engine": { "enum": ["flux", "qwen"] },
+    "inputs": { "type": "array", "items": { "enum": ["text", "image", "mask", "video", "audio", "metadata"] } },
+    "prompt": { "type": "object" },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["node", "input"],
+          "properties": { "node": { "type": "string" }, "input": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" } }
+        }
+      }
+    }
+  },
+  "allOf": [
+    { "if": { "properties": { "kind": { "const": "quick_api" } } }, "then": { "required": ["engine"] } },
+    { "if": { "properties": { "kind": { "const": "raw_comfy_api" } } }, "then": { "required": ["prompt", "bindings"] } }
+  ]
+}

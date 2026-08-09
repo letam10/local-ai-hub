@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "image-draft",
+  "title": "Image AI — FLUX draft",
+  "scope": "image",
+  "nodes": [
+    {"id": "prompt", "type": "prompt_text", "position": {"x": 80, "y": 150}, "data": {"text": "Một studio product shot tối giản"}},
+    {"id": "resolution", "type": "resolution", "position": {"x": 80, "y": 360}, "data": {"width": 768, "height": 768}},
+    {"id": "sampler", "type": "sampler_settings", "position": {"x": 350, "y": 360}, "data": {"steps": 20, "sampler": "backend_default"}},
+    {"id": "seed", "type": "seed", "position": {"x": 350, "y": 150}, "data": {"value": 42}},
+    {"id": "flux", "type": "flux_generate", "position": {"x": 680, "y": 190}, "data": {"width": 768, "height": 768, "steps": 20, "seed": 42, "negative_prompt": ""}},
+    {"id": "preview", "type": "preview_image", "position": {"x": 1010, "y": 190}, "data": {}},
+    {"id": "save", "type": "save_image", "position": {"x": 1280, "y": 190}, "data": {}}
+  ],
+  "edges": [
+    {"id": "prompt_to_flux", "source": {"node": "prompt", "port": "text"}, "target": {"node": "flux", "port": "prompt"}},
+    {"id": "width_to_flux", "source": {"node": "resolution", "port": "width"}, "target": {"node": "flux", "port": "width"}},
+    {"id": "height_to_flux", "source": {"node": "resolution", "port": "height"}, "target": {"node": "flux", "port": "height"}},
+    {"id": "settings_to_flux", "source": {"node": "sampler", "port": "settings"}, "target": {"node": "flux", "port": "settings"}},
+    {"id": "seed_to_flux", "source": {"node": "seed", "port": "seed"}, "target": {"node": "flux", "port": "seed"}},
+    {"id": "flux_to_preview", "source": {"node": "flux", "port": "image"}, "target": {"node": "preview", "port": "image"}},
+    {"id": "preview_to_save", "source": {"node": "preview", "port": "image"}, "target": {"node": "save", "port": "image"}}
+  ],
+  "groups": []
+}

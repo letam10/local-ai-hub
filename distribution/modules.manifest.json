@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "download_policy": {
+    "default_mode": "plan_only",
+    "require_https": true,
+    "require_sha256": true,
+    "require_model_confirmation": true,
+    "never_download_models_during_full_install_without_confirmation": true
+  },
+  "modules": [
+    {
+      "id": "sam2",
+      "title": "SAM 2",
+      "delivery": "on_demand",
+      "component": "sam2",
+      "archive": {
+        "url": null,
+        "sha256": null,
+        "status": "not_published"
+      },
+      "models": {
+        "download_on_select": false,
+        "requires_confirmation": true
+      }
+    },
+    {
+      "id": "vision",
+      "title": "Vision",
+      "delivery": "on_demand",
+      "component": "vision",
+      "archive": {
+        "url": null,
+        "sha256": null,
+        "status": "not_published"
+      },
+      "models": {
+        "download_on_select": false,
+        "requires_confirmation": true
+      }
+    },
+    {
+      "id": "voice",
+      "title": "Voice",
+      "delivery": "on_demand",
+      "component": "voice",
+      "archive": {
+        "url": null,
+        "sha256": null,
+        "status": "not_published"
+      },
+      "models": {
+        "download_on_select": false,
+        "requires_confirmation": true
+      }
+    },
+    {
+      "id": "image",
+      "title": "Image AI and ComfyUI bridge",
+      "delivery": "on_demand",
+      "component": "image_generation",
+      "archive": {
+        "url": null,
+        "sha256": null,
+        "status": "not_published"
+      },
+      "models": {
+        "download_on_select": false,
+        "requires_confirmation": true
+      }
+    },
+    {
+      "id": "animesr",
+      "title": "AnimeSR",
+      "delivery": "on_demand",
+      "component": "animesr",
+      "archive": {
+        "url": null,
+        "sha256": null,
+        "status": "not_published"
+      },
+      "models": {
+        "download_on_select": false,
+        "requires_confirmation": true
+      }
+    }
+  ]
+}

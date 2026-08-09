@@ -42,10 +42,16 @@ class UnifiedUiTests(unittest.TestCase):
         self.assertIn("webview", desktop)
         self.assertIn("min_size=(1280, 720)", desktop)
         self.assertIn("window.maximize()", desktop)
+        self.assertIn("confirm_close=False", desktop)
+        self.assertIn("startup_mutex", desktop)
+        self.assertIn("close_owned_api()", desktop)
         self.assertNotIn("tkinter", desktop.casefold())
         self.assertIn('path.startswith("/ui/")', api)
         self.assertIn('normalized == "/api/applications"', api)
         self.assertIn('path == "/api/storage/scan"', api)
+        self.assertIn("HubHTTPServer", api)
+        self.assertIn("health(probe_gpu=False)", api)
+        self.assertIn("health(probe_gpu=True)", api)
 
     def test_example_application_registry_is_allowlisted(self) -> None:
         registry = json.loads((ROOT / "Config" / "application_registry.example.json").read_text(encoding="utf-8"))

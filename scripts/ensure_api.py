@@ -9,6 +9,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.services.process_manager.windows import popen_hidden
+
 HOST = "127.0.0.1"
 PORT = 8765
 
@@ -27,15 +32,14 @@ def main() -> int:
     python = os.environ.get("LOCALAIHUB_PYTHON") or sys.executable
     log_path = ROOT / "Logs" / "api_server.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log = log_path.open("a", encoding="utf-8")
-    subprocess.Popen(
-        [python, "-m", "src.services.api.api_server"],
-        cwd=ROOT,
-        env={**os.environ, "PYTHONPATH": str(ROOT)},
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-    )
+    with log_path.open("a", encoding="utf-8") as log:
+        popen_hidden(
+            [python, "-m", "src.services.api.api_server"],
+            cwd=ROOT,
+            env={**os.environ, "PYTHONPATH": str(ROOT), "LOCALAIHUB_ROOT": str(ROOT)},
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
     for _ in range(20):
         time.sleep(0.15)
         if ready():

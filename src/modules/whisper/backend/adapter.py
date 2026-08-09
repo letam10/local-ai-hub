@@ -1,50 +1,38 @@
 from __future__ import annotations
 
-import json
 import os
-import subprocess
 from pathlib import Path
+from typing import Any
 
-from src.shared.utils.adapter_common import configured_path, unavailable
-
-
-ROOT = Path(__file__).resolve().parents[1]
-HELPER = ROOT / "Services" / "Whisper" / "whisper_cli.py"
+from src.services.process_manager.managed import ProcessOwner, run_json_worker
+from src.shared.utils.adapter_common import configured_path, local_root, unavailable
 
 
-def transcribe(payload: dict) -> dict:
-    existing_python = configured_path("whisper", "executable", "WHISPER_PYTHON")
-    whisper_home = configured_path("whisper", "path", "WHISPER_HOME")
-    if existing_python is None or not existing_python.exists() or not HELPER.exists():
-        return unavailable("whisper", "Existing Faster-Whisper environment or Hub wrapper is incomplete.")
-    try:
-        result = subprocess.run(
-            [str(existing_python), str(HELPER)],
-            input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            capture_output=True,
-            timeout=1200,
-            check=False,
-            env={
-                **os.environ,
-                "LOCALAIHUB_ROOT": str(ROOT),
-                "WHISPER_HOME": str(whisper_home) if whisper_home else "",
-                "WHISPER_PYTHON": str(existing_python),
-                "PYTHONIOENCODING": "utf-8",
-            },
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {"status": "error", "error": str(exc)}
-    stdout = result.stdout.decode("utf-8", errors="replace")
-    json_line = next((line for line in reversed(stdout.splitlines()) if line.lstrip().startswith("{")), "")
-    try:
-        value = json.loads(json_line)
-    except json.JSONDecodeError as exc:
-        return {"status": "error", "error": f"Whisper helper returned invalid JSON: {exc}", "stdout": stdout[-3000:]}
-    if result.returncode != 0:
-        value.setdefault("status", "error")
-    return value
+def _runtime() -> tuple[Path | None, Path | None, Path]:
+    root = local_root()
+    python = configured_path("whisper", "executable", "WHISPER_PYTHON")
+    service = configured_path("whisper", "path", "WHISPER_HOME")
+    return python, service, root / "Services" / "Whisper" / "whisper_cli.py"
 
 
-def capability() -> dict:
-    whisper_home = configured_path("whisper", "path", "WHISPER_HOME")
-    return {"component": "whisper", "status": "installed", "helper": str(HELPER), "environment": str(whisper_home) if whisper_home else None}
+def transcribe(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[str, Any]:
+    python, whisper_home, helper = _runtime()
+    source = Path(os.path.expandvars(str(payload.get("path", "")))).expanduser()
+    if not source.is_file():
+        return {"status": "error", "error": "Không tìm thấy media đầu vào Whisper."}
+    if python is None or not python.exists() or not helper.exists():
+        return unavailable("whisper", "Faster-Whisper environment hoặc Hub wrapper chưa hoàn chỉnh.")
+    return run_json_worker(
+        [str(python), str(helper)],
+        {**payload, "path": str(source)},
+        label="whisper",
+        cwd=helper.parent,
+        env={**os.environ, "LOCALAIHUB_ROOT": str(local_root()), "WHISPER_HOME": str(whisper_home) if whisper_home else "", "WHISPER_PYTHON": str(python), "PYTHONIOENCODING": "utf-8"},
+        owner=context,
+        timeout_seconds=float(payload.get("timeout_seconds", 1200)),
+    )
+
+
+def capability() -> dict[str, Any]:
+    python, whisper_home, helper = _runtime()
+    return {"component": "whisper", "adapter_status": "direct-worker-configured", "runtime_ready": helper.exists() and bool(whisper_home and whisper_home.exists()), "environment_ready": bool(python and python.exists())}

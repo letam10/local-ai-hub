@@ -4,38 +4,72 @@ import csv
 import io
 import shutil
 import subprocess
+import threading
+import time
 from typing import Any
 
+from src.services.process_manager.windows import run_hidden
 from .jobs import active_heavy_jobs
+
+
+_GPU_CACHE_SECONDS = 2.0
+_gpu_cache: tuple[float, dict[str, Any]] | None = None
+_gpu_lock = threading.RLock()
 
 
 def _nvidia_smi() -> str | None:
     return shutil.which("nvidia-smi") or r"C:\Windows\System32\nvidia-smi.exe"
 
 
-def query_gpu() -> dict[str, Any]:
+def query_gpu(*, force: bool = False, probe: bool = True) -> dict[str, Any]:
+    """Return cached GPU state; only run ``nvidia-smi`` when an explicit snapshot needs it."""
+
+    global _gpu_cache
+    now = time.monotonic()
+    with _gpu_lock:
+        if not force and _gpu_cache:
+            age = now - _gpu_cache[0]
+            if not probe or age < _GPU_CACHE_SECONDS:
+                return dict(_gpu_cache[1])
+    if not probe:
+        return {"available": False, "reason": "GPU snapshot pending"}
+
     executable = _nvidia_smi()
     if not executable:
-        return {"available": False, "reason": "nvidia-smi not found"}
+        value = {"available": False, "reason": "nvidia-smi not found"}
+        with _gpu_lock:
+            _gpu_cache = (now, value)
+        return dict(value)
     command = [
         executable,
         "--query-gpu=name,memory.total,memory.used,memory.free,utilization.gpu,temperature.gpu,driver_version",
         "--format=csv,noheader,nounits",
     ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=5, check=False)
+        result = run_hidden(command, capture_output=True, text=True, timeout=5, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
-        return {"available": False, "reason": str(exc)}
+        value = {"available": False, "reason": str(exc)}
+        with _gpu_lock:
+            _gpu_cache = (now, value)
+        return dict(value)
     if result.returncode != 0:
-        return {"available": False, "reason": result.stderr.strip() or "nvidia-smi failed"}
+        value = {"available": False, "reason": result.stderr.strip() or "nvidia-smi failed"}
+        with _gpu_lock:
+            _gpu_cache = (now, value)
+        return dict(value)
     rows = list(csv.reader(io.StringIO(result.stdout)))
     if not rows:
-        return {"available": False, "reason": "no GPU rows returned"}
+        value = {"available": False, "reason": "no GPU rows returned"}
+        with _gpu_lock:
+            _gpu_cache = (now, value)
+        return dict(value)
     fields = ["name", "memory_total_mib", "memory_used_mib", "memory_free_mib", "utilization_percent", "temperature_c", "driver_version"]
     values = [item.strip() for item in rows[0]]
     data: dict[str, Any] = {"available": True}
     for index, field in enumerate(fields):
         data[field] = values[index] if index < len(values) else None
+    with _gpu_lock:
+        _gpu_cache = (now, dict(data))
     return data
 
 

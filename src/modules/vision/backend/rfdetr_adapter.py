@@ -1,46 +1,38 @@
 from __future__ import annotations
 
-import json
 import os
-import subprocess
 from pathlib import Path
+from typing import Any
 
-from src.shared.utils.adapter_common import unavailable
-
-
-ROOT = Path(__file__).resolve().parents[1]
-PYTHON = ROOT / "Environments" / "vision-torch" / "Scripts" / "python.exe"
-HELPER = ROOT / "Services" / "RF-DETR" / "detect_cli.py"
+from src.services.process_manager.managed import ProcessOwner, run_json_worker
+from src.shared.utils.adapter_common import configured_path, local_root, unavailable
 
 
-def detect(path: str, threshold: float = 0.5) -> dict:
+def _runtime() -> tuple[Path, Path, Path]:
+    root = local_root()
+    service = configured_path("rfdetr", "path", "RFDETR_HOME") or root / "Services" / "RF-DETR"
+    python = configured_path("rfdetr", "executable", "RFDETR_PYTHON") or root / "Environments" / "vision-torch" / "Scripts" / "python.exe"
+    return python, service / "detect_cli.py", service
+
+
+def detect(path: str, threshold: float = 0.5, context: ProcessOwner | None = None) -> dict[str, Any]:
+    python, helper, service = _runtime()
     source = Path(os.path.expandvars(path)).expanduser()
     if not source.is_file():
-        return {"status": "error", "error": f"Input file does not exist: {source}"}
-    if not PYTHON.exists() or not HELPER.exists():
-        return unavailable("rfdetr", "RF-DETR helper environment is incomplete.")
-    payload = {"path": str(source), "threshold": float(threshold)}
-    try:
-        result = subprocess.run(
-            [str(PYTHON), str(HELPER)],
-            input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            capture_output=True,
-            timeout=180,
-            check=False,
-            env={**os.environ, "RF_HOME": str(ROOT / "Models" / "Vision" / "RF-DETR"), "PYTHONIOENCODING": "utf-8"},
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {"status": "error", "error": str(exc)}
-    if result.returncode != 0:
-        return {"status": "error", "error": result.stderr.decode("utf-8", errors="replace")[-4000:], "returncode": result.returncode}
-    stdout = result.stdout.decode("utf-8", errors="replace")
-    json_line = next((line for line in reversed(stdout.splitlines()) if line.lstrip().startswith("{")), "")
-    try:
-        value = json.loads(json_line)
-    except json.JSONDecodeError as exc:
-        return {"status": "error", "error": f"RF-DETR helper returned invalid JSON: {exc}", "stderr": result.stderr.decode("utf-8", errors="replace")[-2000:]}
-    return value
+        return {"status": "error", "error": "Không tìm thấy ảnh/video RF-DETR đầu vào."}
+    if not python.exists() or not helper.exists():
+        return unavailable("rfdetr", "RF-DETR helper environment chưa hoàn chỉnh.")
+    return run_json_worker(
+        [str(python), str(helper)],
+        {"path": str(source), "threshold": float(threshold)},
+        label="rfdetr",
+        cwd=service,
+        env={**os.environ, "LOCALAIHUB_ROOT": str(local_root()), "RF_HOME": str(local_root() / "Models" / "Vision" / "RF-DETR"), "PYTHONIOENCODING": "utf-8"},
+        owner=context,
+        timeout_seconds=300,
+    )
 
 
-def capability() -> dict:
-    return {"component": "rfdetr", "status": "installed", "helper": str(HELPER), "environment": str(PYTHON)}
+def capability() -> dict[str, Any]:
+    python, helper, _ = _runtime()
+    return {"component": "rfdetr", "adapter_status": "direct-worker-configured", "runtime_ready": helper.exists(), "environment_ready": python.exists()}

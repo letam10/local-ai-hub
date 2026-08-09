@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "id": "flux_quick",
+  "title": "FLUX Quick API bridge",
+  "kind": "quick_api",
+  "engine": "flux",
+  "description": "Biên dịch prompt và IMAGE artifact của Hub thành workflow FLUX API đã có trong local ComfyUI.",
+  "inputs": ["text", "image"]
+}

@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "applications": [
     {
       "id": "anime-upscale-studio",
@@ -12,6 +12,7 @@
       "working_directory": "${ANIME_UPSCALE_HOME}",
       "arguments": [],
       "launch": true,
+      "advanced_only": true,
       "notes": "Uses the registered AnimeSR, FFmpeg and model paths; no source media is overwritten."
     },
     {
@@ -25,6 +26,7 @@
       "working_directory": "${SAM2_STUDIO_HOME}",
       "arguments": [],
       "launch": true,
+      "advanced_only": true,
       "notes": "GUI is managed; direct SAM2 adapter remains unavailable until a bounded smoke passes."
     },
     {
@@ -38,6 +40,7 @@
       "working_directory": "${FLUX_STUDIO_HOME}",
       "arguments": [],
       "launch": true,
+      "advanced_only": true,
       "notes": "FLUX and Qwen Image share one ComfyUI runtime and one physical model store."
     },
     {
@@ -51,6 +54,7 @@
       "working_directory": "${FLUX_STUDIO_HOME}",
       "arguments": [],
       "launch": true,
+      "advanced_only": true,
       "notes": "Qwen Image is installed when its manifest files exist; this alias opens the same local Studio."
     },
     {

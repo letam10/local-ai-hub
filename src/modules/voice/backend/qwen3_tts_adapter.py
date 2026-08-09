@@ -1,59 +1,35 @@
 from __future__ import annotations
 
-import json
 import os
-import subprocess
 from pathlib import Path
+from typing import Any
 
-from src.shared.utils.adapter_common import configured_path, local_cache_root, unavailable
-
-
-ROOT = Path(__file__).resolve().parents[1]
+from src.services.process_manager.managed import ProcessOwner, run_json_worker
+from src.shared.utils.adapter_common import configured_path, local_cache_root, local_root, unavailable
 
 
 def _runtime() -> tuple[Path, Path, Path]:
-    service = configured_path("qwen3_tts", "path", "QWEN3_TTS_HOME") or ROOT / "Services" / "Qwen3-TTS"
-    python = configured_path("qwen3_tts", "executable", "QWEN3_TTS_PYTHON") or ROOT / "Environments" / "voice-qwen" / "Scripts" / "python.exe"
+    root = local_root()
+    service = configured_path("qwen3_tts", "path", "QWEN3_TTS_HOME") or root / "Services" / "Qwen3-TTS"
+    python = configured_path("qwen3_tts", "executable", "QWEN3_TTS_PYTHON") or root / "Environments" / "voice-qwen" / "Scripts" / "python.exe"
     return python, service / "qwen_cli.py", service
 
 
-def synthesize(payload: dict) -> dict:
+def synthesize(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[str, Any]:
     python, helper, service = _runtime()
     if not python.exists() or not helper.exists():
-        return unavailable("qwen3_tts", "Qwen3-TTS helper environment is incomplete.")
-    try:
-        result = subprocess.run(
-            [str(python), str(helper)],
-            input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            capture_output=True,
-            timeout=900,
-            check=False,
-            env={
-                **os.environ,
-                "LOCALAIHUB_ROOT": str(ROOT),
-                "QWEN3_TTS_HOME": str(service),
-                "HF_HOME": str(local_cache_root() / "HuggingFace"),
-                "HF_HUB_CACHE": str(local_cache_root() / "HuggingFace" / "hub"),
-                "PYTHONIOENCODING": "utf-8",
-            },
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {"status": "error", "error": str(exc)}
-    if result.returncode != 0:
-        return {
-            "status": "error",
-            "error": result.stderr.decode("utf-8", errors="replace")[-6000:],
-            "stdout": result.stdout.decode("utf-8", errors="replace")[-2000:],
-            "returncode": result.returncode,
-        }
-    stdout = result.stdout.decode("utf-8", errors="replace")
-    json_line = next((line for line in reversed(stdout.splitlines()) if line.lstrip().startswith("{")), "")
-    try:
-        return json.loads(json_line)
-    except json.JSONDecodeError as exc:
-        return {"status": "error", "error": f"Qwen3-TTS helper returned invalid JSON: {exc}", "stdout": stdout[-3000:]}
+        return unavailable("qwen3_tts", "Qwen3-TTS helper environment chưa hoàn chỉnh.")
+    return run_json_worker(
+        [str(python), str(helper)],
+        payload,
+        label="qwen3_tts",
+        cwd=service,
+        env={**os.environ, "LOCALAIHUB_ROOT": str(local_root()), "QWEN3_TTS_HOME": str(service), "HF_HOME": str(local_cache_root() / "HuggingFace"), "HF_HUB_CACHE": str(local_cache_root() / "HuggingFace" / "hub"), "PYTHONIOENCODING": "utf-8"},
+        owner=context,
+        timeout_seconds=float(payload.get("timeout_seconds", 900)),
+    )
 
 
-def capability() -> dict:
+def capability() -> dict[str, Any]:
     python, helper, _ = _runtime()
-    return {"component": "qwen3_tts", "status": "installed", "helper": str(helper), "environment": str(python)}
+    return {"component": "qwen3_tts", "adapter_status": "direct-worker-configured", "runtime_ready": helper.exists(), "environment_ready": python.exists()}

@@ -26,6 +26,10 @@
 /Config/layout_migration.local.json
 /Config/local.env.cmd
 !/Config/local.env.example.cmd
+/workflows/*.local.json
+/workflows/local/
+/Modules/
+/distribution/output/
 
 # Python, Node and tool-generated files.
 **/__pycache__/
@@ -113,12 +117,14 @@ api_key*
 *.temp
 *.bak
 *.swp
+*.lnk
 .DS_Store
 Thumbs.db
 
 # Existing local reports can contain host paths or runtime state. Add a
 # deliberately sanitized report or the migration report explicitly when ready.
 /Reports/*.md
+/Reports/*.local.*
 !/Reports/GITHUB_MIGRATION_REPORT.md
 
 # Never let a nested Git metadata directory become part of the parent repo.

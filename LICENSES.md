@@ -20,4 +20,7 @@ Known upstream sources:
 - AnimeSR — https://github.com/TencentARC/AnimeSR
 - AIRI — https://github.com/moeru-ai/airi
 
+LiteGraph.js is a pinned offline frontend dependency under the MIT license; its
+exact license text is tracked at `src/ui/vendor/LITEGRAPH-LICENSE.txt`.
+
 No model weights or third-party environments are distributed by this repo.
