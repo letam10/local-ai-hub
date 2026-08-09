@@ -174,3 +174,38 @@ FFmpeg/FFprobe, worker, ComfyUI và `taskkill`, đi qua helper Windows chung đ�
 không tạo console. Polling nhanh chỉ refresh health/jobs; GPU, application,
 model và storage dùng cache hoặc chỉ scan theo yêu cầu. Xem chi tiết tại
 [Node Studio V4](docs/NODE_STUDIO_V4.md).
+
+## MILESTONE 1 — Node Image Studio và nền tảng UX
+
+Milestone 1 hoàn thiện một luồng ảnh trực tiếp trong Hub Nodes:
+
+```text
+Prompt / Image artifact → Generate → Image Edit (tuỳ chọn)
+                       → Upscale → Preview → Save / Export
+```
+
+Canvas LiteGraph hiển thị tên node dễ hiểu, cổng có kiểu (`IMAGE`, `TEXT`,
+`NUMBER`, `METADATA`...), kết nối sai kiểu, input bắt buộc thiếu, cạnh trùng và
+chu trình đều bị validator từ chối. Người dùng có thể zoom/pan, bố trí lại,
+undo/redo, lưu cục bộ, import/export graph, chọn template và theo dõi trạng
+thái từng node trong queue job. Palette và Inspector luôn hiển thị lý do cùng
+“Bước tiếp theo” cho backend chưa sẵn sàng.
+
+Các template ảnh được theo dõi trong Git:
+
+- [`workflows/image_create_upscale.json`](workflows/image_create_upscale.json):
+  prompt → FLUX → upscale fallback → preview → save.
+- [`workflows/image_edit_upscale.json`](workflows/image_edit_upscale.json):
+  image artifact + prompt → Qwen image-to-image → upscale → preview → save.
+
+FLUX, Qwen và Image-to-Image hiện mang trạng thái `partial` vì cần ComfyUI,
+model và bounded smoke tương ứng. `image_upscale` có fallback FFmpeg rõ ràng;
+không được gọi là AI upscaler. API registry dùng `node-studio.v2`, run/provenance
+dùng `node-run.v2`, còn job công khai dùng `job.v2`. Các trường `reason`,
+`action`, `next_action` và provenance chỉ công bố thông tin an toàn, không trả
+đường dẫn máy hay input thô.
+
+Xem [tài liệu Node Image Studio Milestone 1](docs/NODE_IMAGE_STUDIO_MILESTONE_1.md)
+và [bản đồ kiến trúc/thư mục](docs/ARCHITECTURE.md) để biết ownership, route,
+template, cấu hình mẫu và cách chạy kiểm thử bounded. Milestone 2 (workflow
+video) chỉ bắt đầu sau khi Milestone 1 được QA xác nhận đạt.
