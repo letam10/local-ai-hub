@@ -31,6 +31,19 @@ const imageModuleTabs = (state) => {
   return `<div class="module-tabs" role="tablist" aria-label="Image AI workspace"><button class="tab ${selected === "quick" ? "is-selected" : ""}" type="button" data-workspace-tab="image:quick" role="tab" aria-selected="${selected === "quick"}">Quick</button><button class="tab ${selected === "nodes" ? "is-selected" : ""}" type="button" data-workspace-tab="image:nodes" role="tab" aria-selected="${selected === "nodes"}">Hub Nodes</button><button class="tab ${selected === "advanced" ? "is-selected" : ""}" type="button" data-workspace-tab="image:advanced" role="tab" aria-selected="${selected === "advanced"}">ComfyUI Advanced</button></div>`;
 };
 const nodeStudio = (scope, description) => `<section class="node-studio-wrap"><div class="node-studio-intro"><div><strong>Node Studio</strong><p>${escapeHtml(description)}</p></div><span class="tag">offline · typed sockets · DAG</span></div><div data-node-studio data-scope="${escapeHtml(scope)}"></div></section>`;
+const imageWorkflowRail = (state) => {
+  const generation = tool(state, "generate_flux");
+  const edit = tool(state, "generate_qwen_image");
+  const transform = tool(state, "run_media_operation");
+  return `<section class="image-workflow-rail" aria-label="Image workflow">
+    <div class="image-workflow-rail__intro"><div><span class="eyebrow">IMAGE FOUNDATION</span><h2>Luồng ảnh end-to-end</h2><p>Chọn template trong Hub Nodes để nối Prompt → Generate/Edit → Upscale → Preview/Save. Mỗi backend hiển thị đúng partial/unavailable nếu chưa smoke.</p></div><span class="tag">artifact · job · provenance</span></div>
+    <div class="image-workflow-rail__steps">
+      <article><span>01</span><strong>Tạo ảnh</strong><small>FLUX / ComfyUI</small>${statusPill(generation.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="image:nodes">Mở template</button></article>
+      <article><span>02</span><strong>Chỉnh ảnh</strong><small>Qwen Image-to-Image</small>${statusPill(edit.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="image:nodes">Mở template</button></article>
+      <article><span>03</span><strong>Upscale</strong><small>FFmpeg fallback / AI partial</small>${statusPill(transform.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="image:nodes">Mở template</button></article>
+    </div>
+  </section>`;
+};
 
 function artifacts(value, found = []) {
   if (!value) return found;
@@ -141,7 +154,7 @@ function renderVoice(state) {
 function renderImageQuickV5(state) {
   const comfy = state.lifecycle?.comfyui || {};
   const imageTool = tool(state, "generate_flux");
-  return heading("IMAGE", "Image AI", "Quick tạo FLUX/Qwen qua ComfyUI API ẩn. Hub Nodes dùng graph editor kéo socket thật; Advanced hiển thị ComfyUI trong chính cửa sổ này.", `<span class="status-pill" data-status="${escapeHtml(imageTool.tool_status || comfy.status || "stopped")}">${escapeHtml(formatStatus(imageTool.tool_status || comfy.status || "stopped"))}</span>`) + `
+  return heading("IMAGE", "Image AI", "Quick tạo FLUX/Qwen qua ComfyUI API ẩn. Hub Nodes dùng graph editor kéo socket thật; Advanced hiển thị ComfyUI trong chính cửa sổ này.", `<span class="status-pill" data-status="${escapeHtml(imageTool.tool_status || comfy.status || "stopped")}">${escapeHtml(formatStatus(imageTool.tool_status || comfy.status || "stopped"))}</span>`) + imageWorkflowRail(state) + `
     <div class="workspace-grid workspace-grid--two">
       ${card("Quick", `<form data-job-form data-tool="generate_flux" data-tool-by-field="engine" data-tool-map='{"flux":"generate_flux","qwen":"generate_qwen_image"}' class="stack">${field("Model", `<select name="engine"><option value="flux">FLUX.2 Klein</option><option value="qwen">Qwen Image 2512</option></select>`)}${field("Prompt", `<textarea name="prompt" required placeholder="Mô tả ảnh cần tạo…"></textarea>`)}${field("Negative prompt", `<input name="negative_prompt" placeholder="Tùy chọn" />`)}<div class="form-grid">${field("Width", `<input name="width" type="number" min="256" max="2048" step="64" value="768" />`)}${field("Height", `<input name="height" type="number" min="256" max="2048" step="64" value="768" />`)}${field("Steps", `<input name="steps" type="number" min="1" max="80" value="20" />`)}${field("Seed", `<input name="seed" type="number" min="0" placeholder="random" />`)}</div>${file("Input image (FLUX image-edit nếu workflow hỗ trợ)", "input_image_asset_id", "image/*")}<div class="form-actions">${button("Generate trong Hub", "button--primary")}</div>${formResult("image-result")}</form>`) }
       ${card("Chế độ làm việc", `<div class="preview-empty"><span>✦</span><strong>Không mở trình duyệt ngoài</strong><p>Chọn Hub Nodes để nối typed socket bằng kéo-thả. Chọn ComfyUI Advanced để sửa graph ComfyUI thật trong WebView của Local AI Hub.</p></div><div class="form-actions"><button class="button" type="button" data-workspace-tab="image:nodes">Mở Hub Nodes</button><button class="button button--primary" type="button" data-workspace-tab="image:advanced">Mở ComfyUI Advanced</button></div>`, "", "card--flat")}
@@ -200,7 +213,7 @@ function renderJobs(state) {
     const actions = ["queued", "starting", "running", "cancelling"].includes(job.status)
       ? `<button class="button button--compact button--danger" type="button" data-cancel-job="${escapeHtml(job.id)}">Hủy</button>`
       : job.resumable ? `<button class="button button--compact" type="button" data-resume-job="${escapeHtml(job.id)}">Resume</button>` : "";
-    return `<article class="job-card"><div class="split"><div><strong>${escapeHtml(job.tool)}</strong><div class="row-meta">${escapeHtml(job.id)} · ${escapeHtml(job.created_at || "")}</div></div>${statusPill(job.status)}</div><div class="progress-track"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, Number(job.progress || 0)))}%"></div></div><p class="job-message">${escapeHtml(job.message || job.error || "")}</p>${artifactList(job.result)}<div class="form-actions">${actions}</div></article>`;
+    return `<article class="job-card"><div class="split"><div><strong>${escapeHtml(job.tool)}</strong><div class="row-meta">${escapeHtml(job.id)} · ${escapeHtml(job.created_at || "")}${job.contract_version ? ` · ${escapeHtml(job.contract_version)}` : ""}</div></div>${statusPill(job.status)}</div><div class="progress-track"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, Number(job.progress || 0)))}%"></div></div><p class="job-message">${escapeHtml(job.message || job.error || "")}</p>${job.next_action ? `<div class="job-next-action"><strong>Bước tiếp theo</strong><span>${escapeHtml(job.next_action)}</span></div>` : ""}${artifactList(job.result)}<div class="form-actions">${actions}</div></article>`;
   }).join("");
   return heading("CONTROL PLANE", "Jobs", "Theo dõi job thực tế do Hub tạo; cancel không ảnh hưởng Python/ComfyUI/AIRI không thuộc Hub.") + `<div class="job-list">${rows || `<div class="empty-state">Chưa có job. Chạy một workflow từ module bất kỳ để bắt đầu.</div>`}</div>`;
 }

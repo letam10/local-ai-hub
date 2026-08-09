@@ -5,6 +5,8 @@ import {
   getNodePreset,
   getNodePresets,
   getNodeRegistry,
+  getNodeAvailability,
+  formatStatus,
   getNodeRun,
   runNodeGraph,
   uploadFile,
@@ -16,7 +18,7 @@ import {
 const LOCAL_PREFIX = "local-ai-hub-graph-v5";
 const LEGACY_PREFIX = "local-ai-hub-node-studio-v1";
 const MAX_HISTORY = 60;
-const PRESET_BY_SCOPE = { image: "image_draft", sam2: "sam2_segment", media: "media_encode", animesr: "animesr_pipeline" };
+const PRESET_BY_SCOPE = { image: "image_create_upscale", sam2: "sam2_segment", media: "media_encode", animesr: "animesr_pipeline" };
 const TYPE_COLORS = {
   IMAGE: "#cf7cff", MASK: "#42c6a0", VIDEO: "#f17c8e", AUDIO: "#f1ad5f",
   TEXT: "#6c8cff", NUMBER: "#a9c6ff", BOOLEAN: "#e5d66a", MODEL: "#e291c7", METADATA: "#8794ad",
@@ -77,6 +79,7 @@ class HubGraphEditor {
     this.scope = root.dataset.scope || "image";
     this.showToast = showToast;
     this.registry = new Map();
+    this.availability = { counts: {}, nodes: [] };
     this.presets = [];
     this.graphData = emptyGraph(this.scope);
     this.groups = [];
@@ -95,6 +98,8 @@ class HubGraphEditor {
     this.resizeObserver = null;
     this.abort = new AbortController();
     this.minimapBounds = null;
+    this.validation = null;
+    this.runStatus = "idle";
   }
 
   async initialize() {
@@ -104,8 +109,9 @@ class HubGraphEditor {
       return;
     }
     try {
-      const [registryPayload, presetPayload] = await Promise.all([getNodeRegistry(this.scope), getNodePresets()]);
+      const [registryPayload, presetPayload, availabilityPayload] = await Promise.all([getNodeRegistry(this.scope), getNodePresets(), getNodeAvailability(this.scope)]);
       this.registry = new Map((registryPayload.nodes || []).map((item) => [item.type, item]));
+      this.availability = availabilityPayload.availability || registryPayload.availability || { counts: {}, nodes: [] };
       this.presets = (presetPayload.presets || []).filter((item) => item.scope === this.scope);
       this.configureLiteGraph();
       const saved = this.readLocalGraph();
@@ -188,11 +194,16 @@ class HubGraphEditor {
   renderShell() {
     this.root.innerHTML = `
       <section class="graph-editor" aria-label="Hub Nodes ${escapeHtml(this.scope)}">
+        <header class="graph-editor__header">
+          <div><span class="eyebrow">NODE WORKFLOW</span><h2>${escapeHtml(this.graphData.title || `Image ${this.scope}`)}</h2><p>Canvas typed socket cho người mới: nối đúng kiểu dữ liệu, kiểm tra trước khi chạy và luôn thấy trạng thái backend.</p></div>
+          <div class="graph-editor__header-status" data-graph-summary><span class="status-pill" data-status="idle">Chưa chạy</span><span class="tag">${escapeHtml(this.scope)}</span></div>
+        </header>
         <div class="graph-editor__toolbar">
-          <div class="graph-editor__toolbar-group"><button class="button button--primary" type="button" data-graph-action="run">Run Graph</button><button class="button" type="button" data-graph-action="cancel" disabled>Cancel</button><button class="button" type="button" data-graph-action="undo">Undo</button><button class="button" type="button" data-graph-action="redo">Redo</button></div>
-          <div class="graph-editor__toolbar-group"><select data-graph-preset aria-label="Preset workflow"><option value="">Preset workflow…</option>${this.presets.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.title)}</option>`).join("")}</select><button class="button" type="button" data-graph-action="save-local">Lưu local</button><button class="button" type="button" data-graph-action="export">Export JSON</button><label class="button graph-editor__import">Import JSON<input type="file" data-graph-import accept="application/json,.json" /></label></div>
+          <div class="graph-editor__toolbar-group"><button class="button button--primary" type="button" data-graph-action="run" aria-label="Run Graph">Chạy workflow</button><button class="button" type="button" data-graph-action="validate">Kiểm tra</button><button class="button" type="button" data-graph-action="cancel" disabled>Hủy job</button><button class="button" type="button" data-graph-action="undo">Hoàn tác</button><button class="button" type="button" data-graph-action="redo">Làm lại</button></div>
+          <div class="graph-editor__toolbar-group"><select data-graph-preset aria-label="Preset workflow"><option value="">Chọn template…</option>${this.presets.map((item) => `<option value="${escapeHtml(item.id)}" title="${escapeHtml(item.description || "")}">${escapeHtml(item.title)}${item.stage ? ` · ${escapeHtml(item.stage)}` : ""}</option>`).join("")}</select><button class="button" type="button" data-graph-action="save-local">Lưu local</button><button class="button" type="button" data-graph-action="export">Export JSON</button><label class="button graph-editor__import">Import JSON<input type="file" data-graph-import accept="application/json,.json" /></label></div>
         </div>
-        <div class="graph-editor__options"><label><input type="checkbox" data-graph-option="auto" ${this.autoPreview ? "checked" : ""} /> Auto Preview</label><label><input type="checkbox" data-graph-option="draft" ${this.draft ? "checked" : ""} /> Draft ảnh</label><span>Drag socket để nối · Shift/Ctrl-click để chọn nhiều · wheel để zoom · kéo nền để pan</span></div>
+        <div class="graph-editor__options"><label><input type="checkbox" data-graph-option="auto" ${this.autoPreview ? "checked" : ""} /> Preview tự động (Auto Preview)</label><label><input type="checkbox" data-graph-option="draft" ${this.draft ? "checked" : ""} /> Draft ảnh</label><span>Kéo socket để nối · wheel để zoom · kéo nền để pan · node sai type sẽ bị Hub từ chối</span></div>
+        <div class="graph-editor__statusbar"><span data-graph-validation>Chưa kiểm tra workflow.</span><span class="graph-editor__availability">${this.availability.counts?.operational || 0} sẵn sàng · ${this.availability.counts?.partial || 0} partial · ${this.availability.counts?.unavailable || 0} unavailable</span></div>
         <div class="graph-editor__layout">
           <aside class="graph-palette"><input type="search" data-graph-search placeholder="Tìm node…" aria-label="Tìm node" /><div data-graph-palette></div></aside>
           <div class="graph-canvas-shell"><canvas class="graph-canvas" data-graph-canvas></canvas><div class="graph-canvas__actions"><button type="button" data-graph-action="fit">Fit</button><button type="button" data-graph-action="delete">Xóa chọn</button></div><canvas class="graph-minimap" data-graph-minimap width="180" height="118" aria-label="Minimap graph"></canvas></div>
@@ -220,6 +231,7 @@ class HubGraphEditor {
     this.bindEvents();
     this.renderPalette();
     this.renderInspector();
+    this.renderGraphStatus();
     this.resizeObserver = new ResizeObserver(() => this.resizeCanvas());
     this.resizeObserver.observe(this.canvasElement.parentElement);
     this.resizeCanvas();
@@ -265,14 +277,34 @@ class HubGraphEditor {
     if (!this.paletteElement) return;
     const needle = this.search.trim().toLocaleLowerCase();
     const nodes = [...this.registry.values()].filter((definition) => !needle || `${definition.title} ${definition.category} ${definition.description}`.toLocaleLowerCase().includes(needle));
-    this.paletteElement.innerHTML = nodes.map((definition) => `<button type="button" class="graph-palette__item" data-graph-add="${escapeHtml(definition.type)}"><i style="--node-color:${escapeHtml(CATEGORY_COLORS[definition.category] || "#8794ad")}"></i><span><b>${escapeHtml(definition.title)}</b><small>${escapeHtml(definition.category)} · ${escapeHtml(definition.status || "operational")}</small></span></button>`).join("") || `<p class="graph-empty">Không tìm thấy node.</p>`;
+    const groups = nodes.reduce((result, definition) => {
+      (result[definition.category] ||= []).push(definition);
+      return result;
+    }, {});
+    this.paletteElement.innerHTML = Object.entries(groups).map(([category, definitions]) => `<section class="graph-palette__group"><h3>${escapeHtml(category)}</h3>${definitions.map((definition) => {
+      const availability = definition.availability || { status: definition.status || "operational", reason: "" };
+      return `<button type="button" class="graph-palette__item" data-graph-add="${escapeHtml(definition.type)}" title="${escapeHtml(availability.reason || definition.description || "")}"><i style="--node-color:${escapeHtml(CATEGORY_COLORS[definition.category] || "#8794ad")}"></i><span><b>${escapeHtml(definition.title)}</b><small>${escapeHtml(availability.status)} · ${escapeHtml(availability.reason || definition.description || "")}</small></span></button>`;
+    }).join("")}</section>`).join("") || `<p class="graph-empty">Không tìm thấy node.</p>`;
+  }
+
+  renderGraphStatus() {
+    const summary = this.root.querySelector("[data-graph-summary]");
+    const validation = this.root.querySelector("[data-graph-validation]");
+    const nodes = this.toHubGraph().nodes || [];
+    const status = this.runStatus || "idle";
+    if (summary) summary.innerHTML = `<span class="status-pill" data-status="${escapeHtml(status)}">${escapeHtml(status === "idle" ? "Chưa chạy" : formatStatus(status))}</span><span class="tag">${nodes.length} node · ${this.dirty.size} cần chạy</span>`;
+    if (validation) {
+      const errors = this.validation?.errors || [];
+      validation.textContent = errors.length ? `${errors.length} lỗi cần sửa: ${errors[0].message || errors[0].code}` : (this.validation ? "Workflow hợp lệ để lưu; bấm Chạy workflow để kiểm tra input bắt buộc." : "Chưa kiểm tra workflow.");
+      validation.className = errors.length ? "graph-editor__validation graph-editor__validation--error" : "graph-editor__validation";
+    }
   }
 
   renderInspector() {
     if (!this.inspectorElement) return;
     const nodes = this.selectedNodes();
     if (!nodes.length) {
-      this.inspectorElement.innerHTML = `<div class="graph-inspector__empty"><strong>Inspector / Live preview</strong><p>Chọn node để chỉnh properties và xem output job. Kết nối được kéo trực tiếp từ socket sang socket.</p><p>Minimap, pan/zoom, multi-select và undo/redo do LiteGraph canvas xử lý.</p></div>`;
+      this.inspectorElement.innerHTML = `<div class="graph-inspector__empty"><strong>Inspector / Live preview</strong><p>Chọn node để chỉnh thông số và xem output. Kết nối trực tiếp từ socket sang socket.</p><div class="graph-type-legend">${Object.entries(TYPE_COLORS).map(([type, color]) => `<span><i style="--node-color:${color}"></i>${type}</span>`).join("")}</div><p>Minimap, pan/zoom, undo/redo và layout do canvas xử lý.</p></div>`;
       return;
     }
     if (nodes.length > 1) {
@@ -286,7 +318,9 @@ class HubGraphEditor {
     const preview = artifact?.url ? (String(artifact.media_type || "").startsWith("image/")
       ? `<img class="graph-preview-image" src="${escapeHtml(artifact.url)}" alt="${escapeHtml(artifact.name || "Output")}" />`
       : `<a class="button button--compact" href="${escapeHtml(artifact.url)}" target="_blank" rel="noopener">Mở output</a>`) : "";
-    this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(definition?.category || "node")}</span><h3>${escapeHtml(definition?.title || node.hubType)}</h3><p>${escapeHtml(definition?.description || "")}</p></div>${state.status ? `<div class="graph-node-state" data-status="${escapeHtml(state.status)}"><b>${escapeHtml(state.status)}</b><span>${escapeHtml(state.message || state.error || "")}</span></div>` : ""}</div>${preview ? `<section class="graph-inspector__section"><strong>Live preview</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>Properties</strong>${(definition?.properties || []).map((property) => propertyControl(node, property)).join("") || `<p class="graph-empty">Node này không có property.</p>`}</section>`;
+    const availability = definition?.availability || { status: definition?.status || "operational", reason: "", action: "" };
+    const action = state.next_action || availability.action;
+    this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(definition?.category || "node")}</span><h3>${escapeHtml(definition?.title || node.hubType)}</h3><p>${escapeHtml(definition?.description || "")}</p></div><div class="graph-node-state" data-status="${escapeHtml(state.status || availability.status)}"><b>${escapeHtml(state.status || availability.status)}</b><span>${escapeHtml(state.message || state.error || availability.reason || "")}</span></div></div>${action ? `<div class="graph-action-hint"><strong>Bước tiếp theo</strong><span>${escapeHtml(action)}</span></div>` : ""}${preview ? `<section class="graph-inspector__section"><strong>Live preview</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>Thông số</strong>${(definition?.properties || []).map((property) => propertyControl(node, property)).join("") || `<p class="graph-empty">Node này không có property.</p>`}</section>`;
   }
 
   selectedNodes() {
@@ -313,6 +347,7 @@ class HubGraphEditor {
     this.persist();
     this.renderInspector();
     this.drawMinimap();
+    this.renderGraphStatus();
     this.scheduleAutoPreview();
   }
 
@@ -427,6 +462,7 @@ class HubGraphEditor {
     if (this.liteGraph._nodes.length) this.fitView();
     this.renderInspector();
     this.drawMinimap();
+    this.renderGraphStatus();
   }
 
   async loadPreset(id, { quiet = false, render = true } = {}) {
@@ -497,10 +533,14 @@ class HubGraphEditor {
     try {
       const graph = this.toHubGraph();
       const validation = await validateNodeGraph(graph, true);
+      this.validation = validation.validation || null;
+      this.renderGraphStatus();
       if (!validation.validation?.valid) throw new Error(validation.validation?.errors?.[0]?.message || "Graph không hợp lệ.");
       const result = await runNodeGraph(validation.validation.graph, Boolean(auto && this.draft));
       this.activeJobId = result.job?.id || null;
+      this.runStatus = result.job?.status || "queued";
       this.updateToolbar();
+      this.renderGraphStatus();
       if (this.activeJobId) {
         this.showToast(`Đã tạo ${this.activeJobId}.`);
         this.startPoll();
@@ -523,6 +563,7 @@ class HubGraphEditor {
       try {
         const response = await getNodeRun(this.activeJobId);
         const run = response.run || {};
+        this.runStatus = run.status || this.runStatus;
         for (const state of run.nodes || []) {
           this.nodeStates.set(state.id, state);
           const node = this.liteGraph._nodes.find((candidate) => candidate.hubId === state.id);
@@ -535,9 +576,11 @@ class HubGraphEditor {
           this.pollTimer = null;
           this.activeJobId = null;
           if (run.status === "completed") this.dirty.clear();
+          this.validation = run.status === "completed" ? { valid: true, errors: [] } : this.validation;
           this.persist();
           this.updateToolbar();
         }
+        this.renderGraphStatus();
       } catch { /* the background job may still be entering its worker thread */ }
     };
     poll();
@@ -547,6 +590,22 @@ class HubGraphEditor {
   updateToolbar() {
     const cancel = this.root.querySelector('[data-graph-action="cancel"]');
     if (cancel) cancel.disabled = !this.activeJobId;
+  }
+
+  async validate(requireRunnable = false) {
+    try {
+      const response = await validateNodeGraph(this.toHubGraph(), requireRunnable);
+      this.validation = response.validation || null;
+      this.renderGraphStatus();
+      if (this.validation?.valid) this.showToast(requireRunnable ? "Workflow sẵn sàng để chạy." : "Workflow hợp lệ để lưu.");
+      else this.showToast(this.validation?.errors?.[0]?.message || "Workflow còn lỗi.", "error");
+      return this.validation;
+    } catch (error) {
+      this.validation = { valid: false, errors: [{ message: error.message }] };
+      this.renderGraphStatus();
+      this.showToast(error.message, "error");
+      return this.validation;
+    }
   }
 
   exportGraph() {
@@ -638,6 +697,7 @@ class HubGraphEditor {
 
   handleAction(action) {
     if (action === "run") this.run();
+    if (action === "validate") this.validate(false);
     if (action === "cancel") this.cancel();
     if (action === "undo") this.undo();
     if (action === "redo") this.redo();

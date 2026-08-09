@@ -50,6 +50,7 @@ export const getComfyBridgeWorkflow = (id) => request(`/api/comfyui/workflows/${
 export const saveComfyBridgeWorkflow = (id, workflow) => request(`/api/comfyui/workflows/${encodeURIComponent(id)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(workflow) });
 
 export const getNodeRegistry = (scope) => request(`/api/node-studio/registry?scope=${encodeURIComponent(scope || "")}`);
+export const getNodeAvailability = (scope) => request(`/api/node-studio/availability?scope=${encodeURIComponent(scope || "")}`);
 export const getNodePresets = () => request("/api/node-studio/presets");
 export const getNodePreset = (id) => request(`/api/node-studio/presets/${encodeURIComponent(id)}`);
 export const validateNodeGraph = (graph, requireRunnable = false) => request("/api/node-studio/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ graph, require_runnable: requireRunnable }) });
