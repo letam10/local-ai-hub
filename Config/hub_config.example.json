@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "hub_name": "Local AI Hub",
   "bind_host": "127.0.0.1",
   "api_port": 8765,
@@ -12,6 +12,8 @@
   "idle_unload_seconds": 900,
   "model_load_policy": "on_demand",
   "auto_start_heavy_services": false,
+  "comfyui_port": 8188,
+  "comfyui_start_timeout_seconds": 45,
   "overwrite_source": false,
   "ffmpeg_path": "${FFMPEG_PATH}",
   "ffprobe_path": "${FFPROBE_PATH}",

@@ -1,224 +1,196 @@
 import { escapeHtml, formatGb, formatStatus } from "./api.js";
 
 export const NAVIGATION = [
-  { group: "Điều khiển", items: [
-    ["dashboard", "Dashboard", "⌂"],
-    ["airi", "AIRI", "✦"],
-  ] },
-  { group: "Vision & Speech", items: [
-    ["vision", "Vision Studio", "◉"],
-    ["sam2", "SAM 2", "◌"],
-    ["ocr", "OCR / Documents", "▤"],
-    ["whisper", "Whisper / Subtitles", "≋"],
-    ["voice", "Voice Studio", "◒"],
-  ] },
-  { group: "Image & Media", items: [
-    ["image", "Image AI", "✧"],
-    ["media", "Media Editor", "▸"],
-    ["animesr", "AnimeSR", "▥"],
-  ] },
-  { group: "Quản lý", items: [
-    ["jobs", "Jobs / Queue", "☷"],
-    ["models", "Models & Storage", "◫"],
-    ["settings", "Settings", "⚙"],
-  ] },
+  { group: "TỔNG QUAN", items: [["dashboard", "Dashboard", "◫"], ["airi", "AIRI", "◌"]] },
+  { group: "VISION & DOCUMENT", items: [["vision", "Vision Studio", "◉"], ["sam2", "SAM2", "◒"], ["ocr", "OCR", "▤"]] },
+  { group: "SPEECH & VOICE", items: [["whisper", "Whisper", "≋"], ["voice", "Voice", "♪"]] },
+  { group: "IMAGE & VIDEO", items: [["image", "Image AI", "✦"], ["media", "Media", "▹"], ["animesr", "AnimeSR", "⇱"]] },
+  { group: "HỆ THỐNG", items: [["jobs", "Jobs", "≡"], ["models", "Models & Storage", "▦"], ["settings", "Settings", "⚙"]] },
 ];
 
-const APP_IDS = {
-  airi: "airi",
-  sam2: "sam2-mask-studio",
-  animesr: "anime-upscale-studio",
-  flux: "local-image-studio",
-  qwen: "qwen-image-studio",
-};
+const component = (state, id) => (state.components || []).find((item) => item.id === id) || {};
+const tool = (state, id) => (state.tools || []).find((item) => item.name === id) || {};
+const app = (state, id) => (state.applications || []).find((item) => item.id === id) || {};
 
-const statusPill = (status, label = formatStatus(status)) =>
-  `<span class="status-pill" data-status="${escapeHtml(status)}"><span class="status-dot"></span>${escapeHtml(label)}</span>`;
-
+const statusPill = (status, label = formatStatus(status)) => `<span class="status-pill" data-status="${escapeHtml(status || "unknown")}">${escapeHtml(label)}</span>`;
 const heading = (eyebrow, title, description, actions = "") => `
-  <div class="page-heading">
-    <div class="heading-copy"><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${description}</p></div>
-    <div class="heading-actions">${actions}</div>
-  </div>`;
+  <header class="page-heading"><div class="heading-copy"><div class="eyebrow">${escapeHtml(eyebrow)}</div><h1>${escapeHtml(title)}</h1><p>${escapeHtml(description)}</p></div><div class="heading-actions">${actions}</div></header>`;
+const card = (title, content, action = "", extra = "") => `<section class="card ${extra}"><div class="card-title-row"><h2>${escapeHtml(title)}</h2>${action}</div>${content}</section>`;
+const field = (label, control, extra = "") => `<label class="field ${extra}"><span>${escapeHtml(label)}</span>${control}</label>`;
+const file = (label, key, accept = "") => field(label, `<input type="file" data-asset-key="${escapeHtml(key)}" ${accept ? `accept="${escapeHtml(accept)}"` : ""} /><div class="file-preview" data-file-preview aria-live="polite"></div>`);
+const files = (label, key, accept = "") => field(label, `<input type="file" data-asset-key="${escapeHtml(key)}" multiple ${accept ? `accept="${escapeHtml(accept)}"` : ""} /><div class="file-preview" data-file-preview aria-live="polite"></div>`);
+const button = (text, extra = "") => `<button class="button ${extra}" type="submit">${escapeHtml(text)}</button>`;
+const capability = (name, item, note, direct = {}) => `<div class="capability"><div><strong>${escapeHtml(name)}</strong><p>${escapeHtml(note)}</p>${direct.reason ? `<p>${escapeHtml(direct.reason)}</p>` : ""}</div>${statusPill(direct.tool_status || item.component_status || item.status || "missing")}</div>`;
 
-const card = (title, body, footer = "", extra = "") => `
-  <section class="card ${extra}"><div class="card-title-row"><h2>${title}</h2></div>${body}${footer ? `<div class="card-footer">${footer}</div>` : ""}</section>`;
-
-const appById = (state, id) => (state.applications || []).find((item) => item.id === id) || null;
-const componentById = (state, id) => (state.components || []).find((item) => item.id === id) || null;
-
-const launchButton = (id, label = "Mở ứng dụng") =>
-  `<button class="button button--primary" type="button" data-launch="${id}">${label}</button>`;
-
-const capabilityCard = (name, description, status, action = "") => card(
-  escapeHtml(name),
-  `<p class="card-description">${escapeHtml(description)}</p>`,
-  `${statusPill(status)}${action ? `<span>${action}</span>` : ""}`,
-);
-
-export function renderPage(id, state) {
-  const health = state.health || {};
-  if (id === "dashboard") return renderDashboard(state, health);
-  if (id === "airi") return renderAiri(state);
-  if (id === "vision") return renderVision(state);
-  if (id === "sam2") return renderSam2(state);
-  if (id === "ocr") return renderOcr(state);
-  if (id === "whisper") return renderWhisper(state);
-  if (id === "voice") return renderVoice(state);
-  if (id === "image") return renderImage(state);
-  if (id === "media") return renderMedia(state);
-  if (id === "animesr") return renderAnime(state);
-  if (id === "jobs") return renderJobs(state);
-  if (id === "models") return renderModels(state);
-  if (id === "settings") return renderSettings(state);
-  return renderDashboard(state, health);
+function artifacts(value, found = []) {
+  if (!value) return found;
+  if (Array.isArray(value)) value.forEach((item) => artifacts(item, found));
+  else if (typeof value === "object") {
+    if (value.id && value.url && !found.some((item) => item.id === value.id)) found.push(value);
+    Object.values(value).forEach((item) => artifacts(item, found));
+  }
+  return found;
 }
 
-function renderDashboard(state, health) {
+const artifactList = (value) => {
+  const items = artifacts(value);
+  if (!items.length) return "";
+  return `<div class="artifact-list">${items.map((item) => {
+    const isImage = String(item.media_type || "").startsWith("image/");
+    const isMedia = /^(image|audio|video)\//.test(String(item.media_type || ""));
+    return `<div class="artifact-item">${isImage ? `<img class="artifact-preview" src="${escapeHtml(item.url)}" alt="${escapeHtml(item.name)}" />` : ""}<div class="row-main"><div class="row-name">${escapeHtml(item.name)}</div><div class="row-meta">${escapeHtml(item.media_type || "artifact")} · ${formatGb(item.size_bytes)}</div></div>${isMedia ? `<a class="button button--compact" href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Xem</a>` : ""}<button class="button button--compact" type="button" data-open-artifact="${escapeHtml(item.id)}">Mở</button></div>`;
+  }).join("")}</div>`;
+};
+
+const formResult = (id) => `<div class="form-result" id="${escapeHtml(id)}" role="status" aria-live="polite"></div>`;
+
+function renderDashboard(state) {
+  const health = state.health || {};
   const disk = health.disk || {};
   const gpu = health.gpu || {};
-  const components = state.components || [];
-  const running = components.filter((item) => item.component_status === "running").length;
   const jobs = state.jobs || [];
-  const active = jobs.filter((item) => ["starting", "running"].includes(item.status)).length;
-  const warnings = components.filter((item) => ["missing", "error"].includes(item.component_status));
-  return heading("TỔNG QUAN", "Dashboard", "Một mặt điều khiển thống nhất cho runtime, model và các ứng dụng AI cục bộ.") + `
-    <div class="card-grid">
-      ${card("Hub status", `<div class="stat-value">${escapeHtml(formatStatus(health.status))}</div><div class="stat-label">API loopback đang phục vụ frontend chung</div>`, statusPill(health.status || "unknown"))}
-      ${card("GPU", `<div class="stat-value">${escapeHtml(gpu.name || "Chưa phát hiện")}</div><div class="stat-label">${gpu.memory_free_mib ? `${escapeHtml(gpu.memory_free_mib)} MiB VRAM trống` : "Không tải model khi khởi động"}</div>`, statusPill(gpu.available ? "operational" : "partial", gpu.available ? "Sẵn sàng" : "Theo dõi"))}
-      ${card("Ổ đĩa", `<div class="stat-value">${escapeHtml(formatGb(disk.free_bytes))}</div><div class="stat-label">dung lượng trống</div>`, statusPill(disk.free_bytes && disk.free_bytes < 20 * 1024 ** 3 ? "partial" : "operational", disk.free_bytes && disk.free_bytes < 20 * 1024 ** 3 ? "Sắp đầy" : "Bình thường"))}
-      ${card("Tác vụ", `<div class="stat-value">${active}</div><div class="stat-label">đang chạy · ${jobs.length} bản ghi trong hàng đợi</div>`, statusPill(active ? "running" : "operational", active ? "Đang xử lý" : "Nhàn rỗi"))}
-      ${card("Runtime", `<div class="stat-value">${running}</div><div class="stat-label">dịch vụ đang lắng nghe hoặc đã đăng ký</div>`, statusPill("installed", `${components.length} đã đăng ký`))}
-      ${card("Model policy", `<div class="stat-value">On demand</div><div class="stat-label">tối đa một GPU nặng cùng lúc</div>`, statusPill("operational", "An toàn mặc định"))}
+  const active = jobs.filter((item) => ["starting", "running", "cancelling"].includes(item.status)).length;
+  const components = state.components || [];
+  return heading("CONTROL PLANE", "Dashboard", "Một cửa sổ điều khiển workflow AI cục bộ. AIRI là ngoại lệ duy nhất mở ứng dụng riêng.") + `
+    <div class="metric-grid">
+      <div class="metric-card"><span>Hub API</span><strong>${escapeHtml(formatStatus(health.status))}</strong><small>loopback · không CDN</small></div>
+      <div class="metric-card"><span>GPU</span><strong>${escapeHtml(gpu.name || "Chưa phát hiện")}</strong><small>${gpu.memory_free_mib ? `${escapeHtml(gpu.memory_free_mib)} MiB VRAM trống` : "nạp model theo yêu cầu"}</small></div>
+      <div class="metric-card"><span>Ổ đĩa</span><strong>${formatGb(disk.free_bytes)}</strong><small>dung lượng trống</small></div>
+      <div class="metric-card"><span>Job hoạt động</span><strong>${active}</strong><small>${jobs.length} bản ghi trong hàng đợi</small></div>
     </div>
-    <div class="card-grid card-grid--wide" style="margin-top:14px">
-      ${card("Dịch vụ gần đây", components.length ? `<div class="row-list">${components.slice(0, 6).map((item) => `<div class="row-item"><div class="row-main"><div class="row-name">${escapeHtml(item.name || item.id)}</div><div class="row-meta">${escapeHtml(item.kind || "component")}</div></div>${statusPill(item.component_status || item.status || "unknown")}</div>`).join("")}</div>` : `<div class="empty-state">Chưa có component trong registry.</div>`)}
-      ${card("Cảnh báo cần chú ý", warnings.length ? `<ul class="notice-list">${warnings.slice(0, 5).map((item) => `<li>${escapeHtml(item.name || item.id)}: ${escapeHtml(formatStatus(item.component_status))}</li>`).join("")}</ul>` : `<div class="callout">Không có lỗi component được phát hiện trong lần đọc gần nhất.</div>`, "", "card--flat")}
+    <div class="workspace-grid workspace-grid--two" style="margin-top:16px">
+      ${card("Tình trạng module", `<div class="row-list">${components.slice(0, 10).map((item) => `<div class="row-item"><div class="row-main"><div class="row-name">${escapeHtml(item.name || item.id)}</div><div class="row-meta">${escapeHtml(item.kind || "component")}</div></div>${statusPill(item.component_status || item.status)}</div>`).join("") || `<div class="empty-state compact">Chưa có component.</div>`}`)}
+      ${card("Workflow trong cửa sổ Hub", `<ul class="notice-list"><li>SAM2, AnimeSR, Whisper, Voice, Vision, OCR, Image AI và FFmpeg dùng worker/API nền.</li><li>Không có console PowerShell/cmd khi khởi động từ shortcut Hub.</li><li>Trạng thái “Một phần” nghĩa là adapter đã cấu hình nhưng chưa có smoke bounded V3.</li></ul>`, "", "card--flat")}
     </div>`;
 }
 
 function renderAiri(state) {
-  const app = appById(state, APP_IDS.airi);
-  return heading("ỨNG DỤNG NGOÀI", "AIRI", "AIRI vẫn do trình cài đặt Windows quản lý; Hub chỉ lưu registry an toàn và điểm khởi chạy.", app?.launchable ? launchButton(APP_IDS.airi) : "") + `
-    <div class="card-grid card-grid--wide">
-      ${card("Trạng thái cài đặt", `<div class="split"><div><div class="stat-value" style="font-size:20px">${escapeHtml(app?.display_name || "AIRI")}</div><div class="stat-label">${escapeHtml(app?.managed_location || "External managed")}</div></div>${statusPill(app?.component_status || "missing")}</div>`, app?.launchable ? launchButton(APP_IDS.airi) : "")}
-      ${card("Tích hợp Hub", `<ul class="notice-list"><li>Launch và trạng thái process: allowlist</li><li>Provider/voice/vision: chỉ hiển thị khi registry cung cấp</li><li>MCP: giữ stdio, không đọc API key</li></ul>`, "", "card--flat")}
+  const item = app(state, "airi");
+  const action = item.launchable ? `<button class="button button--primary" type="button" data-launch="airi">Mở AIRI</button>` : "";
+  return heading("ỨNG DỤNG NGOÀI", "AIRI", "AIRI do trình cài đặt Windows quản lý và là ngoại lệ duy nhất có cửa sổ riêng.", action) + `
+    <div class="workspace-grid workspace-grid--two">
+      ${card("AIRI external", `<div class="stack"><div class="split"><div><strong>${escapeHtml(item.display_name || "AIRI")}</strong><p>Hub không đọc, sao chép hoặc hiển thị API key của AIRI.</p></div>${statusPill(item.component_status || "missing")}</div><div class="callout">Mở AIRI Settings trong ứng dụng AIRI; Hub chỉ dùng allowlist để gọi launcher đã đăng ký.</div></div>`, action)}
+      ${card("Ranh giới tích hợp", `<ul class="notice-list"><li>Không embed AIRI bằng hack WebView.</li><li>Không di chuyển AIRI khỏi vị trí installer-managed.</li><li>Các workflow còn lại ưu tiên thực hiện ngay trong Hub.</li></ul>`, "", "card--flat")}
     </div>`;
 }
 
 function renderVision(state) {
-  const items = [
-    ["OmniParser", "omniparser", "Phân tích giao diện và vùng tương tác."],
-    ["RF-DETR", "rfdetr", "Phát hiện đối tượng với ngưỡng do backend hỗ trợ."],
-    ["Grounding DINO", "groundingdino", "Grounding theo prompt; không tải đồng thời mọi model."],
-  ];
-  return heading("VISION", "Vision Studio", "Chọn một engine cho mỗi tác vụ. Backend chưa xác minh sẽ được báo rõ là partial/unavailable.") + `
-    <div class="module-tabs">${items.map(([name], index) => `<button class="tab ${index === 0 ? "is-selected" : ""}" type="button">${name}</button>`).join("")}</div>
-    <div class="card-grid">${items.map(([name, id, description]) => { const item = componentById(state, id); return capabilityCard(name, description, item?.component_status || "missing"); }).join("")}</div>
-    <div class="callout" style="margin-top:14px">Input dự kiến: kéo/thả, clipboard hoặc file. Output: preview, ảnh chú thích, JSON, boxes, labels và scores khi adapter tương ứng đã sẵn sàng.</div>`;
+  const omni = component(state, "omniparser");
+  const rf = component(state, "rfdetr");
+  const ground = component(state, "groundingdino");
+  return heading("VISION", "Vision Studio", "Tải ảnh/screenshot vào Hub, chạy parser hoặc detector, xem JSON và artifact ngay trong cửa sổ này.") + `
+    <div class="capability-grid">${capability("OmniParser", omni, "Parse UI, vùng tương tác và ảnh annotation.", tool(state, "parse_screen"))}${capability("RF-DETR", rf, "Phát hiện object theo threshold.", tool(state, "detect_objects"))}${capability("Grounding DINO", ground, "Prompt → boxes, có thể dùng lại trong SAM2.", tool(state, "ground_objects"))}</div>
+    <div class="workspace-grid workspace-grid--three" style="margin-top:16px">
+      ${card("OmniParser", `<form data-job-form data-tool="parse_screen" class="stack">${file("Ảnh hoặc screenshot", "asset_id", "image/*")}${field("Box threshold", `<input name="box_threshold" type="number" min="0" max="1" step="0.01" value="0.05" />`)}<div class="form-actions">${button("Phân tích UI", "button--primary")}</div>${formResult("vision-omni-result")}</form>`)}
+      ${card("RF-DETR", `<form data-job-form data-tool="detect_objects" class="stack">${file("Ảnh/video", "asset_id", "image/*,video/*")}${field("Detection threshold", `<input name="threshold" type="number" min="0" max="1" step="0.01" value="0.50" />`)}<div class="form-actions">${button("Phát hiện object", "button--primary")}</div>${formResult("vision-rf-result")}</form>`)}
+      ${card("Grounding DINO", `<form data-job-form data-tool="ground_objects" class="stack">${file("Ảnh", "asset_id", "image/*")}${field("Prompt", `<input name="prompt" required placeholder="person . bag ." />`)}<div class="form-grid">${field("Box", `<input name="box_threshold" type="number" step="0.01" value="0.35" />`)}${field("Text", `<input name="text_threshold" type="number" step="0.01" value="0.25" />`)}</div><div class="form-actions">${button("Tạo boxes", "button--primary")}</div>${formResult("vision-ground-result")}</form>`)}
+    </div>`;
 }
 
 function renderSam2(state) {
-  const app = appById(state, APP_IDS.sam2);
-  const component = componentById(state, "sam2");
-  return heading("VISION", "SAM 2", "SAM2 Mask Studio đã được quản lý trong registry; direct adapter chỉ được đánh operational sau smoke thật.", app?.launchable ? launchButton(APP_IDS.sam2, "Mở SAM2 Mask Studio") : "") + `
-    <div class="card-grid card-grid--wide">
-      ${capabilityCard("Backend direct", "Grounding DINO → boxes → SAM2 → mask chưa được Hub gọi trực tiếp.", "unavailable")}
-      ${card("GUI hiện có", `<div class="split"><div><h3>SAM2 Mask Studio</h3><p class="card-description">${escapeHtml(app?.managed_location || "External managed")}; model nạp theo yêu cầu.</p></div>${statusPill(component?.component_status || app?.component_status || "missing")}</div>`, app?.launchable ? launchButton(APP_IDS.sam2, "Mở GUI") : "")}
-    </div>
-    <div class="callout callout--warning" style="margin-top:14px">Hub không giả vờ tạo mask khi adapter direct chưa xác minh. Nút trên mở workflow GUI đã đăng ký.</div>`;
+  const item = component(state, "sam2");
+  const pointTool = tool(state, "segment_from_points");
+  const pointStatus = pointTool.tool_status || item.component_status || "missing";
+  return heading("VISION", "SAM2", "Phân vùng và theo dõi trực tiếp qua trình xử lý SAM2; SAM2 Mask Studio không còn là workflow chính.", statusPill(pointStatus, `Chọn điểm: ${formatStatus(pointStatus)}`)) + `
+    <div class="workspace-grid workspace-grid--two">
+      ${card("Đầu vào và prompt", `<form data-job-form data-tool="segment_from_points" data-tool-by-field="mode" data-tool-map='{"points":"segment_from_points","box":"segment_from_box","track":"track_video_object","text":"segment_from_text"}' class="stack">${file("Ảnh hoặc video", "asset_id", "image/*,video/*")}${field("Chế độ", `<select name="mode"><option value="points">Chọn điểm</option><option value="box">Chọn box</option><option value="text">Prompt Grounding → SAM2</option><option value="track">Theo dõi video</option></select>`)}${field("Điểm (x,y,nhãn; …)", `<input name="points_text" placeholder="320,240,1; 100,80,0" />`)}${field("Box (x1,y1,x2,y2)", `<input name="box_text" placeholder="80,60,600,500" />`)}${field("Prompt Grounding", `<input name="prompt" placeholder="person . object ." />`)}<div class="form-actions">${button("Tạo mask / track", "button--primary")}</div>${formResult("sam2-result")}</form>`)}
+      ${card("Xem trước và kết quả", `<div class="preview-empty"><span>◒</span><strong>Xem trước mask sẽ xuất hiện trong Jobs</strong><p>Điểm/box đi vào trình xử lý trực tiếp. Model nạp theo yêu cầu và giải phóng khi job xong.</p></div><div class="callout">Trạng thái ở tiêu đề áp dụng riêng cho chế độ Chọn điểm. Box, prompt text và theo dõi chỉ sẵn sàng sau smoke riêng; nếu backend báo một phần/chưa khả dụng, lỗi sẽ hiện cạnh action thay vì mở GUI ngoài.</div>`, "", "card--flat")}
+    </div>`;
 }
 
 function renderOcr(state) {
-  const item = componentById(state, "paddleocr_vl");
-  return heading("DOCUMENTS", "OCR / Documents", "Một giao diện cho ảnh, PDF, clipboard và thư mục; kết quả có thể là text, Markdown, JSON hoặc bảng.") + `
-    <div class="card-grid card-grid--wide">
-      ${capabilityCard("PaddleOCR-VL", "Adapter allowlist có sẵn; chỉ gọi khi environment và model local đã tồn tại.", item?.component_status || "missing")}
-      ${card("Input & output", `<div class="tag-list"><span class="tag">Ảnh</span><span class="tag">PDF</span><span class="tag">Clipboard</span><span class="tag">Folder</span><span class="tag">Text</span><span class="tag">Markdown</span><span class="tag">JSON</span><span class="tag">Tables</span></div>`, "", "card--flat")}
+  const item = component(state, "paddleocr_vl");
+  return heading("DOCUMENTS", "OCR", "Đọc ảnh, PDF, clipboard export hoặc tài liệu từ một workspace; kết quả text/Markdown/JSON/tables là artifact Hub.", statusPill(tool(state, "ocr_document").tool_status || item.component_status || "missing")) + `
+    <div class="workspace-grid workspace-grid--two">
+      ${card("Tải tài liệu", `<form data-job-form data-tool="ocr_document" class="stack">${file("Ảnh hoặc PDF", "asset_id", "image/*,application/pdf")}${field("Output", `<select name="output_format"><option value="all">Text + Markdown + JSON + Tables</option><option value="markdown">Markdown</option><option value="json">JSON</option></select>`)}<div class="form-actions">${button("Chạy OCR", "button--primary")}</div>${formResult("ocr-result")}</form>`)}
+      ${card("Kết quả", `<div class="preview-empty"><span>▤</span><strong>Không mở app OCR riêng</strong><p>Chọn tệp, chạy worker, rồi mở artifact trong bảng Jobs.</p></div><div class="tag-list"><span class="tag">Image</span><span class="tag">PDF</span><span class="tag">Clipboard export</span><span class="tag">Folder batch qua hàng đợi</span></div>`, "", "card--flat")}
     </div>`;
 }
 
 function renderWhisper(state) {
-  const item = componentById(state, "whisper");
-  return heading("SPEECH", "Whisper / Subtitles", "Xếp hàng nhiều video, giữ source nguyên vẹn và xuất SRT/ASS khi backend đã xác minh.") + `
-    <div class="card-grid card-grid--wide">
-      ${capabilityCard("Faster-Whisper", "Transcribe và translate theo chính sách on-demand; CPU fallback được giữ khi CUDA lỗi.", item?.component_status || "missing")}
-      ${card("Quy trình", `<div class="tag-list"><span class="tag">Add video</span><span class="tag">Add folder</span><span class="tag">Language</span><span class="tag">Auto detect</span><span class="tag">Translate</span><span class="tag">SRT</span><span class="tag">ASS</span><span class="tag">Burn subtitle</span><span class="tag">Resume</span></div>`, "Không ghi đè media nguồn", "card--flat")}
+  const item = component(state, "whisper");
+  return heading("SPEECH", "Whisper / Subtitles", "Thêm media, chọn ngôn ngữ và xuất transcript/SRT hoặc burn subtitle bằng worker nền.", statusPill(tool(state, "transcribe_media").tool_status || item.component_status || "missing")) + `
+    <div class="workspace-grid workspace-grid--two">
+      ${card("Transcript queue", `<form data-job-form data-tool="transcribe_media" data-tool-by-field="workflow" data-tool-map='{"transcribe":"transcribe_media","burn":"create_subtitled_video"}' class="stack">${file("Video hoặc audio", "asset_id", "audio/*,video/*")}${field("Workflow", `<select name="workflow"><option value="transcribe">Transcript + SRT</option><option value="burn">Transcript + burn subtitle</option></select>`)}<div class="form-grid">${field("Language", `<input name="language" value="auto" placeholder="auto / vi / ja" />`)}${field("Thiết bị", `<select name="device"><option value="cpu">CPU safe</option><option value="cuda">CUDA nếu environment hỗ trợ</option></select>`)}</div>${field("Đoạn ngắn bắt đầu/kết thúc (giây, tùy chọn)", `<div class="inline-fields"><input name="start" type="number" min="0" step="0.1" value="0" /><input name="end" type="number" min="0.1" step="0.1" value="10" /></div>`)}<div class="form-actions">${button("Thêm vào hàng đợi", "button--primary")}</div>${formResult("whisper-result")}</form>`)}
+      ${card("Điều khiển", `<ul class="notice-list"><li>Output không ghi đè source media.</li><li>Cancel/resume dùng Jobs và chỉ dừng process do Hub sở hữu.</li><li>Folder batch được lên kế hoạch qua nhiều job upload; không cần mở Whisper GUI.</li></ul><div class="preview-empty compact"><span>≋</span><strong>Transcript, SRT và video subtitle xuất hiện ở Jobs</strong></div>`, "", "card--flat")}
     </div>`;
 }
 
 function renderVoice(state) {
-  const tts = componentById(state, "qwen3_tts");
-  const seed = componentById(state, "seed_vc");
-  return heading("VOICE", "Voice Studio", "TTS, Voice Design, Voice Clone, chuyển giọng và batch dùng các model đã có; không tự tải thêm model.") + `
-    <div class="card-grid">
-      ${capabilityCard("Qwen3-TTS", "0.6B CustomVoice · 1.7B VoiceDesign · 1.7B Base", tts?.component_status || "missing")}
-      ${capabilityCard("Seed-VC", "Voice conversion theo preset tiny đã đăng ký.", seed?.component_status || "missing")}
-      ${card("Chức năng", `<div class="tag-list"><span class="tag">Text to Speech</span><span class="tag">Voice Design</span><span class="tag">Voice Clone</span><span class="tag">Voice Conversion</span><span class="tag">Voice Library</span><span class="tag">Batch</span></div>`, "Nạp model theo yêu cầu", "card--flat")}
+  const tts = component(state, "qwen3_tts");
+  const seed = component(state, "seed_vc");
+  return heading("VOICE", "Voice Studio", "Qwen3-TTS và Seed-VC chạy bằng worker nền trong Hub, không mở secondary Voice GUI.") + `
+    <div class="capability-grid">${capability("Qwen3-TTS", tts, "Text to Speech, Voice Design, Voice Clone, Batch.", tool(state, "text_to_speech"))}${capability("Seed-VC", seed, "Voice Conversion với source/target audio.", tool(state, "convert_voice"))}</div>
+    <div class="workspace-grid workspace-grid--three" style="margin-top:16px">
+      ${card("Text to Speech", `<form data-job-form data-tool="text_to_speech" class="stack">${field("Text", `<textarea name="text" required placeholder="Nhập nội dung cần đọc…"></textarea>`)}<div class="form-grid">${field("Language", `<input name="language" value="Vietnamese" />`)}${field("Speaker", `<input name="speaker" value="Ryan" />`)}</div><div class="form-actions">${button("Tạo giọng nói", "button--primary")}</div>${formResult("tts-result")}</form>`)}
+      ${card("Voice Design / Clone", `<form data-job-form data-tool="design_voice" data-tool-by-field="operation" data-tool-map='{"design":"design_voice","clone":"clone_voice"}' class="stack">${field("Operation", `<select name="operation"><option value="design">Voice Design</option><option value="clone">Voice Clone</option></select>`)}${field("Text", `<textarea name="text" required placeholder="Nội dung đầu ra…"></textarea>`)}${file("Reference audio (chỉ Voice Clone)", "reference_asset_id", "audio/*")}${field("Reference text", `<input name="reference_text" placeholder="Tùy chọn" />`)}<div class="form-actions">${button("Chạy Qwen3-TTS", "button--primary")}</div>${formResult("voice-design-result")}</form>`)}
+      ${card("Voice Conversion", `<form data-job-form data-tool="convert_voice" class="stack">${file("Source audio", "source_asset_id", "audio/*")}${file("Target voice", "target_asset_id", "audio/*")}${field("Diffusion steps", `<input name="diffusion_steps" type="number" min="1" max="50" value="4" />`)}<div class="form-actions">${button("Chuyển giọng", "button--primary")}</div>${formResult("seed-result")}</form>`)}
     </div>`;
 }
 
 function renderImage(state) {
-  const flux = appById(state, APP_IDS.flux);
-  const qwen = appById(state, APP_IDS.qwen);
-  const comfy = componentById(state, "comfyui");
-  const models = state.models || [];
-  const qwenInstalled = models.some((item) => String(item.engine || "").toLowerCase().includes("qwen image") && item.installed);
-  return heading("IMAGE", "Image AI", "Một frontend cho FLUX, Qwen Image và ComfyUI Advanced; cả hai model image dùng chung một ComfyUI runtime.", flux?.launchable ? launchButton(APP_IDS.flux, "Mở Local Image Studio") : "") + `
-    <div class="module-tabs"><button class="tab is-selected" type="button">Qwen Image</button><button class="tab" type="button">FLUX</button><button class="tab" type="button">ComfyUI Advanced</button></div>
-    <div class="card-grid">
-      ${capabilityCard("Qwen Image 2512", "Prompt, resolution, steps, seed và model selector. Không tự tải model.", qwenInstalled ? "installed" : (qwen?.component_status || "not_installed"), qwen?.launchable ? launchButton(APP_IDS.qwen, "Mở Studio") : "")}
-      ${capabilityCard("FLUX.2 Klein", "Workflow text-to-image local, output review và model manifest được giữ nguyên.", flux?.component_status || "missing", flux?.launchable ? launchButton(APP_IDS.flux, "Mở Studio") : "")}
-      ${capabilityCard("ComfyUI", "Shared runtime cho image workflows; chỉ expose thao tác đã allowlist.", comfy?.component_status || "missing")}
-    </div>
-    <div class="card" style="margin-top:14px"><div class="card-title-row"><h2>Tham số an toàn</h2>${statusPill("installed", "UI sẵn sàng")}</div><div class="form-grid"><div class="field"><label for="image-prompt">Prompt</label><textarea id="image-prompt" placeholder="Nhập prompt khi backend image được kết nối…" disabled></textarea></div><div class="stack"><div class="field"><label>Resolution</label><select disabled><option>Backend quyết định</option></select></div><div class="field"><label>Steps / Seed</label><input disabled placeholder="Chỉ hiện tham số backend hỗ trợ" /></div></div></div><div class="callout" style="margin-top:13px">Sinh ảnh chưa được gọi trực tiếp bởi Hub API trong smoke này. Nút mở Studio dùng ứng dụng local đã cài, không tạo bản model thứ hai.</div></div>`;
+  const comfy = state.lifecycle?.comfyui || {};
+  const imageTool = tool(state, "generate_flux");
+  return heading("IMAGE", "Image AI", "FLUX và Qwen Image gọi ComfyUI API trực tiếp. ComfyUI chạy nền ẩn khi Hub cần, không mở Local Image Studio.", `<span class="status-pill" data-status="${escapeHtml(imageTool.tool_status || comfy.status || "stopped")}">${escapeHtml(formatStatus(imageTool.tool_status || comfy.status || "stopped"))}</span>`) + `
+    <div class="workspace-grid workspace-grid--two">
+      ${card("Generate", `<form data-job-form data-tool="generate_flux" data-tool-by-field="engine" data-tool-map='{"flux":"generate_flux","qwen":"generate_qwen_image"}' class="stack">${field("Model", `<select name="engine"><option value="flux">FLUX.2 Klein</option><option value="qwen">Qwen Image 2512</option></select>`)}${field("Prompt", `<textarea name="prompt" required placeholder="Mô tả ảnh cần tạo…"></textarea>`)}${field("Negative prompt", `<input name="negative_prompt" placeholder="Tùy chọn" />`)}<div class="form-grid">${field("Width", `<input name="width" type="number" min="256" max="2048" step="64" value="768" />`)}${field("Height", `<input name="height" type="number" min="256" max="2048" step="64" value="768" />`)}${field("Steps", `<input name="steps" type="number" min="1" max="80" value="20" />`)}${field("Seed", `<input name="seed" type="number" min="0" placeholder="random" />`)}</div>${file("Input image (FLUX image-edit nếu workflow hỗ trợ)", "input_image_asset_id", "image/*")}<div class="form-actions">${button("Generate trong Hub", "button--primary")}</div>${formResult("image-result")}</form>`)}
+      ${card("Preview & Advanced", `<div class="preview-empty"><span>✦</span><strong>Ảnh output sẽ hiện trong Jobs</strong><p>Lịch sử giữ prompt, seed, model qua metadata job an toàn; không lộ đường dẫn cục bộ.</p></div><details class="advanced"><summary>ComfyUI Advanced</summary><p>Advanced mở web interface ComfyUI trong trình duyệt nếu cần sửa workflow; normal workflow vẫn dùng form Hub ở bên trái.</p><button class="button" type="button" data-open-comfy>Open ComfyUI web interface</button></details>`, "", "card--flat")}
+    </div>`;
 }
 
 function renderMedia(state) {
-  const ffmpeg = componentById(state, "ffmpeg");
-  return heading("MEDIA", "Media Editor", "Các thao tác FFmpeg an toàn được chuẩn hoá theo preset; không có ô raw shell command.") + `
-    <div class="card-grid card-grid--wide">
-      ${capabilityCard("FFmpeg / FFprobe", "Probe, trim, cut, concat, resize, crop, rotate, transcode, mux và trích frame.", ffmpeg?.component_status || "missing")}
-      ${card("Preset thao tác", `<div class="tag-list"><span class="tag">Probe</span><span class="tag">Trim / Cut</span><span class="tag">Concat</span><span class="tag">Resize / Crop</span><span class="tag">Extract Audio</span><span class="tag">Mux</span><span class="tag">Burn Subtitle</span><span class="tag">Image Sequence → Video</span></div>`, "Không ghi đè source", "card--flat")}
-    </div><div class="callout" style="margin-top:14px">Route probe loopback đã allowlist. Các thao tác ghi file cần input/output riêng và sẽ không tự chạy khi chưa có file do người dùng chọn.</div>`;
+  const item = component(state, "ffmpeg");
+  return heading("MEDIA", "Trình biên tập media", "FFmpeg/FFprobe chạy bằng danh sách lệnh cho phép ở chế độ ẩn, không có ô shell và không ghi đè media nguồn.", statusPill(tool(state, "run_media_operation").tool_status || item.component_status || "missing")) + `
+    <div class="workspace-grid workspace-grid--two">
+      ${card("Thao tác video và ảnh", `<form data-job-form data-tool="run_media_operation" class="stack">${file("Media đầu vào chính", "asset_id", "audio/*,video/*,image/*")}${files("Đầu vào bổ sung (ghép / chuỗi ảnh)", "input_asset_ids", "video/*,image/*")}${file("Audio hoặc phụ đề thứ hai", "secondary_asset_id", "audio/*,.srt,.ass")}${field("Thao tác", `<select name="operation"><option value="probe">Đọc metadata</option><option value="trim">Cắt đầu/cuối</option><option value="concat">Ghép video</option><option value="resize">Đổi kích thước video</option><option value="crop">Cắt khung video</option><option value="rotate">Xoay video</option><option value="fps">FPS</option><option value="transcode">Chuyển mã</option><option value="extract_audio">Tách audio</option><option value="replace_audio">Thay audio</option><option value="mux">Mux audio/video</option><option value="burn_subtitle">Chèn phụ đề</option><option value="extract_frames">Tách frame</option><option value="image_sequence_video">Chuỗi ảnh → video</option><option value="image_resize">Đổi kích thước ảnh</option><option value="image_crop">Cắt khung ảnh</option><option value="image_rotate">Xoay ảnh</option><option value="image_flip">Lật ảnh</option><option value="image_convert">Đổi định dạng ảnh</option><option value="image_compress">Nén ảnh</option></select>`)}<div class="form-grid">${field("Bắt đầu", `<input name="start" type="number" min="0" step="0.1" value="0" />`)}${field("Kết thúc", `<input name="end" type="number" min="0.1" step="0.1" value="5" />`)}${field("Chiều rộng", `<input name="width" type="number" min="2" value="1280" />`)}${field("Chiều cao", `<input name="height" type="number" min="-2" value="-2" />`)}${field("FPS", `<input name="fps" type="number" min="1" value="30" />`)}${field("Xoay", `<select name="degrees"><option value="90">90°</option><option value="180">180°</option><option value="270">270°</option></select>`)}${field("Lật", `<select name="axis"><option value="horizontal">Ngang</option><option value="vertical">Dọc</option></select>`)}${field("Định dạng ảnh", `<select name="format"><option value="png">PNG</option><option value="jpg">JPG</option><option value="webp">WEBP</option></select>`)}</div><div class="form-actions">${button("Chạy FFmpeg", "button--primary")}</div>${formResult("media-result")}</form>`)}
+      ${card("An toàn thao tác", `<ul class="notice-list"><li>Kết quả tạo trong vùng Output/Media của Hub.</li><li>Đọc metadata là read-only; tác vụ ghi file đi qua Job Manager.</li><li>Ghép video và chuỗi ảnh chỉ nhận artifact đã tải lên Hub, rồi tạo manifest Temp ngắn hạn; không nhận raw shell/path list.</li></ul><div class="tag-list"><span class="tag">Cắt</span><span class="tag">Ghép</span><span class="tag">Crop</span><span class="tag">Xoay</span><span class="tag">Mux</span><span class="tag">Chèn phụ đề</span><span class="tag">Frames</span></div>`, "", "card--flat")}
+    </div>`;
 }
 
 function renderAnime(state) {
-  const app = appById(state, APP_IDS.animesr);
-  const component = componentById(state, "animesr");
-  return heading("VIDEO AI", "AnimeSR", "Anime Upscale Studio được quản lý từ registry; executor Hub giữ trạng thái trung thực cho đến khi có smoke inference ngắn.", app?.launchable ? launchButton(APP_IDS.animesr, "Mở Anime Upscale Studio") : "") + `
-    <div class="card-grid card-grid--wide">
-      ${card("Ứng dụng", `<div class="split"><div><h3>Anime Upscale Studio</h3><p class="card-description">${escapeHtml(app?.managed_location || "External managed")}; FFmpeg và AnimeSR dùng đường dẫn canonical/junction.</p></div>${statusPill(app?.component_status || "missing")}</div>`, app?.launchable ? launchButton(APP_IDS.animesr, "Mở ứng dụng") : "")}
-      ${capabilityCard("upscale_anime_video", "Input, output, model, queue, progress, cancel, resume và mở output.", component?.component_status === "installed" ? "partial" : "unavailable")}
-    </div><div class="callout callout--warning" style="margin-top:14px">Hub không tạo job giả. Khi route chưa có smoke inference, hãy mở ứng dụng đã quản lý để chạy workflow được kiểm soát.</div>`;
+  const item = component(state, "animesr");
+  return heading("VIDEO AI", "AnimeSR", "Workflow upscale chính chạy bằng worker AnimeSR trong Hub. Anime Upscale Studio chỉ là legacy/debug fallback, không còn là action chính.", statusPill(tool(state, "upscale_anime_video").tool_status || item.component_status || "missing")) + `
+    <div class="workspace-grid workspace-grid--two">
+      ${card("Upscale queue", `<form data-job-form data-tool="upscale_anime_video" class="stack">${file("Video input", "asset_id", "video/*")}${field("Model", `<select name="model"><option value="AnimeSR_v2">AnimeSR v2</option><option value="AnimeSR_v1-PaperModel">AnimeSR v1 Paper</option></select>`)}<div class="form-grid">${field("Scale", `<select name="scale"><option value="2">2×</option><option value="3">3×</option><option value="4">4×</option></select>`)}${field("Chunk seconds", `<input name="chunk_seconds" type="number" min="10" value="120" />`)}</div><div class="check-grid"><label><input name="half" type="checkbox" checked /> Half precision</label><label><input name="use_rife" type="checkbox" /> RIFE (partial)</label><label><input name="use_realesrgan" type="checkbox" /> Real-ESRGAN (partial)</label></div><div class="form-actions">${button("Thêm AnimeSR job", "button--primary")}</div>${formResult("anime-result")}</form>`)}
+      ${card("Progress & output", `<div class="preview-empty"><span>⇱</span><strong>Queue, progress, cancel và resume nằm ở Jobs</strong><p>Hub không mở Anime Upscale Studio để chạy normal workflow.</p></div><details class="advanced"><summary>Advanced / legacy</summary><p>Legacy Studio chỉ nên dùng debug khi direct worker báo limitation đã được ghi nhận.</p></details>`, "", "card--flat")}
+    </div>`;
 }
 
 function renderJobs(state) {
   const jobs = state.jobs || [];
-  return heading("CONTROL PLANE", "Jobs / Queue", "Theo dõi trạng thái queued, starting, running, completed, failed và cancelled.") + `
-    ${jobs.length ? `<div class="card table-wrap"><table><thead><tr><th>Job</th><th>Tool</th><th>Trạng thái</th><th>Thời điểm</th></tr></thead><tbody>${jobs.map((job) => `<tr><td>${escapeHtml(job.id)}</td><td>${escapeHtml(job.tool)}</td><td>${statusPill(job.status)}</td><td class="muted">${escapeHtml(job.created_at || "")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state">Chưa có job. Các model nặng không được tự nạp khi mở Hub.</div>`}`;
+  const rows = jobs.map((job) => {
+    const actions = ["queued", "starting", "running", "cancelling"].includes(job.status)
+      ? `<button class="button button--compact button--danger" type="button" data-cancel-job="${escapeHtml(job.id)}">Hủy</button>`
+      : job.resumable ? `<button class="button button--compact" type="button" data-resume-job="${escapeHtml(job.id)}">Resume</button>` : "";
+    return `<article class="job-card"><div class="split"><div><strong>${escapeHtml(job.tool)}</strong><div class="row-meta">${escapeHtml(job.id)} · ${escapeHtml(job.created_at || "")}</div></div>${statusPill(job.status)}</div><div class="progress-track"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, Number(job.progress || 0)))}%"></div></div><p class="job-message">${escapeHtml(job.message || job.error || "")}</p>${artifactList(job.result)}<div class="form-actions">${actions}</div></article>`;
+  }).join("");
+  return heading("CONTROL PLANE", "Jobs", "Theo dõi job thực tế do Hub tạo; cancel không ảnh hưởng Python/ComfyUI/AIRI không thuộc Hub.") + `<div class="job-list">${rows || `<div class="empty-state">Chưa có job. Chạy một workflow từ module bất kỳ để bắt đầu.</div>`}</div>`;
 }
 
 function renderModels(state) {
   const storage = state.storage || {};
-  const areas = storage.areas || {};
   const models = state.models || [];
-  const areaRows = Object.entries(areas).map(([name, value]) => `<div class="row-item"><div class="row-main"><div class="row-name">${escapeHtml(name)}</div><div class="row-meta">managed area</div></div><strong>${escapeHtml(formatGb(value.bytes))}</strong></div>`).join("");
-  return heading("STORAGE", "Models & Storage", "Model store canonical, môi trường, runtime, cache, output, temp, logs và legacy paths được xem ở một nơi.", `<button class="button" type="button" data-refresh-storage>Quét lại</button>`) + `
-    <div class="card-grid card-grid--wide">
-      ${card("Dung lượng theo vùng", `<div class="row-list">${areaRows || `<div class="empty-state">Chưa có dữ liệu storage.</div>`}</div>`, `Trống: ${escapeHtml(formatGb(storage.disk?.free_bytes))}`)}
-      ${card("Legacy paths", `<div class="stat-value" style="font-size:20px">${storage.legacy_counts?.total || 0}</div><div class="stat-label">${storage.legacy_counts?.cleanup_candidates || 0} ứng viên cleanup có điều kiện</div><div class="callout callout--warning" style="margin-top:12px">Cleanup chỉ hiện preview; không xoá UNKNOWN, USER_DATA hoặc SYSTEM_MANAGED.</div>`, "", "card--flat")}
+  const areas = Object.entries(storage.areas || {});
+  return heading("STORAGE", "Models & Storage", "Model store canonical không nhân bản. Legacy cleanup chỉ xử lý mục đã phân loại và xác minh, không tự xoá UNKNOWN hoặc user media.", `<button class="button" type="button" data-refresh-storage>Quét lại</button>`) + `
+    <div class="workspace-grid workspace-grid--two">
+      ${card("Dung lượng", `<div class="row-list">${areas.map(([name, value]) => `<div class="row-item"><span>${escapeHtml(name)}</span><strong>${formatGb(value.bytes)}</strong></div>`).join("") || `<div class="empty-state compact">Chưa có số liệu storage.</div>`}</div>`)}
+      ${card("Legacy cleanup", `<div class="metric-inline"><strong>${escapeHtml(storage.legacy_counts?.total || 0)}</strong><span>legacy paths đã inventory</span></div><div class="callout callout--warning">Cleanup V3 tách REAL_DIRECTORY/JUNCTION, kiểm tra reference và user data trước. Mục active hoặc unknown sẽ được giữ cùng lý do/rollback.</div>`, "", "card--flat")}
     </div>
-    <section class="card" style="margin-top:14px"><div class="card-title-row"><h2>Model registry</h2><span class="muted small">Nạp theo yêu cầu</span></div>${models.length ? `<div class="table-wrap"><table><thead><tr><th>Model</th><th>Engine</th><th>Vị trí</th><th>Kích thước</th><th>Trạng thái</th></tr></thead><tbody>${models.map((item) => `<tr><td>${escapeHtml(item.model_name)}</td><td>${escapeHtml(item.engine)}</td><td>${escapeHtml(item.location)}</td><td>${escapeHtml(formatGb(item.size?.bytes))}</td><td>${statusPill(item.installed ? "installed" : "not_installed")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state">Chưa có model registry.</div>`}</section>`;
+    ${card("Model registry", models.length ? `<div class="table-wrap"><table><thead><tr><th>Model</th><th>Engine</th><th>Size</th><th>Status</th></tr></thead><tbody>${models.map((item) => `<tr><td>${escapeHtml(item.model_name)}</td><td>${escapeHtml(item.engine)}</td><td>${formatGb(item.size?.bytes)}</td><td>${statusPill(item.installed ? "installed" : "not_installed")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state compact">Chưa có model registry.</div>`, "", "card--wide")}`;
 }
 
 function renderSettings(state) {
   const settings = state.settings || {};
-  return heading("SYSTEM", "Settings", "Thiết lập an toàn cho startup, giao diện, đường dẫn, GPU, model, API, MCP, AIRI và storage.") + `
-    <div class="card-grid card-grid--wide">
-      ${card("General & Appearance", `<div class="row-list"><div class="row-item"><span>Start maximized</span><strong>${settings.start_maximized ? "Bật" : "Tắt"}</strong></div><div class="row-item"><span>Minimum window</span><strong>${settings.minimum_width || 1280} × ${settings.minimum_height || 720}</strong></div><div class="row-item"><span>Theme</span><strong id="theme-label">System / local</strong></div></div>`, `<button class="button" type="button" data-cycle-theme>Đổi theme</button>`)}
-      ${card("GPU & Model policy", `<div class="row-list"><div class="row-item"><span>Load policy</span><strong>${escapeHtml(settings.model_load_policy || "on_demand")}</strong></div><div class="row-item"><span>Heavy GPU slots</span><strong>${settings.max_heavy_gpu_jobs || 1}</strong></div><div class="row-item"><span>Startup</span><strong>Không tự load model nặng</strong></div></div>`, "", "card--flat")}
-      ${card("API & MCP", `<div class="row-list"><div class="row-item"><span>Bind</span><strong>${escapeHtml(settings.api_bind || "127.0.0.1")}:${settings.api_port || 8765}</strong></div><div class="row-item"><span>MCP transport</span><strong>${escapeHtml(settings.mcp_transport || "stdio")}</strong></div><div class="row-item"><span>Shell access</span><strong>Không allowlist</strong></div></div>`, "", "card--flat")}
-      ${card("Storage safety", `<ul class="notice-list"><li>Không overwrite source media</li><li>Không duplicate model nhiều GB</li><li>Cleanup cần preview + xác nhận</li><li>Legacy junction có rollback metadata</li></ul>`, "", "card--flat")}
+  return heading("SYSTEM", "Settings", "Cấu hình startup, chính sách GPU, storage và advanced integrations. Không hiển thị secrets hay local machine paths.") + `
+    <div class="workspace-grid workspace-grid--two">
+      ${card("Appearance & startup", `<div class="row-list"><div class="row-item"><span>Start maximized</span><strong>${settings.start_maximized ? "Bật" : "Tắt"}</strong></div><div class="row-item"><span>Minimum window</span><strong>${escapeHtml(settings.minimum_width || 1280)} × ${escapeHtml(settings.minimum_height || 720)}</strong></div><div class="row-item"><span>Theme</span><button class="button button--compact" type="button" data-cycle-theme>Đổi theme</button></div></div>`)}
+      ${card("Workers & lifecycle", `<div class="row-list"><div class="row-item"><span>Model policy</span><strong>${escapeHtml(settings.model_load_policy || "on_demand")}</strong></div><div class="row-item"><span>Heavy GPU slots</span><strong>${escapeHtml(settings.max_heavy_gpu_jobs || 1)}</strong></div><div class="row-item"><span>ComfyUI port</span><strong>${escapeHtml(settings.comfyui_port || 8188)}</strong></div></div><div class="form-actions"><button class="button" type="button" data-close-backends>Đóng backend Hub-owned rảnh</button></div>`)}
+      ${card("Storage safety", `<ul class="notice-list"><li>Không ghi đè source media.</li><li>Không duplicate model multi-GB.</li><li>Không tự xoá user media hoặc unknown legacy data.</li><li>AIRI giữ external/installer-managed.</li></ul>`, "", "card--flat")}
+      ${card("Advanced legacy", `<details class="advanced"><summary>Legacy applications</summary><p>SAM2 Mask Studio, Anime Upscale Studio và Local Image Studio không nằm trong normal workflow. Giữ lại làm fallback/debug sau khi direct worker được đánh giá.</p></details>`, "", "card--flat")}
     </div>`;
+}
+
+export function renderPage(route, state) {
+  const pages = { dashboard: renderDashboard, airi: renderAiri, vision: renderVision, sam2: renderSam2, ocr: renderOcr, whisper: renderWhisper, voice: renderVoice, image: renderImage, media: renderMedia, animesr: renderAnime, jobs: renderJobs, models: renderModels, settings: renderSettings };
+  return (pages[route] || renderDashboard)(state);
 }

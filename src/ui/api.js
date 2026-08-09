@@ -6,21 +6,41 @@ const request = async (path, options = {}) => {
   let payload = {};
   try { payload = await response.json(); } catch { payload = { status: "error", error: "Phản hồi không phải JSON." }; }
   if (!response.ok) {
-    const message = payload.error || payload.reason || `HTTP ${response.status}`;
+    const message = payload.error || payload.reason || payload.message || `HTTP ${response.status}`;
     throw new Error(message);
   }
   return payload;
 };
 
 export const getHealth = () => request("/health");
+export const getTools = () => request("/tools");
 export const getDashboard = () => request("/api/dashboard");
 export const getStorage = () => request("/api/storage");
 export const getModels = () => request("/api/models");
 export const getApplications = () => request("/api/applications");
 export const getSettings = () => request("/api/settings");
-export const getJobs = () => request("/jobs");
+export const getJobs = () => request("/api/jobs");
+export const getLifecycle = () => request("/api/lifecycle");
 
+export const uploadFile = async (file) => {
+  if (!file) throw new Error("Chọn tệp trước khi tải lên Hub.");
+  const response = await fetch("/api/uploads", {
+    method: "POST",
+    headers: { "X-File-Name": encodeURIComponent(file.name), "Content-Type": file.type || "application/octet-stream", Accept: "application/json" },
+    body: file,
+  });
+  let payload = {};
+  try { payload = await response.json(); } catch { payload = { error: "Upload không trả JSON." }; }
+  if (!response.ok) throw new Error(payload.error || `Upload thất bại (HTTP ${response.status}).`);
+  return payload.artifact;
+};
+
+export const submitJob = (tool, payload) => request(`/api/jobs/${encodeURIComponent(tool)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const cancelJob = (id) => request(`/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+export const resumeJob = (id) => request(`/jobs/${encodeURIComponent(id)}/resume`, { method: "POST" });
+export const openArtifact = (id) => request(`/api/artifacts/${encodeURIComponent(id)}/open`, { method: "POST" });
 export const launchApplication = (id) => request(`/api/applications/${encodeURIComponent(id)}/launch`, { method: "POST" });
+export const closeOwnedBackends = () => request("/api/lifecycle/close", { method: "POST" });
 
 export const formatGb = (bytes) => {
   const value = Number(bytes || 0) / (1024 ** 3);
@@ -28,17 +48,21 @@ export const formatGb = (bytes) => {
 };
 
 export const formatStatus = (status) => ({
+  healthy: "Sẵn sàng",
   operational: "Sẵn sàng",
   installed: "Đã cài",
   running: "Đang chạy",
+  starting: "Đang chuẩn bị",
+  queued: "Đang chờ",
+  cancelling: "Đang hủy",
+  cancelled: "Đã hủy",
+  completed: "Hoàn tất",
+  failed: "Thất bại",
   partial: "Một phần",
   unavailable: "Chưa khả dụng",
   not_installed: "Chưa cài",
   external_managed: "Quản lý bên ngoài",
   planned: "Đã hoạch định",
-  queued: "Đang chờ",
-  completed: "Hoàn tất",
-  failed: "Thất bại",
 }[status] || status || "Chưa rõ");
 
 export const escapeHtml = (value) => String(value ?? "")

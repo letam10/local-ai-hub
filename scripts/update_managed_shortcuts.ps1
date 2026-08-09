@@ -1,31 +1,42 @@
 [CmdletBinding()]
-param([switch]$Apply)
+param(
+    [switch]$Apply,
+    [switch]$IncludeLegacy
+)
 
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $desktop = [Environment]::GetFolderPath('Desktop')
+$pythonw = Join-Path $root 'Environments\hub\Scripts\pythonw.exe'
 $shortcuts = @(
-    @{ name = 'Local AI Hub.lnk'; target = (Join-Path $root 'Scripts\launch_local_ai_hub.cmd'); working = $root },
-    @{ name = 'SAM2 Mask.lnk'; target = (Join-Path $root 'runtime\applications\SAM2-Mask-Studio\SAM2 Mask Studio.exe'); working = (Join-Path $root 'runtime\applications\SAM2-Mask-Studio') },
-    @{ name = 'AnimeSR v2 Upscale.lnk'; target = (Join-Path $root 'runtime\applications\Anime-Upscale-Studio\Anime Upscale Studio.exe'); working = (Join-Path $root 'runtime\applications\Anime-Upscale-Studio') },
-    @{ name = 'Local Image Studio.lnk'; target = (Join-Path $root 'runtime\applications\FLUX-Klein-Studio\Local Image Studio.exe'); working = (Join-Path $root 'runtime\applications\FLUX-Klein-Studio') }
+    @{ locations = @($desktop, $root); name = 'Local AI Hub.lnk'; target = $pythonw; arguments = '-m src.app.main'; working = $root; description = 'Local AI Hub no-console desktop entry' }
 )
+if ($IncludeLegacy) {
+    $shortcuts += @(
+        @{ locations = @($desktop); name = 'Legacy SAM2 Mask Studio.lnk'; target = (Join-Path $root 'runtime\applications\SAM2-Mask-Studio\SAM2 Mask Studio.exe'); arguments = ''; working = (Join-Path $root 'runtime\applications\SAM2-Mask-Studio'); description = 'Advanced legacy Local AI Hub application' },
+        @{ locations = @($desktop); name = 'Legacy Anime Upscale Studio.lnk'; target = (Join-Path $root 'runtime\applications\Anime-Upscale-Studio\Anime Upscale Studio.exe'); arguments = ''; working = (Join-Path $root 'runtime\applications\Anime-Upscale-Studio'); description = 'Advanced legacy Local AI Hub application' },
+        @{ locations = @($desktop); name = 'Legacy Local Image Studio.lnk'; target = (Join-Path $root 'runtime\applications\FLUX-Klein-Studio\Local Image Studio.exe'); arguments = ''; working = (Join-Path $root 'runtime\applications\FLUX-Klein-Studio'); description = 'Advanced legacy Local AI Hub application' }
+    )
+}
 
 $shell = New-Object -ComObject WScript.Shell
 foreach ($shortcut in $shortcuts) {
-    $link = Join-Path $desktop $shortcut.name
     if (-not (Test-Path -LiteralPath $shortcut.target -PathType Leaf)) {
         Write-Output "SKIP $($shortcut.name): target is not present yet"
         continue
     }
-    if (-not $Apply) {
-        Write-Output "DRYRUN $($shortcut.name): $($shortcut.target)"
-        continue
+    foreach ($location in $shortcut.locations) {
+        $link = Join-Path $location $shortcut.name
+        if (-not $Apply) {
+            Write-Output "DRYRUN $link -> $($shortcut.target) $($shortcut.arguments)"
+            continue
+        }
+        $item = $shell.CreateShortcut($link)
+        $item.TargetPath = $shortcut.target
+        $item.Arguments = $shortcut.arguments
+        $item.WorkingDirectory = $shortcut.working
+        $item.Description = $shortcut.description
+        $item.Save()
+        Write-Output "UPDATED $link -> $($shortcut.target) $($shortcut.arguments)"
     }
-    $item = $shell.CreateShortcut($link)
-    $item.TargetPath = $shortcut.target
-    $item.WorkingDirectory = $shortcut.working
-    $item.Description = "Local AI Hub managed shortcut"
-    $item.Save()
-    Write-Output "UPDATED $link -> $($shortcut.target)"
 }
