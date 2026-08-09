@@ -36,6 +36,7 @@ foreach ($shortcut in $shortcuts) {
         $item.Arguments = $shortcut.arguments
         $item.WorkingDirectory = $shortcut.working
         $item.Description = $shortcut.description
+        $item.IconLocation = "$pythonw,0"
         $item.Save()
         Write-Output "UPDATED $link -> $($shortcut.target) $($shortcut.arguments)"
     }

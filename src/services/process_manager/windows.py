@@ -32,6 +32,23 @@ def hidden_startupinfo() -> subprocess.STARTUPINFO | None:
     return info
 
 
+def minimized_startupinfo() -> subprocess.STARTUPINFO | None:
+    """Return the explicit last-resort policy for a proven unhideable tool.
+
+    Hub-owned commands must use :func:`hidden_startupinfo` by default.  This
+    helper exists only for a third-party GUI that has been verified to ignore
+    ``SW_HIDE``; callers must document that exception and keep it off the
+    normal workflow.  No current Hub backend needs this fallback.
+    """
+
+    if os.name != "nt":
+        return None
+    info = subprocess.STARTUPINFO()
+    info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    info.wShowWindow = subprocess.SW_MINIMIZE
+    return info
+
+
 def hidden_popen_kwargs(**overrides: Any) -> dict[str, Any]:
     """Build the mandatory process options for a Hub-owned background command.
 
@@ -52,6 +69,19 @@ def hidden_popen_kwargs(**overrides: Any) -> dict[str, Any]:
     return options
 
 
+def minimized_popen_kwargs(**overrides: Any) -> dict[str, Any]:
+    """Build the documented fallback options without creating a console."""
+
+    options: dict[str, Any] = {
+        "shell": False,
+        "stdin": subprocess.DEVNULL,
+        "creationflags": no_console_flags(),
+        "startupinfo": minimized_startupinfo(),
+    }
+    options.update(overrides)
+    return options
+
+
 def popen_hidden(
     command: Sequence[str | Path],
     *,
@@ -66,6 +96,23 @@ def popen_hidden(
         cwd=str(cwd) if cwd is not None else None,
         env=env,
         **hidden_popen_kwargs(**overrides),
+    )
+
+
+def popen_minimized(
+    command: Sequence[str | Path],
+    *,
+    cwd: Path | str | None = None,
+    env: dict[str, str] | None = None,
+    **overrides: Any,
+) -> subprocess.Popen[Any]:
+    """Start a documented exception minimized, never with a new console."""
+
+    return subprocess.Popen(
+        [str(item) for item in command],
+        cwd=str(cwd) if cwd is not None else None,
+        env=env,
+        **minimized_popen_kwargs(**overrides),
     )
 
 

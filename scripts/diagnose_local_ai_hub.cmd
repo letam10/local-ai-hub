@@ -6,6 +6,9 @@ if exist "%LOCALAIHUB_ROOT%\Config\local.env.cmd" call "%LOCALAIHUB_ROOT%\Config
 if not defined LOCALAIHUB_PYTHON set "LOCALAIHUB_PYTHON=python"
 if exist "%LOCALAIHUB_ROOT%\Environments\hub\Scripts\python.exe" set "LOCALAIHUB_PYTHON=%LOCALAIHUB_ROOT%\Environments\hub\Scripts\python.exe"
 set "PYTHONPATH=%LOCALAIHUB_ROOT%"
-"%LOCALAIHUB_PYTHON%" "%LOCALAIHUB_ROOT%\Scripts\ensure_api.py"
-start "Local AI Hub" "%LOCALAIHUB_PYTHON%" "%LOCALAIHUB_ROOT%\src\app\main.py"
+echo Local AI Hub diagnostic launcher - intentionally keeps this console open.
+echo Normal use: double-click the Local AI Hub shortcut (pythonw GUI launcher).
+"%LOCALAIHUB_PYTHON%" "%LOCALAIHUB_ROOT%\scripts\ensure_api.py"
+if errorlevel 1 exit /b %errorlevel%
+"%LOCALAIHUB_PYTHON%" -m src.app.main
 endlocal
