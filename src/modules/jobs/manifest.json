@@ -1,0 +1,1 @@
+{"schema_version": 1, "module_id": "jobs", "display_name": "Jobs / Queue", "component_status": "source_ready", "tool_status": "operational", "backend": "src.services.api.jobs", "ui": null}

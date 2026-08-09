@@ -1,0 +1,1 @@
+"""Media editor backend adapters."""

@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "model_root": "${LOCALAIHUB_ROOT}/Models",
+  "models": [
+    {"id": "sam2", "engine": "SAM 2", "path": "${LOCALAIHUB_ROOT}/Models/Vision/SAM2", "status": "external_managed"},
+    {"id": "whisper-large-v3", "engine": "Faster-Whisper", "path": "${LOCALAIHUB_ROOT}/Models/Speech/Whisper", "status": "external_managed"},
+    {"id": "qwen3-tts", "engine": "Qwen3-TTS", "path": "${LOCALAIHUB_ROOT}/Models/Voice/Qwen3-TTS", "status": "installed_or_configured"},
+    {"id": "seed-vc", "engine": "Seed-VC", "path": "${LOCALAIHUB_ROOT}/Models/Voice/Seed-VC", "status": "installed_or_configured"},
+    {"id": "qwen-image", "engine": "Qwen Image", "path": "${LOCALAIHUB_ROOT}/Models/Image/Qwen-Image", "status": "not_installed"},
+    {"id": "flux", "engine": "FLUX", "path": "${LOCALAIHUB_ROOT}/Models/Image/FLUX", "status": "external_managed"},
+    {"id": "animesr", "engine": "AnimeSR", "path": "${LOCALAIHUB_ROOT}/Models/Video/AnimeSR", "status": "external_managed"}
+  ]
+}

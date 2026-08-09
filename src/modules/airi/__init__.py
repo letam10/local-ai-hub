@@ -1,0 +1,1 @@
+"""AIRI external-managed integration."""

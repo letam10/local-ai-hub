@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Validate tracked repository files
-        run: python Scripts/ci_validate.py
+        run: python scripts/ci_validate.py
       - name: Check pull request whitespace
         if: github.event_name == 'pull_request'
         run: git diff --check "${{ github.event.pull_request.base.sha }}" HEAD

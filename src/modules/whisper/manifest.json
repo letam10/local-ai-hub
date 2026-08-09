@@ -1,0 +1,1 @@
+{"schema_version": 1, "module_id": "whisper", "display_name": "Whisper / Subtitle", "component_status": "external_managed", "tool_status": "partial", "backend": "src.modules.whisper.backend.adapter", "ui": null, "notes": "Existing Faster-Whisper environment/cache is reused; subtitle muxing remains unavailable."}

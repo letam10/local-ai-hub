@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "hub_name": "Local AI Hub",
+  "bind_host": "127.0.0.1",
+  "api_port": 8765,
+  "mcp_transport": "stdio",
+  "start_maximized": true,
+  "minimum_width": 1280,
+  "minimum_height": 720,
+  "max_heavy_gpu_jobs": 1,
+  "model_load_policy": "on_demand",
+  "auto_start_heavy_services": false,
+  "overwrite_source": false
+}

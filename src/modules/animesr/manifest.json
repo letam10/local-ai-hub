@@ -1,0 +1,1 @@
+{"schema_version": 1, "module_id": "animesr", "display_name": "AnimeSR", "component_status": "external_managed", "tool_status": "queue_only", "backend": "src.modules.animesr.backend.adapter", "ui": null, "notes": "Existing application and non-relocatable venv are preserved; Hub only records queue jobs."}

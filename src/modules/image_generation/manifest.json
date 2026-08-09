@@ -1,0 +1,1 @@
+{"schema_version": 1, "module_id": "image_generation", "display_name": "Image AI", "component_status": "external_managed", "tool_status": "planned", "backend": null, "ui": null, "notes": "Qwen Image and FLUX are registered separately from Qwen3-TTS; no model download or duplicate ComfyUI runtime is performed."}
