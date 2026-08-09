@@ -167,7 +167,7 @@ def component_statuses() -> list[dict[str, Any]]:
     return result
 
 
-def health() -> dict[str, Any]:
+def health(*, probe_gpu: bool = False) -> dict[str, Any]:
     import shutil
 
     config = hub_config()
@@ -184,7 +184,7 @@ def health() -> dict[str, Any]:
         "time": _now(),
         "bind": f"{config.get('bind_host', '127.0.0.1')}:{config.get('api_port', 8765)}",
         "disk": disk,
-        "gpu": query_gpu(),
+        "gpu": query_gpu(probe=probe_gpu),
         "gpu_policy": gpu_policy(config),
         "active_jobs": len(active),
         "loaded_models": [],

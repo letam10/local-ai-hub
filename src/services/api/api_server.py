@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -29,6 +31,20 @@ _BOOTSTRAP_CACHE_SECONDS = 5.0
 _bootstrap_cache: tuple[float, dict] | None = None
 _bootstrap_lock = threading.RLock()
 _PRESET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
+
+
+class HubHTTPServer(ThreadingHTTPServer):
+    """One loopback Hub API per port; Windows must not share this listener."""
+
+    allow_reuse_address = False
+    allow_reuse_port = False
+
+    def server_bind(self) -> None:
+        if os.name == "nt":
+            exclusive_address_use = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+            if exclusive_address_use is not None:
+                self.socket.setsockopt(socket.SOL_SOCKET, exclusive_address_use, 1)
+        super().server_bind()
 
 
 def _settings_payload() -> dict:
@@ -67,7 +83,7 @@ def _bootstrap_payload(*, force: bool = False) -> dict:
     components = component_statuses()
     payload = {
         "status": "completed",
-        "health": health(),
+        "health": health(probe_gpu=True),
         "components": components,
         "applications": applications(),
         "jobs": list_jobs(),
@@ -212,7 +228,7 @@ class HubHandler(BaseHTTPRequestHandler):
             else:
                 self._write_file(path_value, str(artifact["name"]), str(artifact["media_type"]))
         elif normalized in {"/", "/health"}:
-            self._write(200, health())
+            self._write(200, health(probe_gpu=False))
         elif normalized == "/api/bootstrap":
             self._write(200, _bootstrap_payload())
         elif normalized == "/tools":
@@ -396,7 +412,11 @@ def main() -> int:
     host = str(config.get("bind_host", "127.0.0.1"))
     port = int(config.get("api_port", 8765))
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    server = ThreadingHTTPServer((host, port), HubHandler)
+    try:
+        server = HubHTTPServer((host, port), HubHandler)
+    except OSError as exc:
+        LOG.error("Local AI Hub could not bind %s:%s: %s", host, port, exc)
+        return 1
     LOG.info("Local AI Hub listening on %s:%s", host, port)
     try:
         server.serve_forever(poll_interval=0.5)

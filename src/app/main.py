@@ -15,12 +15,16 @@ import time
 import urllib.request
 from pathlib import Path
 
-from src.services.process_manager.windows import popen_hidden
+from src.services.process_manager.managed import terminate_owned_process
+from src.services.process_manager.windows import popen_hidden, startup_mutex
 
 ROOT = Path(__file__).resolve().parents[2]
 HOST = "127.0.0.1"
 PORT = 8765
 UI_URL = f"http://{HOST}:{PORT}/ui/"
+API_STARTUP_MUTEX = r"Local\LocalAIHub.ApiStartup.v1"
+_api_process: subprocess.Popen[object] | None = None
+_api_process_lock = threading.RLock()
 
 
 def _api_ready() -> bool:
@@ -31,26 +35,59 @@ def _api_ready() -> bool:
         return False
 
 
-def ensure_api(timeout_seconds: float = 12.0) -> None:
-    if _api_ready():
-        return
-    python = os.environ.get("LOCALAIHUB_PYTHON") or sys.executable
-    log_path = ROOT / "Logs" / "api_server.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as log:
-        popen_hidden(
-            [python, "-m", "src.services.api.api_server"],
-            cwd=ROOT,
-            env={**os.environ, "PYTHONPATH": str(ROOT), "LOCALAIHUB_ROOT": str(ROOT)},
-            stdout=log,
-            stderr=subprocess.STDOUT,
-        )
-    deadline = time.monotonic() + timeout_seconds
+def _wait_for_api(deadline: float) -> bool:
     while time.monotonic() < deadline:
         if _api_ready():
-            return
+            return True
         time.sleep(0.2)
+    return False
+
+
+def ensure_api(timeout_seconds: float = 20.0) -> subprocess.Popen[object] | None:
+    """Return the API handle only when this desktop shell started it."""
+
+    if _api_ready():
+        return None
+    deadline = time.monotonic() + timeout_seconds
+    with startup_mutex(API_STARTUP_MUTEX, max(0.0, deadline - time.monotonic())) as acquired:
+        if _api_ready():
+            return None
+        if not acquired:
+            if _wait_for_api(deadline):
+                return None
+            raise RuntimeError(f"Local AI Hub API startup lock timed out at {HOST}:{PORT}.")
+        python = os.environ.get("LOCALAIHUB_PYTHON") or sys.executable
+        log_path = ROOT / "Logs" / "api_server.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as log:
+            process = popen_hidden(
+                [python, "-m", "src.services.api.api_server"],
+                cwd=ROOT,
+                env={**os.environ, "PYTHONPATH": str(ROOT), "LOCALAIHUB_ROOT": str(ROOT)},
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+        if _wait_for_api(deadline):
+            return process if process.poll() is None else None
     raise RuntimeError(f"Local AI Hub API did not become ready at {HOST}:{PORT}.")
+
+
+def _remember_owned_api(process: subprocess.Popen[object] | None) -> None:
+    if process is None or process.poll() is not None:
+        return
+    global _api_process
+    with _api_process_lock:
+        _api_process = process
+
+
+def close_owned_api() -> None:
+    """Stop only the API tree that this desktop shell itself started."""
+
+    global _api_process
+    with _api_process_lock:
+        process, _api_process = _api_process, None
+    if process is not None:
+        terminate_owned_process(process)
 
 
 def close_owned_idle_backends() -> None:
@@ -85,7 +122,7 @@ def _load_ui_when_ready(window: object) -> None:
     """Wait in a worker thread, leaving the native loading window responsive."""
 
     try:
-        ensure_api()
+        _remember_owned_api(ensure_api())
     except Exception as exc:  # pragma: no cover - GUI error rendering is host-specific
         try:
             window.load_html(_error_html(str(exc)))  # type: ignore[attr-defined]
@@ -114,7 +151,7 @@ def main() -> int:
             height=720,
             min_size=(1280, 720),
             resizable=True,
-            confirm_close=True,
+            confirm_close=False,
         )
 
         def initialize_window() -> None:
@@ -131,8 +168,11 @@ def main() -> int:
                 daemon=True,
             ).start()
 
-        webview.start(initialize_window, gui="edgechromium", debug=False)
-        close_owned_idle_backends()
+        try:
+            webview.start(initialize_window, gui="edgechromium", debug=False)
+        finally:
+            close_owned_idle_backends()
+            close_owned_api()
         return 0
     except Exception as exc:  # pragma: no cover - native GUI errors are host-specific
         print(f"Local AI Hub desktop shell failed: {exc}", file=sys.stderr)

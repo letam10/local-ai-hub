@@ -23,7 +23,7 @@ from src.services.process_manager.windows import (
     hidden_startupinfo as _hidden_startupinfo,
     no_console_flags as _no_console_flags,
     popen_hidden,
-    run_hidden,
+    terminate_process_tree,
 )
 
 
@@ -72,23 +72,24 @@ def terminate_owned_process(process: subprocess.Popen[Any]) -> None:
 
     if process.poll() is not None:
         return
+    if os.name == "nt":
+        try:
+            if terminate_process_tree(process.pid):
+                process.wait(timeout=5)
+                return
+        except (OSError, subprocess.SubprocessError):
+            pass
     try:
         process.terminate()
         process.wait(timeout=5)
         return
     except (OSError, subprocess.SubprocessError):
         pass
-    if os.name == "nt":
-        try:
-            run_hidden(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=12,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return
+    try:
+        process.kill()
+        process.wait(timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return
 
 
 def run_json_worker(

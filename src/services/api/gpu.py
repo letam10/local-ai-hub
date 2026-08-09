@@ -21,14 +21,18 @@ def _nvidia_smi() -> str | None:
     return shutil.which("nvidia-smi") or r"C:\Windows\System32\nvidia-smi.exe"
 
 
-def query_gpu(*, force: bool = False) -> dict[str, Any]:
-    """Return a short-lived cached GPU snapshot without spawning visible cmd windows."""
+def query_gpu(*, force: bool = False, probe: bool = True) -> dict[str, Any]:
+    """Return cached GPU state; only run ``nvidia-smi`` when an explicit snapshot needs it."""
 
     global _gpu_cache
     now = time.monotonic()
     with _gpu_lock:
-        if not force and _gpu_cache and now - _gpu_cache[0] < _GPU_CACHE_SECONDS:
-            return dict(_gpu_cache[1])
+        if not force and _gpu_cache:
+            age = now - _gpu_cache[0]
+            if not probe or age < _GPU_CACHE_SECONDS:
+                return dict(_gpu_cache[1])
+    if not probe:
+        return {"available": False, "reason": "GPU snapshot pending"}
 
     executable = _nvidia_smi()
     if not executable:

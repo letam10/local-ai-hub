@@ -75,8 +75,10 @@ class V3IntegrationContractTests(unittest.TestCase):
         self.assertIn("shell", helper)
         self.assertIn("popen_hidden", managed)
         self.assertIn("popen_hidden", main)
-        self.assertIn("taskkill", managed)
-        self.assertIn('"/PID", str(process.pid)', managed)
+        self.assertIn("terminate_process_tree(process.pid)", managed)
+        self.assertNotIn('"taskkill"', managed)
+        self.assertIn("CreateToolhelp32Snapshot", helper)
+        self.assertIn("TerminateProcess", helper)
 
     def test_artifact_api_scrubs_private_machine_paths(self) -> None:
         from src.services.artifact_store import publicize
