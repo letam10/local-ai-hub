@@ -1,0 +1,1 @@
+{"schema_version": 1, "module_id": "settings", "display_name": "Settings", "component_status": "source_ready", "tool_status": "operational", "backend": "src.app_config.settings_service", "ui": null}

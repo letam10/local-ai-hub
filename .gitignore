@@ -23,6 +23,7 @@
 # Machine-specific configuration. Only example templates are tracked.
 /Config/*.json
 !/Config/*.example.json
+/Config/layout_migration.local.json
 /Config/local.env.cmd
 !/Config/local.env.example.cmd
 

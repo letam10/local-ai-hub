@@ -1,0 +1,1 @@
+"""AnimeSR backend adapter boundary."""

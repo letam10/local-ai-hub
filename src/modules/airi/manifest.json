@@ -1,0 +1,1 @@
+{"schema_version": 1, "module_id": "airi", "display_name": "AIRI", "component_status": "external_managed", "tool_status": "unavailable", "backend": "src.modules.airi.backend.adapter", "ui": null, "notes": "Windows installer-managed application; Hub stores only a sanitized link/registry entry."}

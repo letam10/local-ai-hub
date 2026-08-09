@@ -1,0 +1,1 @@
+"""Whisper backend adapter boundary."""

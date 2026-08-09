@@ -1,0 +1,1 @@
+{"schema_version": 1, "module_id": "sam2", "display_name": "SAM 2", "component_status": "external_managed", "tool_status": "unavailable", "backend": "src.modules.sam2.backend.adapter", "ui": null, "notes": "Existing Mask Studio remains outside the Hub; direct backend adapter is not verified."}

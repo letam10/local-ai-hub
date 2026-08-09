@@ -78,26 +78,33 @@ result is not recorded in the repository:
 - `/video/subtitle` remains unavailable because subtitle-video output muxing
   has not been verified.
 
-## Layout
+## V2 source and filesystem layout
 
 ```text
-Local AI Hub/
-|- Apps/
-|- Adapters/
-|- Cache/ (local, ignored)
-|- Config/
-|- Environments/ (local, ignored)
-|- Hub/
-|- MCP/
-|- Models/ (local, ignored)
-|- Output/ (local, ignored)
-|- Reports/
-|- Services/
-`- Temp/ (local, ignored)
+D:\\LocalAIHub\\
+|- src\\
+|  |- app\\                 # desktop bootstrap and lifecycle
+|  |- app_config\\          # settings defaults/schema/service
+|  |- modules\\             # one contract per capability
+|  |- services\\            # API, MCP, jobs, storage, migration
+|  `- shared\\              # paths, schemas, validation and utilities
+|- Config\\                 # canonical Windows case; examples tracked
+|- runtime\\                # ignored third-party engines/applications
+|- Models\\                 # ignored checkpoints/model directories
+|- Cache\\ Output\\ Temp\\ Logs\\  # ignored machine state
+|- scripts\\ patches\\ tests\\ docs\\
+`- dependencies.lock.json
 ```
 
-The current installation state is kept in ignored local configuration files.
-Start from the tracked `Config/*.example.json` templates.
+GitHub is the source of truth for code and documentation. Runtime engines,
+models, environments, cache, output, temporary files and secrets are installed
+separately and are never committed. `Config/` is the single canonical Windows
+case; do not create a parallel `config/` tree.
+
+The machine-local migration manifest is `Config/layout_migration.local.json`
+(ignored). A sanitized explanation of the layout and rollback rules lives in
+[`docs/FILESYSTEM_LAYOUT_V2.md`](docs/FILESYSTEM_LAYOUT_V2.md) and
+[`docs/MIGRATION_AND_ROLLBACK.md`](docs/MIGRATION_AND_ROLLBACK.md).
 
 ## Current local engines
 
@@ -119,16 +126,17 @@ The loopback API is `http://127.0.0.1:8765`. Read-only routes include
 returns both `component_status` and `tool_status` with the reason for the
 reported capability state.
 
-`MCP/local_ai_mcp_server.py` uses stdio and forwards only named, allowlisted
-tools. It never accepts arbitrary shell commands or PowerShell.
+`src/services/mcp/local_ai_mcp_server.py` uses stdio and forwards only named,
+allowlisted tools. Deprecated `Hub/`, `Adapters/`, and `MCP/` shims remain for
+existing launchers/imports until a later cleanup PR.
 
 ## Checks
 
 ```powershell
-python Scripts/ci_validate.py
-python Scripts/diagnose.py
-python Scripts/api_smoke.py --image <local-image>
-python MCP/mcp_smoke.py
+python scripts/ci_validate.py
+python scripts/diagnose.py
+python scripts/api_smoke.py --image <local-image>
+python src/services/mcp/mcp_smoke.py
 ```
 
 Run only the smallest applicable smoke check. Do not use these commands for

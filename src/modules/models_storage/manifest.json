@@ -1,0 +1,1 @@
+{"schema_version": 1, "module_id": "models_storage", "display_name": "Models & Storage", "component_status": "source_ready", "tool_status": "partial", "backend": "src.services.storage_manager", "ui": null, "notes": "Reports usage and cleanup candidates; never auto-deletes model/cache data."}

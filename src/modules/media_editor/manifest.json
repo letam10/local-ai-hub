@@ -1,0 +1,1 @@
+{"schema_version": 1, "module_id": "media_editor", "display_name": "Media Editor / FFmpeg", "component_status": "external_managed", "tool_status": "partial", "backend": "src.modules.media_editor.backend.adapter", "ui": null, "notes": "Canonical FFmpeg path is recorded in the local manifest; only allowlisted operations are exposed."}
