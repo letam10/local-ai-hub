@@ -238,7 +238,7 @@ class NodeStudioContractTests(unittest.TestCase):
         self.assertEqual(set(PORT_TYPES), {"IMAGE", "MASK", "VIDEO", "AUDIO", "TEXT", "NUMBER", "BOOLEAN", "MODEL", "METADATA"})
         required = {
             "load_image", "flux_generate", "qwen_image", "image_edit", "image_upscale", "comfyui_workflow", "sam2_segment", "grounding_dino", "rfdetr_detect", "image_compare",
-            "load_video", "probe_media", "trim_cut", "concat", "extract_audio", "replace_audio", "subtitle_burn", "frame_interpolate", "encode", "animesr_upscale",
+            "load_video", "video_generate", "video_transform", "video_upscale", "probe_media", "trim_cut", "concat", "extract_audio", "replace_audio", "subtitle_burn", "frame_interpolate", "encode", "animesr_upscale",
         }
         self.assertTrue(required.issubset(NODE_DEFINITIONS))
 
@@ -270,6 +270,55 @@ class NodeStudioContractTests(unittest.TestCase):
         edge_targets = {(item["target"]["node"], item["target"]["port"]) for item in edit["edges"]}
         self.assertIn(("edit", "image"), edge_targets)
 
+    def test_video_templates_cover_transform_generation_and_export_contracts(self) -> None:
+        from src.services.node_studio.registry import NODE_DEFINITIONS
+        from src.services.node_studio.schema import validate_graph
+
+        transform = json.loads((ROOT / "workflows" / "video_creative_pipeline.json").read_text(encoding="utf-8"))
+        generation = json.loads((ROOT / "workflows" / "video_generation_unavailable.json").read_text(encoding="utf-8"))
+        self.assertTrue(validate_graph(transform)["valid"])
+        self.assertTrue(validate_graph(generation, require_runnable=True)["valid"])
+        self.assertEqual(NODE_DEFINITIONS["video_generate"].status, "unavailable")
+        self.assertEqual(NODE_DEFINITIONS["video_upscale"].status, "partial")
+        transform_types = {item["type"] for item in transform["nodes"]}
+        self.assertTrue({"video_transform", "video_upscale", "frame_interpolate", "encode", "preview_video", "save_video", "export_video"}.issubset(transform_types))
+
+    def test_video_generation_returns_honest_unavailable_action(self) -> None:
+        from src.services.node_studio.engine import execute_graph
+
+        result = execute_graph(
+            {
+                "schema_version": 1,
+                "id": "video-generation-status",
+                "nodes": [
+                    {"id": "prompt", "type": "prompt_text", "data": {"text": "Một cảnh ngắn"}},
+                    {"id": "generate", "type": "video_generate", "data": {}},
+                ],
+                "edges": [{"id": "prompt_generate", "source": {"node": "prompt", "port": "text"}, "target": {"node": "generate", "port": "prompt"}}],
+            },
+            _Context("job_video_generation_status"),
+            lambda *_args: self.fail("video_generate must not call an unavailable backend"),
+        )
+        self.assertEqual(result["status"], "unavailable")
+        self.assertTrue(result["next_action"])
+
+    def test_video_upscale_command_is_allowlisted(self) -> None:
+        from src.modules.media_editor.backend import adapter
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ffmpeg = root / "ffmpeg.exe"
+            source = root / "source.mp4"
+            target = root / "target.mp4"
+            ffmpeg.write_bytes(b"")
+            source.write_bytes(b"input")
+            with patch.object(adapter, "_paths", return_value=(ffmpeg, None)):
+                command = adapter._command({"operation": "video_upscale", "scale": 2}, source, target)
+        assert command is not None
+        command_text = " ".join(command)
+        self.assertIn("trunc(iw*2.0/2)*2", command_text)
+        self.assertIn("-c:a", command)
+
     def test_graph_run_provenance_is_public_and_deduplicated(self) -> None:
         from src.services.node_studio.state import GraphRunRegistry
 
@@ -284,6 +333,7 @@ class NodeStudioContractTests(unittest.TestCase):
         self.assertEqual(snapshot["contract_version"], "node-run.v2")
         self.assertEqual(len(snapshot["provenance"]), 1)
         self.assertNotIn("D:\\private", str(snapshot))
+        self.assertNotIn("D:\\private", str(snapshot["nodes"][0]["output"]))
         self.assertEqual(snapshot["next_action"], "Kiểm tra preview.")
 
     def test_ui_and_api_keep_node_studio_offline_and_bounded(self) -> None:

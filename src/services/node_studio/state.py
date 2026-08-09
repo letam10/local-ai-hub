@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import threading
+import re
 from datetime import datetime, timezone
 from typing import Any
 
+from src.services.artifact_store import publicize
+
+
+_LOCAL_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\)")
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -29,6 +34,22 @@ def _public_artifacts(value: Any, *, path: str = "") -> list[dict[str, Any]]:
         for index, child in enumerate(value):
             found.extend(_public_artifacts(child, path=f"{path}[{index}]"))
     return found
+
+
+def _safe_output(value: Any) -> Any:
+    """Apply the public artifact conversion and scrub raw paths at the state boundary."""
+
+    try:
+        value = publicize(value)
+    except Exception:  # pragma: no cover - defensive boundary for worker payloads
+        pass
+    if isinstance(value, dict):
+        return {str(key): _safe_output(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_safe_output(child) for child in value]
+    if isinstance(value, str) and _LOCAL_PATH.search(value):
+        return "[đường-dẫn-cục-bộ]"
+    return value
 
 
 class GraphRunRegistry:
@@ -88,6 +109,7 @@ class GraphRunRegistry:
                 return
             node.update({"status": status, "progress": max(0, min(100, int(progress))), "message": message})
             if output is not None:
+                output = _safe_output(output)
                 node["output"] = output
             if error:
                 node["error"] = error

@@ -19,7 +19,7 @@ from src.shared.utils.adapter_common import configured_path, unavailable
 
 
 VIDEO_OPS = {
-    "trim", "cut", "concat", "resize", "crop", "rotate", "fps", "transcode", "extract_audio", "replace_audio", "mux", "burn_subtitle", "extract_frames", "image_sequence_video", "frame_interpolate", "encode",
+    "trim", "cut", "concat", "resize", "crop", "rotate", "fps", "transcode", "video_upscale", "extract_audio", "replace_audio", "mux", "burn_subtitle", "extract_frames", "image_sequence_video", "frame_interpolate", "encode",
 }
 IMAGE_OPS = {"image_resize", "image_upscale", "image_crop", "image_rotate", "image_flip", "image_convert", "image_compress", "image_levels"}
 _ENCODER_CACHE_LOCK = threading.RLock()
@@ -418,6 +418,9 @@ def _command(payload: dict[str, Any], source: Path, target: Path) -> list[str] |
     if operation == "fps":
         fps = max(1, min(120, float(payload.get("fps", 30))))
         return [*prefix, "-vf", f"fps={fps}", "-c:a", "copy", str(target)]
+    if operation == "video_upscale":
+        scale = max(1.0, min(4.0, float(payload.get("scale", 2))))
+        return [*prefix, "-vf", f"scale=trunc(iw*{scale}/2)*2:trunc(ih*{scale}/2)*2", "-c:a", "copy", str(target)]
     if operation == "frame_interpolate":
         if str(payload.get("backend") or "ffmpeg_minterpolate") == "practical_rife":
             return []

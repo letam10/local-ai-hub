@@ -281,6 +281,41 @@ def _run_frame_interpolate(data: dict[str, Any], inputs: dict[str, Any], context
     return output
 
 
+def _run_video_transform(data: dict[str, Any], inputs: dict[str, Any], context: Any, execute_tool: ToolExecutor) -> dict[str, Any]:
+    source = _input_artifact(inputs, "video")
+    operation = str(data.get("operation") or "resize")
+    if operation not in {"resize", "crop", "rotate", "fps", "transcode"}:
+        raise NodeFailure("Video Transform không nằm trong allowlist.")
+    result = execute_tool("run_media_operation", {"operation": operation, "path": str(source.path), **data}, context)
+    output = _media_result(result, expected_output="video")
+    output.setdefault("metadata", {}).update({"operation": operation, "creative_prompt": str(inputs.get("prompt") or "")})
+    return output
+
+
+def _run_video_upscale(data: dict[str, Any], inputs: dict[str, Any], context: Any, execute_tool: ToolExecutor) -> dict[str, Any]:
+    source = _input_artifact(inputs, "video")
+    backend = str(data.get("backend") or "ffmpeg_scale")
+    if backend == "animesr":
+        result = execute_tool("upscale_anime_video", {"path": str(source.path), **data}, context)
+        if result.get("status") != "completed":
+            raise NodeFailure(
+                str(result.get("error") or result.get("reason") or "AnimeSR video upscale không hoàn tất."),
+                status=str(result.get("status") or "failed"),
+            )
+        output_value = result.get("output")
+        if not isinstance(output_value, str) or not output_value:
+            raise NodeFailure("AnimeSR không trả output video hợp lệ.")
+        return {"video": _artifact_from_path(output_value), "metadata": {"backend": "animesr", "scale": data.get("scale")}}
+    if backend != "ffmpeg_scale":
+        raise NodeFailure("Video Upscale backend không nằm trong allowlist.")
+    output = _media_result(
+        execute_tool("run_media_operation", {"operation": "video_upscale", "path": str(source.path), **data}, context),
+        expected_output="video",
+    )
+    output.setdefault("metadata", {}).update({"backend": "ffmpeg_scale", "ai_upscaler": False, "scale": data.get("scale")})
+    return output
+
+
 def _run_encode(data: dict[str, Any], inputs: dict[str, Any], context: Any, execute_tool: ToolExecutor) -> dict[str, Any]:
     source = _input_artifact(inputs, "video")
     payload = {"operation": "encode", "path": str(source.path), **data}
@@ -453,10 +488,20 @@ def _run_node(definition: NodeDefinition, data: dict[str, Any], inputs: dict[str
         return _run_media(definition.type, data, inputs, context, execute_tool)
     if runner == "frame_interpolate":
         return _run_frame_interpolate(data, inputs, context, execute_tool)
+    if runner == "video_transform":
+        return _run_video_transform(data, inputs, context, execute_tool)
+    if runner == "video_upscale":
+        return _run_video_upscale(data, inputs, context, execute_tool)
     if runner == "encode":
         return _run_encode(data, inputs, context, execute_tool)
     if runner in {"flux", "qwen"}:
         return _run_image_generation(definition, data, inputs, context, execute_tool, draft=draft)
+    if runner == "video_generate":
+        raise NodeFailure(
+            "Video generation backend chưa khả dụng trong Hub.",
+            status="unavailable",
+            next_action=definition.status_action,
+        )
     if runner == "comfyui_workflow":
         return _run_comfyui_workflow(data, inputs, context, draft=draft)
     if runner == "grounding":

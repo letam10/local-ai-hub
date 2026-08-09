@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "video-creative-pipeline",
+  "title": "Video — Transform → Upscale → Interpolate → Export",
+  "description": "Tải video artifact, thêm creative prompt tuỳ chọn, transform bằng FFmpeg rồi upscale, nội suy, encode và export.",
+  "scope": "media",
+  "stage": "video-creative",
+  "requires": ["video artifact", "FFmpeg canonical"],
+  "nodes": [
+    {"id": "input", "type": "load_video", "position": {"x": 70, "y": 230}, "data": {"asset_id": ""}},
+    {"id": "prompt", "type": "prompt_text", "position": {"x": 70, "y": 450}, "data": {"text": "Giữ nhịp chuyển động mượt và màu điện ảnh"}},
+    {"id": "transform", "type": "video_transform", "position": {"x": 390, "y": 230}, "data": {"operation": "resize", "width": 1280, "height": -2, "degrees": 90, "fps": 30, "crf": 18}},
+    {"id": "upscale", "type": "video_upscale", "position": {"x": 700, "y": 230}, "data": {"backend": "ffmpeg_scale", "scale": 2}},
+    {"id": "interpolate", "type": "frame_interpolate", "position": {"x": 990, "y": 230}, "data": {"mode": "target_fps", "target_fps": 60, "backend": "ffmpeg_minterpolate"}},
+    {"id": "encode", "type": "encode", "position": {"x": 1290, "y": 230}, "data": {"container": "mp4", "codec": "auto", "rate_control": "quality", "quality": 20, "bitrate_kbps": 6000, "max_bitrate_kbps": 9000, "buffer_kbps": 12000, "preset": "medium", "pixel_format": "", "audio_codec": "aac", "audio_bitrate_kbps": 192, "prefer_gpu": false, "multipass": false}},
+    {"id": "preview", "type": "preview_video", "position": {"x": 1580, "y": 230}, "data": {}},
+    {"id": "save", "type": "save_video", "position": {"x": 1830, "y": 230}, "data": {}},
+    {"id": "export", "type": "export_video", "position": {"x": 2070, "y": 230}, "data": {}}
+  ],
+  "edges": [
+    {"id": "input_to_transform", "source": {"node": "input", "port": "video"}, "target": {"node": "transform", "port": "video"}},
+    {"id": "prompt_to_transform", "source": {"node": "prompt", "port": "text"}, "target": {"node": "transform", "port": "prompt"}},
+    {"id": "transform_to_upscale", "source": {"node": "transform", "port": "video"}, "target": {"node": "upscale", "port": "video"}},
+    {"id": "upscale_to_interpolate", "source": {"node": "upscale", "port": "video"}, "target": {"node": "interpolate", "port": "video"}},
+    {"id": "interpolate_to_encode", "source": {"node": "interpolate", "port": "video"}, "target": {"node": "encode", "port": "video"}},
+    {"id": "encode_to_preview", "source": {"node": "encode", "port": "video"}, "target": {"node": "preview", "port": "video"}},
+    {"id": "preview_to_save", "source": {"node": "preview", "port": "video"}, "target": {"node": "save", "port": "video"}},
+    {"id": "save_to_export", "source": {"node": "save", "port": "video"}, "target": {"node": "export", "port": "video"}}
+  ],
+  "groups": []
+}
