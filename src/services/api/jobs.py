@@ -117,7 +117,7 @@ def public_job(record: dict[str, Any]) -> dict[str, Any]:
         result["result"] = publicize(result["result"])
     if result.get("error"):
         result["error"] = publicize(result["error"])
-    result["resumable"] = bool(record.get("resume_data")) and record.get("status") in {"cancelled", "failed"}
+    result["resumable"] = bool(record.get("resume_data")) and record.get("status") in {"cancelled", "failed", "unavailable"}
     return result
 
 

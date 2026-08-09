@@ -145,8 +145,8 @@ class HubJobManager:
         record = get_job_internal(job_id)
         if record is None:
             return False, "Không tìm thấy job Hub."
-        if record.get("status") not in {"cancelled", "failed"}:
-            return False, "Chỉ có thể tiếp tục job đã hủy hoặc thất bại."
+        if record.get("status") not in {"cancelled", "failed", "unavailable"}:
+            return False, "Chỉ có thể thử lại job đã hủy, thất bại hoặc chưa khả dụng."
         with self._lock:
             runner = self._runners.get(job_id)
         payload = record.get("resume_data")

@@ -88,6 +88,32 @@ TOOL_CAPABILITIES = {
     "generate_qwen_image": ("partial", "Qwen Image workflow gọi trực tiếp ComfyUI API; chưa có smoke generation V3 được ghi nhận."),
 }
 
+# Keep the UI's "Bước tiếp theo" contract alongside the truthful capability
+# status.  These actions are guidance only; they never imply that an un-smoked
+# backend is operational.
+TOOL_ACTIONS = {
+    "parse_screen": "Chọn một screenshot nhỏ rồi chạy bounded smoke khi tài nguyên sẵn sàng.",
+    "detect_objects": "Chọn một ảnh nhỏ và xác minh detector trước khi dùng batch.",
+    "ground_objects": "Nhập prompt ngắn, kiểm tra boxes rồi mới nối sang SAM2.",
+    "segment_image": "Tải ảnh và kiểm tra mask trong Jobs; chưa có smoke thì giữ partial.",
+    "segment_from_box": "Kéo box trên preview, sau đó kiểm tra mask artifact trong Jobs.",
+    "segment_from_points": "Chọn điểm trên preview và kiểm tra mask artifact trong Jobs.",
+    "segment_from_text": "Xác minh Grounding DINO trước khi chạy pipeline text → mask.",
+    "track_video_object": "Chỉ chạy với clip ngắn sau khi resource override được gỡ.",
+    "ocr_document": "Tải một ảnh/PDF nhỏ và kiểm tra text artifact trước khi chạy batch.",
+    "transcribe_media": "Chọn media ngắn và kiểm tra transcript/SRT trước khi dịch hoặc burn.",
+    "create_subtitled_video": "Xác minh transcript trước; video smoke hiện deferred do resource contention.",
+    "text_to_speech": "Nhập một câu ngắn và kiểm tra audio artifact sau bounded smoke.",
+    "design_voice": "Dùng sample ngắn, không đưa reference cá nhân vào log hoặc PR.",
+    "clone_voice": "Chỉ dùng reference đã được phép và kiểm tra output local.",
+    "convert_voice": "Kiểm tra source/target artifact ID trước khi queue.",
+    "upscale_anime_video": "Video smoke hiện deferred do resource contention; giữ trạng thái partial.",
+    "probe_media": "Đọc metadata là read-only; mở JSON result trong Jobs.",
+    "run_media_operation": "Chọn operation allowlist và kiểm tra output artifact, không ghi đè source.",
+    "generate_flux": "Chọn template Image AI; generation smoke hiện deferred nếu ComfyUI/GPU đang bận.",
+    "generate_qwen_image": "Chọn ảnh input nếu edit; generation smoke hiện deferred nếu ComfyUI/GPU đang bận.",
+}
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -202,7 +228,13 @@ def _tool_readiness(tool: str, statuses: dict[str, dict[str, Any]]) -> dict[str,
     elif tool_status == "partial" and tool in SMOKE_ELIGIBLE_TOOLS and smoke_passed(tool):
         tool_status = "operational"
         reason = "Đã có một direct job bounded hoàn tất trên máy này; trạng thái được lưu cục bộ, không chứa đường dẫn hoặc dữ liệu input."
-    return {"component": component_id, "component_status": component_status, "tool_status": tool_status, "reason": reason}
+    return {
+        "component": component_id,
+        "component_status": component_status,
+        "tool_status": tool_status,
+        "reason": reason,
+        "action": TOOL_ACTIONS.get(tool, "Kiểm tra trạng thái backend rồi thử lại trong Jobs."),
+    }
 
 
 def tool_catalog(component_items: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
@@ -218,10 +250,11 @@ def tool_catalog(component_items: list[dict[str, Any]] | None = None) -> list[di
             "status": readiness["tool_status"],
             "description": f"Allowlisted Local AI Hub workflow backed by {component_id}.",
             "reason": readiness["reason"],
+            "action": readiness["action"],
         })
     tools.extend([
-        {"name": "get_health", "component": "local_ai_api", "component_status": "running", "tool_status": "operational", "status": "operational", "description": "Return Hub health.", "reason": "Loopback control-plane route."},
-        {"name": "list_models", "component": "local_ai_api", "component_status": "running", "tool_status": "operational", "status": "operational", "description": "Return safe model inventory.", "reason": "Loopback control-plane route."},
+        {"name": "get_health", "component": "local_ai_api", "component_status": "running", "tool_status": "operational", "status": "operational", "description": "Return Hub health.", "reason": "Loopback control-plane route.", "action": "Mở Dashboard để xem health, disk và job summary."},
+        {"name": "list_models", "component": "local_ai_api", "component_status": "running", "tool_status": "operational", "status": "operational", "description": "Return safe model inventory.", "reason": "Loopback control-plane route.", "action": "Mở Models & Storage và quét lại khi cần."},
     ])
     return tools
 
@@ -234,6 +267,7 @@ def _unavailable(tool: str, readiness: dict[str, Any], reason: str | None = None
         "component_status": readiness["component_status"],
         "tool_status": readiness["tool_status"],
         "reason": reason or readiness["reason"],
+        "action": readiness.get("action") or TOOL_ACTIONS.get(tool, "Kiểm tra backend rồi thử lại."),
     }
 
 

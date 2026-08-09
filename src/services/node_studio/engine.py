@@ -604,11 +604,14 @@ def execute_graph(graph: dict[str, Any], context: Any, execute_tool: ToolExecuto
         next_action = exc.next_action or (definition.status_action if definition and definition.status != "operational" else None)
         graph_runs.update_node(str(context.job_id), node_id, status=exc.status, progress=0, message=message, error=message, next_action=next_action)
         graph_runs.finish(str(context.job_id), status=exc.status, error=message, next_action=next_action)
-        return {"status": "unavailable" if exc.status == "unavailable" else "error", "error": message, "next_action": next_action, "failed_node": node_id, "nodes": public_nodes}
+        snapshot = graph_runs.snapshot(str(context.job_id)) or {}
+        return {"status": "unavailable" if exc.status == "unavailable" else "error", "error": message, "next_action": next_action, "failed_node": node_id, "nodes": public_nodes, "provenance": snapshot.get("provenance", [])}
     except Exception as exc:  # pragma: no cover - protects the background job thread
         message = str(publicize(str(exc)))
         graph_runs.update_node(str(context.job_id), node_id, status="failed", progress=0, message=message, error=message, next_action="Kiểm tra log job và cấu hình backend rồi thử lại.")
         graph_runs.finish(str(context.job_id), status="failed", error=message, next_action="Kiểm tra log job và cấu hình backend rồi thử lại.")
-        return {"status": "error", "error": message, "next_action": "Kiểm tra log job và cấu hình backend rồi thử lại.", "failed_node": node_id, "nodes": public_nodes}
+        snapshot = graph_runs.snapshot(str(context.job_id)) or {}
+        return {"status": "error", "error": message, "next_action": "Kiểm tra log job và cấu hình backend rồi thử lại.", "failed_node": node_id, "nodes": public_nodes, "provenance": snapshot.get("provenance", [])}
     graph_runs.finish(str(context.job_id), status="completed")
-    return {"status": "completed", "graph_id": value.get("id"), "draft": bool(draft), "nodes": public_nodes}
+    snapshot = graph_runs.snapshot(str(context.job_id)) or {}
+    return {"status": "completed", "graph_id": value.get("id"), "draft": bool(draft), "nodes": public_nodes, "provenance": snapshot.get("provenance", [])}
