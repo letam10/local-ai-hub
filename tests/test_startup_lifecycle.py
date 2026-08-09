@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from src.app import main as desktop
 from src.services.api import gpu
 from src.services.api.core import health
 
@@ -14,10 +15,16 @@ ROOT = Path(__file__).resolve().parents[1]
 class StartupLifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
         self._saved_gpu_cache = gpu._gpu_cache
+        self._saved_api_process = desktop._api_process
+        self._saved_shutdown_started = desktop._shutdown_started
         gpu._gpu_cache = None
+        desktop._api_process = None
+        desktop._shutdown_started = False
 
     def tearDown(self) -> None:
         gpu._gpu_cache = self._saved_gpu_cache
+        desktop._api_process = self._saved_api_process
+        desktop._shutdown_started = self._saved_shutdown_started
 
     def test_readiness_snapshot_does_not_spawn_nvidia_smi(self) -> None:
         with patch.object(gpu, "run_hidden") as run_hidden:
@@ -38,6 +45,26 @@ class StartupLifecycleTests(unittest.TestCase):
         self.assertNotIn('"taskkill"', managed)
         self.assertIn("CreateToolhelp32Snapshot", windows)
         self.assertIn("TerminateProcess", windows)
+
+    def test_late_owned_api_after_close_is_terminated_once(self) -> None:
+        process = Mock()
+        process.poll.return_value = None
+        with patch.object(desktop, "terminate_owned_process") as terminate:
+            desktop.close_owned_api()
+            desktop._remember_owned_api(process)
+
+        terminate.assert_called_once_with(process)
+        self.assertIsNone(desktop._api_process)
+
+    def test_owned_api_registered_before_close_is_terminated_once(self) -> None:
+        process = Mock()
+        process.poll.return_value = None
+        with patch.object(desktop, "terminate_owned_process") as terminate:
+            desktop._remember_owned_api(process)
+            desktop.close_owned_api()
+
+        terminate.assert_called_once_with(process)
+        self.assertIsNone(desktop._api_process)
 
 
 if __name__ == "__main__":

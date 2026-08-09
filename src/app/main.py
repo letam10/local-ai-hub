@@ -25,6 +25,7 @@ UI_URL = f"http://{HOST}:{PORT}/ui/"
 API_STARTUP_MUTEX = r"Local\LocalAIHub.ApiStartup.v1"
 _api_process: subprocess.Popen[object] | None = None
 _api_process_lock = threading.RLock()
+_shutdown_started = False
 
 
 def _api_ready() -> bool:
@@ -76,15 +77,23 @@ def _remember_owned_api(process: subprocess.Popen[object] | None) -> None:
     if process is None or process.poll() is not None:
         return
     global _api_process
+    terminate_late_process = False
     with _api_process_lock:
-        _api_process = process
+        if _shutdown_started:
+            terminate_late_process = True
+        else:
+            _api_process = process
+    if terminate_late_process:
+        # Shutdown may win the startup race; never leave a late-owned API tree alive.
+        terminate_owned_process(process)
 
 
 def close_owned_api() -> None:
     """Stop only the API tree that this desktop shell itself started."""
 
-    global _api_process
+    global _api_process, _shutdown_started
     with _api_process_lock:
+        _shutdown_started = True
         process, _api_process = _api_process, None
     if process is not None:
         terminate_owned_process(process)
