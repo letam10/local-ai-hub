@@ -46,7 +46,7 @@ API chỉ bind loopback `127.0.0.1`; UI không nhận command shell, executable 
 | AnimeSR | Upload, queue, scale, chunk, cancel/resume; RIFE/Real-ESRGAN giữ `partial` khi chưa có CLI contract đã xác minh |
 | Whisper | Transcript/SRT, dịch khi backend hỗ trợ và burn subtitle qua FFmpeg ẩn |
 | Voice Studio | Qwen3-TTS, Voice Design/Clone và Seed-VC qua worker nền |
-| Image AI | FLUX/Qwen Image qua ComfyUI API; Advanced chỉ mở web ComfyUI theo yêu cầu |
+| Image AI | Quick FLUX/Qwen qua ComfyUI API, Hub Nodes và ComfyUI Advanced nhúng trong cùng cửa sổ |
 | Media | Probe, trim, concat, resize/crop/rotate/FPS, transcode, audio/subtitle, frames và image sequence qua FFmpeg allowlist |
 | OCR | Ảnh/PDF qua PaddleOCR worker, xuất text/Markdown/JSON/tables khi backend có sẵn |
 
@@ -135,7 +135,24 @@ Xem thêm [kiến trúc một cửa sổ V3](docs/TRUE_SINGLE_WINDOW_V3.md),
 [migration và rollback](docs/MIGRATION_AND_ROLLBACK.md) và
 [tích hợp AIRI](docs/AIRI_INTEGRATION.md).
 
-## V4 — Node Studio và khởi động nhanh
+## V5 — Node Studio, ComfyUI Advanced và phân phối
+
+V5 thay editor Node Studio tự viết bằng LiteGraph.js offline đã pin phiên bản.
+Image AI có ba workspace: Quick, Hub Nodes và ComfyUI Advanced. Advanced nhúng
+frontend ComfyUI gốc vào chính WebView Local AI Hub qua loopback, không mở
+Chrome hoặc Edge ngoài cho luồng bình thường. Bridge workflow nối artifact Hub
+với ComfyUI nhưng không chấp nhận đường dẫn máy thô.
+
+Phân phối V5 giữ Git nhỏ: Core release chỉ dành cho launcher, frontend, API,
+runtime bootstrap nhỏ và wheelhouse nhỏ; model, CUDA, Torch, Paddle,
+environment, cache và dữ liệu người dùng không vào Core. Module chỉ có thể tải
+on-demand khi manifest có URL HTTPS và SHA-256 đã xác minh; Full không tự tải
+model nếu chưa có xác nhận rõ.
+
+Xem thêm tài liệu về [Node Studio V5](docs/NODE_STUDIO_V5.md),
+[launcher không console V5](docs/NO_CONSOLE_V5.md),
+[Source Audit V5](docs/SOURCE_AUDIT_V5.md) và
+[phân phối V5](docs/DISTRIBUTION_V5.md).
 
 V4 thêm tab `Nodes` vào Image AI, SAM2, Media và AnimeSR. Node Studio chạy
 offline trong WebView, có typed sockets, DAG validator/cycle detection,

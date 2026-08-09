@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "asset_name": "LocalAIHub-Core-Win64.zip",
+  "platform": "windows-x64",
+  "target_size_mib": {
+    "minimum": 50,
+    "maximum": 200
+  },
+  "purpose": "Offline core launcher, frontend, API, bootstrap runtime and small wheelhouse only.",
+  "tracked_source_roots": [
+    "src",
+    "scripts",
+    "workflows",
+    "Config",
+    "docs",
+    "distribution",
+    "tests"
+  ],
+  "tracked_source_files": [
+    "README.md",
+    "LICENSES.md",
+    "requirements-hub.txt",
+    "dependencies.lock.json"
+  ],
+  "portable_runtime": {
+    "required_for_release_build": true,
+    "source": "release staging only; never commit to this repository",
+    "destination": "runtime/bootstrap-python",
+    "allowed_purpose": "CPython and small UI/bootstrap dependencies"
+  },
+  "wheelhouse": {
+    "required_for_release_build": true,
+    "source": "release staging only; never commit to this repository",
+    "destination": "wheelhouse",
+    "allowed_purpose": "Pinned small bootstrap wheels only"
+  },
+  "exclude_roots": [
+    "Models",
+    "Environments",
+    "Cache",
+    "Temp",
+    "Output",
+    "Backups",
+    "Logs",
+    "runtime",
+    "Runtimes",
+    "Modules",
+    "Reports"
+  ],
+  "forbidden_suffixes": [
+    ".bin",
+    ".ckpt",
+    ".gguf",
+    ".npy",
+    ".npz",
+    ".onnx",
+    ".pkl",
+    ".pt",
+    ".pth",
+    ".safetensors"
+  ],
+  "forbidden_runtime_path_tokens": [
+    "cuda",
+    "cudnn",
+    "torch",
+    "paddle",
+    "model",
+    "cache",
+    "venv",
+    "environment"
+  ],
+  "build_policy": {
+    "require_explicit_runtime_dir": true,
+    "require_explicit_wheelhouse_dir": true,
+    "enforce_target_size_only_for_release_build": true,
+    "never_pad_archive_to_reach_target": true
+  }
+}

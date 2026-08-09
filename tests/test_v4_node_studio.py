@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import threading
 import time
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 
@@ -160,13 +162,82 @@ class NodeStudioExecutionTests(unittest.TestCase):
         record_completed.assert_called_once_with("node_graph")
 
 
+class ComfyBridgeWorkflowTests(unittest.TestCase):
+    def test_local_bridge_save_load_and_private_path_rejection(self) -> None:
+        from src.modules.image_generation.backend import comfyui
+
+        workflow = {
+            "schema_version": 1,
+            "id": "bridge_test",
+            "title": "Bridge test",
+            "kind": "raw_comfy_api",
+            "prompt": {"1": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}}},
+            "bindings": {"text": [{"node": "1", "input": "text"}]},
+        }
+        with TemporaryDirectory() as temporary:
+            tracked = Path(temporary) / "tracked"
+            local = Path(temporary) / "local"
+            with patch.object(comfyui, "BRIDGE_WORKFLOW_ROOT", tracked), patch.object(comfyui, "BRIDGE_LOCAL_ROOT", local):
+                status, payload = comfyui.save_bridge_workflow("bridge_test", workflow)
+                self.assertEqual(status, 201)
+                self.assertEqual(payload["status"], "completed")
+                self.assertEqual(comfyui.load_bridge_workflow("bridge_test")["id"], "bridge_test")
+                self.assertEqual(comfyui.list_bridge_workflows()[0]["local"], True)
+                unsafe = {**workflow, "id": "unsafe_bridge", "description": r"D:\private-machine\secret.json"}
+                error_status, error_payload = comfyui.save_bridge_workflow("unsafe_bridge", unsafe)
+                self.assertEqual(error_status, 400)
+                self.assertIn("đường dẫn", error_payload["error"])
+
+    def test_advanced_frontend_is_loopback_only_and_not_a_browser_popup(self) -> None:
+        pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
+        app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('data-workspace-tab="image:advanced"', pages)
+        self.assertIn('sandbox="allow-scripts allow-same-origin allow-forms allow-downloads"', pages)
+        self.assertIn("127\\.0\\.0\\.1", pages)
+        self.assertNotIn("window.open", app)
+
+    def test_portable_comfyui_gets_a_safe_startup_window(self) -> None:
+        backend = (ROOT / "src" / "modules" / "image_generation" / "backend" / "comfyui.py").read_text(encoding="utf-8")
+        example = json.loads((ROOT / "Config" / "hub_config.example.json").read_text(encoding="utf-8"))
+        self.assertIn("max(300.0", backend)
+        self.assertEqual(example["comfyui_start_timeout_seconds"], 300)
+
+
+class DistributionContractTests(unittest.TestCase):
+    def test_core_manifest_excludes_models_and_installer_full_needs_confirmation(self) -> None:
+        core = json.loads((ROOT / "distribution" / "core.manifest.json").read_text(encoding="utf-8"))
+        modules = json.loads((ROOT / "distribution" / "modules.manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(core["asset_name"], "LocalAIHub-Core-Win64.zip")
+        self.assertEqual(core["target_size_mib"], {"minimum": 50, "maximum": 200})
+        self.assertIn("Models", core["exclude_roots"])
+        self.assertTrue(modules["download_policy"]["never_download_models_during_full_install_without_confirmation"])
+
+        spec = importlib.util.spec_from_file_location("bootstrap_installer_test", ROOT / "scripts" / "bootstrap_installer.py")
+        assert spec and spec.loader
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        plan = installer.plan_install(modules, "full", [], False)
+        self.assertEqual(len(plan), 5)
+        self.assertTrue(all(item["module_archive"] == "unavailable" for item in plan))
+        self.assertTrue(all(item["model_download"] == "blocked_without_explicit_confirmation" for item in plan))
+
+    def test_source_audit_and_core_builder_are_read_only_by_default(self) -> None:
+        source_audit = (ROOT / "scripts" / "audit_source_v5.py").read_text(encoding="utf-8")
+        builder = (ROOT / "scripts" / "build_core_release.py").read_text(encoding="utf-8")
+        self.assertIn("read-only", source_audit.lower())
+        self.assertIn("never copies, moves, deletes", source_audit.lower())
+        self.assertIn("--build", builder)
+        self.assertIn("--runtime-dir", builder)
+        self.assertIn("Do not pad it", builder)
+
+
 class NodeStudioContractTests(unittest.TestCase):
     def test_registry_covers_required_port_types_and_key_nodes(self) -> None:
         from src.services.node_studio.registry import PORT_TYPES, NODE_DEFINITIONS
 
         self.assertEqual(set(PORT_TYPES), {"IMAGE", "MASK", "VIDEO", "AUDIO", "TEXT", "NUMBER", "BOOLEAN", "MODEL", "METADATA"})
         required = {
-            "load_image", "flux_generate", "qwen_image", "sam2_segment", "grounding_dino", "rfdetr_detect", "image_compare",
+            "load_image", "flux_generate", "qwen_image", "comfyui_workflow", "sam2_segment", "grounding_dino", "rfdetr_detect", "image_compare",
             "load_video", "probe_media", "trim_cut", "concat", "extract_audio", "replace_audio", "subtitle_burn", "frame_interpolate", "encode", "animesr_upscale",
         }
         self.assertTrue(required.issubset(NODE_DEFINITIONS))
@@ -178,6 +249,10 @@ class NodeStudioContractTests(unittest.TestCase):
         self.assertIn("Auto Preview", ui)
         self.assertIn("Run Graph", ui)
         self.assertIn("Undo", ui) if "Undo" in ui else self.assertIn("this.undo", ui)
+        self.assertIn("LiteGraph.LGraphCanvas", ui)
+        self.assertIn("allow_reconnect_links", ui)
+        self.assertNotIn("chooseOutput", ui)
+        self.assertNotIn("connectInput", ui)
         self.assertIn("/api/node-studio/run", api)
         self.assertIn("cycle_detected", schema)
         self.assertNotIn("cdn", ui.lower())
@@ -187,11 +262,16 @@ class NodeStudioContractTests(unittest.TestCase):
         runtime = (ROOT / "src" / "services" / "runtime_registry.py").read_text(encoding="utf-8")
         gpu = (ROOT / "src" / "services" / "api" / "gpu.py").read_text(encoding="utf-8")
         app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
+        launcher_audit = (ROOT / "scripts" / "audit_local_ai_hub_entrypoints.ps1").read_text(encoding="utf-8")
         self.assertIn("CREATE_NO_WINDOW", helper)
         self.assertIn("SW_HIDE", helper)
+        self.assertIn("SW_MINIMIZE", helper)
         self.assertIn("_TASKLIST_CACHE_SECONDS = 5.0", runtime)
         self.assertIn("_GPU_CACHE_SECONDS = 2.0", gpu)
         self.assertIn("2500", app)
+        self.assertIn("pythonw.exe", launcher_audit)
+        retired_launcher = "launch_local_ai_hub" + ".cmd"
+        self.assertFalse((ROOT / "scripts" / retired_launcher).exists())
 
 
 if __name__ == "__main__":

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "approved_roots": [
+    {
+      "path": "D:\\LocalAIHub\\Adapters",
+      "label": "First-party adapter candidates"
+    },
+    {
+      "path": "D:\\LocalAIHub\\Apps",
+      "label": "Legacy application source candidates"
+    },
+    {
+      "path": "D:\\LocalAIHub\\patches",
+      "label": "Reviewed upstream patches"
+    }
+  ],
+  "max_depth": 4,
+  "max_directories": 1200
+}
