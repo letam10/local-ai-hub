@@ -1,48 +1,50 @@
 # Local AI Hub
 
-Windows-native coordinator for local AI applications and engines. This
-repository contains first-party source, adapters, wrappers, examples, and
-documentation - not the machine installation, models, environments, caches, or
-personal media.
+Trình điều phối chạy thuần Windows cho các ứng dụng và engine AI cục bộ. Kho mã
+này chỉ chứa mã nguồn first-party, adapter, wrapper, ví dụ cấu hình và tài liệu;
+không chứa bản cài đặt trên máy, model, environment, cache hay dữ liệu media cá
+nhân.
 
-## Safety properties
+## Các nguyên tắc an toàn
 
-- The local installation root is supplied by `LOCAL_AI_HOME`; no personal
-  absolute path is required in the repository.
-- Existing AnimeSR, SAM 2, FFmpeg, Whisper/ASR, Ollama, ComfyUI, and AIRI
-  installations are referenced through ignored local configuration and are not
-  moved or overwritten.
-- Heavy models load on demand and the default policy allows one heavy GPU job
-  at a time.
-- The API binds to `127.0.0.1` only. The MCP bridge uses stdio by default.
-- Source media is never overwritten; outputs are written below the configured
-  local output root.
-- Functional smoke tests are used instead of benchmark loops or stress tests.
+- Thư mục gốc cài đặt cục bộ được cung cấp qua `LOCAL_AI_HOME`; repository
+  không cần và không chứa đường dẫn tuyệt đối riêng của máy.
+- Các bản cài đặt AnimeSR, SAM 2, FFmpeg, Whisper/ASR, Ollama, ComfyUI và AIRI
+  đang có được tham chiếu qua cấu hình cục bộ bị Git bỏ qua; chúng không bị di
+  chuyển hoặc ghi đè.
+- Model nặng chỉ được nạp theo yêu cầu; chính sách mặc định chỉ cho phép một
+  tác vụ GPU nặng chạy tại một thời điểm.
+- API chỉ bind vào `127.0.0.1`. Cầu nối MCP mặc định sử dụng stdio.
+- Media nguồn không bao giờ bị ghi đè; kết quả được ghi bên dưới thư mục output
+  cục bộ đã cấu hình.
+- Dùng smoke test chức năng có giới hạn thay cho vòng lặp benchmark hoặc stress
+  test.
 
-## Readiness model
+## Mô hình trạng thái sẵn sàng
 
-Local AI Hub reports two independent states:
+Local AI Hub báo cáo hai trạng thái độc lập:
 
-- `component_status` describes the discovered local component state, such as
-  `installed`, `running`, `missing`, or `planned`.
-- `tool_status` describes the readiness of a specific allowlisted tool:
-  `operational`, `partial`, `queue_only`, `unavailable`, `planned`, or `error`.
+- `component_status` mô tả trạng thái thành phần cục bộ đã phát hiện, ví dụ
+  `installed`, `running`, `missing` hoặc `planned`.
+- `tool_status` mô tả mức độ sẵn sàng của một công cụ đã được allowlist:
+  `operational`, `partial`, `queue_only`, `unavailable`, `planned` hoặc
+  `error`.
 
-An installed component never implies that every tool backed by it is
-operational. For example, SAM 2 can be installed as an external GUI while its
-`segment_image` and `track_video_object` tools remain unavailable. A partial
-tool dynamically reports `unavailable` when its required local component is
-not installed.
+Một component đã được cài đặt không đồng nghĩa mọi tool dựa trên component đó
+đều đang hoạt động. Ví dụ, SAM 2 có thể được cài dưới dạng GUI bên ngoài trong
+khi các tool `segment_image` và `track_video_object` vẫn ở trạng thái không khả
+dụng. Một tool `partial` sẽ tự báo `unavailable` khi component cục bộ mà nó cần
+chưa được cài đặt.
 
-## Current backend readiness
+## Mức độ sẵn sàng backend hiện tại
 
-The following describes the imported source contract. It does not claim that a
-particular workstation has every local component configured.
+Nội dung sau mô tả contract của mã nguồn đã import. Nó không khẳng định một máy
+cụ thể đã cấu hình đầy đủ mọi component cục bộ.
 
-### Operational
+### Đang hoạt động
 
-The bounded no-model control-plane smoke covers these routes when the Hub is
-running:
+Smoke test control-plane không cần model, có giới hạn, bao phủ các route sau
+khi Hub đang chạy:
 
 - `GET /health`
 - `GET /tools`
@@ -50,10 +52,10 @@ running:
 - `GET /components`
 - `GET /jobs`
 
-### Partial
+### Hoạt động một phần
 
-These routes have allowlisted adapters, but a bounded functional backend smoke
-result is not recorded in the repository:
+Các route này có adapter được allowlist, nhưng repository chưa lưu kết quả smoke
+test backend chức năng có giới hạn:
 
 - `/media/probe`
 - `/vision/ui/parse`
@@ -66,71 +68,72 @@ result is not recorded in the repository:
 - `/voice/clone`
 - `/voice/convert`
 
-### Queue-only
+### Chỉ đưa vào hàng đợi
 
-- `/video/upscale/anime` creates a guarded job record but does not execute
-  AnimeSR until its executor has been verified.
+- `/video/upscale/anime` tạo job record có kiểm soát nhưng không thực thi
+  AnimeSR cho đến khi executor được xác minh.
 
-### Unavailable / pending backend
+### Chưa khả dụng / chờ backend
 
-- `/vision/segment` and `/vision/track` remain unavailable because the direct
-  SAM 2 backend adapter has not been verified.
-- `/video/subtitle` remains unavailable because subtitle-video output muxing
-  has not been verified.
+- `/vision/segment` và `/vision/track` vẫn chưa khả dụng vì adapter backend
+  trực tiếp của SAM 2 chưa được xác minh.
+- `/video/subtitle` vẫn chưa khả dụng vì quá trình mux đầu ra subtitle-video
+  chưa được xác minh.
 
-## V2 source and filesystem layout
+## Mã nguồn V2 và bố cục hệ thống tệp
 
 ```text
-D:\\LocalAIHub\\
-|- src\\
-|  |- app\\                 # desktop bootstrap and lifecycle
-|  |- app_config\\          # settings defaults/schema/service
-|  |- modules\\             # one contract per capability
-|  |- services\\            # API, MCP, jobs, storage, migration
-|  `- shared\\              # paths, schemas, validation and utilities
-|- Config\\                 # canonical Windows case; examples tracked
-|- runtime\\                # ignored third-party engines/applications
-|- Models\\                 # ignored checkpoints/model directories
-|- Cache\\ Output\\ Temp\\ Logs\\  # ignored machine state
-|- scripts\\ patches\\ tests\\ docs\\
+D:\LocalAIHub\
+|- src\
+|  |- app\                 # bootstrap và vòng đời ứng dụng desktop
+|  |- app_config\          # mặc định/schema/service cho settings
+|  |- modules\             # một contract cho mỗi capability
+|  |- services\            # API, MCP, jobs, storage, migration
+|  `- shared\              # paths, schemas, validation và utilities dùng chung
+|- Config\                 # chữ hoa/thường chuẩn trên Windows; ví dụ được track
+|- runtime\                # engine/ứng dụng bên thứ ba bị Git bỏ qua
+|- Models\                 # checkpoint/thư mục model bị Git bỏ qua
+|- Cache\ Output\ Temp\ Logs\  # trạng thái riêng của máy, bị Git bỏ qua
+|- scripts\ patches\ tests\ docs\
 `- dependencies.lock.json
 ```
 
-GitHub is the source of truth for code and documentation. Runtime engines,
-models, environments, cache, output, temporary files and secrets are installed
-separately and are never committed. `Config/` is the single canonical Windows
-case; do not create a parallel `config/` tree.
+GitHub là nguồn chuẩn cho mã nguồn và tài liệu. Engine runtime, model,
+environment, cache, output, file tạm và secret được cài riêng và tuyệt đối
+không được commit. `Config/` là cách viết hoa/thường chuẩn duy nhất trên
+Windows; không tạo cây `config/` song song.
 
-The machine-local migration manifest is `Config/layout_migration.local.json`
-(ignored). A sanitized explanation of the layout and rollback rules lives in
-[`docs/FILESYSTEM_LAYOUT_V2.md`](docs/FILESYSTEM_LAYOUT_V2.md) and
+Migration manifest cục bộ là `Config/layout_migration.local.json` (bị Git bỏ
+qua). Phần giải thích đã được làm sạch về bố cục và quy tắc rollback nằm tại
+[`docs/FILESYSTEM_LAYOUT_V2.md`](docs/FILESYSTEM_LAYOUT_V2.md) và
 [`docs/MIGRATION_AND_ROLLBACK.md`](docs/MIGRATION_AND_ROLLBACK.md).
 
-## Current local engines
+## Các engine cục bộ hiện có
 
-- Vision: OmniParser v2, RF-DETR Nano, Grounding DINO Swin-T, and PaddleOCR-VL
-  1.6 have isolated native Windows adapter paths.
-- Voice: Qwen3-TTS 0.6B CustomVoice, 1.7B VoiceDesign, 1.7B Base, and Seed-VC
-  tiny are represented by on-demand adapters.
-- Reused external components: AnimeSR v2, SAM 2, Faster-Whisper,
-  FFmpeg/FFprobe, Ollama, ComfyUI, and AIRI remain at their existing paths.
+- Vision: OmniParser v2, RF-DETR Nano, Grounding DINO Swin-T và PaddleOCR-VL
+  1.6 có các adapter Windows native độc lập.
+- Voice: Qwen3-TTS 0.6B CustomVoice, 1.7B VoiceDesign, 1.7B Base và Seed-VC
+  tiny được biểu diễn bằng các adapter nạp theo yêu cầu.
+- Component bên ngoài được tái sử dụng: AnimeSR v2, SAM 2, Faster-Whisper,
+  FFmpeg/FFprobe, Ollama, ComfyUI và AIRI vẫn ở các đường dẫn hiện có.
 
-Qwen3-TTS is a voice engine. It is distinct from Qwen Image and
-Qwen-Image-2512 image-generation systems; their models and directories must
-never be mixed.
+Qwen3-TTS là engine giọng nói. Nó khác với các hệ thống tạo ảnh Qwen Image và
+Qwen-Image-2512; model và thư mục của các hệ thống này không bao giờ được trộn
+lẫn.
 
-## API and MCP
+## API và MCP
 
-The loopback API is `http://127.0.0.1:8765`. Read-only routes include
-`/health`, `/tools`, `/models`, `/components`, and `/jobs`. `GET /tools`
-returns both `component_status` and `tool_status` with the reason for the
-reported capability state.
+API loopback là `http://127.0.0.1:8765`. Các route chỉ đọc gồm `/health`,
+`/tools`, `/models`, `/components` và `/jobs`. `GET /tools` trả về cả
+`component_status` lẫn `tool_status`, kèm lý do cho trạng thái capability được
+báo cáo.
 
-`src/services/mcp/local_ai_mcp_server.py` uses stdio and forwards only named,
-allowlisted tools. Deprecated `Hub/`, `Adapters/`, and `MCP/` shims remain for
-existing launchers/imports until a later cleanup PR.
+`src/services/mcp/local_ai_mcp_server.py` sử dụng stdio và chỉ chuyển tiếp các
+tool đã đặt tên, nằm trong allowlist. Các shim `Hub/`, `Adapters/` và `MCP/` đã
+deprecated vẫn được giữ để launcher/import hiện có tiếp tục hoạt động cho đến
+khi có PR dọn dẹp riêng.
 
-## Checks
+## Kiểm tra
 
 ```powershell
 python scripts/ci_validate.py
@@ -139,8 +142,9 @@ python scripts/api_smoke.py --image <local-image>
 python src/services/mcp/mcp_smoke.py
 ```
 
-Run only the smallest applicable smoke check. Do not use these commands for
-benchmarks, stress tests, or repeated model inference.
+Chỉ chạy smoke check nhỏ nhất phù hợp với mục đích. Không dùng các lệnh này để
+benchmark, stress test hoặc chạy inference model lặp lại.
 
-See `Reports/` for sanitized evidence and limitations. Generated local reports
-may contain host-specific paths and are intentionally ignored.
+Xem `Reports/` để biết evidence và các giới hạn đã được làm sạch. Report cục bộ
+được tạo tự động có thể chứa đường dẫn riêng của máy và được Git bỏ qua một cách
+có chủ đích.
