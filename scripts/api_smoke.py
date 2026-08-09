@@ -26,6 +26,21 @@ def call(base: str, name: str, method: str, path: str, payload: dict | None) -> 
         return {"name": name, "status": "error", "error": str(exc)}
 
 
+def call_static(base: str, name: str, path: str) -> dict:
+    request = urllib.request.Request(base + path, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            body = response.read()
+            return {
+                "name": name,
+                "http": response.status,
+                "status": "completed" if response.status == 200 and body else "error",
+                "content_type": response.headers.get_content_type(),
+            }
+    except (urllib.error.URLError, TimeoutError) as exc:
+        return {"name": name, "status": "error", "error": str(exc)}
+
+
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run bounded Local AI Hub smoke checks with explicitly supplied local inputs.")
     parser.add_argument("--base", default=DEFAULT_BASE, help="Local API base URL (default: %(default)s)")
@@ -39,7 +54,14 @@ def arguments() -> argparse.Namespace:
 
 def main() -> int:
     args = arguments()
-    requests: list[tuple[str, str, str, dict | None]] = [("health", "GET", "/health", None)]
+    requests: list[tuple[str, str, str, dict | None]] = [
+        ("health", "GET", "/health", None),
+        ("dashboard", "GET", "/api/dashboard", None),
+        ("storage", "GET", "/api/storage", None),
+        ("models", "GET", "/api/models", None),
+        ("applications", "GET", "/api/applications", None),
+        ("settings", "GET", "/api/settings", None),
+    ]
     if args.image:
         requests.extend(
             [
@@ -62,7 +84,12 @@ def main() -> int:
             requests.append(("voice_clone", "POST", "/voice/clone", {"text": "This is a local cloned voice smoke test.", "language": "English", "reference_audio": args.voice_source, "reference_text": "", "max_new_tokens": 256}))
         if args.voice_source and args.voice_target:
             requests.append(("voice_convert", "POST", "/voice/convert", {"source": args.voice_source, "target": args.voice_target, "diffusion_steps": 4}))
-    results = [call(args.base.rstrip("/"), *item) for item in requests]
+    base = args.base.rstrip("/")
+    results = [call(base, *item) for item in requests]
+    results.extend([
+        call_static(base, "ui", "/ui/"),
+        call_static(base, "ui_app", "/ui/app.js"),
+    ])
     for result in results:
         print(json.dumps(result, ensure_ascii=False))
     return 0 if all(result.get("status") not in {"error", "unavailable"} for result in results) else 1

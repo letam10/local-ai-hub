@@ -61,6 +61,15 @@
       "patch_path": null,
       "verification_status": "unresolved",
       "verification_note": "The reused local environment does not provide verified upstream Git commit metadata."
+    },
+    {
+      "name": "pywebview",
+      "repository": "https://github.com/r0x0r/pywebview",
+      "commit_sha": null,
+      "version": "6.2.1",
+      "local_install_strategy": "install in the ignored Hub environment; use Microsoft Edge WebView2 on Windows",
+      "patch_path": null,
+      "verification_status": "pinned-for-desktop-shell"
     }
   ]
 }

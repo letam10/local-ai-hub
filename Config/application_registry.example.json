@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "applications": [
+    {
+      "id": "anime-upscale-studio",
+      "display_name": "Anime Upscale Studio",
+      "category": "video",
+      "classification": "PORTABLE_APP",
+      "status": "planned",
+      "path": "${LOCAL_AI_RUNTIME}/applications/Anime-Upscale-Studio",
+      "executable": "${ANIME_UPSCALE_EXECUTABLE}",
+      "working_directory": "${ANIME_UPSCALE_HOME}",
+      "arguments": [],
+      "launch": true,
+      "notes": "Uses the registered AnimeSR, FFmpeg and model paths; no source media is overwritten."
+    },
+    {
+      "id": "sam2-mask-studio",
+      "display_name": "SAM2 Mask Studio",
+      "category": "vision",
+      "classification": "PORTABLE_APP",
+      "status": "planned",
+      "path": "${LOCAL_AI_RUNTIME}/applications/SAM2-Mask-Studio",
+      "executable": "${SAM2_STUDIO_EXECUTABLE}",
+      "working_directory": "${SAM2_STUDIO_HOME}",
+      "arguments": [],
+      "launch": true,
+      "notes": "GUI is managed; direct SAM2 adapter remains unavailable until a bounded smoke passes."
+    },
+    {
+      "id": "local-image-studio",
+      "display_name": "Local Image Studio (FLUX)",
+      "category": "image",
+      "classification": "PORTABLE_APP",
+      "status": "planned",
+      "path": "${LOCAL_AI_RUNTIME}/applications/FLUX-Klein-Studio",
+      "executable": "${FLUX_STUDIO_EXECUTABLE}",
+      "working_directory": "${FLUX_STUDIO_HOME}",
+      "arguments": [],
+      "launch": true,
+      "notes": "FLUX and Qwen Image share one ComfyUI runtime and one physical model store."
+    },
+    {
+      "id": "qwen-image-studio",
+      "display_name": "Local Image Studio (Qwen Image)",
+      "category": "image",
+      "classification": "PORTABLE_APP",
+      "status": "planned",
+      "path": "${LOCAL_AI_RUNTIME}/applications/FLUX-Klein-Studio",
+      "executable": "${FLUX_STUDIO_EXECUTABLE}",
+      "working_directory": "${FLUX_STUDIO_HOME}",
+      "arguments": [],
+      "launch": true,
+      "notes": "Qwen Image is installed when its manifest files exist; this alias opens the same local Studio."
+    },
+    {
+      "id": "airi",
+      "display_name": "AIRI",
+      "category": "assistant",
+      "classification": "SYSTEM_INSTALLED_APP",
+      "status": "external_system_app",
+      "path": "${AIRI_HOME}",
+      "executable": "${AIRI_EXECUTABLE}",
+      "working_directory": "${AIRI_HOME}",
+      "arguments": [],
+      "launch": true,
+      "notes": "Installer-managed; never relocate manually and never copy credentials."
+    },
+    {
+      "id": "ollama",
+      "display_name": "Ollama",
+      "category": "model-service",
+      "classification": "SYSTEM_INSTALLED_APP",
+      "status": "external_system_app",
+      "path": "${OLLAMA_HOME}",
+      "executable": "${OLLAMA_EXECUTABLE}",
+      "working_directory": "${OLLAMA_HOME}",
+      "arguments": [],
+      "launch": true,
+      "notes": "System-installed service; model location is not changed by this Hub task."
+    }
+  ]
+}

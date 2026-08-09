@@ -12,12 +12,16 @@ CONFIG_DIR = CONFIG_ROOT
 
 
 def load_json(name: str, default: Any) -> Any:
-    path = CONFIG_DIR / name
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        return default
+    candidates = [CONFIG_DIR / name]
+    if name.endswith(".json") and not name.endswith(".example.json"):
+        candidates.append(CONFIG_DIR / f"{name[:-5]}.example.json")
+    for path in candidates:
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            continue
+    return default
 
 
 def hub_config() -> dict[str, Any]:
