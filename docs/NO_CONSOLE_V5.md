@@ -22,5 +22,11 @@ tasklist, nvidia-smi, FFmpeg, worker, ComfyUI và taskkill. SW_MINIMIZE chỉ l�
 fallback được ghi rõ cho third-party đã chứng minh không thể ẩn; hiện không có
 backend Hub nào dùng fallback đó.
 
+Đây là chính sách cửa sổ cho tiến trình con do Hub sở hữu, không phải bản sửa
+cho PowerShell hoặc Windows Terminal. Không được báo “đã sửa PowerShell” chỉ
+vì đã thêm `CREATE_NO_WINDOW` hoặc `SW_HIDE`. Khi còn hiện tượng console nháy,
+phải kiểm tra runtime theo PID, ParentPID, executable, command line và HWND để
+phân biệt cây Hub với tiến trình ngoài Hub.
+
 Launcher diagnose_local_ai_hub.cmd là chẩn đoán có chủ đích và có thể giữ
 console mở để đọc lỗi. Nó không phải normal-use entrypoint.

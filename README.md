@@ -28,6 +28,13 @@ src.app.main`: cửa sổ Hub mở tối đa, kích thước nhỏ nhất 1280 �
 hiện PowerShell, cmd hay Python console. Các shortcut GUI cũ chỉ được tạo khi
 chủ động dùng `-IncludeLegacy`.
 
+Phạm vi của mô tả trên chỉ là route khởi động chuẩn của Hub: shortcut này không
+gọi PowerShell hoặc cmd và `pythonw.exe` không tạo console riêng. Cờ
+`CREATE_NO_WINDOW`/`SW_HIDE` chỉ kiểm soát tiến trình con do Hub sở hữu; chúng
+không sửa PowerShell, Windows Terminal, Codex/ChatGPT hay tiến trình bên ngoài.
+Nếu vẫn thấy cửa sổ console nháy, cần truy vết PID, tiến trình cha, executable
+và HWND để xác định đúng nguồn trước khi khẳng định đã khắc phục.
+
 Cho mục đích phát triển, có thể chạy giao diện web tại `http://127.0.0.1:8765/ui/`:
 
 ```powershell
