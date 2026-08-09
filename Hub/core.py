@@ -31,6 +31,76 @@ TOOL_COMPONENTS = {
     "probe_media": "ffmpeg",
 }
 
+TOOL_STATUS_VALUES = {
+    "operational",
+    "partial",
+    "queue_only",
+    "unavailable",
+    "planned",
+    "error",
+}
+
+READY_COMPONENT_STATUSES = {"installed", "running"}
+
+TOOL_CAPABILITIES = {
+    "parse_screen": {
+        "tool_status": "partial",
+        "reason": "The OmniParser adapter exists, but no bounded functional backend smoke test is recorded.",
+    },
+    "detect_objects": {
+        "tool_status": "partial",
+        "reason": "The RF-DETR adapter exists, but no bounded functional backend smoke test is recorded.",
+    },
+    "ground_objects": {
+        "tool_status": "partial",
+        "reason": "The Grounding DINO adapter exists, but no bounded functional backend smoke test is recorded.",
+    },
+    "segment_image": {
+        "tool_status": "unavailable",
+        "reason": "Direct SAM 2 backend adapter has not been verified; the existing application is GUI-only.",
+    },
+    "track_video_object": {
+        "tool_status": "unavailable",
+        "reason": "Direct SAM 2 backend adapter has not been verified; the existing application is GUI-only.",
+    },
+    "ocr_document": {
+        "tool_status": "partial",
+        "reason": "The PaddleOCR-VL adapter exists, but no bounded functional backend smoke test is recorded.",
+    },
+    "transcribe_media": {
+        "tool_status": "partial",
+        "reason": "The Faster-Whisper adapter exists, but no bounded functional backend smoke test is recorded.",
+    },
+    "create_subtitled_video": {
+        "tool_status": "unavailable",
+        "reason": "Subtitle-video output muxing has not been verified.",
+    },
+    "text_to_speech": {
+        "tool_status": "partial",
+        "reason": "The Qwen3-TTS adapter exists, but no bounded functional backend smoke test is recorded.",
+    },
+    "design_voice": {
+        "tool_status": "partial",
+        "reason": "The Qwen3-TTS adapter exists, but no bounded functional backend smoke test is recorded.",
+    },
+    "clone_voice": {
+        "tool_status": "partial",
+        "reason": "The Qwen3-TTS adapter exists, but no bounded functional backend smoke test is recorded.",
+    },
+    "convert_voice": {
+        "tool_status": "partial",
+        "reason": "The Seed-VC adapter exists, but no bounded functional backend smoke test is recorded.",
+    },
+    "upscale_anime_video": {
+        "tool_status": "queue_only",
+        "reason": "The route records a job, but no AnimeSR executor has been verified.",
+    },
+    "probe_media": {
+        "tool_status": "partial",
+        "reason": "The allowlisted FFprobe route is implemented, but a local functional smoke result is not recorded.",
+    },
+}
+
 HEAVY_GPU_LOCK = threading.Lock()
 
 
@@ -52,21 +122,37 @@ def _port_open(port: int | None, host: str = "127.0.0.1") -> bool:
         return False
 
 
+def _configured_component_status(item: dict[str, Any]) -> str:
+    value = item.get("component_status") or item.get("status") or "unknown"
+    return str(value).strip().lower()
+
+
+def _observed_component_status(item: dict[str, Any]) -> str:
+    executable = item.get("executable")
+    path = item.get("path")
+    if _port_open(item.get("port")):
+        return "running"
+    if (executable and _path_exists(executable)) or (path and _path_exists(path)):
+        return "installed"
+    configured_status = _configured_component_status(item)
+    if configured_status in {"planned", "not_installed"}:
+        return "planned"
+    if configured_status == "error":
+        return "error"
+    return "missing"
+
+
 def component_statuses() -> list[dict[str, Any]]:
     statuses: list[dict[str, Any]] = []
     for item in components():
-        status = item.get("status", "unknown")
-        executable = item.get("executable")
-        path = item.get("path")
-        if status == "planned":
-            observed = "planned"
-        elif executable and _path_exists(executable):
-            observed = "running" if _port_open(item.get("port")) else "installed"
-        elif path and _path_exists(path):
-            observed = "installed"
-        else:
-            observed = "missing"
-        statuses.append({**item, "observed_status": observed})
+        observed = _observed_component_status(item)
+        statuses.append({
+            **item,
+            "configured_component_status": _configured_component_status(item),
+            "component_status": observed,
+            "status": observed,
+            "observed_status": observed,
+        })
     return statuses
 
 
@@ -100,20 +186,66 @@ def health() -> dict[str, Any]:
     }
 
 
+def _tool_readiness(tool: str, statuses: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    component_id = TOOL_COMPONENTS[tool]
+    component_item = statuses.get(component_id, {})
+    component_status = component_item.get("component_status", "missing")
+    capability = TOOL_CAPABILITIES[tool]
+    tool_status = capability["tool_status"]
+    reason = capability["reason"]
+
+    if tool_status not in TOOL_STATUS_VALUES:
+        return {
+            "component": component_id,
+            "component_status": component_status,
+            "tool_status": "error",
+            "reason": f"Unsupported configured tool status: {tool_status}.",
+        }
+    if tool_status not in {"unavailable", "planned", "error"} and component_status not in READY_COMPONENT_STATUSES:
+        tool_status = "unavailable"
+        reason = f"{component_item.get('name', component_id)} component is {component_status}; the local backend cannot accept calls."
+    return {
+        "component": component_id,
+        "component_status": component_status,
+        "tool_status": tool_status,
+        "reason": reason,
+    }
+
+
 def tool_catalog() -> list[dict[str, Any]]:
-    statuses = {item["id"]: item for item in component_statuses()}
+    statuses = {item["id"]: item for item in component_statuses() if item.get("id")}
     tools = []
     for name, component_id in TOOL_COMPONENTS.items():
         item = statuses.get(component_id, {})
+        readiness = _tool_readiness(name, statuses)
         tools.append({
             "name": name,
             "component": component_id,
-            "status": item.get("observed_status", "missing"),
+            "component_status": readiness["component_status"],
+            "tool_status": readiness["tool_status"],
+            "status": readiness["tool_status"],
             "description": f"Allowlisted Local AI Hub tool backed by {item.get('name', component_id)}.",
+            "reason": readiness["reason"],
         })
     tools.extend([
-        {"name": "get_health", "component": "local_ai_api", "status": "running", "description": "Return Hub health and GPU policy."},
-        {"name": "list_models", "component": "local_ai_api", "status": "running", "description": "Return the model registry."},
+        {
+            "name": "get_health",
+            "component": "local_ai_api",
+            "component_status": "running",
+            "tool_status": "operational",
+            "status": "operational",
+            "description": "Return Hub health and GPU policy.",
+            "reason": "Control-plane route served by the running Hub API.",
+        },
+        {
+            "name": "list_models",
+            "component": "local_ai_api",
+            "component_status": "running",
+            "tool_status": "operational",
+            "status": "operational",
+            "description": "Return the model registry.",
+            "reason": "Control-plane route served by the running Hub API.",
+        },
     ])
     return tools
 
@@ -147,13 +279,23 @@ def probe_media(input_path: str) -> dict[str, Any]:
     }
 
 
-def _unavailable(tool: str, component_id: str, reason: str | None = None) -> dict[str, Any]:
+def _unavailable(
+    tool: str,
+    component_id: str,
+    reason: str | None = None,
+    readiness: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     item = component(component_id) or {}
+    if readiness is None:
+        statuses = {entry["id"]: entry for entry in component_statuses() if entry.get("id")}
+        readiness = _tool_readiness(tool, statuses)
     return {
         "status": "unavailable",
         "tool": tool,
         "component": component_id,
-        "reason": reason or f"{item.get('name', component_id)} is not ready for a backend call.",
+        "component_status": readiness["component_status"],
+        "tool_status": readiness["tool_status"],
+        "reason": reason or readiness["reason"] or f"{item.get('name', component_id)} is not ready for a backend call.",
     }
 
 
@@ -171,20 +313,21 @@ def _run_heavy(tool: str, operation: Any) -> tuple[int, dict[str, Any]]:
 
 
 def dispatch_tool(tool: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    component_id = TOOL_COMPONENTS.get(tool)
+    if component_id is None:
+        return 404, {"status": "error", "error": f"Unknown allowlisted tool: {tool}"}
+
+    statuses = {entry["id"]: entry for entry in component_statuses() if entry.get("id")}
+    readiness = _tool_readiness(tool, statuses)
+    if readiness["tool_status"] in {"unavailable", "planned", "error"}:
+        return 503, _unavailable(tool, component_id, readiness=readiness)
+
     if tool == "probe_media":
         path = payload.get("path")
         if not isinstance(path, str) or not path:
             return 400, {"status": "error", "error": "Expected JSON field 'path'."}
         result = probe_media(path)
         return (200 if result.get("status") == "completed" else 400), result
-
-    component_id = TOOL_COMPONENTS.get(tool)
-    if component_id is None:
-        return 404, {"status": "error", "error": f"Unknown allowlisted tool: {tool}"}
-
-    item = component(component_id) or {}
-    if item.get("status") == "planned":
-        return 503, _unavailable(tool, component_id, "Component is planned but not installed.")
     if tool == "detect_objects":
         from Adapters.rfdetr_adapter import detect
 
