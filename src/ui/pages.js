@@ -4,7 +4,7 @@ export const NAVIGATION = [
   { group: "TỔNG QUAN", items: [["dashboard", "Dashboard", "◫"], ["airi", "AIRI", "◌"]] },
   { group: "VISION & DOCUMENT", items: [["vision", "Vision Studio", "◉"], ["sam2", "SAM2", "◒"], ["ocr", "OCR", "▤"]] },
   { group: "SPEECH & VOICE", items: [["whisper", "Whisper", "≋"], ["voice", "Voice", "♪"]] },
-  { group: "IMAGE & VIDEO", items: [["image", "Image AI", "✦"], ["media", "Media", "▹"], ["animesr", "AnimeSR", "⇱"]] },
+  { group: "IMAGE & VIDEO", items: [["image", "Image AI", "✦"], ["media", "Media", "▹"], ["video", "Video Creative", "▶"], ["animesr", "AnimeSR", "⇱"]] },
   { group: "HỆ THỐNG", items: [["jobs", "Jobs", "≡"], ["models", "Models & Storage", "▦"], ["settings", "Settings", "⚙"]] },
 ];
 
@@ -20,7 +20,13 @@ const field = (label, control, extra = "") => `<label class="field ${extra}"><sp
 const file = (label, key, accept = "") => field(label, `<input type="file" data-asset-key="${escapeHtml(key)}" ${accept ? `accept="${escapeHtml(accept)}"` : ""} /><div class="file-preview" data-file-preview aria-live="polite"></div>`);
 const files = (label, key, accept = "") => field(label, `<input type="file" data-asset-key="${escapeHtml(key)}" multiple ${accept ? `accept="${escapeHtml(accept)}"` : ""} /><div class="file-preview" data-file-preview aria-live="polite"></div>`);
 const button = (text, extra = "") => `<button class="button ${extra}" type="submit">${escapeHtml(text)}</button>`;
-const capability = (name, item, note, direct = {}) => `<div class="capability"><div><strong>${escapeHtml(name)}</strong><p>${escapeHtml(note)}</p>${direct.reason ? `<p>${escapeHtml(direct.reason)}</p>` : ""}</div>${statusPill(direct.tool_status || item.component_status || item.status || "missing")}</div>`;
+const capability = (name, item, note, direct = {}) => `<div class="capability"><div><strong>${escapeHtml(name)}</strong><p>${escapeHtml(note)}</p>${direct.reason ? `<p>${escapeHtml(direct.reason)}</p>` : ""}${direct.action ? `<p class="capability-action"><strong>Bước tiếp theo:</strong> ${escapeHtml(direct.action)}</p>` : ""}</div>${statusPill(direct.tool_status || item.component_status || item.status || "missing")}</div>`;
+const workspaceState = (label, item = {}, fallbackAction = "Kiểm tra backend rồi thử lại trong Jobs.") => {
+  const status = item.tool_status || item.status || item.component_status || "missing";
+  const reason = item.reason || "Chưa có snapshot readiness cho backend này.";
+  const action = item.action || fallbackAction;
+  return `<section class="workspace-state" data-status="${escapeHtml(status)}" aria-live="polite"><div class="workspace-state__head"><div><span class="eyebrow">BACKEND CONTRACT</span><h2>${escapeHtml(label)}</h2></div>${statusPill(status)}</div><p>${escapeHtml(reason)}</p><div class="workspace-state__action"><strong>Bước tiếp theo</strong><span>${escapeHtml(action)}</span></div></section>`;
+};
 const activeTab = (state, module) => state.workspaceTabs?.[module] || "quick";
 const moduleTabs = (state, module) => {
   const selected = activeTab(state, module);
@@ -61,7 +67,8 @@ function artifacts(value, found = []) {
   if (!value) return found;
   if (Array.isArray(value)) value.forEach((item) => artifacts(item, found));
   else if (typeof value === "object") {
-    if (value.id && value.url && !found.some((item) => item.id === value.id)) found.push(value);
+    const id = value.id || value.artifact_id;
+    if (id && value.url && !found.some((item) => item.id === id)) found.push({ ...value, id });
     Object.values(value).forEach((item) => artifacts(item, found));
   }
   return found;
@@ -73,8 +80,14 @@ const artifactList = (value) => {
   return `<div class="artifact-list">${items.map((item) => {
     const isImage = String(item.media_type || "").startsWith("image/");
     const isMedia = /^(image|audio|video)\//.test(String(item.media_type || ""));
-    return `<div class="artifact-item">${isImage ? `<img class="artifact-preview" src="${escapeHtml(item.url)}" alt="${escapeHtml(item.name)}" />` : ""}<div class="row-main"><div class="row-name">${escapeHtml(item.name)}</div><div class="row-meta">${escapeHtml(item.media_type || "artifact")} · ${formatGb(item.size_bytes)}</div></div>${isMedia ? `<a class="button button--compact" href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Xem</a>` : ""}<button class="button button--compact" type="button" data-open-artifact="${escapeHtml(item.id)}">Mở</button></div>`;
+    return `<div class="artifact-item">${isImage ? `<img class="artifact-preview" src="${escapeHtml(item.url)}" alt="${escapeHtml(item.name)}" />` : ""}<div class="row-main"><div class="row-name">${escapeHtml(item.name)}</div><div class="row-meta">${escapeHtml(item.media_type || "artifact")} · ${formatGb(item.size_bytes)}</div></div>${isMedia ? `<button class="button button--compact" type="button" data-preview-artifact="${escapeHtml(item.id)}" data-artifact-url="${escapeHtml(item.url)}" data-artifact-name="${escapeHtml(item.name)}" data-artifact-type="${escapeHtml(item.media_type || "application/octet-stream")}">Xem</button>` : ""}<a class="button button--compact" href="${escapeHtml(item.url)}" download="${escapeHtml(item.name || "artifact")}">Lưu/Xuất</a><button class="button button--compact" type="button" data-open-artifact="${escapeHtml(item.id)}">Mở</button></div>`;
   }).join("")}</div>`;
+};
+
+const provenanceList = (job) => {
+  const items = job?.result?.provenance || job?.provenance || [];
+  if (!Array.isArray(items) || !items.length) return "";
+  return `<details class="job-provenance"><summary>Provenance · ${items.length} artifact</summary><div class="tag-list">${items.map((item) => `<span class="tag">${escapeHtml(item.node_type || "node")} → ${escapeHtml(item.name || item.artifact_id || "artifact")}</span>`).join("")}</div></details>`;
 };
 
 const formResult = (id) => `<div class="form-result" id="${escapeHtml(id)}" role="status" aria-live="polite"></div>`;
@@ -126,7 +139,7 @@ function renderSam2(state) {
   const item = component(state, "sam2");
   const pointTool = tool(state, "segment_from_points");
   const pointStatus = pointTool.tool_status || item.component_status || "missing";
-  return heading("VISION", "SAM2", "Phân vùng và theo dõi trực tiếp qua trình xử lý SAM2; SAM2 Mask Studio không còn là workflow chính.", statusPill(pointStatus, `Chọn điểm: ${formatStatus(pointStatus)}`)) + `
+  return heading("VISION", "SAM2", "Phân vùng và theo dõi trực tiếp qua trình xử lý SAM2; SAM2 Mask Studio không còn là workflow chính.", statusPill(pointStatus, `Chọn điểm: ${formatStatus(pointStatus)}`)) + workspaceState("SAM2 direct worker", pointTool, "Chọn điểm hoặc box trên preview rồi kiểm tra mask artifact trong Jobs.") + `
     <div class="workspace-grid workspace-grid--two">
       ${card("Đầu vào và prompt", `<form data-job-form data-tool="segment_from_points" data-tool-by-field="mode" data-tool-map='{"points":"segment_from_points","box":"segment_from_box","track":"track_video_object","text":"segment_from_text"}' class="stack">${file("Ảnh hoặc video", "asset_id", "image/*,video/*")}${field("Chế độ", `<select name="mode"><option value="points">Chọn điểm</option><option value="box">Chọn box</option><option value="text">Prompt Grounding → SAM2</option><option value="track">Theo dõi video</option></select>`)}${field("Điểm (x,y,nhãn; …)", `<input name="points_text" placeholder="320,240,1; 100,80,0" />`)}${field("Box (x1,y1,x2,y2)", `<input name="box_text" placeholder="80,60,600,500" />`)}${field("Prompt Grounding", `<input name="prompt" placeholder="person . object ." />`)}<div class="form-actions">${button("Tạo mask / track", "button--primary")}</div>${formResult("sam2-result")}</form>`)}
       ${card("Xem trước và kết quả", `<div class="preview-empty"><span>◒</span><strong>Xem trước mask sẽ xuất hiện trong Jobs</strong><p>Điểm/box đi vào trình xử lý trực tiếp. Model nạp theo yêu cầu và giải phóng khi job xong.</p></div><div class="callout">Trạng thái ở tiêu đề áp dụng riêng cho chế độ Chọn điểm. Box, prompt text và theo dõi chỉ sẵn sàng sau smoke riêng; nếu backend báo một phần/chưa khả dụng, lỗi sẽ hiện cạnh action thay vì mở GUI ngoài.</div>`, "", "card--flat")}
@@ -166,7 +179,7 @@ function renderVoice(state) {
 function renderImageQuickV5(state) {
   const comfy = state.lifecycle?.comfyui || {};
   const imageTool = tool(state, "generate_flux");
-  return heading("IMAGE", "Image AI", "Quick tạo FLUX/Qwen qua ComfyUI API ẩn. Hub Nodes dùng graph editor kéo socket thật; Advanced hiển thị ComfyUI trong chính cửa sổ này.", `<span class="status-pill" data-status="${escapeHtml(imageTool.tool_status || comfy.status || "stopped")}">${escapeHtml(formatStatus(imageTool.tool_status || comfy.status || "stopped"))}</span>`) + imageWorkflowRail(state) + `
+  return heading("IMAGE", "Image AI", "Quick tạo FLUX/Qwen qua ComfyUI API ẩn. Hub Nodes dùng graph editor kéo socket thật; Advanced hiển thị ComfyUI trong chính cửa sổ này.", `<span class="status-pill" data-status="${escapeHtml(imageTool.tool_status || comfy.status || "stopped")}">${escapeHtml(formatStatus(imageTool.tool_status || comfy.status || "stopped"))}</span>`) + workspaceState("Image Generate / Edit", imageTool, "Chọn template Hub Nodes để nối prompt → generate/edit → upscale → preview.") + imageWorkflowRail(state) + `
     <div class="workspace-grid workspace-grid--two">
       ${card("Quick", `<form data-job-form data-tool="generate_flux" data-tool-by-field="engine" data-tool-map='{"flux":"generate_flux","qwen":"generate_qwen_image"}' class="stack">${field("Model", `<select name="engine"><option value="flux">FLUX.2 Klein</option><option value="qwen">Qwen Image 2512</option></select>`)}${field("Prompt", `<textarea name="prompt" required placeholder="Mô tả ảnh cần tạo…"></textarea>`)}${field("Negative prompt", `<input name="negative_prompt" placeholder="Tùy chọn" />`)}<div class="form-grid">${field("Width", `<input name="width" type="number" min="256" max="2048" step="64" value="768" />`)}${field("Height", `<input name="height" type="number" min="256" max="2048" step="64" value="768" />`)}${field("Steps", `<input name="steps" type="number" min="1" max="80" value="20" />`)}${field("Seed", `<input name="seed" type="number" min="0" placeholder="random" />`)}</div>${file("Input image (FLUX image-edit nếu workflow hỗ trợ)", "input_image_asset_id", "image/*")}<div class="form-actions">${button("Generate trong Hub", "button--primary")}</div>${formResult("image-result")}</form>`) }
       ${card("Chế độ làm việc", `<div class="preview-empty"><span>✦</span><strong>Không mở trình duyệt ngoài</strong><p>Chọn Hub Nodes để nối typed socket bằng kéo-thả. Chọn ComfyUI Advanced để sửa graph ComfyUI thật trong WebView của Local AI Hub.</p></div><div class="form-actions"><button class="button" type="button" data-workspace-tab="image:nodes">Mở Hub Nodes</button><button class="button button--primary" type="button" data-workspace-tab="image:advanced">Mở ComfyUI Advanced</button></div>`, "", "card--flat")}
@@ -194,7 +207,7 @@ function renderComfyAdvancedV5(state) {
 function renderImage(state) {
   const comfy = state.lifecycle?.comfyui || {};
   const imageTool = tool(state, "generate_flux");
-  return heading("IMAGE", "Image AI", "FLUX và Qwen Image gọi ComfyUI API trực tiếp. ComfyUI chạy nền ẩn khi Hub cần, không mở Local Image Studio.", `<span class="status-pill" data-status="${escapeHtml(imageTool.tool_status || comfy.status || "stopped")}">${escapeHtml(formatStatus(imageTool.tool_status || comfy.status || "stopped"))}</span>`) + `
+  return heading("IMAGE", "Image AI", "FLUX và Qwen Image gọi ComfyUI API trực tiếp. ComfyUI chạy nền ẩn khi Hub cần, không mở Local Image Studio.", `<span class="status-pill" data-status="${escapeHtml(imageTool.tool_status || comfy.status || "stopped")}">${escapeHtml(formatStatus(imageTool.tool_status || comfy.status || "stopped"))}</span>`) + workspaceState("Image Generate / Edit", imageTool, "Chọn template Hub Nodes để nối prompt → generate/edit → upscale → preview.") + `
     <div class="workspace-grid workspace-grid--two">
       ${card("Generate", `<form data-job-form data-tool="generate_flux" data-tool-by-field="engine" data-tool-map='{"flux":"generate_flux","qwen":"generate_qwen_image"}' class="stack">${field("Model", `<select name="engine"><option value="flux">FLUX.2 Klein</option><option value="qwen">Qwen Image 2512</option></select>`)}${field("Prompt", `<textarea name="prompt" required placeholder="Mô tả ảnh cần tạo…"></textarea>`)}${field("Negative prompt", `<input name="negative_prompt" placeholder="Tùy chọn" />`)}<div class="form-grid">${field("Width", `<input name="width" type="number" min="256" max="2048" step="64" value="768" />`)}${field("Height", `<input name="height" type="number" min="256" max="2048" step="64" value="768" />`)}${field("Steps", `<input name="steps" type="number" min="1" max="80" value="20" />`)}${field("Seed", `<input name="seed" type="number" min="0" placeholder="random" />`)}</div>${file("Input image (FLUX image-edit nếu workflow hỗ trợ)", "input_image_asset_id", "image/*")}<div class="form-actions">${button("Generate trong Hub", "button--primary")}</div>${formResult("image-result")}</form>`)}
       ${card("Preview & Advanced", `<div class="preview-empty"><span>✦</span><strong>Ảnh output sẽ hiện trong Jobs</strong><p>Lịch sử giữ prompt, seed, model qua metadata job an toàn; không lộ đường dẫn cục bộ.</p></div><details class="advanced"><summary>ComfyUI Advanced</summary><p>Advanced mở web interface ComfyUI trong trình duyệt nếu cần sửa workflow; normal workflow vẫn dùng form Hub ở bên trái.</p><button class="button" type="button" data-open-comfy>Open ComfyUI web interface</button></details>`, "", "card--flat")}
@@ -203,7 +216,7 @@ function renderImage(state) {
 
 function renderMedia(state) {
   const item = component(state, "ffmpeg");
-  return heading("MEDIA", "Trình biên tập media", "FFmpeg/FFprobe chạy bằng danh sách lệnh cho phép ở chế độ ẩn, không có ô shell và không ghi đè media nguồn.", statusPill(tool(state, "run_media_operation").tool_status || item.component_status || "missing")) + videoWorkflowRail(state) + `
+  return heading("MEDIA", "Trình biên tập media", "FFmpeg/FFprobe chạy bằng danh sách lệnh cho phép ở chế độ ẩn, không có ô shell và không ghi đè media nguồn.", statusPill(tool(state, "run_media_operation").tool_status || item.component_status || "missing")) + workspaceState("Video Transform / Export", tool(state, "run_media_operation"), "Chọn artifact, operation allowlist và kiểm tra output; video smoke deferred khi GPU đang bận.") + videoWorkflowRail(state) + `
     <div class="workspace-grid workspace-grid--two">
       ${card("Thao tác video và ảnh", `<form data-job-form data-tool="run_media_operation" class="stack">${file("Media đầu vào chính", "asset_id", "audio/*,video/*,image/*")}${files("Đầu vào bổ sung (ghép / chuỗi ảnh)", "input_asset_ids", "video/*,image/*")}${file("Audio hoặc phụ đề thứ hai", "secondary_asset_id", "audio/*,.srt,.ass")}${field("Thao tác", `<select name="operation"><option value="probe">Đọc metadata</option><option value="trim">Cắt đầu/cuối</option><option value="concat">Ghép video</option><option value="resize">Đổi kích thước video</option><option value="crop">Cắt khung video</option><option value="rotate">Xoay video</option><option value="fps">FPS</option><option value="transcode">Chuyển mã</option><option value="extract_audio">Tách audio</option><option value="replace_audio">Thay audio</option><option value="mux">Mux audio/video</option><option value="burn_subtitle">Chèn phụ đề</option><option value="extract_frames">Tách frame</option><option value="image_sequence_video">Chuỗi ảnh → video</option><option value="image_resize">Đổi kích thước ảnh</option><option value="image_crop">Cắt khung ảnh</option><option value="image_rotate">Xoay ảnh</option><option value="image_flip">Lật ảnh</option><option value="image_convert">Đổi định dạng ảnh</option><option value="image_compress">Nén ảnh</option></select>`)}<div class="form-grid">${field("Bắt đầu", `<input name="start" type="number" min="0" step="0.1" value="0" />`)}${field("Kết thúc", `<input name="end" type="number" min="0.1" step="0.1" value="5" />`)}${field("Chiều rộng", `<input name="width" type="number" min="2" value="1280" />`)}${field("Chiều cao", `<input name="height" type="number" min="-2" value="-2" />`)}${field("FPS", `<input name="fps" type="number" min="1" value="30" />`)}${field("Xoay", `<select name="degrees"><option value="90">90°</option><option value="180">180°</option><option value="270">270°</option></select>`)}${field("Lật", `<select name="axis"><option value="horizontal">Ngang</option><option value="vertical">Dọc</option></select>`)}${field("Định dạng ảnh", `<select name="format"><option value="png">PNG</option><option value="jpg">JPG</option><option value="webp">WEBP</option></select>`)}</div><div class="form-actions">${button("Chạy FFmpeg", "button--primary")}</div>${formResult("media-result")}</form>`)}
       ${card("An toàn thao tác", `<ul class="notice-list"><li>Kết quả tạo trong vùng Output/Media của Hub.</li><li>Đọc metadata là read-only; tác vụ ghi file đi qua Job Manager.</li><li>Ghép video và chuỗi ảnh chỉ nhận artifact đã tải lên Hub, rồi tạo manifest Temp ngắn hạn; không nhận raw shell/path list.</li></ul><div class="tag-list"><span class="tag">Cắt</span><span class="tag">Ghép</span><span class="tag">Crop</span><span class="tag">Xoay</span><span class="tag">Mux</span><span class="tag">Chèn phụ đề</span><span class="tag">Frames</span></div>`, "", "card--flat")}
@@ -212,7 +225,7 @@ function renderMedia(state) {
 
 function renderAnime(state) {
   const item = component(state, "animesr");
-  return heading("VIDEO AI", "AnimeSR", "Workflow upscale chính chạy bằng worker AnimeSR trong Hub. Anime Upscale Studio chỉ là legacy/debug fallback, không còn là action chính.", statusPill(tool(state, "upscale_anime_video").tool_status || item.component_status || "missing")) + `
+  return heading("VIDEO AI", "AnimeSR", "Workflow upscale chính chạy bằng worker AnimeSR trong Hub. Anime Upscale Studio chỉ là legacy/debug fallback, không còn là action chính.", statusPill(tool(state, "upscale_anime_video").tool_status || item.component_status || "missing")) + workspaceState("AnimeSR / Interpolate", tool(state, "upscale_anime_video"), "Chuẩn bị clip ngắn; video smoke hiện deferred do resource contention.") + `
     <div class="workspace-grid workspace-grid--two">
       ${card("Upscale queue", `<form data-job-form data-tool="upscale_anime_video" class="stack">${file("Video input", "asset_id", "video/*")}${field("Model", `<select name="model"><option value="AnimeSR_v2">AnimeSR v2</option><option value="AnimeSR_v1-PaperModel">AnimeSR v1 Paper</option></select>`)}<div class="form-grid">${field("Scale", `<select name="scale"><option value="2">2×</option><option value="3">3×</option><option value="4">4×</option></select>`)}${field("Chunk seconds", `<input name="chunk_seconds" type="number" min="10" value="120" />`)}</div><div class="check-grid"><label><input name="half" type="checkbox" checked /> Half precision</label><label><input name="use_rife" type="checkbox" /> RIFE (partial)</label><label><input name="use_realesrgan" type="checkbox" /> Real-ESRGAN (partial)</label></div><div class="form-actions">${button("Thêm AnimeSR job", "button--primary")}</div>${formResult("anime-result")}</form>`)}
       ${card("Progress & output", `<div class="preview-empty"><span>⇱</span><strong>Queue, progress, cancel và resume nằm ở Jobs</strong><p>Hub không mở Anime Upscale Studio để chạy normal workflow.</p></div><details class="advanced"><summary>Advanced / legacy</summary><p>Legacy Studio chỉ nên dùng debug khi direct worker báo limitation đã được ghi nhận.</p></details>`, "", "card--flat")}
@@ -221,13 +234,16 @@ function renderAnime(state) {
 
 function renderJobs(state) {
   const jobs = state.jobs || [];
-  const rows = jobs.map((job) => {
+  const filter = state.jobFilter || "all";
+  const filtered = jobs.filter((job) => filter === "all" || (filter === "active" && ["queued", "starting", "running", "cancelling"].includes(job.status)) || (filter === "attention" && ["failed", "unavailable", "cancelled"].includes(job.status)) || (filter === "completed" && job.status === "completed"));
+  const rows = filtered.map((job) => {
     const actions = ["queued", "starting", "running", "cancelling"].includes(job.status)
       ? `<button class="button button--compact button--danger" type="button" data-cancel-job="${escapeHtml(job.id)}">Hủy</button>`
-      : job.resumable ? `<button class="button button--compact" type="button" data-resume-job="${escapeHtml(job.id)}">Resume</button>` : "";
-    return `<article class="job-card"><div class="split"><div><strong>${escapeHtml(job.tool)}</strong><div class="row-meta">${escapeHtml(job.id)} · ${escapeHtml(job.created_at || "")}${job.contract_version ? ` · ${escapeHtml(job.contract_version)}` : ""}</div></div>${statusPill(job.status)}</div><div class="progress-track"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, Number(job.progress || 0)))}%"></div></div><p class="job-message">${escapeHtml(job.message || job.error || "")}</p>${job.next_action ? `<div class="job-next-action"><strong>Bước tiếp theo</strong><span>${escapeHtml(job.next_action)}</span></div>` : ""}${artifactList(job.result)}<div class="form-actions">${actions}</div></article>`;
+      : job.resumable ? `<button class="button button--compact" type="button" data-resume-job="${escapeHtml(job.id)}">${job.status === "cancelled" ? "Tiếp tục" : "Thử lại"}</button>` : "";
+    return `<article class="job-card" data-job-status="${escapeHtml(job.status)}"><div class="split"><div><strong>${escapeHtml(job.tool)}</strong><div class="row-meta">${escapeHtml(job.id)} · ${escapeHtml(job.created_at || "")}${job.contract_version ? ` · ${escapeHtml(job.contract_version)}` : ""}</div></div>${statusPill(job.status)}</div><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.max(0, Math.min(100, Number(job.progress || 0)))}"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, Number(job.progress || 0)))}%"></div></div><p class="job-message">${escapeHtml(job.message || job.error || "")}</p>${job.next_action ? `<div class="job-next-action"><strong>Bước tiếp theo</strong><span>${escapeHtml(job.next_action)}</span></div>` : ""}${provenanceList(job)}${artifactList(job.result)}<div class="form-actions">${actions}</div></article>`;
   }).join("");
-  return heading("CONTROL PLANE", "Jobs", "Theo dõi job thực tế do Hub tạo; cancel không ảnh hưởng Python/ComfyUI/AIRI không thuộc Hub.") + `<div class="job-list">${rows || `<div class="empty-state">Chưa có job. Chạy một workflow từ module bất kỳ để bắt đầu.</div>`}</div>`;
+  const filters = [ ["all", "Tất cả"], ["active", "Đang chạy"], ["attention", "Cần chú ý"], ["completed", "Hoàn tất"] ].map(([id, label]) => `<button class="tab ${filter === id ? "is-selected" : ""}" type="button" data-job-filter="${id}" aria-pressed="${filter === id}">${label}</button>`).join("");
+  return heading("CONTROL PLANE", "Jobs", "Theo dõi queue và lịch sử job do Hub tạo; cancel/retry chỉ tác động tới process và payload do Hub sở hữu.") + `<div class="module-tabs job-filters" role="group" aria-label="Bộ lọc lịch sử job">${filters}</div><div class="job-list">${rows || `<div class="empty-state"><strong>Không có job trong bộ lọc này</strong><span>Chạy workflow từ module bất kỳ hoặc chuyển sang Tất cả.</span></div>`}</div>`;
 }
 
 function renderModels(state) {
@@ -255,25 +271,26 @@ function renderSettings(state) {
 
 export function renderPage(route, state) {
   const pages = { dashboard: renderDashboard, airi: renderAiri, vision: renderVision, sam2: renderSam2, ocr: renderOcr, whisper: renderWhisper, voice: renderVoice, image: renderImageQuickV5, media: renderMedia, animesr: renderAnime, jobs: renderJobs, models: renderModels, settings: renderSettings };
+  const pageRoute = route === "video" ? "media" : route;
   const nodeCopy = {
     image: "Compose FLUX/Qwen, SAM2 mask và image transforms trong cùng graph; preset JSON được track, workflow cá nhân autosave local.",
     sam2: "Advanced workflow: Grounding DINO → SAM2 → mask/composite/export. GPU nodes chỉ chạy khi bấm Run Graph.",
     media: "Build video creative graph: input/prompt → transform hoặc generation contract → upscale/interpolate → encode → preview/export. Encode chỉ hiện capability FFmpeg thực tế.",
     animesr: "Advanced order do bạn chọn: Load → AnimeSR → Frame Interpolation → Encode. AnimeSR/RIFE vẫn partial cho tới smoke riêng.",
   };
-  const nodeScope = Object.prototype.hasOwnProperty.call(nodeCopy, route) ? route : null;
-  if (route === "image" && activeTab(state, "image") === "advanced") {
+  const nodeScope = Object.prototype.hasOwnProperty.call(nodeCopy, pageRoute) ? pageRoute : null;
+  if (pageRoute === "image" && activeTab(state, "image") === "advanced") {
     return `${imageModuleTabs(state)}${renderComfyAdvancedV5(state)}`;
   }
-  if (route === "image" && activeTab(state, "image") === "nodes") {
+  if (pageRoute === "image" && activeTab(state, "image") === "nodes") {
     return `${heading("ADVANCED WORKFLOW", "Image AI Hub Nodes", "Kéo socket trực tiếp, typed sockets, minimap, multi-select và live preview.")}${imageModuleTabs(state)}${nodeStudio("image", nodeCopy.image)}`;
   }
-  if (route === "image") {
+  if (pageRoute === "image") {
     return `${imageModuleTabs(state)}${renderImageQuickV5(state)}`;
   }
   if (nodeScope && activeTab(state, nodeScope) === "nodes") {
     return `${heading("ADVANCED WORKFLOW", `${nodeScope === "sam2" ? "SAM2" : nodeScope === "animesr" ? "AnimeSR" : nodeScope === "media" ? "Media" : "Image AI"} Nodes`, "Node editor chạy offline trong cửa sổ Local AI Hub.")}${moduleTabs(state, nodeScope)}${nodeStudio(nodeScope, nodeCopy[nodeScope])}`;
   }
-  const page = (pages[route] || renderDashboard)(state);
+  const page = (pages[pageRoute] || renderDashboard)(state);
   return nodeScope ? `${moduleTabs(state, nodeScope)}${page}` : page;
 }

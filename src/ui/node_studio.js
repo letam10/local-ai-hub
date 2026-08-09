@@ -17,7 +17,9 @@ import {
 // is the Hub adapter: it maps mature canvas-editor state to the Hub DAG API.
 const LOCAL_PREFIX = "local-ai-hub-graph-v5";
 const LEGACY_PREFIX = "local-ai-hub-node-studio-v1";
+const WORKFLOW_INDEX_PREFIX = "local-ai-hub-workflows-v1";
 const MAX_HISTORY = 60;
+const MAX_RECENT_WORKFLOWS = 12;
 const PRESET_BY_SCOPE = { image: "image_create_upscale", sam2: "sam2_segment", media: "video_creative_pipeline", animesr: "animesr_pipeline" };
 const TYPE_COLORS = {
   IMAGE: "#cf7cff", MASK: "#42c6a0", VIDEO: "#f17c8e", AUDIO: "#f1ad5f",
@@ -28,8 +30,26 @@ const CATEGORY_COLORS = { utility: "#6c8cff", image: "#cf7cff", vision: "#42c6a0
 const clone = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 const keyFor = (scope) => `${LOCAL_PREFIX}:${scope}`;
 const legacyKeyFor = (scope) => `${LEGACY_PREFIX}:${scope}`;
+const workflowIndexKey = (scope) => `${WORKFLOW_INDEX_PREFIX}:index:${scope}`;
+const workflowGraphKey = (scope, id) => `${WORKFLOW_INDEX_PREFIX}:graph:${scope}:${id}`;
 const asNumber = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
 const uid = () => `node_${globalThis.crypto?.randomUUID?.().replaceAll("-", "") || Math.random().toString(16).slice(2)}`;
+const nowIso = () => new Date().toISOString();
+const safeWorkflowId = (value, fallback = "workflow") => {
+  const normalized = String(value || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+  return normalized || fallback;
+};
+
+function readWorkflowIndex(scope) {
+  try {
+    const value = JSON.parse(localStorage.getItem(workflowIndexKey(scope)) || "[]");
+    return Array.isArray(value) ? value.filter((item) => item && typeof item.id === "string").slice(0, MAX_RECENT_WORKFLOWS) : [];
+  } catch { return []; }
+}
+
+function writeWorkflowIndex(scope, value) {
+  localStorage.setItem(workflowIndexKey(scope), JSON.stringify(value.slice(0, MAX_RECENT_WORKFLOWS)));
+}
 
 function emptyGraph(scope) {
   return { schema_version: 1, id: `local-${scope}`, title: `Workflow ${scope}`, scope, nodes: [], edges: [], groups: [] };
@@ -81,6 +101,7 @@ class HubGraphEditor {
     this.registry = new Map();
     this.availability = { counts: {}, nodes: [] };
     this.presets = [];
+    this.workflowIndex = [];
     this.graphData = emptyGraph(this.scope);
     this.groups = [];
     this.history = [];
@@ -100,6 +121,10 @@ class HubGraphEditor {
     this.minimapBounds = null;
     this.validation = null;
     this.runStatus = "idle";
+    this.savedFingerprint = "";
+    this.unsaved = false;
+    this.recovered = false;
+    this.autosavedAt = null;
   }
 
   async initialize() {
@@ -113,13 +138,18 @@ class HubGraphEditor {
       this.registry = new Map((registryPayload.nodes || []).map((item) => [item.type, item]));
       this.availability = availabilityPayload.availability || registryPayload.availability || { counts: {}, nodes: [] };
       this.presets = (presetPayload.presets || []).filter((item) => item.scope === this.scope);
+      this.workflowIndex = readWorkflowIndex(this.scope);
       this.configureLiteGraph();
       const saved = this.readLocalGraph();
-      if (saved) this.graphData = saved;
+      if (saved) { this.graphData = saved; this.recovered = true; }
       else await this.loadPreset(PRESET_BY_SCOPE[this.scope], { quiet: true, render: false });
+      this.savedFingerprint = graphFingerprint(this.graphData);
+      this.unsaved = !this.recovered;
       this.dirty = new Set(this.graphData.nodes.map((node) => node.id));
       this.renderShell();
       this.hydrateLiteGraph(this.graphData);
+      this.renderWorkflowStatus();
+      if (this.recovered) this.showToast("Đã khôi phục bản autosave local của workflow.");
     } catch (error) {
       this.root.innerHTML = `<div class="callout callout--warning">Không thể nạp graph editor: ${escapeHtml(error.message)}</div>`;
     }
@@ -144,11 +174,108 @@ class HubGraphEditor {
     return null;
   }
 
-  persist() {
+  isUnsaved() {
+    return this.unsaved || (Boolean(this.savedFingerprint) && graphFingerprint(this.toHubGraph()) !== this.savedFingerprint);
+  }
+
+  rememberWorkflow(graph, { source = "autosave", saved = false } = {}) {
+    const id = safeWorkflowId(graph.id, `local-${this.scope}`);
+    const record = {
+      id,
+      title: String(graph.title || id).slice(0, 160),
+      scope: this.scope,
+      updated_at: nowIso(),
+      saved_at: saved ? nowIso() : null,
+      source,
+    };
+    localStorage.setItem(workflowGraphKey(this.scope, id), JSON.stringify(graph));
+    this.workflowIndex = [record, ...this.workflowIndex.filter((item) => item.id !== id)].slice(0, MAX_RECENT_WORKFLOWS);
+    writeWorkflowIndex(this.scope, this.workflowIndex);
+    return record;
+  }
+
+  persist({ source = "autosave", saved = false } = {}) {
     const graph = this.toHubGraph();
+    graph.id = safeWorkflowId(graph.id, `local-${this.scope}`);
+    graph.title = String(graph.title || `Workflow ${this.scope}`).slice(0, 160);
+    this.graphData = { ...this.graphData, id: graph.id, title: graph.title };
     localStorage.setItem(keyFor(this.scope), JSON.stringify(graph));
     localStorage.setItem(`${keyFor(this.scope)}:auto`, String(this.autoPreview));
     localStorage.setItem(`${keyFor(this.scope)}:draft`, String(this.draft));
+    this.autosavedAt = nowIso();
+    this.rememberWorkflow(graph, { source, saved });
+    if (saved) { this.savedFingerprint = graphFingerprint(graph); this.unsaved = false; }
+    this.renderWorkflowStatus();
+  }
+
+  saveLocal() {
+    this.persist({ source: "saved", saved: true });
+    this.showToast("Workflow đã lưu local và có thể khôi phục trong Recent.");
+  }
+
+  renameWorkflow(value) {
+    const title = String(value || "").trim().slice(0, 160);
+    if (!title || title === this.graphData.title) return;
+    this.graphData = { ...this.graphData, title };
+    this.persist({ source: "rename" });
+    this.renderShellTitle();
+  }
+
+  renderShellTitle() {
+    const title = this.root.querySelector("[data-graph-title]");
+    if (title && title.value !== this.graphData.title) title.value = this.graphData.title || "";
+    const heading = this.root.querySelector(".graph-editor__header h2");
+    if (heading) heading.textContent = this.graphData.title || `Workflow ${this.scope}`;
+  }
+
+  renderWorkflowStatus() {
+    const target = this.root?.querySelector("[data-graph-save-state]");
+    if (!target) return;
+    const unsaved = this.isUnsaved();
+    target.dataset.state = unsaved ? "unsaved" : "saved";
+    target.textContent = unsaved ? "Có thay đổi chưa lưu" : this.recovered ? "Đã khôi phục autosave" : "Đã lưu local";
+    const recent = this.root.querySelector("[data-graph-recent]");
+    if (recent && recent.value !== this.graphData.id) recent.value = this.graphData.id || "";
+  }
+
+  recentOptions() {
+    return this.workflowIndex.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.title || item.id)} · ${escapeHtml(item.source || "local")}</option>`).join("");
+  }
+
+  async loadRecent(id) {
+    if (!id) return;
+    try {
+      const stored = localStorage.getItem(workflowGraphKey(this.scope, id));
+      if (!stored) throw new Error("Không tìm thấy workflow local này.");
+      const result = await validateNodeGraph(JSON.parse(stored), false);
+      if (!result.validation?.valid) throw new Error(result.validation?.errors?.[0]?.message || "Workflow local không còn hợp lệ.");
+      this.history = [];
+      this.future = [];
+      this.nodeStates.clear();
+      this.hydrateLiteGraph(result.validation.graph);
+      this.savedFingerprint = graphFingerprint(result.validation.graph);
+      this.unsaved = false;
+      this.dirty = new Set(result.validation.graph.nodes.map((node) => node.id));
+      this.recovered = true;
+      this.persist({ source: "recent", saved: true });
+      this.showToast("Đã mở workflow trong Recent.");
+    } catch (error) { this.showToast(error.message, "error"); }
+  }
+
+  duplicateWorkflow() {
+    const copy = clone(this.toHubGraph());
+    copy.id = `${safeWorkflowId(copy.id, `local-${this.scope}`)}-copy-${Date.now().toString(36)}`.slice(0, 80);
+    copy.title = `${copy.title || "Workflow"} (bản sao)`;
+    this.history = [];
+    this.future = [];
+    this.nodeStates.clear();
+    this.hydrateLiteGraph(copy);
+    this.savedFingerprint = "";
+    this.unsaved = true;
+    this.recovered = false;
+    this.dirty = new Set(copy.nodes.map((node) => node.id));
+    this.persist({ source: "duplicate" });
+    this.showToast("Đã tạo bản sao workflow; bấm Lưu local để xác nhận tên mới.");
   }
 
   configureLiteGraph() {
@@ -198,6 +325,7 @@ class HubGraphEditor {
           <div><span class="eyebrow">NODE WORKFLOW</span><h2>${escapeHtml(this.graphData.title || `Image ${this.scope}`)}</h2><p>Canvas typed socket cho người mới: nối đúng kiểu dữ liệu, kiểm tra trước khi chạy và luôn thấy trạng thái backend.</p></div>
           <div class="graph-editor__header-status" data-graph-summary><span class="status-pill" data-status="idle">Chưa chạy</span><span class="tag">${escapeHtml(this.scope)}</span></div>
         </header>
+        <div class="graph-editor__workflow-bar"><label class="graph-workflow-title"><span>Tên workflow</span><input data-graph-title aria-label="Tên workflow" value="${escapeHtml(this.graphData.title || "")}" /></label><label class="graph-workflow-recent"><span>Recent</span><select data-graph-recent aria-label="Recent workflows"><option value="">Chọn workflow local…</option>${this.recentOptions()}</select></label><span class="graph-save-state" data-graph-save-state>Đã lưu local</span><button class="button button--compact" type="button" data-graph-action="duplicate">Nhân bản</button></div>
         <div class="graph-editor__toolbar">
           <div class="graph-editor__toolbar-group"><button class="button button--primary" type="button" data-graph-action="run" aria-label="Run Graph">Chạy workflow</button><button class="button" type="button" data-graph-action="validate">Kiểm tra</button><button class="button" type="button" data-graph-action="cancel" disabled>Hủy job</button><button class="button" type="button" data-graph-action="undo">Hoàn tác</button><button class="button" type="button" data-graph-action="redo">Làm lại</button></div>
           <div class="graph-editor__toolbar-group"><select data-graph-preset aria-label="Preset workflow"><option value="">Chọn template…</option>${this.presets.map((item) => `<option value="${escapeHtml(item.id)}" title="${escapeHtml(item.description || "")}">${escapeHtml(item.title)}${item.stage ? ` · ${escapeHtml(item.stage)}` : ""}</option>`).join("")}</select><button class="button" type="button" data-graph-action="save-local">Lưu local</button><button class="button" type="button" data-graph-action="export">Export JSON</button><label class="button graph-editor__import">Import JSON<input type="file" data-graph-import accept="application/json,.json" /></label></div>
@@ -247,11 +375,13 @@ class HubGraphEditor {
     }, { signal });
     this.root.addEventListener("input", (event) => {
       if (event.target.matches("[data-graph-search]")) { this.search = event.target.value; this.renderPalette(); }
+      if (event.target.matches("[data-graph-title]")) this.renameWorkflow(event.target.value);
     }, { signal });
     this.root.addEventListener("change", (event) => {
       const option = event.target.dataset.graphOption;
       if (option === "auto") { this.autoPreview = event.target.checked; this.persist(); return; }
       if (option === "draft") { this.draft = event.target.checked; this.persist(); return; }
+      if (event.target.matches("[data-graph-recent]")) { this.loadRecent(event.target.value); return; }
       if (event.target.matches("[data-graph-preset]")) { this.loadPreset(event.target.value); return; }
       if (event.target.matches("[data-graph-property]")) { this.changeProperty(event.target); return; }
       if (event.target.matches("[data-graph-asset]")) { this.uploadAsset(event.target); return; }
@@ -263,6 +393,11 @@ class HubGraphEditor {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); event.shiftKey ? this.redo() : this.undo(); }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") { event.preventDefault(); this.redo(); }
       if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); this.deleteSelected(); }
+    }, { signal });
+    window.addEventListener("beforeunload", (event) => {
+      if (!this.root.isConnected || !this.isUnsaved()) return;
+      event.preventDefault();
+      event.returnValue = "";
     }, { signal });
   }
 
@@ -298,6 +433,7 @@ class HubGraphEditor {
       validation.textContent = errors.length ? `${errors.length} lỗi cần sửa: ${errors[0].message || errors[0].code}` : (this.validation ? "Workflow hợp lệ để lưu; bấm Chạy workflow để kiểm tra input bắt buộc." : "Chưa kiểm tra workflow.");
       validation.className = errors.length ? "graph-editor__validation graph-editor__validation--error" : "graph-editor__validation";
     }
+    this.renderWorkflowStatus();
   }
 
   renderInspector() {
@@ -317,7 +453,7 @@ class HubGraphEditor {
     const artifact = firstArtifact(state.output);
     const preview = artifact?.url ? (String(artifact.media_type || "").startsWith("image/")
       ? `<img class="graph-preview-image" src="${escapeHtml(artifact.url)}" alt="${escapeHtml(artifact.name || "Output")}" />`
-      : `<a class="button button--compact" href="${escapeHtml(artifact.url)}" target="_blank" rel="noopener">Mở output</a>`) : "";
+      : `<button class="button button--compact" type="button" data-preview-artifact="${escapeHtml(artifact.id || "")}" data-artifact-url="${escapeHtml(artifact.url)}" data-artifact-name="${escapeHtml(artifact.name || "Output")}" data-artifact-type="${escapeHtml(artifact.media_type || "application/octet-stream")}">Mở output</button>`) : "";
     const availability = definition?.availability || { status: definition?.status || "operational", reason: "", action: "" };
     const action = state.next_action || availability.action;
     this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(definition?.category || "node")}</span><h3>${escapeHtml(definition?.title || node.hubType)}</h3><p>${escapeHtml(definition?.description || "")}</p></div><div class="graph-node-state" data-status="${escapeHtml(state.status || availability.status)}"><b>${escapeHtml(state.status || availability.status)}</b><span>${escapeHtml(state.message || state.error || availability.reason || "")}</span></div></div>${action ? `<div class="graph-action-hint"><strong>Bước tiếp theo</strong><span>${escapeHtml(action)}</span></div>` : ""}${preview ? `<section class="graph-inspector__section"><strong>Live preview</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>Thông số</strong>${(definition?.properties || []).map((property) => propertyControl(node, property)).join("") || `<p class="graph-empty">Node này không có property.</p>`}</section>`;
@@ -343,6 +479,7 @@ class HubGraphEditor {
     }
     this.beforeChange = null;
     this.graphData = next;
+    this.unsaved = true;
     this.markDirty(next.nodes.map((node) => node.id));
     this.persist();
     this.renderInspector();
@@ -475,8 +612,11 @@ class HubGraphEditor {
       this.nodeStates.clear();
       this.dirty = new Set((result.graph.nodes || []).map((node) => node.id));
       this.graphData = result.graph;
+      this.savedFingerprint = "";
+      this.recovered = false;
+      this.unsaved = true;
       if (render && this.liteGraph) this.hydrateLiteGraph(result.graph);
-      this.persist();
+      this.persist({ source: "template" });
       if (!quiet) this.showToast("Đã nạp preset workflow Hub.");
     } catch (error) {
       if (!quiet) this.showToast(error.message, "error");
@@ -489,6 +629,7 @@ class HubGraphEditor {
     this.future.push(graphFingerprint(this.toHubGraph()));
     const graph = JSON.parse(previous);
     this.hydrateLiteGraph(graph);
+    this.unsaved = true;
     this.dirty = new Set(graph.nodes.map((node) => node.id));
     this.persist();
   }
@@ -499,6 +640,7 @@ class HubGraphEditor {
     this.history.push(graphFingerprint(this.toHubGraph()));
     const graph = JSON.parse(next);
     this.hydrateLiteGraph(graph);
+    this.unsaved = true;
     this.dirty = new Set(graph.nodes.map((node) => node.id));
     this.persist();
   }
@@ -628,8 +770,11 @@ class HubGraphEditor {
       this.history = [];
       this.future = [];
       this.dirty = new Set(result.validation.graph.nodes.map((node) => node.id));
+      this.savedFingerprint = "";
+      this.recovered = false;
+      this.unsaved = true;
       this.hydrateLiteGraph(result.validation.graph);
-      this.persist();
+      this.persist({ source: "import" });
       this.showToast("Đã import workflow JSON vào Hub Nodes.");
     } catch (error) {
       this.showToast(error.message, "error");
@@ -702,6 +847,8 @@ class HubGraphEditor {
     if (action === "undo") this.undo();
     if (action === "redo") this.redo();
     if (action === "delete") this.deleteSelected();
+    if (action === "save-local") { this.saveLocal(); return; }
+    if (action === "duplicate") this.duplicateWorkflow();
     if (action === "fit") this.fitView();
     if (action === "export") this.exportGraph();
     if (action === "save-local") { this.persist(); this.showToast("Workflow đã lưu local trong WebView."); }

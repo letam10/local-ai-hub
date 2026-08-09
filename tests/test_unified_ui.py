@@ -26,6 +26,7 @@ class UnifiedUiTests(unittest.TestCase):
             "Voice",
             "Image AI",
             "Media",
+            "Video Creative",
             "AnimeSR",
             "Jobs",
             "Models & Storage",

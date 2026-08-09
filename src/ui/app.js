@@ -25,7 +25,7 @@ import { disposeNodeStudios, mountNodeStudios } from "./node_studio.js";
 import { NAVIGATION, renderPage } from "./pages.js";
 
 const state = {
-  health: {}, components: [], tools: [], applications: [], jobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {},
+  health: {}, components: [], tools: [], applications: [], jobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", apiStatus: "loading", apiError: "",
 };
 const view = document.querySelector("#module-view");
 const nav = document.querySelector("#sidebar-nav");
@@ -34,6 +34,9 @@ const diskMetric = document.querySelector("#disk-metric");
 const gpuMetric = document.querySelector("#gpu-metric");
 const jobSummary = document.querySelector("#job-summary");
 const toastRegion = document.querySelector("#toast-region");
+const sidebar = document.querySelector(".sidebar");
+const sidebarToggle = document.querySelector("#sidebar-toggle");
+const artifactPreviewLayer = document.querySelector("#artifact-preview-layer");
 let routeLoad = null;
 
 const routeId = () => {
@@ -49,12 +52,58 @@ const showToast = (message, kind = "") => {
   window.setTimeout(() => toast.remove(), 5200);
 };
 
+const closeArtifactPreview = () => artifactPreviewLayer?.replaceChildren();
+
+const showArtifactPreview = (button) => {
+  if (!artifactPreviewLayer) return;
+  artifactPreviewLayer.replaceChildren();
+  const dialog = document.createElement("section");
+  dialog.className = "artifact-preview-dialog";
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  const header = document.createElement("header");
+  header.className = "artifact-preview-dialog__header";
+  const title = document.createElement("strong");
+  title.textContent = button.dataset.artifactName || "Artifact preview";
+  const close = document.createElement("button");
+  close.className = "button button--compact";
+  close.type = "button";
+  close.dataset.closeArtifactPreview = "true";
+  close.textContent = "Đóng";
+  header.append(title, close);
+  const body = document.createElement("div");
+  body.className = "artifact-preview-dialog__body";
+  const url = button.dataset.artifactUrl || "";
+  const mediaType = button.dataset.artifactType || "";
+  if (mediaType.startsWith("image/")) {
+    const image = document.createElement("img"); image.src = url; image.alt = title.textContent; body.append(image);
+  } else if (mediaType.startsWith("video/")) {
+    const video = document.createElement("video"); video.src = url; video.controls = true; video.preload = "metadata"; body.append(video);
+  } else if (mediaType.startsWith("audio/")) {
+    const audio = document.createElement("audio"); audio.src = url; audio.controls = true; body.append(audio);
+  } else {
+    const note = document.createElement("p"); note.textContent = "Artifact này không có trình phát inline."; body.append(note);
+  }
+  const save = document.createElement("a");
+  save.className = "button button--primary"; save.href = url; save.download = button.dataset.artifactName || "artifact"; save.textContent = "Lưu/Xuất artifact";
+  body.append(save);
+  dialog.append(header, body);
+  artifactPreviewLayer.append(dialog);
+  close.focus();
+};
+
 const renderNavigation = () => {
   const active = routeId();
   nav.innerHTML = NAVIGATION.map((group) => `
     <div class="nav-group">${group.group}</div>
     ${group.items.map(([id, label, icon]) => `<button class="nav-item ${id === active ? "is-active" : ""}" type="button" data-route="${id}" aria-current="${id === active ? "page" : "false"}"><span class="nav-icon">${icon}</span><span>${label}</span></button>`).join("")}
   `).join("");
+};
+
+const renderApiState = () => {
+  if (state.apiStatus === "error") return `<section class="global-state global-state--error" role="alert"><strong>API Hub chưa sẵn sàng</strong><span>${state.apiError || "Kiểm tra listener loopback rồi thử lại."}</span><button class="button button--compact" type="button" data-refresh-api>Thử lại</button></section>`;
+  if (state.apiStatus === "loading") return `<section class="global-state global-state--loading" role="status"><strong>Đang tải workspace</strong><span>Đang lấy health, capability và queue snapshot…</span></section>`;
+  return "";
 };
 
 const updateTopbar = () => {
@@ -71,13 +120,15 @@ const updateTopbar = () => {
 const render = () => {
   disposeNodeStudios();
   renderNavigation();
-  view.innerHTML = renderPage(routeId(), state);
+  view.innerHTML = `${renderApiState()}${renderPage(routeId(), state)}`;
   view.focus({ preventScroll: true });
   updateTopbar();
   if (view.querySelector("[data-node-studio]")) mountNodeStudios({ showToast });
 };
 
 const applyBootstrap = (payload) => {
+  state.apiStatus = "ready";
+  state.apiError = "";
   state.health = payload.health || {};
   state.components = payload.components || [];
   state.applications = payload.applications || [];
@@ -95,6 +146,7 @@ const refreshFast = async ({ quiet = false } = {}) => {
   if (jobs.status === "fulfilled") state.jobs = jobs.value.jobs || [];
   else failed = true;
   if (["dashboard", "jobs"].includes(routeId())) render(); else updateTopbar();
+  if (failed && state.apiStatus === "ready") state.apiStatus = "degraded";
   if (failed && !quiet) showToast("API đang khởi động hoặc một snapshot nhanh chưa sẵn sàng.", "warning");
 };
 
@@ -123,6 +175,8 @@ const initialize = async () => {
   try {
     applyBootstrap(await getBootstrap());
   } catch (error) {
+    state.apiStatus = "error";
+    state.apiError = error.message;
     showToast(`API chưa sẵn sàng: ${error.message}`, "warning");
   }
   render();
@@ -242,10 +296,22 @@ document.addEventListener("submit", async (event) => {
 });
 
 document.addEventListener("click", async (event) => {
+  if (event.target.closest("#sidebar-toggle")) {
+    const open = !sidebar?.classList.contains("is-open");
+    sidebar?.classList.toggle("is-open", open);
+    sidebarToggle?.setAttribute("aria-expanded", String(open));
+    return;
+  }
+  if (event.target.closest("[data-close-artifact-preview]")) { closeArtifactPreview(); return; }
+  const preview = event.target.closest("[data-preview-artifact]");
+  if (preview) { showArtifactPreview(preview); return; }
+  if (event.target.closest("[data-refresh-api]")) { await initialize(); return; }
   const route = event.target.closest("[data-route]");
-  if (route) { window.location.hash = `#/${route.dataset.route}`; return; }
+  if (route) { sidebar?.classList.remove("is-open"); sidebarToggle?.setAttribute("aria-expanded", "false"); window.location.hash = `#/${route.dataset.route}`; return; }
   const tab = event.target.closest("[data-workspace-tab]");
   if (tab) { const [module, name] = tab.dataset.workspaceTab.split(":"); state.workspaceTabs[module] = name; render(); return; }
+  const jobFilter = event.target.closest("[data-job-filter]");
+  if (jobFilter) { state.jobFilter = jobFilter.dataset.jobFilter || "all"; render(); return; }
   if (event.target.closest("#theme-toggle") || event.target.closest("[data-cycle-theme]")) { cycleTheme(); return; }
   const refreshButton = event.target.closest("[data-refresh-storage]");
   if (refreshButton) { refreshButton.disabled = true; await loadRouteData({ scan: true }); refreshButton.disabled = false; showToast("Đã quét lại storage theo yêu cầu."); return; }
