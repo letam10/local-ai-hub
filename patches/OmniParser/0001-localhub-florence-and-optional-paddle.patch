@@ -1,0 +1,97 @@
+diff --git a/util/omniparser.py b/util/omniparser.py
+index a5f4350..74c605f 100644
+--- a/util/omniparser.py
++++ b/util/omniparser.py
+@@ -29,4 +29,4 @@ class Omniparser(object):
+         (text, ocr_bbox), _ = check_ocr_box(image, display_img=False, output_bb_format='xyxy', easyocr_args={'text_threshold': 0.8}, use_paddleocr=False)
+         dino_labled_img, label_coordinates, parsed_content_list = get_som_labeled_img(image, self.som_model, BOX_TRESHOLD = self.config['BOX_TRESHOLD'], output_coord_in_ratio=True, ocr_bbox=ocr_bbox,draw_bbox_config=draw_bbox_config, caption_model_processor=self.caption_model_processor, ocr_text=text,use_local_semantics=True, iou_threshold=0.7, scale_img=False, batch_size=128)
+ 
+-        return dino_labled_img, parsed_content_list
+\ No newline at end of file
++        return dino_labled_img, label_coordinates, parsed_content_list
+diff --git a/util/utils.py b/util/utils.py
+index 22c0508..289c8ba 100644
+--- a/util/utils.py
++++ b/util/utils.py
+@@ -18,17 +18,22 @@ import numpy as np
+ # %matplotlib inline
+ from matplotlib import pyplot as plt
+ import easyocr
+-from paddleocr import PaddleOCR
++try:
++    from paddleocr import PaddleOCR
++except Exception:
++    PaddleOCR = None
+ reader = easyocr.Reader(['en'])
+-paddle_ocr = PaddleOCR(
+-    lang='en',  # other lang also available
+-    use_angle_cls=False,
+-    use_gpu=False,  # using cuda will conflict with pytorch in the same process
+-    show_log=False,
+-    max_batch_size=1024,
+-    use_dilation=True,  # improves accuracy
+-    det_db_score_mode='slow',  # improves accuracy
+-    rec_batch_num=1024)
++paddle_ocr = None
++if PaddleOCR is not None:
++    paddle_ocr = PaddleOCR(
++        lang='en',  # other lang also available
++        use_angle_cls=False,
++        use_gpu=False,  # using cuda will conflict with pytorch in the same process
++        show_log=False,
++        max_batch_size=1024,
++        use_dilation=True,  # improves accuracy
++        det_db_score_mode='slow',  # improves accuracy
++        rec_batch_num=1024)
+ import time
+ import base64
+ 
+@@ -118,11 +123,29 @@ def get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_
+         batch = croped_pil_image[i:i+batch_size]
+         t1 = time.time()
+         if model.device.type == 'cuda':
+-            inputs = processor(images=batch, text=[prompt]*len(batch), return_tensors="pt", do_resize=False).to(device=device, dtype=torch.float16)
++            # Florence-2's current processor must perform its native resize;
++            # disabling it on 64x64 crops creates an image/text attention-mask
++            # length mismatch with the released icon-caption checkpoint.
++            inputs = processor(images=batch, text=[prompt]*len(batch), return_tensors="pt", do_resize=True).to(device=device, dtype=torch.float16)
+         else:
+             inputs = processor(images=batch, text=[prompt]*len(batch), return_tensors="pt").to(device=device)
+-        if 'florence' in model.config.name_or_path:
+-            generated_ids = model.generate(input_ids=inputs["input_ids"],pixel_values=inputs["pixel_values"],max_new_tokens=20,num_beams=1, do_sample=False)
++        if 'florence' in model.config.name_or_path.lower() or getattr(model.config, 'model_type', '') == 'florence2':
++            # GenerationMixin asks Florence-2 for its bare text encoder and
++            # can therefore drop pixel_values before the image/text merge.
++            # Pre-merge the released model features so the encoder receives a
++            # matching  image+prompt attention mask.
++            image_features = model._encode_image(inputs["pixel_values"])
++            text_features = model.get_input_embeddings()(inputs["input_ids"])
++            merged_features, merged_attention = model._merge_input_ids_with_image_features(image_features, text_features)
++            generated_ids = model.generate(
++                input_ids=inputs["input_ids"],
++                inputs_embeds=merged_features,
++                attention_mask=merged_attention,
++                max_new_tokens=20,
++                num_beams=1,
++                do_sample=False,
++                early_stopping=False,
++            )
+         else:
+             generated_ids = model.generate(**inputs, max_length=100, num_beams=5, no_repeat_ngram_size=2, early_stopping=True, num_return_sequences=1) # temperature=0.01, do_sample=True,
+         generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)
+@@ -519,7 +542,7 @@ def check_ocr_box(image_source: Union[str, Image.Image], display_img = True, out
+         image_source = image_source.convert('RGB')
+     image_np = np.array(image_source)
+     w, h = image_source.size
+-    if use_paddleocr:
++    if use_paddleocr and paddle_ocr is not None:
+         if easyocr_args is None:
+             text_threshold = 0.5
+         else:
+@@ -547,4 +570,4 @@ def check_ocr_box(image_source: Union[str, Image.Image], display_img = True, out
+             bb = [get_xywh(item) for item in coord]
+         elif output_bb_format == 'xyxy':
+             bb = [get_xyxy(item) for item in coord]
+-    return (text, bb), goal_filtering
+\ No newline at end of file
++    return (text, bb), goal_filtering

@@ -10,6 +10,7 @@
 /Backups/
 /Logs/
 /Runtimes/
+/runtime/
 
 # Upstream clones stay outside the main repository. First-party wrappers live
 # under Adapters/runners and patches/ instead.
@@ -22,6 +23,8 @@
 # Machine-specific configuration. Only example templates are tracked.
 /Config/*.json
 !/Config/*.example.json
+/Config/local.env.cmd
+!/Config/local.env.example.cmd
 
 # Python, Node and tool-generated files.
 **/__pycache__/
@@ -69,6 +72,19 @@ build/
 *.jpeg
 *.gif
 *.webp
+
+# Deliberately tracked source assets. Keep generated or personal media outside
+# these narrowly scoped locations.
+!docs/assets/
+!docs/assets/**
+!src/ui/assets/
+!src/ui/assets/**
+!src/modules/**/ui/assets/
+!src/modules/**/ui/assets/**
+!Apps/**/assets/
+!Apps/**/assets/**
+!tests/fixtures/
+!tests/fixtures/**
 
 # Secrets and credentials (including names commonly used by model tooling).
 .env

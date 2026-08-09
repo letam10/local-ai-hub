@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+import json
+import threading
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from .config import BASE_DIR
+
+
+JOBS_PATH = BASE_DIR / "Config" / "jobs.json"
+_lock = threading.RLock()
+_jobs: dict[str, dict[str, Any]] = {}
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _load() -> None:
+    if not JOBS_PATH.exists():
+        return
+    try:
+        with JOBS_PATH.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict):
+            _jobs.update({str(key): value for key, value in data.items() if isinstance(value, dict)})
+    except (OSError, json.JSONDecodeError):
+        return
+
+
+def _save() -> None:
+    JOBS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = JOBS_PATH.with_suffix(".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(_jobs, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    temporary.replace(JOBS_PATH)
+
+
+_load()
+
+
+def create_job(tool: str, input_data: Any, *, output: str | None = None, device: str | None = None) -> dict[str, Any]:
+    with _lock:
+        job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        record = {
+            "id": job_id,
+            "tool": tool,
+            "input": input_data,
+            "output": output,
+            "status": "queued",
+            "progress": 0,
+            "created_at": _now(),
+            "started_at": None,
+            "finished_at": None,
+            "device": device,
+            "error": None,
+            "resume_data": None,
+        }
+        _jobs[job_id] = record
+        _save()
+        return dict(record)
+
+
+def update_job(job_id: str, **changes: Any) -> dict[str, Any] | None:
+    with _lock:
+        record = _jobs.get(job_id)
+        if record is None:
+            return None
+        record.update(changes)
+        _save()
+        return dict(record)
+
+
+def get_job(job_id: str) -> dict[str, Any] | None:
+    with _lock:
+        record = _jobs.get(job_id)
+        return dict(record) if record else None
+
+
+def list_jobs() -> list[dict[str, Any]]:
+    with _lock:
+        return [dict(item) for item in sorted(_jobs.values(), key=lambda value: value.get("created_at", ""), reverse=True)]
+
+
+def active_heavy_jobs() -> list[dict[str, Any]]:
+    return [item for item in list_jobs() if item.get("status") in {"starting", "running"}]

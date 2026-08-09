@@ -1,0 +1,16 @@
+diff --git a/inference.py b/inference.py
+index 84d673b..fc391c0 100644
+--- a/inference.py
++++ b/inference.py
+@@ -2,7 +2,10 @@ import os
+ 
+ import numpy as np
+ 
+-os.environ['HF_HUB_CACHE'] = './checkpoints/hf_cache'
++os.environ.setdefault(
++    'HF_HUB_CACHE',
++    os.environ.get('LOCALAIHUB_HF_HUB_CACHE', './checkpoints/hf_cache'),
++)
+ import shutil
+ import warnings
+ import argparse
