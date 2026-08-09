@@ -241,6 +241,23 @@ class HubHandler(BaseHTTPRequestHandler):
             self._write(200, {"status": "completed", "applications": applications()})
         elif normalized == "/api/lifecycle":
             self._write(200, _lifecycle_payload())
+        elif normalized == "/api/comfyui/advanced":
+            from src.modules.image_generation.backend.comfyui import health as comfy_health
+
+            self._write(200, {"status": "completed", "comfyui": comfy_health()})
+        elif normalized == "/api/comfyui/workflows":
+            from src.modules.image_generation.backend.comfyui import list_bridge_workflows
+
+            self._write(200, {"status": "completed", "workflows": list_bridge_workflows()})
+        elif normalized.startswith("/api/comfyui/workflows/"):
+            from src.modules.image_generation.backend.comfyui import load_bridge_workflow
+
+            workflow_id = normalized.rsplit("/", 1)[-1]
+            workflow = load_bridge_workflow(workflow_id)
+            if workflow is None:
+                self._write(404, {"status": "error", "error": "Không tìm thấy ComfyUI bridge workflow."})
+            else:
+                self._write(200, {"status": "completed", "workflow": workflow})
         elif normalized == "/api/settings":
             self._write(200, _settings_payload())
         elif normalized == "/api/node-studio/registry":
@@ -304,6 +321,11 @@ class HubHandler(BaseHTTPRequestHandler):
 
             self._write(200, shutdown_owned_idle())
             return
+        if path == "/api/comfyui/advanced/start":
+            from src.modules.image_generation.backend.comfyui import start_advanced
+
+            self._write(*start_advanced())
+            return
         if path == "/api/storage/scan":
             from src.services.storage_manager.overview import storage_summary
 
@@ -357,6 +379,16 @@ class HubHandler(BaseHTTPRequestHandler):
             return
         status, payload = submit_tool(tool, self._read_json())
         self._write(status, payload)
+
+    def do_PUT(self) -> None:  # noqa: N802
+        path = unquote(urlparse(self.path).path.rstrip("/") or "/")
+        if not path.startswith("/api/comfyui/workflows/"):
+            self._write(404, {"status": "error", "error": "Route not found."})
+            return
+        from src.modules.image_generation.backend.comfyui import save_bridge_workflow
+
+        workflow_id = path.rsplit("/", 1)[-1]
+        self._write(*save_bridge_workflow(workflow_id, self._read_json()))
 
 
 def main() -> int:

@@ -375,6 +375,46 @@ def _run_sam2_track(inputs: dict[str, Any], context: Any, execute_tool: ToolExec
     }
 
 
+def _run_comfyui_workflow(data: dict[str, Any], inputs: dict[str, Any], context: Any, *, draft: bool) -> dict[str, Any]:
+    """Bridge typed Hub artifacts into an allowlisted ComfyUI API workflow."""
+
+    from src.modules.image_generation.backend.comfyui import run_bridge_workflow
+
+    bridge_inputs: dict[str, Any] = {}
+    for name in ("image", "mask", "video", "audio"):
+        value = inputs.get(name)
+        if isinstance(value, ArtifactValue):
+            bridge_inputs[name] = str(value.path)
+    if "text" in inputs:
+        bridge_inputs["text"] = str(inputs["text"])
+    elif data.get("prompt"):
+        bridge_inputs["text"] = str(data["prompt"])
+    if isinstance(inputs.get("metadata"), dict):
+        bridge_inputs["metadata"] = inputs["metadata"]
+    request = dict(data)
+    if draft:
+        request["width"] = min(_integer(request.get("width"), 768), 512)
+        request["height"] = min(_integer(request.get("height"), 768), 512)
+        request["steps"] = min(_integer(request.get("steps"), 20), 8)
+    workflow_id = str(data.get("workflow_id") or "flux_quick")
+    result = run_bridge_workflow(workflow_id, bridge_inputs, request, context)
+    status = str(result.get("status") or "error")
+    if status != "completed":
+        raise NodeFailure(str(result.get("error") or result.get("reason") or "ComfyUI bridge không hoàn tất."), status="unavailable" if status == "unavailable" else status)
+    outputs = result.get("outputs")
+    if not isinstance(outputs, list) or not outputs or not isinstance(outputs[-1], str):
+        raise NodeFailure("ComfyUI bridge không trả image output hợp lệ.")
+    return {
+        "image": _artifact_from_path(outputs[-1]),
+        "metadata": {
+            "bridge_workflow": result.get("bridge_workflow", workflow_id),
+            "engine": result.get("engine"),
+            "draft": bool(draft),
+            "seed": result.get("seed"),
+        },
+    }
+
+
 def _run_node(definition: NodeDefinition, data: dict[str, Any], inputs: dict[str, Any], context: Any, execute_tool: ToolExecutor, *, draft: bool) -> dict[str, Any]:
     runner = definition.runner
     if runner == "annotation":
@@ -415,6 +455,8 @@ def _run_node(definition: NodeDefinition, data: dict[str, Any], inputs: dict[str
         return _run_encode(data, inputs, context, execute_tool)
     if runner in {"flux", "qwen"}:
         return _run_image_generation(definition, data, inputs, context, execute_tool, draft=draft)
+    if runner == "comfyui_workflow":
+        return _run_comfyui_workflow(data, inputs, context, draft=draft)
     if runner == "grounding":
         image = _input_artifact(inputs, "image")
         prompt = inputs.get("prompt")

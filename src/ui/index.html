@@ -6,6 +6,7 @@
     <meta name="color-scheme" content="dark light" />
     <title>Local AI Hub</title>
     <link rel="stylesheet" href="/ui/styles.css" />
+    <link rel="stylesheet" href="/ui/vendor/litegraph.css" />
   </head>
   <body>
     <div class="hub-shell">
@@ -48,6 +49,8 @@
       </footer>
     </div>
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <!-- Pinned, local-only graph editor dependency. No CDN request is made. -->
+    <script src="/ui/vendor/litegraph.js"></script>
     <script type="module" src="/ui/app.js"></script>
   </body>
 </html>

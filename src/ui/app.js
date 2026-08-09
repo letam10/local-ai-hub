@@ -4,6 +4,9 @@ import {
   formatGb,
   formatStatus,
   getBootstrap,
+  getComfyAdvanced,
+  getComfyBridgeWorkflow,
+  getComfyBridgeWorkflows,
   getHealth,
   getJobs,
   getLifecycle,
@@ -12,7 +15,9 @@ import {
   launchApplication,
   openArtifact,
   resumeJob,
+  saveComfyBridgeWorkflow,
   scanStorage,
+  startComfyAdvanced,
   submitJob,
   uploadFile,
 } from "./api.js";
@@ -20,7 +25,7 @@ import { disposeNodeStudios, mountNodeStudios } from "./node_studio.js";
 import { NAVIGATION, renderPage } from "./pages.js";
 
 const state = {
-  health: {}, components: [], tools: [], applications: [], jobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, workspaceTabs: {},
+  health: {}, components: [], tools: [], applications: [], jobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {},
 };
 const view = document.querySelector("#module-view");
 const nav = document.querySelector("#sidebar-nav");
@@ -105,7 +110,10 @@ const loadRouteData = async ({ scan = false } = {}) => {
     return routeLoad;
   }
   if (route === "image") {
-    try { state.lifecycle = await getLifecycle(); } catch { /* bootstrap state stays truthful */ }
+    const results = await Promise.allSettled([getLifecycle(), getComfyAdvanced(), getComfyBridgeWorkflows()]);
+    if (results[0].status === "fulfilled") state.lifecycle = results[0].value;
+    if (results[1].status === "fulfilled") state.comfyAdvanced = results[1].value;
+    if (results[2].status === "fulfilled") state.comfyWorkflows = results[2].value.workflows || [];
     render();
   }
   return undefined;
@@ -255,7 +263,53 @@ document.addEventListener("click", async (event) => {
   if (resume) { resume.disabled = true; try { showToast(`Đã tạo ${((await resumeJob(resume.dataset.resumeJob)).job || {}).id || "job tiếp tục"}.`); await refreshFast({ quiet: true }); } catch (error) { showToast(error.message, "error"); } return; }
   const open = event.target.closest("[data-open-artifact]");
   if (open) { try { showToast((await openArtifact(open.dataset.openArtifact)).message || "Đã yêu cầu mở artifact."); } catch (error) { showToast(error.message, "error"); } return; }
-  if (event.target.closest("[data-open-comfy]")) { window.open(`http://127.0.0.1:${state.settings.comfyui_port || 8188}`, "_blank", "noopener"); return; }
+  const comfyAction = event.target.closest("[data-comfy-action]")?.dataset.comfyAction;
+  if (comfyAction === "start") {
+    const button = event.target.closest("[data-comfy-action]");
+    button.disabled = true;
+    try {
+      state.comfyAdvanced = await startComfyAdvanced();
+      state.lifecycle = { ...state.lifecycle, comfyui: state.comfyAdvanced.comfyui || {} };
+      const workflows = await getComfyBridgeWorkflows();
+      state.comfyWorkflows = workflows.workflows || [];
+      showToast("ComfyUI đang chạy trong backend ẩn; editor sẽ hiện trong cửa sổ Hub.");
+      render();
+    } catch (error) {
+      showToast(error.message, "error");
+    } finally {
+      button.disabled = false;
+    }
+    return;
+  }
+  if (comfyAction === "load") {
+    const select = view.querySelector("[data-comfy-workflow-select]");
+    const id = select?.value;
+    if (!id) { showToast("Chọn bridge workflow trước.", "warning"); return; }
+    try {
+      const result = await getComfyBridgeWorkflow(id);
+      const textarea = view.querySelector("[data-comfy-workflow-json]");
+      const idInput = view.querySelector("[data-comfy-workflow-id]");
+      if (textarea) textarea.value = JSON.stringify(result.workflow, null, 2);
+      if (idInput) idInput.value = result.workflow.id || id;
+      showToast("Đã nạp bridge JSON local.");
+    } catch (error) { showToast(error.message, "error"); }
+    return;
+  }
+  if (comfyAction === "save") {
+    const textarea = view.querySelector("[data-comfy-workflow-json]");
+    const idInput = view.querySelector("[data-comfy-workflow-id]");
+    try {
+      const workflow = JSON.parse(textarea?.value || "{}");
+      const id = String(idInput?.value || workflow.id || "").trim();
+      if (!id) throw new Error("Nhập ID bridge workflow trước khi lưu.");
+      await saveComfyBridgeWorkflow(id, workflow);
+      const workflows = await getComfyBridgeWorkflows();
+      state.comfyWorkflows = workflows.workflows || [];
+      showToast("Đã lưu bridge workflow vào user-data local, không đưa vào Git.");
+      render();
+    } catch (error) { showToast(error.message, "error"); }
+    return;
+  }
   if (event.target.closest("[data-close-backends]")) { try { const result = await closeOwnedBackends(); showToast(result.stopped?.length ? "Đã dừng backend Hub-owned rảnh." : "Không có backend Hub-owned cần dừng."); await refreshFast({ quiet: true }); } catch (error) { showToast(error.message, "error"); } }
 });
 

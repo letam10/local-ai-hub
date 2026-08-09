@@ -11,550 +11,503 @@ import {
   validateNodeGraph,
 } from "./api.js";
 
-const LOCAL_PREFIX = "local-ai-hub-node-studio-v1";
-const STAGE_WIDTH = 2600;
-const STAGE_HEIGHT = 1800;
-const scopePreset = { image: "image_draft", sam2: "sam2_segment", media: "media_encode", animesr: "animesr_pipeline" };
-const categoryColor = { utility: "#6c8cff", image: "#cf7cff", vision: "#42c6a0", media: "#f1ad5f", video: "#f17c8e", annotation: "#8794ad" };
+// LiteGraph.js is intentionally pinned and served from /ui/vendor.  This file
+// is the Hub adapter: it maps mature canvas-editor state to the Hub DAG API.
+const LOCAL_PREFIX = "local-ai-hub-graph-v5";
+const LEGACY_PREFIX = "local-ai-hub-node-studio-v1";
+const MAX_HISTORY = 60;
+const PRESET_BY_SCOPE = { image: "image_draft", sam2: "sam2_segment", media: "media_encode", animesr: "animesr_pipeline" };
+const TYPE_COLORS = {
+  IMAGE: "#cf7cff", MASK: "#42c6a0", VIDEO: "#f17c8e", AUDIO: "#f1ad5f",
+  TEXT: "#6c8cff", NUMBER: "#a9c6ff", BOOLEAN: "#e5d66a", MODEL: "#e291c7", METADATA: "#8794ad",
+};
+const CATEGORY_COLORS = { utility: "#6c8cff", image: "#cf7cff", vision: "#42c6a0", media: "#f1ad5f", video: "#f17c8e", annotation: "#8794ad" };
 
-const clone = (value) => JSON.parse(JSON.stringify(value));
-const uuid = () => `node_${globalThis.crypto?.randomUUID?.().replaceAll("-", "") || Math.random().toString(16).slice(2)}`;
-const graphKey = (scope) => `${LOCAL_PREFIX}:${scope}`;
+const clone = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+const keyFor = (scope) => `${LOCAL_PREFIX}:${scope}`;
+const legacyKeyFor = (scope) => `${LEGACY_PREFIX}:${scope}`;
 const asNumber = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+const uid = () => `node_${globalThis.crypto?.randomUUID?.().replaceAll("-", "") || Math.random().toString(16).slice(2)}`;
 
 function emptyGraph(scope) {
   return { schema_version: 1, id: `local-${scope}`, title: `Workflow ${scope}`, scope, nodes: [], edges: [], groups: [] };
 }
 
-function artifactFrom(value) {
+function firstArtifact(value) {
   if (!value || typeof value !== "object") return null;
   if (value.id && value.url) return value;
-  for (const item of Object.values(value)) {
-    const found = artifactFrom(item);
+  for (const child of Object.values(value)) {
+    const found = firstArtifact(child);
     if (found) return found;
   }
   return null;
 }
 
-function nodePosition(node, output = false, index = 0) {
-  const position = node.position || {};
-  return {
-    x: asNumber(position.x, 80) + (output ? 232 : 0),
-    y: asNumber(position.y, 80) + 70 + index * 26,
-  };
+function graphFingerprint(graph) {
+  return JSON.stringify(graph);
 }
 
-class NodeStudio {
+function propertyControl(node, property) {
+  const value = node.properties?.[property.name] ?? property.default ?? "";
+  const target = `${node.id}:${property.name}`;
+  const label = escapeHtml(property.label || property.name);
+  if (property.kind === "asset") {
+    return `<label class="graph-property"><span>${label}</span><small>${escapeHtml(value || "Chưa có artifact")}</small><input type="file" data-graph-asset="${escapeHtml(target)}" accept="${escapeHtml(property.accept || "")}" /></label>`;
+  }
+  if (property.kind === "boolean") {
+    return `<label class="graph-property graph-property--toggle"><input type="checkbox" data-graph-property="${escapeHtml(target)}" ${value ? "checked" : ""} /><span>${label}</span></label>`;
+  }
+  if (property.kind === "select" || property.kind === "encoder") {
+    const options = property.options || [];
+    return `<label class="graph-property"><span>${label}</span><select data-graph-property="${escapeHtml(target)}">${options.map((option) => `<option value="${escapeHtml(option)}" ${String(option) === String(value) ? "selected" : ""}>${escapeHtml(option)}</option>`).join("")}</select></label>`;
+  }
+  if (property.kind === "textarea") {
+    return `<label class="graph-property"><span>${label}</span><textarea data-graph-property="${escapeHtml(target)}">${escapeHtml(value)}</textarea></label>`;
+  }
+  const type = property.kind === "number" ? "number" : property.kind === "color" ? "color" : "text";
+  const min = property.min === undefined ? "" : ` min="${escapeHtml(property.min)}"`;
+  const max = property.max === undefined ? "" : ` max="${escapeHtml(property.max)}"`;
+  const step = property.step === undefined ? "" : ` step="${escapeHtml(property.step)}"`;
+  return `<label class="graph-property"><span>${label}</span><input type="${type}" data-graph-property="${escapeHtml(target)}" value="${escapeHtml(value)}"${min}${max}${step} /></label>`;
+}
+
+class HubGraphEditor {
   constructor(root, { showToast }) {
     this.root = root;
     this.scope = root.dataset.scope || "image";
     this.showToast = showToast;
     this.registry = new Map();
-    this.encoderCapabilities = {};
     this.presets = [];
-    this.graph = emptyGraph(this.scope);
-    this.selected = new Set();
-    this.dirty = new Set();
-    this.nodeStates = new Map();
-    this.pendingOutput = null;
-    this.pan = { x: 0, y: 0 };
-    this.zoom = 0.72;
+    this.graphData = emptyGraph(this.scope);
+    this.groups = [];
     this.history = [];
     this.future = [];
+    this.dirty = new Set();
+    this.nodeStates = new Map();
     this.activeJobId = null;
-    this.autoPreview = localStorage.getItem(`${graphKey(this.scope)}:auto`) === "true";
-    this.draft = localStorage.getItem(`${graphKey(this.scope)}:draft`) !== "false";
-    this.paletteSearch = "";
-    this.commandOpen = false;
-    this.autoTimer = null;
+    this.autoPreview = localStorage.getItem(`${keyFor(this.scope)}:auto`) === "true";
+    this.draft = localStorage.getItem(`${keyFor(this.scope)}:draft`) !== "false";
+    this.search = "";
+    this.hydrating = false;
+    this.beforeChange = null;
     this.pollTimer = null;
-    this.drag = null;
+    this.autoTimer = null;
+    this.resizeObserver = null;
     this.abort = new AbortController();
-    this.eventsBound = false;
+    this.minimapBounds = null;
   }
 
   async initialize() {
-    this.root.innerHTML = `<div class="node-studio-loading">Đang nạp Node Studio offline…</div>`;
+    this.root.innerHTML = `<div class="graph-editor-loading">Đang nạp graph editor offline…</div>`;
+    if (!globalThis.LiteGraph) {
+      this.root.innerHTML = `<div class="callout callout--warning">Thiếu LiteGraph offline. Kiểm tra file <code>/ui/vendor/litegraph.js</code>.</div>`;
+      return;
+    }
     try {
-      const [registry, presetList] = await Promise.all([getNodeRegistry(this.scope), getNodePresets()]);
-      this.registry = new Map((registry.nodes || []).map((item) => [item.type, item]));
-      this.encoderCapabilities = registry.encoder_capabilities || {};
-      this.presets = (presetList.presets || []).filter((item) => item.scope === this.scope);
+      const [registryPayload, presetPayload] = await Promise.all([getNodeRegistry(this.scope), getNodePresets()]);
+      this.registry = new Map((registryPayload.nodes || []).map((item) => [item.type, item]));
+      this.presets = (presetPayload.presets || []).filter((item) => item.scope === this.scope);
+      this.configureLiteGraph();
       const saved = this.readLocalGraph();
-      if (saved) this.graph = saved;
-      else await this.loadPreset(scopePreset[this.scope], { quiet: true });
-      this.dirty = new Set(this.graph.nodes.map((item) => item.id));
-      this.render();
-      this.bindGlobalKeys();
+      if (saved) this.graphData = saved;
+      else await this.loadPreset(PRESET_BY_SCOPE[this.scope], { quiet: true, render: false });
+      this.dirty = new Set(this.graphData.nodes.map((node) => node.id));
+      this.renderShell();
+      this.hydrateLiteGraph(this.graphData);
     } catch (error) {
-      this.root.innerHTML = `<div class="callout callout--warning">Không thể nạp Node Studio: ${escapeHtml(error.message)}</div>`;
+      this.root.innerHTML = `<div class="callout callout--warning">Không thể nạp graph editor: ${escapeHtml(error.message)}</div>`;
     }
   }
 
   destroy() {
     this.abort.abort();
-    if (this.autoTimer) clearTimeout(this.autoTimer);
     if (this.pollTimer) clearInterval(this.pollTimer);
+    if (this.autoTimer) clearTimeout(this.autoTimer);
+    this.resizeObserver?.disconnect();
+    this.liteCanvas?.stopRendering?.();
+    this.liteCanvas?.setGraph?.(null);
   }
 
   readLocalGraph() {
-    try {
-      const value = JSON.parse(localStorage.getItem(graphKey(this.scope)) || "null");
-      return value && value.schema_version === 1 && Array.isArray(value.nodes) && Array.isArray(value.edges) ? value : null;
-    } catch { return null; }
+    for (const storageKey of [keyFor(this.scope), legacyKeyFor(this.scope)]) {
+      try {
+        const value = JSON.parse(localStorage.getItem(storageKey) || "null");
+        if (value?.schema_version === 1 && Array.isArray(value.nodes) && Array.isArray(value.edges)) return value;
+      } catch { /* ignore a malformed private WebView value */ }
+    }
+    return null;
   }
 
   persist() {
-    localStorage.setItem(graphKey(this.scope), JSON.stringify(this.graph));
-    localStorage.setItem(`${graphKey(this.scope)}:auto`, String(this.autoPreview));
-    localStorage.setItem(`${graphKey(this.scope)}:draft`, String(this.draft));
+    const graph = this.toHubGraph();
+    localStorage.setItem(keyFor(this.scope), JSON.stringify(graph));
+    localStorage.setItem(`${keyFor(this.scope)}:auto`, String(this.autoPreview));
+    localStorage.setItem(`${keyFor(this.scope)}:draft`, String(this.draft));
   }
 
-  snapshot() { return JSON.stringify(this.graph); }
-
-  mutate(callback, changedIds = []) {
-    const before = this.snapshot();
-    callback();
-    const after = this.snapshot();
-    if (before === after) return;
-    this.history.push(before);
-    if (this.history.length > 60) this.history.shift();
-    this.future = [];
-    changedIds.forEach((id) => this.markDirty(id));
-    this.persist();
-    this.render();
-    this.scheduleAutoPreview();
-  }
-
-  undo() {
-    const previous = this.history.pop();
-    if (!previous) return;
-    this.future.push(this.snapshot());
-    this.graph = JSON.parse(previous);
-    this.dirty = new Set(this.graph.nodes.map((item) => item.id));
-    this.persist();
-    this.render();
-  }
-
-  redo() {
-    const next = this.future.pop();
-    if (!next) return;
-    this.history.push(this.snapshot());
-    this.graph = JSON.parse(next);
-    this.dirty = new Set(this.graph.nodes.map((item) => item.id));
-    this.persist();
-    this.render();
-  }
-
-  markDirty(nodeId) {
-    if (!nodeId) return;
-    const local = new Set([nodeId]);
-    const queue = [nodeId];
-    while (queue.length) {
-      const current = queue.shift();
-      for (const edge of this.graph.edges) {
-        if (edge.source.node === current && !local.has(edge.target.node)) {
-          local.add(edge.target.node);
-          queue.push(edge.target.node);
+  configureLiteGraph() {
+    const { LiteGraph } = globalThis;
+    LiteGraph.NODE_TEXT_SIZE = 14;
+    LiteGraph.NODE_SLOT_HEIGHT = 22;
+    Object.assign(LiteGraph.LGraphCanvas.link_type_colors, TYPE_COLORS);
+    for (const definition of this.registry.values()) {
+      const typeName = `local-ai-hub/${definition.type}`;
+      if (LiteGraph.registered_node_types[typeName]) continue;
+      const captured = definition;
+      function HubLiteNode() {
+        this.title = captured.title;
+        this.hubType = captured.type;
+        this.properties = Object.fromEntries((captured.properties || []).map((property) => [property.name, clone(property.default)]));
+        for (const port of captured.inputs || []) {
+          this.addInput(port.label || port.name, port.type, { hubPort: port.name, required: Boolean(port.required), multi: Boolean(port.multi) });
+          this.inputs[this.inputs.length - 1].hubPort = port.name;
         }
+        for (const port of captured.outputs || []) {
+          this.addOutput(port.label || port.name, port.type, { hubPort: port.name });
+          this.outputs[this.outputs.length - 1].hubPort = port.name;
+        }
+        this.color = CATEGORY_COLORS[captured.category] || "#8794ad";
+        this.bgcolor = "#172039";
+        this.shape = "round";
+        this.size = [230, Math.max(82, 42 + Math.max((captured.inputs || []).length, (captured.outputs || []).length) * 22)];
       }
+      HubLiteNode.title = captured.title;
+      HubLiteNode.desc = captured.description;
+      HubLiteNode.prototype.onDrawForeground = function drawHubNodeForeground(ctx) {
+        if (this.hubStatus && this.hubStatus !== "completed") {
+          ctx.save();
+          ctx.fillStyle = this.hubStatus === "failed" || this.hubStatus === "error" ? "#ef7885" : "#80aaff";
+          ctx.fillRect(this.size[0] - 12, 8, 5, 5);
+          ctx.restore();
+        }
+      };
+      LiteGraph.registerNodeType(typeName, HubLiteNode);
     }
-    local.forEach((id) => this.dirty.add(id));
-    // The API performs the same DAG propagation.  The local result is immediate;
-    // this response keeps the UI aligned with the backend validator.
-    getDirtyNodes(this.graph, [nodeId]).then((result) => {
-      if (result.valid) result.dirty_nodes.forEach((id) => this.dirty.add(id));
-    }).catch(() => {});
   }
 
-  definition(node) { return this.registry.get(node.type); }
-  selectedNode() { return this.graph.nodes.find((node) => this.selected.has(node.id)) || null; }
-
-  visibleDefinitions() {
-    const query = this.paletteSearch.trim().toLocaleLowerCase();
-    return [...this.registry.values()].filter((item) => !query || `${item.title} ${item.description} ${item.category}`.toLocaleLowerCase().includes(query));
-  }
-
-  render() {
-    if (!this.registry.size) return;
-    const definitions = this.visibleDefinitions();
-    const selected = this.selectedNode();
+  renderShell() {
     this.root.innerHTML = `
-      <section class="node-studio" aria-label="Node Studio ${escapeHtml(this.scope)}">
-        <div class="node-toolbar">
-          <div class="node-toolbar__group"><button class="button button--primary" type="button" data-node-action="run">Run Graph</button><button class="button" type="button" data-node-action="cancel" ${this.activeJobId ? "" : "disabled"}>Cancel</button><label class="node-toggle"><input type="checkbox" data-node-option="auto" ${this.autoPreview ? "checked" : ""} /> Auto Preview</label><label class="node-toggle"><input type="checkbox" data-node-option="draft" ${this.draft ? "checked" : ""} /> Draft ảnh</label></div>
-          <div class="node-toolbar__group"><select class="node-preset" data-node-preset><option value="">Preset Hub…</option>${this.presets.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.title)}</option>`).join("")}</select><button class="button button--compact" type="button" data-node-action="save-local">Lưu local</button><button class="button button--compact" type="button" data-node-action="save-as">Save As</button><button class="button button--compact" type="button" data-node-action="export">Export JSON</button><button class="button button--compact" type="button" data-node-action="import">Import JSON</button></div>
+      <section class="graph-editor" aria-label="Hub Nodes ${escapeHtml(this.scope)}">
+        <div class="graph-editor__toolbar">
+          <div class="graph-editor__toolbar-group"><button class="button button--primary" type="button" data-graph-action="run">Run Graph</button><button class="button" type="button" data-graph-action="cancel" disabled>Cancel</button><button class="button" type="button" data-graph-action="undo">Undo</button><button class="button" type="button" data-graph-action="redo">Redo</button></div>
+          <div class="graph-editor__toolbar-group"><select data-graph-preset aria-label="Preset workflow"><option value="">Preset workflow…</option>${this.presets.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.title)}</option>`).join("")}</select><button class="button" type="button" data-graph-action="save-local">Lưu local</button><button class="button" type="button" data-graph-action="export">Export JSON</button><label class="button graph-editor__import">Import JSON<input type="file" data-graph-import accept="application/json,.json" /></label></div>
         </div>
-        <div class="node-studio__layout">
-          <aside class="node-palette">
-            <div class="node-palette__title"><strong>Palette</strong><button class="icon-button" type="button" title="Thêm node (Ctrl+K)" data-node-action="command">+</button></div>
-            <input class="node-search" data-node-search value="${escapeHtml(this.paletteSearch)}" placeholder="Tìm / thêm node…" />
-            <div class="node-palette__actions"><button class="button button--compact" type="button" data-node-add="comment">+ Comment</button><button class="button button--compact" type="button" data-node-add="group">+ Group</button></div>
-            <div class="node-palette__list">${definitions.map((item) => `<button class="node-palette-item" type="button" data-node-add="${escapeHtml(item.type)}"><span style="--node-color:${categoryColor[item.category] || categoryColor.utility}"></span><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.category)} · ${escapeHtml(item.status)}</small></button>`).join("")}</div>
-          </aside>
-          <div class="node-canvas-shell">
-            <div class="node-canvas-tools"><span>${escapeHtml(this.graph.title || "Untitled workflow")}</span><span>${this.graph.nodes.length} node · ${this.graph.edges.length} link</span><button class="button button--compact" type="button" data-node-action="reset-view">Reset view</button></div>
-            <div class="node-canvas" data-node-canvas tabindex="0"><div class="node-stage" style="width:${STAGE_WIDTH}px;height:${STAGE_HEIGHT}px;transform:translate(${this.pan.x}px,${this.pan.y}px) scale(${this.zoom})">${this.renderEdges()}${this.graph.nodes.map((node) => this.renderNode(node)).join("")}</div></div>
-            <div class="node-minimap">${this.graph.nodes.map((node) => `<i class="node-minimap__dot" style="left:${Math.max(2, Math.min(94, asNumber(node.position?.x, 0) / STAGE_WIDTH * 100))}%;top:${Math.max(2, Math.min(94, asNumber(node.position?.y, 0) / STAGE_HEIGHT * 100))}%;background:${categoryColor[this.definition(node)?.category] || categoryColor.utility}"></i>`).join("")}</div>
-          </div>
-          <aside class="node-inspector">${this.renderInspector(selected)}</aside>
+        <div class="graph-editor__options"><label><input type="checkbox" data-graph-option="auto" ${this.autoPreview ? "checked" : ""} /> Auto Preview</label><label><input type="checkbox" data-graph-option="draft" ${this.draft ? "checked" : ""} /> Draft ảnh</label><span>Drag socket để nối · Shift/Ctrl-click để chọn nhiều · wheel để zoom · kéo nền để pan</span></div>
+        <div class="graph-editor__layout">
+          <aside class="graph-palette"><input type="search" data-graph-search placeholder="Tìm node…" aria-label="Tìm node" /><div data-graph-palette></div></aside>
+          <div class="graph-canvas-shell"><canvas class="graph-canvas" data-graph-canvas></canvas><div class="graph-canvas__actions"><button type="button" data-graph-action="fit">Fit</button><button type="button" data-graph-action="delete">Xóa chọn</button></div><canvas class="graph-minimap" data-graph-minimap width="180" height="118" aria-label="Minimap graph"></canvas></div>
+          <aside class="graph-inspector" data-graph-inspector></aside>
         </div>
-        ${this.commandOpen ? this.renderCommandMenu() : ""}
-        <input class="node-import-input" type="file" accept="application/json,.json" hidden data-node-import />
       </section>`;
+    this.canvasElement = this.root.querySelector("[data-graph-canvas]");
+    this.minimap = this.root.querySelector("[data-graph-minimap]");
+    this.paletteElement = this.root.querySelector("[data-graph-palette]");
+    this.inspectorElement = this.root.querySelector("[data-graph-inspector]");
+    this.liteGraph = new globalThis.LiteGraph.LGraph();
+    this.liteCanvas = new globalThis.LiteGraph.LGraphCanvas(this.canvasElement, this.liteGraph, { autoresize: false });
+    this.liteCanvas.allow_dragcanvas = true;
+    this.liteCanvas.allow_dragnodes = true;
+    this.liteCanvas.allow_reconnect_links = true;
+    this.liteCanvas.allow_searchbox = true;
+    this.liteCanvas.multi_select = false;
+    this.liteCanvas.render_shadows = true;
+    this.liteCanvas.render_connections_border = true;
+    this.liteCanvas.links_render_mode = globalThis.LiteGraph.SPLINE_LINK;
+    this.liteCanvas.onBeforeChange = () => this.captureBeforeChange();
+    this.liteCanvas.onAfterChange = () => this.captureAfterChange();
+    this.liteCanvas.onSelectionChange = () => { this.renderInspector(); this.drawMinimap(); };
+    this.liteCanvas.onNodeMoved = () => this.drawMinimap();
     this.bindEvents();
-  }
-
-  renderEdges() {
-    const nodes = new Map(this.graph.nodes.map((node) => [node.id, node]));
-    return `<svg class="node-edges" viewBox="0 0 ${STAGE_WIDTH} ${STAGE_HEIGHT}" aria-hidden="true">${this.graph.edges.map((edge) => {
-      const source = nodes.get(edge.source.node);
-      const target = nodes.get(edge.target.node);
-      const sourceDefinition = source && this.definition(source);
-      const targetDefinition = target && this.definition(target);
-      if (!source || !target || !sourceDefinition || !targetDefinition) return "";
-      const sourceIndex = Math.max(0, (sourceDefinition.outputs || []).findIndex((port) => port.name === edge.source.port));
-      const targetIndex = Math.max(0, (targetDefinition.inputs || []).findIndex((port) => port.name === edge.target.port));
-      const from = nodePosition(source, true, sourceIndex);
-      const to = nodePosition(target, false, targetIndex);
-      const bend = Math.max(55, Math.abs(to.x - from.x) * 0.45);
-      const port = sourceDefinition.outputs[sourceIndex];
-      return `<path d="M ${from.x} ${from.y} C ${from.x + bend} ${from.y}, ${to.x - bend} ${to.y}, ${to.x} ${to.y}" class="node-edge" data-type="${escapeHtml(port?.type || "METADATA")}" />`;
-    }).join("")}</svg>`;
-  }
-
-  renderNode(node) {
-    const definition = this.definition(node);
-    if (!definition) return "";
-    const state = this.nodeStates.get(node.id) || {};
-    const selected = this.selected.has(node.id);
-    const position = node.position || {};
-    const color = categoryColor[definition.category] || categoryColor.utility;
-    const inputs = (definition.inputs || []).map((port) => `<button class="node-socket node-socket--input" type="button" title="${escapeHtml(port.type)}" style="--socket:${color}" data-node-input="${escapeHtml(node.id)}:${escapeHtml(port.name)}"><span>${escapeHtml(port.label || port.name)}</span><i>${escapeHtml(port.type)}</i></button>`).join("");
-    const outputs = (definition.outputs || []).map((port) => `<button class="node-socket node-socket--output ${this.pendingOutput?.node === node.id && this.pendingOutput?.port === port.name ? "is-pending" : ""}" type="button" title="${escapeHtml(port.type)}" style="--socket:${color}" data-node-output="${escapeHtml(node.id)}:${escapeHtml(port.name)}"><i>${escapeHtml(port.type)}</i><span>${escapeHtml(port.label || port.name)}</span></button>`).join("");
-    return `<article class="graph-node ${selected ? "is-selected" : ""} ${this.dirty.has(node.id) ? "is-dirty" : ""}" data-node-card="${escapeHtml(node.id)}" style="left:${asNumber(position.x, 80)}px;top:${asNumber(position.y, 80)}px;--node-color:${color}"><header data-node-drag="${escapeHtml(node.id)}"><span class="graph-node__category">${escapeHtml(definition.category)}</span><strong>${escapeHtml(node.data?.title || definition.title)}</strong><span class="graph-node__status" data-status="${escapeHtml(state.status || (this.dirty.has(node.id) ? "dirty" : definition.status))}">${escapeHtml(state.cache_hit ? "cache" : state.status || (this.dirty.has(node.id) ? "dirty" : definition.status))}</span></header><div class="graph-node__body"><div class="graph-node__ports">${inputs}</div><div class="graph-node__ports graph-node__ports--out">${outputs}</div></div></article>`;
-  }
-
-  renderInspector(selected) {
-    if (!selected) return `<div class="node-inspector__empty"><strong>Inspector / Preview</strong><p>Chọn node để chỉnh typed properties, xem output, link và lỗi.</p><p>Shift-click để multi-select. Kéo node, lăn chuột để zoom, kéo nền để pan.</p></div>`;
-    const definition = this.definition(selected);
-    const state = this.nodeStates.get(selected.id) || {};
-    const data = selected.data || {};
-    const fields = (definition.properties || []).map((property) => this.renderProperty(selected, property, data[property.name])).join("");
-    const linked = this.graph.edges.filter((edge) => edge.source.node === selected.id || edge.target.node === selected.id);
-    return `<div class="node-inspector__head"><div><span class="eyebrow">${escapeHtml(definition.category)}</span><h3>${escapeHtml(definition.title)}</h3><p>${escapeHtml(definition.description)}</p></div><button class="button button--compact" type="button" data-node-action="duplicate">Duplicate</button></div><div class="node-state" data-status="${escapeHtml(state.status || "idle")}">${escapeHtml(state.message || (this.dirty.has(selected.id) ? "Đã dirty; Run Graph sẽ chỉ tính lại downstream." : "Sẵn sàng."))}</div><div class="node-properties">${fields || `<p class="muted small">Node này không có property.</p>`}</div><div class="node-inspector__section"><strong>Links</strong>${linked.length ? linked.map((edge) => `<div class="node-link-row"><span>${escapeHtml(edge.source.node)} → ${escapeHtml(edge.target.node)}</span><button class="button button--compact" type="button" data-node-disconnect="${escapeHtml(edge.id)}">×</button></div>`).join("") : `<p class="muted small">Chưa có link.</p>`}</div><div class="node-inspector__section"><strong>Preview</strong>${this.renderPreview(state.output)}</div>${state.error ? `<div class="form-result form-result--error">${escapeHtml(state.error)}</div>` : ""}</div>`;
-  }
-
-  renderProperty(node, property, value) {
-    const current = value ?? property.default ?? "";
-    const name = escapeHtml(property.name);
-    const label = escapeHtml(property.label || property.name);
-    if (property.kind === "asset") return `<label class="node-property"><span>${label}</span><input type="file" data-node-asset="${escapeHtml(node.id)}:${name}" accept="${escapeHtml(property.accept || "*")}" /><small>${typeof current === "string" && current ? `artifact: ${escapeHtml(current.slice(0, 18))}…` : "Chưa chọn artifact"}</small></label>`;
-    if (property.kind === "textarea") return `<label class="node-property"><span>${label}</span><textarea data-node-property="${escapeHtml(node.id)}:${name}">${escapeHtml(current)}</textarea></label>`;
-    if (property.kind === "boolean") return `<label class="node-toggle node-property"><input type="checkbox" data-node-property="${escapeHtml(node.id)}:${name}" ${current ? "checked" : ""} /><span>${label}</span></label>`;
-    if (property.kind === "select") return `<label class="node-property"><span>${label}</span><select data-node-property="${escapeHtml(node.id)}:${name}">${(property.options || []).map((option) => `<option value="${escapeHtml(option)}" ${String(option) === String(current) ? "selected" : ""}>${escapeHtml(option)}</option>`).join("")}</select></label>`;
-    if (property.kind === "encoder") {
-      const encoders = this.encoderCapabilities.encoders || [];
-      return `<label class="node-property"><span>${label}</span><select data-node-property="${escapeHtml(node.id)}:${name}"><option value="auto">Auto (capability thật)</option>${encoders.map((encoder) => `<option value="${escapeHtml(encoder.id)}" ${encoder.id === current ? "selected" : ""}>${escapeHtml(encoder.codec)} · ${escapeHtml(encoder.id)}${encoder.hardware ? " · GPU" : ""}</option>`).join("")}</select><small>${this.encoderCapabilities.available ? "FFmpeg -encoders/-h encoder đã cache trong Hub." : escapeHtml(this.encoderCapabilities.reason || "FFmpeg chưa khả dụng.")}</small></label>`;
-    }
-    const type = property.kind === "number" ? "number" : property.kind === "color" ? "color" : "text";
-    const extras = property.kind === "number" ? ` min="${escapeHtml(property.min ?? "")}" max="${escapeHtml(property.max ?? "")}" step="${escapeHtml(property.step ?? "any")}"` : "";
-    return `<label class="node-property"><span>${label}</span><input type="${type}" value="${escapeHtml(current)}" data-node-property="${escapeHtml(node.id)}:${name}"${extras} /></label>`;
-  }
-
-  renderPreview(output) {
-    if (!output) return `<div class="node-preview-empty">Output artifact sẽ cập nhật ngay khi node hoàn tất.</div>`;
-    const a = output.a && artifactFrom(output.a);
-    const b = output.b && artifactFrom(output.b);
-    if (a && b) return `<div class="node-compare"><figure><img src="${escapeHtml(a.url)}" alt="Before" /><figcaption>Before</figcaption></figure><figure><img src="${escapeHtml(b.url)}" alt="After" /><figcaption>After</figcaption></figure></div>`;
-    const artifact = artifactFrom(output);
-    if (!artifact) return `<pre class="node-metadata">${escapeHtml(JSON.stringify(output, null, 2).slice(0, 3500))}</pre>`;
-    const media = String(artifact.media_type || "");
-    if (media.startsWith("image/")) return `<img class="node-preview-media" src="${escapeHtml(artifact.url)}" alt="${escapeHtml(artifact.name)}" />`;
-    if (media.startsWith("video/")) return `<video class="node-preview-media" src="${escapeHtml(artifact.url)}" controls preload="metadata"></video>`;
-    if (media.startsWith("audio/")) return `<audio class="node-preview-media" src="${escapeHtml(artifact.url)}" controls preload="metadata"></audio>`;
-    return `<a class="button button--compact" href="${escapeHtml(artifact.url)}" target="_blank" rel="noopener">Mở ${escapeHtml(artifact.name)}</a>`;
-  }
-
-  renderCommandMenu() {
-    const definitions = this.visibleDefinitions().slice(0, 24);
-    return `<div class="node-command-backdrop" data-node-action="close-command"><div class="node-command" role="dialog" aria-label="Thêm node"><div class="split"><strong>Thêm node</strong><button class="button button--compact" type="button" data-node-action="close-command">Đóng</button></div><input autofocus data-node-command-search value="${escapeHtml(this.paletteSearch)}" placeholder="Tìm node…" /><div class="node-command__list">${definitions.map((item) => `<button type="button" data-node-add="${escapeHtml(item.type)}"><span style="--node-color:${categoryColor[item.category] || categoryColor.utility}"></span><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.description)}</small></button>`).join("")}</div></div></div>`;
+    this.renderPalette();
+    this.renderInspector();
+    this.resizeObserver = new ResizeObserver(() => this.resizeCanvas());
+    this.resizeObserver.observe(this.canvasElement.parentElement);
+    this.resizeCanvas();
   }
 
   bindEvents() {
-    if (this.eventsBound) return;
-    this.eventsBound = true;
-    const signal = this.abort.signal;
-    this.root.querySelector("[data-node-search]")?.addEventListener("input", (event) => { this.paletteSearch = event.target.value; this.render(); }, { signal });
-    this.root.querySelector("[data-node-command-search]")?.addEventListener("input", (event) => { this.paletteSearch = event.target.value; this.render(); }, { signal });
-    this.root.addEventListener("click", (event) => this.handleClick(event), { signal });
-    this.root.addEventListener("change", (event) => this.handleChange(event), { signal });
-    this.root.addEventListener("input", (event) => this.handleInput(event), { signal });
-    this.root.addEventListener("pointerdown", (event) => this.handlePointerDown(event), { signal });
-    this.root.addEventListener("wheel", (event) => this.handleWheel(event), { signal, passive: false });
-  }
-
-  bindGlobalKeys() {
+    const { signal } = this.abort;
+    this.root.addEventListener("click", (event) => {
+      const action = event.target.closest("[data-graph-action]")?.dataset.graphAction;
+      if (action) this.handleAction(action);
+      const add = event.target.closest("[data-graph-add]")?.dataset.graphAdd;
+      if (add) this.addNode(add);
+    }, { signal });
+    this.root.addEventListener("input", (event) => {
+      if (event.target.matches("[data-graph-search]")) { this.search = event.target.value; this.renderPalette(); }
+    }, { signal });
+    this.root.addEventListener("change", (event) => {
+      const option = event.target.dataset.graphOption;
+      if (option === "auto") { this.autoPreview = event.target.checked; this.persist(); return; }
+      if (option === "draft") { this.draft = event.target.checked; this.persist(); return; }
+      if (event.target.matches("[data-graph-preset]")) { this.loadPreset(event.target.value); return; }
+      if (event.target.matches("[data-graph-property]")) { this.changeProperty(event.target); return; }
+      if (event.target.matches("[data-graph-asset]")) { this.uploadAsset(event.target); return; }
+      if (event.target.matches("[data-graph-import]")) { this.importGraph(event.target.files?.[0]); }
+    }, { signal });
+    this.minimap.addEventListener("pointerdown", (event) => this.recenterFromMinimap(event), { signal });
     document.addEventListener("keydown", (event) => {
-      if (!this.root.isConnected) return;
-      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
-      if (event.ctrlKey && event.key.toLowerCase() === "k") { event.preventDefault(); this.commandOpen = true; this.render(); return; }
-      if (typing) return;
-      if (event.ctrlKey && event.key.toLowerCase() === "z") { event.preventDefault(); this.undo(); return; }
-      if (event.ctrlKey && event.key.toLowerCase() === "y") { event.preventDefault(); this.redo(); return; }
-      if (event.ctrlKey && event.key.toLowerCase() === "d") { event.preventDefault(); this.duplicateSelected(); return; }
-      if (["Delete", "Backspace"].includes(event.key)) { event.preventDefault(); this.deleteSelected(); }
-    }, { signal: this.abort.signal });
+      if (!this.root.isConnected || event.defaultPrevented || /INPUT|TEXTAREA|SELECT/.test(event.target?.tagName || "")) return;
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); event.shiftKey ? this.redo() : this.undo(); }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") { event.preventDefault(); this.redo(); }
+      if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); this.deleteSelected(); }
+    }, { signal });
   }
 
-  handleClick(event) {
-    const action = event.target.closest("[data-node-action]")?.dataset.nodeAction;
-    if (action) { this.handleAction(action); return; }
-    const add = event.target.closest("[data-node-add]")?.dataset.nodeAdd;
-    if (add) { this.addNode(add); return; }
-    const disconnect = event.target.closest("[data-node-disconnect]")?.dataset.nodeDisconnect;
-    if (disconnect) { this.mutate(() => { this.graph.edges = this.graph.edges.filter((edge) => edge.id !== disconnect); }, []); return; }
-    const output = event.target.closest("[data-node-output]")?.dataset.nodeOutput;
-    if (output) { this.chooseOutput(output); return; }
-    const input = event.target.closest("[data-node-input]")?.dataset.nodeInput;
-    if (input) { this.connectInput(input); return; }
-    const card = event.target.closest("[data-node-card]")?.dataset.nodeCard;
-    if (card) {
-      if (event.shiftKey) this.selected.has(card) ? this.selected.delete(card) : this.selected.add(card);
-      else this.selected = new Set([card]);
-      this.render();
-    }
+  resizeCanvas() {
+    if (!this.liteCanvas || !this.canvasElement.isConnected) return;
+    const box = this.canvasElement.parentElement.getBoundingClientRect();
+    this.liteCanvas.resize(Math.max(320, Math.floor(box.width)), Math.max(340, Math.floor(box.height)));
+    this.drawMinimap();
   }
 
-  handleChange(event) {
-    const option = event.target.closest("[data-node-option]")?.dataset.nodeOption;
-    if (option) {
-      this[option === "auto" ? "autoPreview" : "draft"] = event.target.checked;
-      this.persist();
-      this.scheduleAutoPreview();
+  renderPalette() {
+    if (!this.paletteElement) return;
+    const needle = this.search.trim().toLocaleLowerCase();
+    const nodes = [...this.registry.values()].filter((definition) => !needle || `${definition.title} ${definition.category} ${definition.description}`.toLocaleLowerCase().includes(needle));
+    this.paletteElement.innerHTML = nodes.map((definition) => `<button type="button" class="graph-palette__item" data-graph-add="${escapeHtml(definition.type)}"><i style="--node-color:${escapeHtml(CATEGORY_COLORS[definition.category] || "#8794ad")}"></i><span><b>${escapeHtml(definition.title)}</b><small>${escapeHtml(definition.category)} · ${escapeHtml(definition.status || "operational")}</small></span></button>`).join("") || `<p class="graph-empty">Không tìm thấy node.</p>`;
+  }
+
+  renderInspector() {
+    if (!this.inspectorElement) return;
+    const nodes = this.selectedNodes();
+    if (!nodes.length) {
+      this.inspectorElement.innerHTML = `<div class="graph-inspector__empty"><strong>Inspector / Live preview</strong><p>Chọn node để chỉnh properties và xem output job. Kết nối được kéo trực tiếp từ socket sang socket.</p><p>Minimap, pan/zoom, multi-select và undo/redo do LiteGraph canvas xử lý.</p></div>`;
       return;
     }
-    const preset = event.target.closest("[data-node-preset]")?.value;
-    if (preset) { this.loadPreset(preset); return; }
-    const asset = event.target.closest("[data-node-asset]");
-    if (asset) { this.uploadAsset(asset); return; }
-    const property = event.target.closest("[data-node-property]");
-    if (property) this.updateProperty(property);
-    const imported = event.target.closest("[data-node-import]");
-    if (imported?.files?.[0]) this.importGraph(imported.files[0]);
+    if (nodes.length > 1) {
+      this.inspectorElement.innerHTML = `<div class="graph-inspector__empty"><strong>${nodes.length} node đang được chọn</strong><p>Kéo các node cùng lúc, dùng Delete để xóa hoặc Ctrl+Z để hoàn tác.</p></div>`;
+      return;
+    }
+    const node = nodes[0];
+    const definition = this.registry.get(node.hubType);
+    const state = this.nodeStates.get(node.hubId) || {};
+    const artifact = firstArtifact(state.output);
+    const preview = artifact?.url ? (String(artifact.media_type || "").startsWith("image/")
+      ? `<img class="graph-preview-image" src="${escapeHtml(artifact.url)}" alt="${escapeHtml(artifact.name || "Output")}" />`
+      : `<a class="button button--compact" href="${escapeHtml(artifact.url)}" target="_blank" rel="noopener">Mở output</a>`) : "";
+    this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(definition?.category || "node")}</span><h3>${escapeHtml(definition?.title || node.hubType)}</h3><p>${escapeHtml(definition?.description || "")}</p></div>${state.status ? `<div class="graph-node-state" data-status="${escapeHtml(state.status)}"><b>${escapeHtml(state.status)}</b><span>${escapeHtml(state.message || state.error || "")}</span></div>` : ""}</div>${preview ? `<section class="graph-inspector__section"><strong>Live preview</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>Properties</strong>${(definition?.properties || []).map((property) => propertyControl(node, property)).join("") || `<p class="graph-empty">Node này không có property.</p>`}</section>`;
   }
 
-  handleInput(event) {
-    const property = event.target.closest("[data-node-property]");
-    if (property && !["checkbox", "file"].includes(property.type)) this.updateProperty(property, { render: false });
+  selectedNodes() {
+    return Object.values(this.liteCanvas?.selected_nodes || {});
   }
 
-  handlePointerDown(event) {
-    const drag = event.target.closest("[data-node-drag]")?.dataset.nodeDrag;
-    if (drag) { this.startNodeDrag(event, drag); return; }
-    const canvas = event.target.closest("[data-node-canvas]");
-    if (canvas) this.startPan(event, canvas);
+  captureBeforeChange() {
+    if (this.hydrating || this.beforeChange) return;
+    this.beforeChange = graphFingerprint(this.toHubGraph());
   }
 
-  handleWheel(event) {
-    if (!event.target.closest("[data-node-canvas]")) return;
-    event.preventDefault();
-    this.zoom = Math.max(0.3, Math.min(1.5, this.zoom + (event.deltaY < 0 ? 0.08 : -0.08)));
-    this.render();
+  captureAfterChange() {
+    if (this.hydrating) return;
+    const next = this.toHubGraph();
+    const after = graphFingerprint(next);
+    if (this.beforeChange && this.beforeChange !== after) {
+      this.history.push(this.beforeChange);
+      if (this.history.length > MAX_HISTORY) this.history.shift();
+      this.future = [];
+    }
+    this.beforeChange = null;
+    this.graphData = next;
+    this.markDirty(next.nodes.map((node) => node.id));
+    this.persist();
+    this.renderInspector();
+    this.drawMinimap();
+    this.scheduleAutoPreview();
   }
 
-  handleAction(action) {
-    if (action === "run") { this.run(); return; }
-    if (action === "cancel") { this.cancel(); return; }
-    if (action === "reset-view") { this.pan = { x: 0, y: 0 }; this.zoom = 0.72; this.render(); return; }
-    if (action === "save-local") { this.persist(); this.showToast("Workflow đã lưu local trong WebView."); return; }
-    if (action === "save-as") { this.saveAs(); return; }
-    if (action === "export") { this.exportGraph(); return; }
-    if (action === "import") { this.root.querySelector("[data-node-import]")?.click(); return; }
-    if (action === "duplicate") { this.duplicateSelected(); return; }
-    if (action === "command") { this.commandOpen = true; this.render(); return; }
-    if (action === "close-command") { this.commandOpen = false; this.render(); }
+  mutate(callback) {
+    this.liteGraph.beforeChange();
+    callback();
+    this.liteGraph.afterChange();
   }
 
   addNode(type) {
     const definition = this.registry.get(type);
     if (!definition) return;
-    const properties = Object.fromEntries((definition.properties || []).map((property) => [property.name, property.default]));
-    const offset = this.graph.nodes.length * 26;
-    const node = { id: uuid(), type, position: { x: 340 + (offset % 420), y: 180 + (offset % 360) }, data: properties };
-    this.mutate(() => { this.graph.nodes.push(node); this.selected = new Set([node.id]); this.commandOpen = false; }, [node.id]);
-  }
-
-  chooseOutput(value) {
-    const [nodeId, port] = value.split(":");
-    const node = this.graph.nodes.find((item) => item.id === nodeId);
-    const definition = node && this.definition(node);
-    const portDefinition = definition?.outputs?.find((item) => item.name === port);
-    if (!portDefinition) return;
-    this.pendingOutput = { node: nodeId, port, type: portDefinition.type };
-    this.render();
-  }
-
-  connectInput(value) {
-    const [targetNode, targetPort] = value.split(":");
-    if (!this.pendingOutput) { this.showToast("Chọn output socket trước.", "warning"); return; }
-    const target = this.graph.nodes.find((item) => item.id === targetNode);
-    const targetDefinition = target && this.definition(target);
-    const input = targetDefinition?.inputs?.find((item) => item.name === targetPort);
-    if (!input) return;
-    if (input.type !== this.pendingOutput.type) { this.showToast(`Không thể nối ${this.pendingOutput.type} vào ${input.type}.`, "error"); return; }
-    const source = this.pendingOutput;
-    this.mutate(() => {
-      if (!input.multi) this.graph.edges = this.graph.edges.filter((edge) => !(edge.target.node === targetNode && edge.target.port === targetPort));
-      if (!this.graph.edges.some((edge) => edge.source.node === source.node && edge.source.port === source.port && edge.target.node === targetNode && edge.target.port === targetPort)) {
-        this.graph.edges.push({ id: `edge_${Date.now()}_${Math.random().toString(16).slice(2, 7)}`, source: { node: source.node, port: source.port }, target: { node: targetNode, port: targetPort } });
-      }
-      this.pendingOutput = null;
-    }, [targetNode]);
-  }
-
-  updateProperty(element, { render = true } = {}) {
-    const [nodeId, name] = element.dataset.nodeProperty.split(":");
-    const node = this.graph.nodes.find((item) => item.id === nodeId);
+    const node = globalThis.LiteGraph.createNode(`local-ai-hub/${type}`);
     if (!node) return;
-    const definition = this.definition(node);
-    const property = definition?.properties?.find((item) => item.name === name);
-    let value = element.type === "checkbox" ? element.checked : element.value;
-    if (property?.kind === "number") value = asNumber(value, property.default ?? 0);
-    const before = this.snapshot();
-    node.data = { ...(node.data || {}), [name]: value };
-    if (before !== this.snapshot()) {
-      this.history.push(before); this.future = []; this.markDirty(nodeId); this.persist();
-      if (render) this.render(); else this.scheduleAutoPreview();
-    }
-  }
-
-  async uploadAsset(input) {
-    const file = input.files?.[0];
-    if (!file) return;
-    const [nodeId, name] = input.dataset.nodeAsset.split(":");
-    input.disabled = true;
-    try {
-      const artifact = await uploadFile(file);
-      const node = this.graph.nodes.find((item) => item.id === nodeId);
-      if (!node) return;
-      this.mutate(() => { node.data = { ...(node.data || {}), [name]: artifact.id }; }, [nodeId]);
-      this.showToast(`Đã dùng artifact ${artifact.name} trong node.`);
-    } catch (error) { this.showToast(error.message, "error"); }
-    finally { input.disabled = false; }
-  }
-
-  startNodeDrag(event, nodeId) {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    if (!this.selected.has(nodeId)) this.selected = new Set([nodeId]);
-    const selected = [...this.selected];
-    const origins = Object.fromEntries(selected.map((id) => {
-      const node = this.graph.nodes.find((item) => item.id === id);
-      return [id, { x: asNumber(node?.position?.x, 0), y: asNumber(node?.position?.y, 0) }];
-    }));
-    this.drag = { mode: "node", startX: event.clientX, startY: event.clientY, origins, before: this.snapshot() };
-    this.attachPointerFinish();
-  }
-
-  startPan(event, canvas) {
-    if (event.button !== 0 || event.target !== canvas) return;
-    this.drag = { mode: "pan", startX: event.clientX, startY: event.clientY, originPan: { ...this.pan } };
-    this.attachPointerFinish();
-  }
-
-  attachPointerFinish() {
-    const signal = this.abort.signal;
-    const move = (event) => {
-      if (!this.drag) return;
-      const dx = event.clientX - this.drag.startX;
-      const dy = event.clientY - this.drag.startY;
-      if (this.drag.mode === "pan") this.pan = { x: this.drag.originPan.x + dx, y: this.drag.originPan.y + dy };
-      else for (const [id, origin] of Object.entries(this.drag.origins)) {
-        const node = this.graph.nodes.find((item) => item.id === id);
-        if (node) node.position = { x: Math.max(0, origin.x + dx / this.zoom), y: Math.max(0, origin.y + dy / this.zoom) };
-      }
-      this.render();
-    };
-    const finish = () => {
-      if (this.drag?.mode === "node" && this.drag.before !== this.snapshot()) { this.history.push(this.drag.before); this.future = []; [...this.selected].forEach((id) => this.markDirty(id)); this.persist(); this.scheduleAutoPreview(); }
-      this.drag = null;
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", finish);
-    };
-    window.addEventListener("pointermove", move, { signal });
-    window.addEventListener("pointerup", finish, { signal, once: true });
+    node.hubType = type;
+    node.hubId = uid();
+    const count = this.liteGraph._nodes.length;
+    node.pos = [260 + (count % 5) * 46, 130 + (count % 7) * 34];
+    this.mutate(() => this.liteGraph.add(node));
+    this.liteCanvas.selectNode(node);
+    this.liteCanvas.centerOnNode(node);
   }
 
   deleteSelected() {
-    if (!this.selected.size) return;
-    const remove = new Set(this.selected);
-    this.mutate(() => { this.graph.nodes = this.graph.nodes.filter((node) => !remove.has(node.id)); this.graph.edges = this.graph.edges.filter((edge) => !remove.has(edge.source.node) && !remove.has(edge.target.node)); this.selected.clear(); }, []);
+    const selected = this.selectedNodes();
+    if (!selected.length) return;
+    this.mutate(() => selected.forEach((node) => this.liteGraph.remove(node)));
+    this.liteCanvas.deselectAllNodes();
   }
 
-  duplicateSelected() {
-    const node = this.selectedNode();
-    if (!node) return;
-    this.mutate(() => {
-      const copy = clone(node); copy.id = uuid(); copy.position = { x: asNumber(node.position?.x, 0) + 42, y: asNumber(node.position?.y, 0) + 42 };
-      this.graph.nodes.push(copy); this.selected = new Set([copy.id]);
-    }, []);
+  changeProperty(element) {
+    const [liteId, name] = element.dataset.graphProperty.split(":");
+    const node = this.liteGraph.getNodeById(Number(liteId));
+    const definition = node && this.registry.get(node.hubType);
+    const property = definition?.properties?.find((item) => item.name === name);
+    if (!node || !property) return;
+    let value = element.type === "checkbox" ? element.checked : element.value;
+    if (property.kind === "number") value = asNumber(value, property.default ?? 0);
+    this.mutate(() => { node.properties[name] = value; node.setDirtyCanvas(true, true); });
   }
 
-  async loadPreset(id, { quiet = false } = {}) {
+  async uploadAsset(input) {
+    const [liteId, name] = input.dataset.graphAsset.split(":");
+    const node = this.liteGraph.getNodeById(Number(liteId));
+    const file = input.files?.[0];
+    if (!node || !file) return;
+    input.disabled = true;
+    try {
+      const artifact = await uploadFile(file);
+      this.mutate(() => { node.properties[name] = artifact.id; node.setDirtyCanvas(true, true); });
+      this.showToast(`Đã dùng artifact ${artifact.name} trong node.`);
+    } catch (error) {
+      this.showToast(error.message, "error");
+    } finally {
+      input.disabled = false;
+    }
+  }
+
+  toHubGraph() {
+    if (!this.liteGraph) return clone(this.graphData);
+    const nodeByLiteId = new Map();
+    const nodes = this.liteGraph._nodes.map((node) => {
+      const data = Object.fromEntries(Object.entries(node.properties || {}).filter(([key]) => !key.startsWith("__")));
+      const value = {
+        id: node.hubId || `node_${node.id}`,
+        type: node.hubType || String(node.type || "").split("/").pop(),
+        position: { x: Math.round(asNumber(node.pos?.[0], 0)), y: Math.round(asNumber(node.pos?.[1], 0)) },
+        data,
+      };
+      nodeByLiteId.set(node.id, { node, value });
+      return value;
+    });
+    const edges = Object.values(this.liteGraph.links || {}).map((link) => {
+      const source = nodeByLiteId.get(link.origin_id);
+      const target = nodeByLiteId.get(link.target_id);
+      const sourcePort = source?.node.outputs?.[link.origin_slot]?.hubPort;
+      const targetPort = target?.node.inputs?.[link.target_slot]?.hubPort;
+      if (!source || !target || !sourcePort || !targetPort) return null;
+      return { id: `edge_${source.value.id}_${sourcePort}_${target.value.id}_${targetPort}`, source: { node: source.value.id, port: sourcePort }, target: { node: target.value.id, port: targetPort } };
+    }).filter(Boolean);
+    return { schema_version: 1, id: this.graphData.id || `local-${this.scope}`, title: this.graphData.title || `Workflow ${this.scope}`, scope: this.scope, nodes, edges, groups: clone(this.groups || []) };
+  }
+
+  hydrateLiteGraph(graph) {
+    this.hydrating = true;
+    this.liteGraph.clear();
+    this.liteCanvas.clear();
+    this.groups = clone(graph.groups || []);
+    const byHubId = new Map();
+    for (const source of graph.nodes || []) {
+      const type = String(source.type || "");
+      if (!this.registry.has(type)) continue;
+      const node = globalThis.LiteGraph.createNode(`local-ai-hub/${type}`);
+      if (!node) continue;
+      node.hubType = type;
+      node.hubId = String(source.id || uid());
+      node.pos = [asNumber(source.position?.x, 80), asNumber(source.position?.y, 80)];
+      node.properties = { ...node.properties, ...(source.data || {}) };
+      this.liteGraph.add(node);
+      byHubId.set(node.hubId, node);
+    }
+    for (const edge of graph.edges || []) {
+      const source = byHubId.get(edge.source?.node);
+      const target = byHubId.get(edge.target?.node);
+      const sourceSlot = source?.outputs?.findIndex((port) => port.hubPort === edge.source?.port) ?? -1;
+      const targetSlot = target?.inputs?.findIndex((port) => port.hubPort === edge.target?.port) ?? -1;
+      if (source && target && sourceSlot >= 0 && targetSlot >= 0) source.connect(sourceSlot, target, targetSlot);
+    }
+    this.graphData = clone(graph);
+    this.hydrating = false;
+    this.liteCanvas.setDirty(true, true);
+    if (this.liteGraph._nodes.length) this.fitView();
+    this.renderInspector();
+    this.drawMinimap();
+  }
+
+  async loadPreset(id, { quiet = false, render = true } = {}) {
     if (!id) return;
     try {
       const result = await getNodePreset(id);
-      if (!result.validation?.valid) throw new Error("Preset Hub không qua schema validation.");
-      this.graph = result.graph;
-      this.selected.clear(); this.history = []; this.future = []; this.nodeStates.clear(); this.dirty = new Set(this.graph.nodes.map((node) => node.id)); this.persist();
-      if (!quiet) { this.render(); this.showToast("Đã nạp preset workflow Hub."); }
-    } catch (error) { if (!quiet) this.showToast(error.message, "error"); }
+      if (!result.validation?.valid) throw new Error(result.validation?.errors?.[0]?.message || "Preset không qua schema validation.");
+      this.history = [];
+      this.future = [];
+      this.nodeStates.clear();
+      this.dirty = new Set((result.graph.nodes || []).map((node) => node.id));
+      this.graphData = result.graph;
+      if (render && this.liteGraph) this.hydrateLiteGraph(result.graph);
+      this.persist();
+      if (!quiet) this.showToast("Đã nạp preset workflow Hub.");
+    } catch (error) {
+      if (!quiet) this.showToast(error.message, "error");
+    }
   }
 
-  saveAs() {
-    const title = window.prompt("Tên workflow local", this.graph.title || "Workflow local");
-    if (!title) return;
-    this.mutate(() => { this.graph.title = title; this.graph.id = `local-${title.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "workflow"}`; }, []);
-    this.showToast("Đã Save As local. Export JSON nếu muốn lưu file ngoài Git.");
+  undo() {
+    const previous = this.history.pop();
+    if (!previous) return;
+    this.future.push(graphFingerprint(this.toHubGraph()));
+    const graph = JSON.parse(previous);
+    this.hydrateLiteGraph(graph);
+    this.dirty = new Set(graph.nodes.map((node) => node.id));
+    this.persist();
   }
 
-  exportGraph() {
-    const blob = new Blob([JSON.stringify(this.graph, null, 2)], { type: "application/json" });
-    const href = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = href; link.download = `${this.graph.id || "workflow"}.json`; link.click();
-    setTimeout(() => URL.revokeObjectURL(href), 1000);
+  redo() {
+    const next = this.future.pop();
+    if (!next) return;
+    this.history.push(graphFingerprint(this.toHubGraph()));
+    const graph = JSON.parse(next);
+    this.hydrateLiteGraph(graph);
+    this.dirty = new Set(graph.nodes.map((node) => node.id));
+    this.persist();
   }
 
-  async importGraph(file) {
-    try {
-      const graph = JSON.parse(await file.text());
-      const result = await validateNodeGraph(graph, false);
-      if (!result.validation?.valid) throw new Error(result.validation?.errors?.[0]?.message || "Workflow JSON không hợp lệ.");
-      this.graph = result.validation.graph;
-      this.selected.clear(); this.history = []; this.future = []; this.nodeStates.clear(); this.dirty = new Set(this.graph.nodes.map((node) => node.id)); this.persist(); this.render();
-      this.showToast("Đã import workflow JSON vào local Node Studio.");
-    } catch (error) { this.showToast(error.message, "error"); }
+  markDirty(changedIds) {
+    const graph = this.toHubGraph();
+    const changed = new Set(changedIds);
+    const pending = [...changed];
+    while (pending.length) {
+      const current = pending.shift();
+      for (const edge of graph.edges) {
+        if (edge.source.node === current && !changed.has(edge.target.node)) { changed.add(edge.target.node); pending.push(edge.target.node); }
+      }
+    }
+    changed.forEach((id) => this.dirty.add(id));
+    getDirtyNodes(graph, [...changed]).then((result) => {
+      if (result.valid) result.dirty_nodes.forEach((id) => this.dirty.add(id));
+    }).catch(() => {});
   }
 
   scheduleAutoPreview() {
     if (!this.autoPreview) return;
-    const hasHeavy = this.graph.nodes.some((node) => this.definition(node)?.heavy);
-    if (hasHeavy && !this.draft) { this.showToast("Node GPU nặng chỉ chạy khi bấm Run Graph, hoặc bật Draft ảnh rõ ràng.", "warning"); return; }
+    const graph = this.toHubGraph();
+    const hasHeavy = graph.nodes.some((node) => this.registry.get(node.type)?.heavy);
+    if (hasHeavy && !this.draft) return;
     if (this.autoTimer) clearTimeout(this.autoTimer);
-    this.autoTimer = setTimeout(() => this.run({ auto: true }), 420);
+    this.autoTimer = setTimeout(() => this.run({ auto: true }), 450);
   }
 
   async run({ auto = false } = {}) {
     if (this.activeJobId) return;
     try {
-      const result = await runNodeGraph(this.graph, Boolean(auto && this.draft));
+      const graph = this.toHubGraph();
+      const validation = await validateNodeGraph(graph, true);
+      if (!validation.validation?.valid) throw new Error(validation.validation?.errors?.[0]?.message || "Graph không hợp lệ.");
+      const result = await runNodeGraph(validation.validation.graph, Boolean(auto && this.draft));
       this.activeJobId = result.job?.id || null;
-      this.showToast(this.activeJobId ? `Đã tạo ${this.activeJobId}.` : "Đã gửi Run Graph.");
-      this.render();
-      if (this.activeJobId) this.startPoll();
-    } catch (error) { this.showToast(error.message, "error"); }
+      this.updateToolbar();
+      if (this.activeJobId) {
+        this.showToast(`Đã tạo ${this.activeJobId}.`);
+        this.startPoll();
+      }
+    } catch (error) {
+      this.showToast(error.message, "error");
+    }
   }
 
   async cancel() {
@@ -568,31 +521,142 @@ class NodeStudio {
     const poll = async () => {
       if (!this.activeJobId) return;
       try {
-        const result = await getNodeRun(this.activeJobId);
-        const run = result.run || {};
-        for (const node of run.nodes || []) this.nodeStates.set(node.id, node);
-        this.render();
-        if (["completed", "failed", "error", "cancelled", "unavailable"].includes(run.status)) {
-          clearInterval(this.pollTimer); this.pollTimer = null; this.activeJobId = null;
-          if (run.status === "completed") this.dirty.clear();
-          this.persist(); this.render();
+        const response = await getNodeRun(this.activeJobId);
+        const run = response.run || {};
+        for (const state of run.nodes || []) {
+          this.nodeStates.set(state.id, state);
+          const node = this.liteGraph._nodes.find((candidate) => candidate.hubId === state.id);
+          if (node) node.hubStatus = state.status;
         }
-      } catch { /* job may still be entering its worker thread */ }
+        this.liteCanvas.setDirty(true, true);
+        this.renderInspector();
+        if (["completed", "failed", "error", "cancelled", "unavailable"].includes(run.status)) {
+          clearInterval(this.pollTimer);
+          this.pollTimer = null;
+          this.activeJobId = null;
+          if (run.status === "completed") this.dirty.clear();
+          this.persist();
+          this.updateToolbar();
+        }
+      } catch { /* the background job may still be entering its worker thread */ }
     };
     poll();
     this.pollTimer = setInterval(poll, 2000);
   }
+
+  updateToolbar() {
+    const cancel = this.root.querySelector('[data-graph-action="cancel"]');
+    if (cancel) cancel.disabled = !this.activeJobId;
+  }
+
+  exportGraph() {
+    const graph = this.toHubGraph();
+    const blob = new Blob([JSON.stringify(graph, null, 2)], { type: "application/json" });
+    const href = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = href;
+    anchor.download = `${graph.id || "workflow"}.json`;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(href), 1000);
+  }
+
+  async importGraph(file) {
+    if (!file) return;
+    try {
+      const graph = JSON.parse(await file.text());
+      const result = await validateNodeGraph(graph, false);
+      if (!result.validation?.valid) throw new Error(result.validation?.errors?.[0]?.message || "Workflow JSON không hợp lệ.");
+      this.history = [];
+      this.future = [];
+      this.dirty = new Set(result.validation.graph.nodes.map((node) => node.id));
+      this.hydrateLiteGraph(result.validation.graph);
+      this.persist();
+      this.showToast("Đã import workflow JSON vào Hub Nodes.");
+    } catch (error) {
+      this.showToast(error.message, "error");
+    }
+  }
+
+  fitView() {
+    const nodes = this.liteGraph._nodes;
+    if (!nodes.length) return;
+    const left = Math.min(...nodes.map((node) => node.pos[0]));
+    const top = Math.min(...nodes.map((node) => node.pos[1]));
+    const right = Math.max(...nodes.map((node) => node.pos[0] + node.size[0]));
+    const bottom = Math.max(...nodes.map((node) => node.pos[1] + node.size[1]));
+    const zoom = Math.max(0.35, Math.min(1.15, Math.min(this.canvasElement.width / (right - left + 160), this.canvasElement.height / (bottom - top + 140))));
+    this.liteCanvas.ds.scale = zoom;
+    this.liteCanvas.ds.offset[0] = this.canvasElement.width / (2 * zoom) - (left + right) / 2;
+    this.liteCanvas.ds.offset[1] = this.canvasElement.height / (2 * zoom) - (top + bottom) / 2;
+    this.liteCanvas.setDirty(true, true);
+    this.drawMinimap();
+  }
+
+  drawMinimap() {
+    if (!this.minimap || !this.liteGraph) return;
+    const ctx = this.minimap.getContext("2d");
+    const { width, height } = this.minimap;
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = "rgba(8, 13, 27, .94)";
+    ctx.fillRect(0, 0, width, height);
+    const nodes = this.liteGraph._nodes;
+    if (!nodes.length) return;
+    const left = Math.min(...nodes.map((node) => node.pos[0]));
+    const top = Math.min(...nodes.map((node) => node.pos[1]));
+    const right = Math.max(...nodes.map((node) => node.pos[0] + node.size[0]));
+    const bottom = Math.max(...nodes.map((node) => node.pos[1] + node.size[1]));
+    const scale = Math.min((width - 18) / Math.max(1, right - left), (height - 18) / Math.max(1, bottom - top));
+    const offsetX = (width - (right - left) * scale) / 2 - left * scale;
+    const offsetY = (height - (bottom - top) * scale) / 2 - top * scale;
+    for (const node of nodes) {
+      const color = CATEGORY_COLORS[this.registry.get(node.hubType)?.category] || "#8794ad";
+      ctx.fillStyle = color;
+      ctx.fillRect(node.pos[0] * scale + offsetX, node.pos[1] * scale + offsetY, Math.max(4, node.size[0] * scale), Math.max(3, node.size[1] * scale));
+    }
+    const viewLeft = -this.liteCanvas.ds.offset[0];
+    const viewTop = -this.liteCanvas.ds.offset[1];
+    const viewWidth = this.canvasElement.width / this.liteCanvas.ds.scale;
+    const viewHeight = this.canvasElement.height / this.liteCanvas.ds.scale;
+    ctx.strokeStyle = "#edf2ff";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(viewLeft * scale + offsetX, viewTop * scale + offsetY, viewWidth * scale, viewHeight * scale);
+    this.minimapBounds = { scale, offsetX, offsetY };
+  }
+
+  recenterFromMinimap(event) {
+    if (!this.minimapBounds) return;
+    const rect = this.minimap.getBoundingClientRect();
+    const x = (event.clientX - rect.left) * this.minimap.width / rect.width;
+    const y = (event.clientY - rect.top) * this.minimap.height / rect.height;
+    const graphX = (x - this.minimapBounds.offsetX) / this.minimapBounds.scale;
+    const graphY = (y - this.minimapBounds.offsetY) / this.minimapBounds.scale;
+    this.liteCanvas.ds.offset[0] = this.canvasElement.width / (2 * this.liteCanvas.ds.scale) - graphX;
+    this.liteCanvas.ds.offset[1] = this.canvasElement.height / (2 * this.liteCanvas.ds.scale) - graphY;
+    this.liteCanvas.setDirty(true, true);
+    this.drawMinimap();
+  }
+
+  handleAction(action) {
+    if (action === "run") this.run();
+    if (action === "cancel") this.cancel();
+    if (action === "undo") this.undo();
+    if (action === "redo") this.redo();
+    if (action === "delete") this.deleteSelected();
+    if (action === "fit") this.fitView();
+    if (action === "export") this.exportGraph();
+    if (action === "save-local") { this.persist(); this.showToast("Workflow đã lưu local trong WebView."); }
+  }
 }
 
-let activeStudios = [];
+let activeEditors = [];
 
 export function disposeNodeStudios() {
-  activeStudios.forEach((studio) => studio.destroy());
-  activeStudios = [];
+  activeEditors.forEach((editor) => editor.destroy());
+  activeEditors = [];
 }
 
 export function mountNodeStudios(options) {
   disposeNodeStudios();
-  activeStudios = [...document.querySelectorAll("[data-node-studio]")].map((root) => new NodeStudio(root, options));
-  activeStudios.forEach((studio) => studio.initialize());
+  activeEditors = [...document.querySelectorAll("[data-node-studio]")].map((root) => new HubGraphEditor(root, options));
+  activeEditors.forEach((editor) => editor.initialize());
 }

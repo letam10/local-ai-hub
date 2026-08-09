@@ -19,3 +19,6 @@
 *.mp3 binary
 *.mp4 binary
 patches/**/*.patch whitespace=-trailing-space
+# Preserve the byte-identical, hash-pinned LiteGraph upstream distribution.
+src/ui/vendor/litegraph.js whitespace=-trailing-space,-space-before-tab
+src/ui/vendor/litegraph.css whitespace=-trailing-space,-space-before-tab

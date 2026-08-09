@@ -170,6 +170,19 @@ _DEFINITIONS: tuple[NodeDefinition, ...] = (
     _node("animesr_upscale", "AnimeSR Upscale", "video", "AnimeSR direct worker, không mở Anime Upscale Studio.", "animesr", inputs=(_port("video", "VIDEO", required=True),), outputs=(_port("video", "VIDEO"),), properties=(_prop("scale", "Scale", "select", 2, options=[1, 2, 3, 4]),), status="partial", heavy=True),
     _node("realesrgan_upscale", "Real-ESRGAN", "video", "Hiển thị partial cho đến khi CLI contract được smoke.", "realesrgan", inputs=(_port("image", "IMAGE", required=True),), outputs=(_port("image", "IMAGE"),), status="partial", heavy=True),
     _node("encode", "Encode", "media", "Encode theo capabilities FFmpeg được dò và cache cục bộ.", "encode", inputs=(_port("video", "VIDEO", required=True), _port("audio", "AUDIO")), outputs=(_port("video", "VIDEO"), _port("metadata", "METADATA")), properties=(_prop("container", "Container", "select", "mp4", options=["mp4", "mkv", "webm"]), _prop("codec", "Codec", "encoder", "auto"), _prop("rate_control", "Rate control", "select", "quality", options=["quality", "vbr", "cbr"]), _prop("quality", "CRF / CQ", "number", 20, min=0, max=51), _prop("bitrate_kbps", "Target bitrate (kbps)", "number", 6000, min=100), _prop("max_bitrate_kbps", "Max bitrate (kbps)", "number", 9000, min=100), _prop("buffer_kbps", "Buffer (kbps)", "number", 12000, min=100), _prop("preset", "Preset", "text", "medium"), _prop("pixel_format", "Pixel format", "text", ""), _prop("audio_codec", "Audio codec", "text", "aac"), _prop("audio_bitrate_kbps", "Audio bitrate (kbps)", "number", 192, min=32), _prop("prefer_gpu", "Ưu tiên NVIDIA NVENC", "boolean", True), _prop("multipass", "Multipass nếu encoder hỗ trợ", "boolean", False)), status="partial", heavy=True),
+    _node(
+        "comfyui_workflow",
+        "ComfyUI Workflow",
+        "image",
+        "Chạy bridge workflow ComfyUI đã lưu; TEXT/IMAGE/MASK nối từ Hub, không nhận raw path.",
+        "comfyui_workflow",
+        inputs=(_port("text", "TEXT"), _port("image", "IMAGE"), _port("mask", "MASK"), _port("video", "VIDEO"), _port("audio", "AUDIO"), _port("metadata", "METADATA")),
+        outputs=(_port("image", "IMAGE"), _port("metadata", "METADATA")),
+        properties=(_prop("workflow_id", "Bridge workflow ID", "text", "flux_quick"), _prop("prompt", "Prompt fallback", "textarea", ""), _prop("width", "Width", "number", 768, min=256, max=2048, step=64), _prop("height", "Height", "number", 768, min=256, max=2048, step=64), _prop("steps", "Steps", "number", 20, min=1, max=80), _prop("seed", "Seed", "number", 42, min=0), _prop("negative_prompt", "Negative prompt", "text", "")),
+        status="partial",
+        heavy=True,
+        supports_draft=True,
+    ),
 )
 
 NODE_DEFINITIONS = {item.type: item for item in _DEFINITIONS}

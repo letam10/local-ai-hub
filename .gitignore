@@ -27,6 +27,9 @@
 /Config/local.env.cmd
 !/Config/local.env.example.cmd
 /workflows/*.local.json
+/workflows/local/
+/Modules/
+/distribution/output/
 
 # Python, Node and tool-generated files.
 **/__pycache__/

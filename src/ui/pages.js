@@ -26,6 +26,10 @@ const moduleTabs = (state, module) => {
   const selected = activeTab(state, module);
   return `<div class="module-tabs" role="tablist" aria-label="${escapeHtml(module)} workspace"><button class="tab ${selected === "quick" ? "is-selected" : ""}" type="button" data-workspace-tab="${escapeHtml(module)}:quick" role="tab" aria-selected="${selected === "quick"}">Quick</button><button class="tab ${selected === "nodes" ? "is-selected" : ""}" type="button" data-workspace-tab="${escapeHtml(module)}:nodes" role="tab" aria-selected="${selected === "nodes"}">Nodes</button></div>`;
 };
+const imageModuleTabs = (state) => {
+  const selected = activeTab(state, "image");
+  return `<div class="module-tabs" role="tablist" aria-label="Image AI workspace"><button class="tab ${selected === "quick" ? "is-selected" : ""}" type="button" data-workspace-tab="image:quick" role="tab" aria-selected="${selected === "quick"}">Quick</button><button class="tab ${selected === "nodes" ? "is-selected" : ""}" type="button" data-workspace-tab="image:nodes" role="tab" aria-selected="${selected === "nodes"}">Hub Nodes</button><button class="tab ${selected === "advanced" ? "is-selected" : ""}" type="button" data-workspace-tab="image:advanced" role="tab" aria-selected="${selected === "advanced"}">ComfyUI Advanced</button></div>`;
+};
 const nodeStudio = (scope, description) => `<section class="node-studio-wrap"><div class="node-studio-intro"><div><strong>Node Studio</strong><p>${escapeHtml(description)}</p></div><span class="tag">offline · typed sockets · DAG</span></div><div data-node-studio data-scope="${escapeHtml(scope)}"></div></section>`;
 
 function artifacts(value, found = []) {
@@ -134,6 +138,34 @@ function renderVoice(state) {
     </div>`;
 }
 
+function renderImageQuickV5(state) {
+  const comfy = state.lifecycle?.comfyui || {};
+  const imageTool = tool(state, "generate_flux");
+  return heading("IMAGE", "Image AI", "Quick tạo FLUX/Qwen qua ComfyUI API ẩn. Hub Nodes dùng graph editor kéo socket thật; Advanced hiển thị ComfyUI trong chính cửa sổ này.", `<span class="status-pill" data-status="${escapeHtml(imageTool.tool_status || comfy.status || "stopped")}">${escapeHtml(formatStatus(imageTool.tool_status || comfy.status || "stopped"))}</span>`) + `
+    <div class="workspace-grid workspace-grid--two">
+      ${card("Quick", `<form data-job-form data-tool="generate_flux" data-tool-by-field="engine" data-tool-map='{"flux":"generate_flux","qwen":"generate_qwen_image"}' class="stack">${field("Model", `<select name="engine"><option value="flux">FLUX.2 Klein</option><option value="qwen">Qwen Image 2512</option></select>`)}${field("Prompt", `<textarea name="prompt" required placeholder="Mô tả ảnh cần tạo…"></textarea>`)}${field("Negative prompt", `<input name="negative_prompt" placeholder="Tùy chọn" />`)}<div class="form-grid">${field("Width", `<input name="width" type="number" min="256" max="2048" step="64" value="768" />`)}${field("Height", `<input name="height" type="number" min="256" max="2048" step="64" value="768" />`)}${field("Steps", `<input name="steps" type="number" min="1" max="80" value="20" />`)}${field("Seed", `<input name="seed" type="number" min="0" placeholder="random" />`)}</div>${file("Input image (FLUX image-edit nếu workflow hỗ trợ)", "input_image_asset_id", "image/*")}<div class="form-actions">${button("Generate trong Hub", "button--primary")}</div>${formResult("image-result")}</form>`) }
+      ${card("Chế độ làm việc", `<div class="preview-empty"><span>✦</span><strong>Không mở trình duyệt ngoài</strong><p>Chọn Hub Nodes để nối typed socket bằng kéo-thả. Chọn ComfyUI Advanced để sửa graph ComfyUI thật trong WebView của Local AI Hub.</p></div><div class="form-actions"><button class="button" type="button" data-workspace-tab="image:nodes">Mở Hub Nodes</button><button class="button button--primary" type="button" data-workspace-tab="image:advanced">Mở ComfyUI Advanced</button></div>`, "", "card--flat")}
+    </div>`;
+}
+
+function renderComfyAdvancedV5(state) {
+  const comfy = state.comfyAdvanced?.comfyui || state.lifecycle?.comfyui || {};
+  const workflows = state.comfyWorkflows || [];
+  const candidate = String(comfy.advanced_url || "");
+  const url = /^http:\/\/127\.0\.0\.1:\d+$/.test(candidate) ? candidate : "";
+  const frame = url
+    ? `<iframe class="comfy-advanced__frame" data-comfy-frame src="${escapeHtml(url)}" title="ComfyUI Advanced in Local AI Hub" sandbox="allow-scripts allow-same-origin allow-forms allow-downloads" referrerpolicy="no-referrer"></iframe>`
+    : `<div class="preview-empty"><span>✦</span><strong>ComfyUI chưa chạy</strong><p>Bấm Khởi động để Hub mở ComfyUI thành backend ẩn rồi nhúng editor thật ở đây. Không mở Chrome hoặc Edge ngoài.</p></div>`;
+  return heading("IMAGE / ADVANCED", "ComfyUI Advanced", "ComfyUI frontend gốc được nhúng trong WebView Local AI Hub. Hub không sao chép hoặc triển khai lại frontend ComfyUI.", `<button class="button" type="button" data-workspace-tab="image:quick">← Back to Hub</button>`) + `
+    <section class="comfy-advanced" data-comfy-advanced>
+      <div class="comfy-advanced__toolbar"><div><strong>${escapeHtml(comfy.status || "stopped")}</strong><span>${comfy.hub_owned ? " · Hub-owned hidden backend" : " · existing local backend"}</span></div><div class="form-actions"><button class="button button--primary" type="button" data-comfy-action="start">Khởi động / làm mới ComfyUI</button><button class="button" type="button" data-workspace-tab="image:quick">Back to Hub</button></div></div>
+      <div class="comfy-advanced__layout">
+        <aside class="comfy-bridge"><h2>Workflow bridge</h2><p>List/load/save JSON local cho node <code>ComfyUI Workflow</code>. Bridge không nhận raw path và không được commit vào Git.</p><label class="field"><span>Đã lưu</span><select data-comfy-workflow-select><option value="">Chọn workflow…</option>${workflows.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.title)}${item.local ? " · local" : ""}</option>`).join("")}</select></label><div class="form-actions"><button class="button" type="button" data-comfy-action="load">Load JSON</button></div><label class="field"><span>ID khi lưu local</span><input data-comfy-workflow-id placeholder="my_flux_mask" /></label><label class="field"><span>Bridge JSON</span><textarea data-comfy-workflow-json rows="18" placeholder='{"schema_version":1,"id":"my_flux_mask","kind":"raw_comfy_api",…}'></textarea></label><div class="form-actions"><button class="button" type="button" data-comfy-action="save">Save local bridge</button></div><small>Quick FLUX/Qwen compile qua API. Bridge raw chỉ nhận binding có schema và lưu dưới user-data local.</small></aside>
+        <div class="comfy-advanced__frame-wrap">${frame}</div>
+      </div>
+    </section>`;
+}
+
 function renderImage(state) {
   const comfy = state.lifecycle?.comfyui || {};
   const imageTool = tool(state, "generate_flux");
@@ -197,7 +229,7 @@ function renderSettings(state) {
 }
 
 export function renderPage(route, state) {
-  const pages = { dashboard: renderDashboard, airi: renderAiri, vision: renderVision, sam2: renderSam2, ocr: renderOcr, whisper: renderWhisper, voice: renderVoice, image: renderImage, media: renderMedia, animesr: renderAnime, jobs: renderJobs, models: renderModels, settings: renderSettings };
+  const pages = { dashboard: renderDashboard, airi: renderAiri, vision: renderVision, sam2: renderSam2, ocr: renderOcr, whisper: renderWhisper, voice: renderVoice, image: renderImageQuickV5, media: renderMedia, animesr: renderAnime, jobs: renderJobs, models: renderModels, settings: renderSettings };
   const nodeCopy = {
     image: "Compose FLUX/Qwen, SAM2 mask và image transforms trong cùng graph; preset JSON được track, workflow cá nhân autosave local.",
     sam2: "Advanced workflow: Grounding DINO → SAM2 → mask/composite/export. GPU nodes chỉ chạy khi bấm Run Graph.",
@@ -205,6 +237,15 @@ export function renderPage(route, state) {
     animesr: "Advanced order do bạn chọn: Load → AnimeSR → Frame Interpolation → Encode. AnimeSR/RIFE vẫn partial cho tới smoke riêng.",
   };
   const nodeScope = Object.prototype.hasOwnProperty.call(nodeCopy, route) ? route : null;
+  if (route === "image" && activeTab(state, "image") === "advanced") {
+    return `${imageModuleTabs(state)}${renderComfyAdvancedV5(state)}`;
+  }
+  if (route === "image" && activeTab(state, "image") === "nodes") {
+    return `${heading("ADVANCED WORKFLOW", "Image AI Hub Nodes", "Kéo socket trực tiếp, typed sockets, minimap, multi-select và live preview.")}${imageModuleTabs(state)}${nodeStudio("image", nodeCopy.image)}`;
+  }
+  if (route === "image") {
+    return `${imageModuleTabs(state)}${renderImageQuickV5(state)}`;
+  }
   if (nodeScope && activeTab(state, nodeScope) === "nodes") {
     return `${heading("ADVANCED WORKFLOW", `${nodeScope === "sam2" ? "SAM2" : nodeScope === "animesr" ? "AnimeSR" : nodeScope === "media" ? "Media" : "Image AI"} Nodes`, "Node editor chạy offline trong cửa sổ Local AI Hub.")}${moduleTabs(state, nodeScope)}${nodeStudio(nodeScope, nodeCopy[nodeScope])}`;
   }

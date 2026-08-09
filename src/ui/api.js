@@ -43,6 +43,11 @@ export const openArtifact = (id) => request(`/api/artifacts/${encodeURIComponent
 export const launchApplication = (id) => request(`/api/applications/${encodeURIComponent(id)}/launch`, { method: "POST" });
 export const closeOwnedBackends = () => request("/api/lifecycle/close", { method: "POST" });
 export const scanStorage = () => request("/api/storage/scan", { method: "POST" });
+export const getComfyAdvanced = () => request("/api/comfyui/advanced");
+export const startComfyAdvanced = () => request("/api/comfyui/advanced/start", { method: "POST" });
+export const getComfyBridgeWorkflows = () => request("/api/comfyui/workflows");
+export const getComfyBridgeWorkflow = (id) => request(`/api/comfyui/workflows/${encodeURIComponent(id)}`);
+export const saveComfyBridgeWorkflow = (id, workflow) => request(`/api/comfyui/workflows/${encodeURIComponent(id)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(workflow) });
 
 export const getNodeRegistry = (scope) => request(`/api/node-studio/registry?scope=${encodeURIComponent(scope || "")}`);
 export const getNodePresets = () => request("/api/node-studio/presets");

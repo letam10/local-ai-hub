@@ -233,3 +233,56 @@ td { color: var(--text); }
 .node-command-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 28px; background: rgba(4,8,18,.55); }.node-command { width: min(520px, 100%); max-height: min(620px, calc(100vh - 56px)); display: grid; gap: 10px; padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); box-shadow: var(--shadow); }.node-command input { width: 100%; padding: 10px; }.node-command__list { display: grid; gap: 5px; overflow: auto; }.node-command__list > button { display: grid; grid-template-columns: 8px 1fr; gap: 8px; padding: 9px; border: 1px solid transparent; border-radius: 8px; color: var(--text); background: transparent; text-align: left; }.node-command__list > button:hover { border-color: var(--border); background: var(--panel-raised); }.node-command__list small { grid-column: 2; color: var(--muted); font-size: 10px; }
 
 @media (max-width: 1450px) { .node-studio__layout { grid-template-columns: 165px minmax(0, 1fr) 205px; }.node-toolbar { align-items: flex-start; flex-direction: column; }.node-canvas-shell { min-width: 0; } }
+
+/* V5 Hub Nodes: LiteGraph is the canvas editor; these styles only place the
+   local, pinned dependency inside the Local AI Hub shell. */
+.graph-editor-loading { min-height: 560px; display: grid; place-items: center; border: 1px dashed var(--border); border-radius: 13px; color: var(--muted); }
+.graph-editor { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 13px; background: var(--panel); box-shadow: var(--shadow); }
+.graph-editor__toolbar, .graph-editor__toolbar-group, .graph-editor__options { display: flex; align-items: center; gap: 8px; }
+.graph-editor__toolbar { justify-content: space-between; flex-wrap: wrap; padding: 10px; border-bottom: 1px solid var(--border); background: var(--panel-raised); }
+.graph-editor__toolbar-group { flex-wrap: wrap; }
+.graph-editor__toolbar select { max-width: 210px; padding: 7px; border: 1px solid var(--border); border-radius: 7px; color: var(--text); background: var(--panel-soft); font: inherit; font-size: 11px; }
+.graph-editor__import { position: relative; overflow: hidden; cursor: pointer; }
+.graph-editor__import input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.graph-editor__options { flex-wrap: wrap; padding: 7px 11px; border-bottom: 1px solid var(--border); color: var(--muted); background: var(--panel); font-size: 10px; }
+.graph-editor__options label { display: inline-flex; align-items: center; gap: 5px; color: var(--text); }
+.graph-editor__layout { display: grid; grid-template-columns: 205px minmax(0, 1fr) 260px; height: clamp(560px, calc(100vh - 230px), 760px); min-height: 0; }
+.graph-editor__layout > * { min-height: 0; }
+.graph-palette, .graph-inspector { min-width: 0; overflow: auto; background: var(--panel-soft); }
+.graph-palette { padding: 10px; border-right: 1px solid var(--border); }
+.graph-palette > input { width: 100%; margin-bottom: 9px; padding: 8px; border: 1px solid var(--border); border-radius: 7px; color: var(--text); background: var(--panel); font: inherit; font-size: 11px; }
+.graph-palette__item { width: 100%; display: grid; grid-template-columns: 8px minmax(0, 1fr); gap: 8px; margin-bottom: 5px; padding: 8px; border: 1px solid transparent; border-radius: 8px; color: var(--text); background: transparent; text-align: left; cursor: pointer; }
+.graph-palette__item:hover { border-color: var(--border); background: var(--panel-raised); }
+.graph-palette__item i { align-self: stretch; border-radius: 999px; background: var(--node-color); }
+.graph-palette__item span { min-width: 0; display: grid; gap: 3px; }
+.graph-palette__item b, .graph-palette__item small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.graph-palette__item b { font-size: 11px; }.graph-palette__item small { color: var(--muted); font-size: 9px; }
+.graph-canvas-shell { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: #0c1323; }
+.graph-canvas { position: absolute; inset: 0; width: 100%; height: 100%; outline: none; touch-action: none; }
+.graph-canvas-shell .lgraphcanvas { background-color: #0d1424; background-image: radial-gradient(rgba(167,190,244,.16) 1px, transparent 1px); background-size: 18px 18px; }
+.graph-canvas__actions { position: absolute; top: 10px; right: 10px; z-index: 2; display: flex; gap: 5px; }
+.graph-canvas__actions button { padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: rgba(12,19,35,.88); font: inherit; font-size: 10px; cursor: pointer; }
+.graph-minimap { position: absolute; right: 10px; bottom: 10px; z-index: 2; width: 180px; height: 118px; border: 1px solid var(--border); border-radius: 8px; background: rgba(8,13,27,.94); cursor: crosshair; box-shadow: 0 8px 24px rgba(0,0,0,.3); }
+.graph-inspector { padding: 12px; border-left: 1px solid var(--border); }
+.graph-inspector__empty { display: grid; gap: 9px; padding-top: 5px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.graph-inspector__empty strong { color: var(--text); }
+.graph-inspector__head { display: grid; gap: 10px; }.graph-inspector__head h3 { margin: 7px 0 0; font-size: 16px; }.graph-inspector__head p { margin: 5px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.graph-inspector__section { display: grid; gap: 9px; margin-top: 16px; padding-top: 13px; border-top: 1px solid var(--border); }
+.graph-inspector__section > strong { font-size: 11px; }
+.graph-property { display: grid; gap: 5px; color: var(--muted); font-size: 10px; }.graph-property--toggle { grid-template-columns: auto 1fr; align-items: center; color: var(--text); }
+.graph-property input:not([type="checkbox"]), .graph-property select, .graph-property textarea { width: 100%; box-sizing: border-box; padding: 7px; border: 1px solid var(--border); border-radius: 7px; color: var(--text); background: var(--panel); font: inherit; font-size: 11px; }
+.graph-property textarea { min-height: 72px; resize: vertical; }.graph-property small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
+.graph-node-state { display: grid; gap: 3px; padding: 8px; border-left: 3px solid var(--accent); border-radius: 6px; color: var(--muted); background: rgba(128,170,255,.08); font-size: 10px; }.graph-node-state[data-status="failed"], .graph-node-state[data-status="error"], .graph-node-state[data-status="unavailable"] { border-left-color: var(--danger); background: rgba(239,120,133,.08); }
+.graph-preview-image { width: 100%; max-height: 220px; object-fit: contain; border: 1px solid var(--border); border-radius: 7px; background: #050813; }.graph-empty { color: var(--muted); font-size: 11px; }
+
+@media (max-width: 1450px) { .graph-editor__layout { grid-template-columns: 175px minmax(0, 1fr) 220px; }.graph-minimap { width: 145px; height: 95px; } }
+@media (max-width: 980px) { .graph-editor__layout { grid-template-columns: minmax(0, 1fr); height: auto; }.graph-palette, .graph-inspector { max-height: 240px; border: 0; border-bottom: 1px solid var(--border); }.graph-canvas-shell { min-height: 560px; }.graph-minimap { width: 150px; height: 98px; } }
+
+/* The original ComfyUI frontend stays in an isolated loopback iframe inside
+   the native WebView; Local AI Hub only supplies navigation and bridge data. */
+.comfy-advanced { overflow: hidden; border: 1px solid var(--border); border-radius: 13px; background: var(--panel); box-shadow: var(--shadow); }
+.comfy-advanced__toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--border); background: var(--panel-raised); color: var(--muted); font-size: 12px; }.comfy-advanced__toolbar strong { color: var(--text); }
+.comfy-advanced__layout { display: grid; grid-template-columns: 310px minmax(0, 1fr); min-height: min(760px, calc(100vh - 220px)); }
+.comfy-bridge { display: grid; align-content: start; gap: 10px; overflow: auto; padding: 14px; border-right: 1px solid var(--border); background: var(--panel-soft); }.comfy-bridge h2 { margin: 0; font-size: 14px; }.comfy-bridge p, .comfy-bridge small { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.45; }.comfy-bridge textarea { min-height: 290px; resize: vertical; font-family: ui-monospace, Consolas, monospace; font-size: 10px; }
+.comfy-advanced__frame-wrap { min-width: 0; min-height: 0; display: grid; background: #131313; }.comfy-advanced__frame { width: 100%; height: 100%; min-height: 660px; border: 0; background: #131313; }
+@media (max-width: 1050px) { .comfy-advanced__layout { grid-template-columns: minmax(0, 1fr); }.comfy-bridge { max-height: 350px; border: 0; border-bottom: 1px solid var(--border); }.comfy-advanced__frame { min-height: 620px; } }
