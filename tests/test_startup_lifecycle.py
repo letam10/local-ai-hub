@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -63,6 +64,34 @@ class StartupLifecycleTests(unittest.TestCase):
             desktop._remember_owned_api(process)
             desktop.close_owned_api()
 
+        terminate.assert_called_once_with(process)
+        self.assertIsNone(desktop._api_process)
+
+    def test_concurrent_registration_and_close_is_linearizable(self) -> None:
+        process = Mock()
+        process.poll.return_value = None
+        start = threading.Barrier(2)
+        errors: list[BaseException] = []
+
+        def invoke(callback: object) -> None:
+            try:
+                start.wait(timeout=2)
+                callback()  # type: ignore[operator]
+            except BaseException as exc:  # pragma: no cover - assertion below reports it
+                errors.append(exc)
+
+        with patch.object(desktop, "terminate_owned_process") as terminate:
+            threads = [
+                threading.Thread(target=invoke, args=(lambda: desktop._remember_owned_api(process),)),
+                threading.Thread(target=invoke, args=(desktop.close_owned_api,)),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=2)
+
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [])
         terminate.assert_called_once_with(process)
         self.assertIsNone(desktop._api_process)
 
