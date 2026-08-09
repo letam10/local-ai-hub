@@ -82,8 +82,8 @@ class StartupLifecycleTests(unittest.TestCase):
 
         with patch.object(desktop, "terminate_owned_process") as terminate:
             threads = [
-                threading.Thread(target=invoke, args=(lambda: desktop._remember_owned_api(process),)),
-                threading.Thread(target=invoke, args=(desktop.close_owned_api,)),
+                threading.Thread(target=invoke, args=(lambda: desktop._remember_owned_api(process),), daemon=True),
+                threading.Thread(target=invoke, args=(desktop.close_owned_api,), daemon=True),
             ]
             for thread in threads:
                 thread.start()
