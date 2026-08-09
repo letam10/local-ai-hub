@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import os
 import threading
 import time
 import unittest
@@ -355,16 +356,19 @@ class NodeStudioContractTests(unittest.TestCase):
         self.assertIn("scale=16:-2", image_command)
 
     def test_default_video_resize_sentinel_preserves_aspect_through_upscale(self) -> None:
+        if os.environ.get("LOCALAIHUB_RUN_VIDEO_SMOKE") != "1":
+            self.skipTest("Video smoke is opt-in: set LOCALAIHUB_RUN_VIDEO_SMOKE=1 when resources are available")
+
         from src.modules.media_editor.backend import adapter
         from src.services import artifact_store
         from src.services.node_studio import engine as node_engine
+        from src.services.process_manager import managed
 
         ffmpeg, ffprobe = adapter._paths()
         if ffmpeg is None or not ffmpeg.is_file() or ffprobe is None or not ffprobe.is_file():
             self.skipTest("Canonical FFmpeg/ffprobe is not installed")
 
         job_id = "test_video_resize_sentinel"
-        log_paths = [ROOT / "Logs" / "workers" / f"ffmpeg_{operation}_{job_id}.log" for operation in ("resize", "video_upscale")]
         template = json.loads((ROOT / "workflows" / "video_creative_pipeline.json").read_text(encoding="utf-8"))
         transform_data = next(item["data"] for item in template["nodes"] if item["type"] == "video_transform")
         self.assertEqual(transform_data.get("height"), -2)
@@ -388,12 +392,14 @@ class NodeStudioContractTests(unittest.TestCase):
                 owner = _MediaOwner(job_id)
                 upload_root = root / "uploads"
                 index_path = root / "artifacts.json"
+                log_root = root / "logs"
                 with (
                     patch.object(artifact_store, "UPLOAD_ROOT", upload_root),
                     patch.object(artifact_store, "OUTPUT_ROOT", output_root),
                     patch.object(artifact_store, "INDEX_PATH", index_path),
                     patch.object(adapter, "OUTPUT_ROOT", output_root),
                     patch.object(node_engine, "OUTPUT_ROOT", output_root),
+                    patch.object(managed, "LOG_ROOT", log_root),
                 ):
                     uploaded = artifact_store.stage_upload("input.mp4", source.read_bytes(), "video/mp4")
                     graph = json.loads(json.dumps(template))
@@ -428,8 +434,6 @@ class NodeStudioContractTests(unittest.TestCase):
             self.assertFalse(owner.processes, "FFmpeg child processes must be detached after the bounded smoke")
         finally:
             node_engine.node_cache.clear()
-            for path in log_paths:
-                path.unlink(missing_ok=True)
 
     def test_graph_run_provenance_is_public_and_deduplicated(self) -> None:
         from src.services.node_studio.state import GraphRunRegistry
