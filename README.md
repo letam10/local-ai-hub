@@ -1,148 +1,136 @@
-# Local AI Hub — Ứng dụng hợp nhất V2
+# Local AI Hub — Ứng dụng một cửa sổ V3
 
-Local AI Hub là lớp điều phối chạy hoàn toàn trên Windows cho các ứng dụng và
-engine AI cục bộ. Kho Git chỉ chứa mã nguồn, cấu hình mẫu, launcher, adapter và
-tài liệu; không chứa model, môi trường Python, cache, kết quả, media cá nhân,
-nhật ký cục bộ hoặc bí mật.
+Local AI Hub là ứng dụng Windows điều phối các workflow AI chạy cục bộ trong
+một cửa sổ. Kho Git chỉ chứa mã nguồn, cấu hình mẫu, launcher, adapter, script
+và tài liệu; không chứa model, môi trường Python, cache, output, media cá
+nhân, log cục bộ hay bí mật.
 
-Phiên bản V2 cung cấp một giao diện duy nhất ở `/ui/`. Giao diện này chạy giống
-nhau trong trình duyệt và trong cửa sổ desktop `pywebview` dùng WebView2. API
-chỉ bind vào loopback `127.0.0.1`; không có CDN hay backend điều khiển tùy ý.
+V3 chuyển workflow chính vào Hub thay vì mở GUI desktop riêng:
 
-## Khởi động
+- SAM2, AnimeSR, Whisper, Voice, Vision, OCR, Image AI và FFmpeg chạy qua Hub
+  API → Job Manager → worker/background backend ẩn.
+- FLUX và Qwen Image gọi ComfyUI API trực tiếp; Local Image Studio chỉ thuộc
+  Advanced/legacy, không phải luồng chính.
+- AIRI là ngoại lệ cửa sổ riêng duy nhất. Hub không embed AIRI, không đọc hay
+  sao chép API key của AIRI.
 
-Mở ứng dụng desktop (cửa sổ tối thiểu 1280 × 720, tự phóng to):
+## Khởi động không hiện console
+
+Cài hoặc cập nhật shortcut desktop một lần từ PowerShell:
 
 ```powershell
 cd D:\LocalAIHub
-.\scripts\launch_local_ai_hub.cmd
+pwsh -File .\scripts\update_managed_shortcuts.ps1 -Apply
 ```
 
-Mở cùng giao diện bằng trình duyệt:
+Shortcut `Local AI Hub` gọi `Environments\hub\Scripts\pythonw.exe -m
+src.app.main`: cửa sổ Hub mở tối đa, kích thước nhỏ nhất 1280 × 720 và không
+hiện PowerShell, cmd hay Python console. Các shortcut GUI cũ chỉ được tạo khi
+chủ động dùng `-IncludeLegacy`.
+
+Cho mục đích phát triển, có thể chạy giao diện web tại `http://127.0.0.1:8765/ui/`:
 
 ```powershell
-cd D:\LocalAIHub
 .\scripts\start_web_ui.cmd
-# truy cập http://127.0.0.1:8765/ui/
 ```
 
-Hoặc chỉ chạy API:
+API chỉ bind loopback `127.0.0.1`; UI không nhận command shell, executable hay
+đường dẫn máy tùy ý.
 
-```powershell
-.\scripts\start_api.cmd
-```
+## Workflow trực tiếp trong Hub
 
-Giao diện gồm Dashboard, AIRI, Vision Studio, SAM2, OCR, Whisper, Voice,
-Image AI, Media, AnimeSR, Jobs, Models & Storage và Settings. Các thẻ điều
-khiển chỉ gọi API loopback đã allowlist; không nhận executable hoặc tham số
-shell từ trình duyệt.
+| Workspace | Luồng chính |
+| --- | --- |
+| Vision Studio | OmniParser, RF-DETR, Grounding DINO và JSON/annotation output |
+| SAM2 | Upload ảnh/video, chọn điểm hoặc kéo box trên preview, prompt Grounding DINO, mask/tracking output |
+| AnimeSR | Upload, queue, scale, chunk, cancel/resume; RIFE/Real-ESRGAN giữ `partial` khi chưa có CLI contract đã xác minh |
+| Whisper | Transcript/SRT, dịch khi backend hỗ trợ và burn subtitle qua FFmpeg ẩn |
+| Voice Studio | Qwen3-TTS, Voice Design/Clone và Seed-VC qua worker nền |
+| Image AI | FLUX/Qwen Image qua ComfyUI API; Advanced chỉ mở web ComfyUI theo yêu cầu |
+| Media | Probe, trim, concat, resize/crop/rotate/FPS, transcode, audio/subtitle, frames và image sequence qua FFmpeg allowlist |
+| OCR | Ảnh/PDF qua PaddleOCR worker, xuất text/Markdown/JSON/tables khi backend có sẵn |
 
-## Trạng thái hiển thị trung thực
+Tệp tải lên được stage trong vùng `Temp` của Hub và nhận một artifact ID mờ.
+API/UI chỉ nhận artifact ID và chỉ phục vụ/mở file thuộc `Temp`, `Output` hoặc
+`Archive` của Hub; không trả đường dẫn cục bộ của máy cho trình duyệt.
 
-Hub phân biệt trạng thái thành phần và trạng thái công cụ:
+## Trạng thái trung thực
 
-- `component_status`: `installed`, `running`, `partial`, `not_installed` hoặc
-  `external_system_app`.
-- `tool_status`: `operational`, `partial`, `unavailable`, `planned` hoặc
-  `error`.
+`component_status` mô tả runtime quan sát được; `tool_status` mô tả mức độ
+workflow trực tiếp đã được xác minh. `partial` nghĩa là adapter/form đã có
+nhưng chưa có smoke chức năng bounded tương ứng. `unavailable` nghĩa là runtime
+hoặc backend cần thiết không có. Không có job giả và không tuyên bố inference
+hoạt động khi smoke chưa đạt.
 
-Một ứng dụng desktop đã khởi chạy được không đồng nghĩa adapter API trực tiếp
-đã được xác minh. Ví dụ, SAM2 Mask Studio và Anime Upscale Studio có thể mở từ
-launcher quản lý, nhưng endpoint inference trực tiếp vẫn báo `unavailable` cho
-đến khi có smoke test adapter riêng. AnimeSR không tạo job giả khi executor
-chưa được xác minh. Whisper cũng được báo đúng là chưa cài nếu máy không có
-backend và model tương ứng.
+Worker chỉ sở hữu PID do Hub tạo, chạy với cờ no-console và log dưới `Logs`.
+Cancel/close chỉ dừng worker hoặc ComfyUI do Hub sở hữu; Hub không kill Python,
+ComfyUI, AIRI hay tiến trình người dùng không liên quan.
 
-## Bố cục và lưu trữ V2
+## Bố cục cục bộ
 
 ```text
 D:\LocalAIHub\
-|- src\ui\                 # giao diện HTML/CSS/JavaScript thuần
-|- src\app\                # desktop shell pywebview
-|- src\services\           # API, registry, storage và jobs
-|- Config\                  # chỉ cấu hình mẫu được theo dõi bởi Git
-|- runtime\                 # ứng dụng/engine bên thứ ba, bị Git bỏ qua
-|- Models\                  # model cục bộ, bị Git bỏ qua
-|- Environments\ Cache\ Output\ Temp\ Logs\ Reports\
-|- Scripts\ tests\ docs\
+|- src\                 # UI, API, worker và desktop shell
+|- Config\              # chỉ file *.example.json được theo dõi Git
+|- runtime\             # portable applications/engines, bị Git bỏ qua
+|- Models\              # model local, bị Git bỏ qua
+|- Environments\        # Hub và environment đã migrate, bị Git bỏ qua
+|- Output\ Temp\ Archive\ Cache\ Logs\ Reports\
+|- scripts\ tests\ docs\
 `- dependencies.lock.json
 ```
 
-Các model FLUX và Qwen Image dùng chung một kho vật lý thông qua đường dẫn
-chuẩn và junction không sao chép dữ liệu. Qwen Image là hệ tạo ảnh; nó tách
-biệt hoàn toàn với Qwen3-TTS (engine giọng nói). SAM2, AnimeSR, FFmpeg/FFprobe,
-ComfyUI, Practical-RIFE và Real-ESRGAN chỉ được nhận diện là sẵn sàng khi
-đường dẫn cục bộ tương ứng tồn tại và đã có kiểm tra phù hợp.
+Không sao chép model để hợp nhất. Không sửa driver NVIDIA, CUDA hoặc phần mềm
+hệ thống. Không ghi đè media nguồn; output chỉ vào vùng Output/Archive của Hub.
 
-AIRI và Ollama là ứng dụng được cài đặt bởi hệ thống. Hub chỉ hiển thị và khởi
-chạy chúng qua registry cố định khi được cấu hình; không di chuyển thư mục
-cài đặt, model hay thông tin đăng nhập của chúng.
+## Cleanup legacy V3 và rollback
 
-## Quy tắc an toàn dữ liệu
+Inventory trước, không xoá theo tên thư mục:
 
-- Không sao chép model để “hợp nhất”; ưu tiên `Move-Item` cùng ổ đĩa sau khi
-  kiểm tra tiến trình, sau đó tạo junction tương thích ở đường dẫn cũ.
-- Không di chuyển environment Python/Conda/venv một cách mù quáng. Những môi
-  trường không di động vẫn là external/partial trong registry.
-- Không đụng đến thư mục chứa dự án, media, download, cache hoặc output của
-  người dùng nếu chưa được phân loại rõ ràng là runtime portable.
-- Không sửa NVIDIA driver, CUDA hay phần mềm hệ thống.
-- Không ghi đè media nguồn. Kết quả chỉ thuộc thư mục output cục bộ được cấu
-  hình.
-- Model được tải theo nhu cầu; mặc định chỉ có một tác vụ GPU nặng tại một
-  thời điểm.
+```powershell
+python .\scripts\inventory_legacy_v3.py
+pwsh -File .\scripts\cleanup_legacy_v3.ps1 -RemoveVerifiedEmptyFolders
+pwsh -File .\scripts\cleanup_legacy_v3.ps1 -RemoveObsoleteJunctions
+```
 
-`Config/layout_migration.local.json` là manifest cục bộ bị Git bỏ qua. Nó ghi
-nhận nguồn/đích, dung lượng, chiến lược move, junction, rollback, mức tin cậy
-và trạng thái xác minh. Ba báo cáo cục bộ cũng bị bỏ qua có chủ đích:
+Hai lệnh cleanup mặc định là dry-run. Chỉ thêm `-Apply` sau khi report local
+xác nhận đúng một `REAL_DIRECTORY` rỗng hoặc junction không còn tham chiếu.
+Mỗi junction cần thêm chính xác `-ApprovedJunctionPath <path>`; điều này ngăn
+một lần apply xóa hàng loạt junction được inventory tìm thấy.
+Report bỏ qua Git gồm:
 
-- `Reports/FINAL_STORAGE_PLAN.local.md`
-- `Reports/LEGACY_AI_PATHS.local.md`
-- `Reports/FINAL_LOCAL_AI_MIGRATION.local.md`
+- `Reports\LEGACY_CLEANUP_V3.local.md`
+- `Reports\V3_INTEGRATION_AND_CLEANUP.local.md`
+- `Config\legacy_cleanup_v3.local.json`
 
-Chúng có thể chứa đường dẫn riêng của máy nên không được commit hoặc đưa vào
-mô tả PR.
+Sau cleanup và kiểm thử, `scripts\write_v3_final_report.py` ghi báo cáo bàn giao
+local cuối cùng từ các state trên. Script chỉ đọc state, yêu cầu ghi rõ tối đa ba
+vòng validation và chỉ liệt kê path đã xóa khi path đó đã được xác nhận vắng mặt.
 
-## Cấu hình cục bộ
-
-Sao chép các tệp `Config/*.example.json` và `Config/local.env.example.cmd` theo
-quy ước cục bộ của máy. Tệp cấu hình thật bị `.gitignore`; không thêm API key,
-token, mật khẩu hoặc đường dẫn cá nhân vào Git. Khi thay đổi schema, hãy cập
-nhật tệp `.example` tương ứng trong cùng PR.
-
-`Config/application_registry.example.json` là allowlist launcher. Nó giới hạn
-ứng dụng có thể mở và không chấp nhận lệnh hay đối số tùy ý từ API/UI.
-
-## API cục bộ
-
-Các endpoint chính:
-
-- `GET /health`, `/tools`, `/models`, `/components`, `/jobs`
-- `GET /api/dashboard`, `/api/storage`, `/api/models`, `/api/applications`,
-  `/api/settings`
-- `POST /api/applications/<id>/launch` và `/api/storage/scan`
-- `POST /media/probe` cùng các route capability đã được allowlist
-
-API phục vụ asset giao diện ở `/ui/` với kiểm tra đường dẫn để không thể truy
-cập tệp ngoài `src/ui`. Gọi launcher chỉ sử dụng ID ứng dụng đã đăng ký; không
-có route chạy shell tùy ý.
+Environment Python ngoài Hub cần rebuild có kiểm soát, không kéo-thả/move
+venv. Xem [migration và rollback](docs/MIGRATION_AND_ROLLBACK.md) để export
+package state, tạo replacement, kiểm tra import, smoke một lần, cập nhật
+adapter rồi mới đủ điều kiện xóa legacy environment. Tiến trình đang hoạt động,
+user data, system-managed app và dữ liệu chưa xác minh luôn được giữ lại.
 
 ## Kiểm tra có giới hạn
 
-Chạy kiểm tra phù hợp nhất với thay đổi, không benchmark hay stress test:
+Không benchmark, không loop inference, không stress GPU. V3 có tối đa ba vòng:
+
+1. Static/control plane: syntax, unit test, API, `/ui/`, routing, registry,
+   storage và launcher no-console.
+2. Functional integration: tối đa một input nhỏ cho từng module khả dụng.
+3. Chỉ sau khi sửa lỗi; cold start/restart và regression tối thiểu.
+
+Ví dụ kiểm tra repository:
 
 ```powershell
-python -m unittest discover -s tests
-python scripts/ci_validate.py
-python scripts/api_smoke.py --image <duong-dan-anh-cuc-bo>
-python src/services/mcp/mcp_smoke.py
+python .\scripts\ci_validate.py
+python -m unittest discover -s tests -v
+git diff --check
 ```
 
-Có thể dùng `ffprobe` để kiểm tra media và launcher `--self-test` khi ứng dụng
-hỗ trợ. Không chạy inference model nặng chỉ để chứng minh giao diện. Mọi công
-cụ hoặc route chưa có smoke test chức năng phải tiếp tục hiển thị `partial` hoặc
-`unavailable`.
-
-Tài liệu bổ sung: [bố cục V2](docs/FILESYSTEM_LAYOUT_V2.md),
+Xem thêm [kiến trúc một cửa sổ V3](docs/TRUE_SINGLE_WINDOW_V3.md),
+[filesystem layout V2](docs/FILESYSTEM_LAYOUT_V2.md),
 [migration và rollback](docs/MIGRATION_AND_ROLLBACK.md) và
-[ứng dụng hợp nhất V2](docs/UNIFIED_APPLICATION_V2.md).
+[tích hợp AIRI](docs/AIRI_INTEGRATION.md).
