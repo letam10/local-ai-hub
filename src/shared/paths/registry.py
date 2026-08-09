@@ -23,22 +23,26 @@ TEMP_ROOT = ROOT / "Temp"
 LOG_ROOT = ROOT / "Logs"
 
 RUNTIME_PATHS = {
-    "vision.omniparser": RUNTIME_ROOT / "engines" / "vision" / "omniparser",
-    "vision.rfdetr": RUNTIME_ROOT / "engines" / "vision" / "rfdetr",
-    "vision.groundingdino": RUNTIME_ROOT / "engines" / "vision" / "groundingdino",
-    "vision.paddleocr": RUNTIME_ROOT / "engines" / "vision" / "paddleocr",
-    "vision.sam2": RUNTIME_ROOT / "engines" / "vision" / "sam2",
-    "speech.faster-whisper": RUNTIME_ROOT / "engines" / "speech" / "faster-whisper",
-    "voice.qwen3-tts": RUNTIME_ROOT / "engines" / "voice" / "qwen3-tts",
-    "voice.seed-vc": RUNTIME_ROOT / "engines" / "voice" / "seed-vc",
-    "image.qwen-image": RUNTIME_ROOT / "engines" / "image" / "qwen-image",
-    "image.flux": RUNTIME_ROOT / "engines" / "image" / "flux",
-    "image.comfyui": RUNTIME_ROOT / "engines" / "image" / "comfyui",
-    "video.animesr": RUNTIME_ROOT / "engines" / "video" / "animesr",
+    "vision.omniparser": RUNTIME_ROOT / "engines" / "vision" / "OmniParser",
+    "vision.rfdetr": RUNTIME_ROOT / "engines" / "vision" / "RF-DETR",
+    "vision.groundingdino": RUNTIME_ROOT / "engines" / "vision" / "GroundingDINO",
+    "vision.paddleocr": RUNTIME_ROOT / "engines" / "vision" / "PaddleOCR",
+    "vision.sam2": RUNTIME_ROOT / "engines" / "vision" / "SAM2",
+    "speech.faster-whisper": RUNTIME_ROOT / "engines" / "speech" / "Faster-Whisper",
+    "voice.qwen3-tts": RUNTIME_ROOT / "engines" / "voice" / "Qwen3-TTS",
+    "voice.seed-vc": RUNTIME_ROOT / "engines" / "voice" / "Seed-VC",
+    "image.qwen-image": RUNTIME_ROOT / "engines" / "image" / "Qwen-Image",
+    "image.flux": RUNTIME_ROOT / "engines" / "image" / "FLUX",
+    "image.comfyui": RUNTIME_ROOT / "engines" / "image" / "ComfyUI",
+    "video.animesr": RUNTIME_ROOT / "engines" / "video" / "AnimeSR",
+    "video.practical-rife": RUNTIME_ROOT / "engines" / "video" / "Practical-RIFE",
+    "video.real-esrgan": RUNTIME_ROOT / "engines" / "video" / "Real-ESRGAN",
     "tools.ffmpeg": RUNTIME_ROOT / "tools" / "ffmpeg",
     "app.sam2-mask-studio": RUNTIME_ROOT / "applications" / "SAM2-Mask-Studio",
     "app.anime-upscale-studio": RUNTIME_ROOT / "applications" / "Anime-Upscale-Studio",
-    "app.local-image-studio": RUNTIME_ROOT / "applications" / "Local-Image-Studio",
+    "app.flux-klein-studio": RUNTIME_ROOT / "applications" / "FLUX-Klein-Studio",
+    "app.qwen-image-studio": RUNTIME_ROOT / "applications" / "Qwen-Image-Studio",
+    "app.external": RUNTIME_ROOT / "applications" / "external",
 }
 
 MODEL_PATHS = {
@@ -59,7 +63,7 @@ MODEL_PATHS = {
 def ensure_managed_directories() -> None:
     """Create empty ignored roots without touching existing user data."""
 
-    for path in (RUNTIME_ROOT, CACHE_ROOT, OUTPUT_ROOT, TEMP_ROOT, LOG_ROOT):
+    for path in (RUNTIME_ROOT, MODEL_ROOT, CACHE_ROOT, OUTPUT_ROOT, TEMP_ROOT, LOG_ROOT):
         path.mkdir(parents=True, exist_ok=True)
 
 

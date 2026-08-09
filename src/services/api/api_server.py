@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 
-from .config import hub_config, models
+from .config import hub_config
 from .core import component_statuses, dispatch_tool, get_job_or_error, health, tool_catalog
 from .jobs import list_jobs
+from src.services.runtime_registry import applications, launch
+from src.services.storage_manager.overview import model_summary, storage_summary
+from src.shared.paths.registry import ROOT
 
 
 LOG = logging.getLogger("local-ai-hub")
+UI_ROOT = (ROOT / "src" / "ui").resolve()
 
 
 class HubHandler(BaseHTTPRequestHandler):
@@ -25,6 +31,33 @@ class HubHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _write_static(self, path: str) -> None:
+        relative = unquote(path[len("/ui/") :]) or "index.html"
+        candidate = (UI_ROOT / relative).resolve()
+        try:
+            candidate.relative_to(UI_ROOT)
+        except ValueError:
+            self._write(403, {"status": "error", "error": "UI path is outside the bundled frontend."})
+            return
+        if not candidate.is_file():
+            self._write(404, {"status": "error", "error": "UI asset not found."})
+            return
+        try:
+            body = candidate.read_bytes()
+        except OSError as exc:
+            self._write(500, {"status": "error", "error": str(exc)})
+            return
+        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        if content_type.startswith("text/") or content_type in {"application/javascript", "application/json"}:
+            content_type += "; charset=utf-8"
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(body)
 
@@ -38,24 +71,62 @@ class HubHandler(BaseHTTPRequestHandler):
             return {}
 
     def do_GET(self) -> None:  # noqa: N802
-        path = urlparse(self.path).path.rstrip("/") or "/"
-        if path in {"/", "/health"}:
+        path = unquote(urlparse(self.path).path)
+        normalized = path.rstrip("/") or "/"
+        if path == "/ui":
+            self.send_response(302)
+            self.send_header("Location", "/ui/")
+            self.end_headers()
+        elif path.startswith("/ui/"):
+            self._write_static(path)
+        elif normalized in {"/", "/health"}:
             self._write(200, health())
-        elif path == "/tools":
+        elif normalized == "/tools":
             self._write(200, {"status": "completed", "tools": tool_catalog()})
-        elif path == "/models":
-            self._write(200, {"status": "completed", "models": models()})
-        elif path == "/components":
+        elif normalized == "/models":
+            self._write(200, {"status": "completed", "models": model_summary()})
+        elif normalized == "/components":
             self._write(200, {"status": "completed", "components": component_statuses()})
-        elif path == "/jobs":
+        elif normalized == "/jobs":
             self._write(200, {"status": "completed", "jobs": list_jobs()})
-        elif path.startswith("/jobs/"):
-            self._write(*get_job_or_error(path.split("/", 2)[2]))
+        elif normalized.startswith("/jobs/"):
+            self._write(*get_job_or_error(normalized.split("/", 2)[2]))
+        elif normalized == "/api/dashboard":
+            self._write(200, {"status": "completed", "health": health(), "components": component_statuses(), "applications": applications()})
+        elif normalized == "/api/storage":
+            self._write(200, storage_summary())
+        elif normalized == "/api/models":
+            self._write(200, {"status": "completed", "models": model_summary()})
+        elif normalized == "/api/applications":
+            self._write(200, {"status": "completed", "applications": applications()})
+        elif normalized == "/api/settings":
+            config = hub_config()
+            self._write(200, {
+                "status": "completed",
+                "settings": {
+                    "start_maximized": bool(config.get("start_maximized", True)),
+                    "minimum_width": int(config.get("minimum_width", 1280)),
+                    "minimum_height": int(config.get("minimum_height", 720)),
+                    "model_load_policy": config.get("model_load_policy", "on_demand"),
+                    "max_heavy_gpu_jobs": int(config.get("max_heavy_gpu_jobs", 1)),
+                    "api_bind": str(config.get("bind_host", "127.0.0.1")),
+                    "api_port": int(config.get("api_port", 8765)),
+                    "mcp_transport": config.get("mcp_transport", "stdio"),
+                },
+            })
         else:
             self._write(404, {"status": "error", "error": "Route not found."})
 
     def do_POST(self) -> None:  # noqa: N802
-        path = urlparse(self.path).path.rstrip("/") or "/"
+        path = unquote(urlparse(self.path).path.rstrip("/") or "/")
+        if path.startswith("/api/applications/") and path.endswith("/launch"):
+            application_id = path[len("/api/applications/") : -len("/launch")].strip("/")
+            status, payload = launch(application_id)
+            self._write(status, payload)
+            return
+        if path == "/api/storage/scan":
+            self._write(200, storage_summary())
+            return
         aliases = {
             "/media/probe": "probe_media",
             "/probe_media": "probe_media",

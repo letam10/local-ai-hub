@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 import threading
@@ -9,9 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import BASE_DIR, component, components, hub_config, models
+from .config import BASE_DIR, component, components, hub_config
 from .gpu import gpu_policy, query_gpu
-from .jobs import create_job, get_job, list_jobs
+from .jobs import get_job, list_jobs
 
 
 TOOL_COMPONENTS = {
@@ -92,12 +93,12 @@ TOOL_CAPABILITIES = {
         "reason": "The Seed-VC adapter exists, but no bounded functional backend smoke test is recorded.",
     },
     "upscale_anime_video": {
-        "tool_status": "queue_only",
-        "reason": "The route records a job, but no AnimeSR executor has been verified.",
+        "tool_status": "partial",
+        "reason": "The managed Anime Upscale Studio executor is registered, but no bounded local inference smoke is recorded; launch the verified desktop workflow for execution.",
     },
     "probe_media": {
-        "tool_status": "partial",
-        "reason": "The allowlisted FFprobe route is implemented, but a local functional smoke result is not recorded.",
+        "tool_status": "operational",
+        "reason": "The allowlisted FFprobe route uses the configured canonical FFmpeg runtime when installed.",
     },
 }
 
@@ -127,14 +128,34 @@ def _configured_component_status(item: dict[str, Any]) -> str:
     return str(value).strip().lower()
 
 
+def _public_component_text(value: object, fallback: str) -> str:
+    """Keep component summaries useful without leaking machine-local paths."""
+
+    if not isinstance(value, str):
+        return fallback
+    text = value.strip()
+    if not text or re.match(r"^[A-Za-z]:[\\/]", text) or text.startswith("\\\\"):
+        return fallback
+    return text
+
+
 def _observed_component_status(item: dict[str, Any]) -> str:
     executable = item.get("executable")
     path = item.get("path")
+    configured_status = _configured_component_status(item)
     if _port_open(item.get("port")):
         return "running"
-    if (executable and _path_exists(executable)) or (path and _path_exists(path)):
+    executable_exists = bool(executable and _path_exists(executable))
+    path_exists = bool(path and _path_exists(path))
+    if configured_status in {"planned", "not_installed"} and not executable_exists:
+        return configured_status
+    if executable_exists or path_exists:
+        environment = item.get("environment")
+        if environment and not _path_exists(environment):
+            return "partial"
+        if item.get("adapter") == "registered-engine":
+            return "partial"
         return "installed"
-    configured_status = _configured_component_status(item)
     if configured_status in {"planned", "not_installed"}:
         return "planned"
     if configured_status == "error":
@@ -147,7 +168,13 @@ def component_statuses() -> list[dict[str, Any]]:
     for item in components():
         observed = _observed_component_status(item)
         statuses.append({
-            **item,
+            "id": item.get("id"),
+            "name": item.get("name") or item.get("id"),
+            "kind": item.get("kind") or "component",
+            "version": item.get("version") or "unknown",
+            "adapter": _public_component_text(item.get("adapter"), "configured"),
+            "source": _public_component_text(item.get("source"), "local configuration"),
+            "port": item.get("port"),
             "configured_component_status": _configured_component_status(item),
             "component_status": observed,
             "status": observed,
@@ -174,7 +201,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "healthy",
         "service": "Local AI Hub",
-        "version": "0.1.0",
+        "version": "2.0.0",
         "time": _now(),
         "bind": f"{config.get('bind_host', '127.0.0.1')}:{config.get('api_port', 8765)}",
         "disk": usage,
@@ -359,8 +386,12 @@ def dispatch_tool(tool: str, payload: dict[str, Any]) -> tuple[int, dict[str, An
 
         return _run_heavy(tool, lambda: convert(payload))
     if tool == "upscale_anime_video":
-        job = create_job(tool, payload, device="cuda:0")
-        return 202, {"status": "queued", "job_id": job["id"], "note": "Existing AnimeSR application is preserved; execution adapter is being connected."}
+        return 503, _unavailable(
+            tool,
+            component_id,
+            "AnimeSR execution is exposed through the managed desktop application until a bounded local inference fixture is approved; no fake queue record is created.",
+            readiness=readiness,
+        )
     if tool == "transcribe_media":
         from src.modules.whisper.backend.adapter import transcribe
 

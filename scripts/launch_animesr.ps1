@@ -3,10 +3,11 @@ param(
     [string]$Executable = $env:ANIMESR_EXECUTABLE
 )
 
-$animeExecutable = [Environment]::ExpandEnvironmentVariables($Executable)
-if ([string]::IsNullOrWhiteSpace($animeExecutable)) {
-    throw 'AnimeSR executable is not configured. Set ANIMESR_EXECUTABLE in Config/local.env.cmd or the environment.'
+$root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+if ([string]::IsNullOrWhiteSpace($Executable)) {
+    $Executable = Join-Path $root 'runtime\applications\Anime-Upscale-Studio\Anime Upscale Studio.exe'
 }
+$animeExecutable = [Environment]::ExpandEnvironmentVariables($Executable)
 $animeWorkingDirectory = Split-Path -LiteralPath $animeExecutable -Parent
 if (-not (Test-Path -LiteralPath $animeExecutable)) { throw "AnimeSR executable not found: $animeExecutable" }
 Start-Process -FilePath $animeExecutable -WorkingDirectory $animeWorkingDirectory
