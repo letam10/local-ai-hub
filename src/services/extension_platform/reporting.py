@@ -34,7 +34,7 @@ def build_compatibility_report(
     records = discovery.get("extensions", []) if isinstance(discovery.get("extensions"), list) else []
     preflights = _preflight_index(preflight)
     extensions: list[dict[str, Any]] = []
-    status = "operational"
+    status = preflight.get("status") if isinstance(preflight, Mapping) and preflight.get("status") in _STATUS_RANK else "operational"
     for record in records:
         if not isinstance(record, Mapping):
             continue
@@ -43,14 +43,17 @@ def build_compatibility_report(
         item_status = assessed.get("status") if isinstance(assessed, Mapping) else record.get("status", "unavailable")
         item_reason = assessed.get("reason") if isinstance(assessed, Mapping) else record.get("reason", "No discovery reason was supplied.")
         item_action = assessed.get("action") if isinstance(assessed, Mapping) else record.get("action", "Run static validation.")
+        planning_eligible = assessed.get("planning_eligible", True) if isinstance(assessed, Mapping) else True
         if item_status not in _STATUS_RANK:
             item_status = "unavailable"
-        status = _combine(status, item_status)
+        if planning_eligible:
+            status = _combine(status, item_status)
         extensions.append(
             {
                 "extension_id": extension_id,
                 "display_name": record.get("display_name", "Unidentified extension"),
                 "status": item_status,
+                "planning_eligible": bool(planning_eligible),
                 "reason": item_reason,
                 "action": item_action,
                 "capabilities": list(record.get("capabilities", [])),

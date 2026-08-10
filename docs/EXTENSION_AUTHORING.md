@@ -49,6 +49,8 @@ Optional `description` is concise single-line text.
 
 `audio_transcription`, `capability_pack`, `document_analysis`, `image_analysis`, `image_generation`, `metadata_catalog`, `model_cards`, `resource_planning`, `runtime_cards`, `text_generation`, and `workflow_templates` are the only v1 capability values.
 
+`workflow_templates` is allowlisted as metadata, but it does not yet have a static template-entrypoint contract. Declaring it therefore remains `partial` until that contract and a bounded functional smoke are added; do not use a generic JSON or code entrypoint as a workaround.
+
 ### Permission allowlist
 
 Use only `read_extension_metadata`, `read_capability_cards`, `inspect_component_status`, `inspect_model_status`, `plan_resources`, and `render_compatibility_report`.
@@ -119,6 +121,8 @@ Use ignored `Config/extensions.local.json` for local non-secret inventory data w
 ```
 
 Never place API keys, tokens, passwords, raw paths, model locations, or command lines in this configuration. Unknown local fields are intentionally ignored by the platform and never exported into reports.
+
+When `enabled_extensions` is present, it is an explicit planning allowlist: only listed extensions enter the resource plan, and `[]` deliberately enters none. Unlisted descriptors remain visible as planned metadata and do not consume capacity or block enabled work. A direct in-process caller that omits the setting may intentionally plan all discovered extensions.
 
 Then run:
 

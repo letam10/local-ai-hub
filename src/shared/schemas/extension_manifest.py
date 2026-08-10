@@ -50,6 +50,10 @@ CAPABILITY_ALLOWLIST = frozenset(
         "workflow_templates",
     }
 )
+# These capabilities are completely described by allowlisted metadata in v1.
+# Every other capability, including workflow_templates, remains runtime
+# unverified until it gains its own descriptor contract and bounded smoke.
+STATIC_METADATA_CAPABILITIES = frozenset({"capability_pack", "metadata_catalog", "model_cards", "resource_planning", "runtime_cards"})
 PERMISSION_ALLOWLIST = frozenset(
     {
         "inspect_component_status",
@@ -490,17 +494,186 @@ EXTENSION_MANIFEST_V1_SCHEMA: dict[str, Any] = {
         "resource_profile",
         "availability",
     ],
+    "$defs": {
+        "identifier": {"type": "string", "pattern": EXTENSION_ID_PATTERN.pattern},
+        "semantic_version": {"type": "string", "pattern": SEMVER_PATTERN.pattern},
+        "version_constraint": {"type": "string", "pattern": VERSION_CONSTRAINT_PATTERN.pattern},
+        "safe_text": {"type": "string", "minLength": 1, "maxLength": 300, "pattern": r"^[^\r\n\u0000]+$"},
+        "public_url": {
+            "type": "string",
+            "maxLength": 300,
+            "pattern": r"^https?://[^/?#@]+(?:/[^?#]*)?$",
+        },
+        "requirement": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["id"],
+            "properties": {
+                "id": {"$ref": "#/$defs/identifier"},
+                "version": {"$ref": "#/$defs/version_constraint"},
+                "optional": {"type": "boolean"},
+            },
+        },
+        "compatibility": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["hub"],
+            "properties": {
+                "hub": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["min_version"],
+                    "properties": {
+                        "min_version": {"$ref": "#/$defs/semantic_version"},
+                        "max_version": {"$ref": "#/$defs/semantic_version"},
+                    },
+                },
+                "platforms": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": True,
+                    "items": {"enum": sorted(PLATFORMS)},
+                    "default": ["windows"],
+                },
+            },
+        },
+        "entrypoint": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["kind", "path"],
+            "properties": {
+                "kind": {"enum": sorted(ENTRYPOINT_ALLOWLIST)},
+                "path": {
+                    "type": "string",
+                    "pattern": SAFE_DESCRIPTOR_PATH_PATTERN.pattern,
+                    "allOf": [{"not": {"pattern": r"(?:^|/)\.\.?/"}}],
+                },
+            },
+            "oneOf": [
+                {
+                    "properties": {
+                        "kind": {"const": "capability_pack"},
+                        "path": {"type": "string", "pattern": r"\.json$"},
+                    },
+                },
+                {
+                    "properties": {
+                        "kind": {"const": "model_cards"},
+                        "path": {"type": "string", "pattern": r"\.json$"},
+                    },
+                },
+                {
+                    "properties": {
+                        "kind": {"const": "runtime_cards"},
+                        "path": {"type": "string", "pattern": r"\.json$"},
+                    },
+                },
+                {
+                    "properties": {
+                        "kind": {"const": "documentation"},
+                        "path": {"type": "string", "pattern": r"\.md$"},
+                    },
+                },
+            ],
+        },
+        "resource_profile": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["cpu", "gpu", "vram_gb", "ram_gb", "disk_gb", "exclusive_resource_groups"],
+            "properties": {
+                "cpu": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["class", "threads"],
+                    "properties": {
+                        "class": {"enum": sorted(CPU_CLASSES)},
+                        "threads": {"type": "integer", "minimum": 1, "maximum": 256},
+                    },
+                },
+                "gpu": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["required", "vendor", "device_class"],
+                    "properties": {
+                        "required": {"type": "boolean"},
+                        "vendor": {"enum": sorted(GPU_VENDORS)},
+                        "device_class": {"enum": sorted(GPU_DEVICE_CLASSES)},
+                    },
+                    "allOf": [
+                        {
+                            "if": {"properties": {"required": {"const": False}}, "required": ["required"]},
+                            "then": {"properties": {"vendor": {"const": "none"}, "device_class": {"const": "none"}}},
+                        },
+                        {
+                            "if": {"properties": {"required": {"const": True}}, "required": ["required"]},
+                            "then": {"properties": {"vendor": {"not": {"const": "none"}}}},
+                        },
+                    ],
+                },
+                "vram_gb": {"type": "number", "minimum": 0, "maximum": 100000},
+                "ram_gb": {"type": "number", "minimum": 0, "maximum": 100000},
+                "disk_gb": {"type": "number", "minimum": 0, "maximum": 100000},
+                "exclusive_resource_groups": {
+                    "type": "array",
+                    "maxItems": 16,
+                    "uniqueItems": True,
+                    "items": {"type": "string", "pattern": RESOURCE_GROUP_PATTERN.pattern},
+                },
+            },
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {"gpu": {"properties": {"required": {"const": False}}, "required": ["required"]}},
+                        "required": ["gpu"],
+                    },
+                    "then": {"properties": {"vram_gb": {"const": 0}}},
+                }
+            ],
+        },
+        "availability": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["status", "reason", "action"],
+            "properties": {
+                "status": {"enum": sorted(AVAILABILITY_STATUSES)},
+                "reason": {"$ref": "#/$defs/safe_text"},
+                "action": {"$ref": "#/$defs/safe_text"},
+            },
+        },
+    },
     "properties": {
         "schema_version": {"const": MANIFEST_SCHEMA_VERSION},
-        "id": {"type": "string", "pattern": EXTENSION_ID_PATTERN.pattern},
-        "version": {"type": "string", "pattern": SEMVER_PATTERN.pattern},
-        "display_name": {"type": "string", "minLength": 1, "maxLength": 120},
-        "description": {"type": "string", "maxLength": 500},
-        "author": {"type": "object", "required": ["name"], "additionalProperties": False},
-        "license": {"type": "string", "minLength": 1, "maxLength": 160},
-        "source": {"type": "string", "format": "uri"},
-        "capabilities": {"type": "array", "items": {"enum": sorted(CAPABILITY_ALLOWLIST)}, "uniqueItems": True},
-        "permissions": {"type": "array", "items": {"enum": sorted(PERMISSION_ALLOWLIST)}, "uniqueItems": True},
-        "availability": {"type": "object", "required": ["status", "reason", "action"], "additionalProperties": False},
+        "id": {"$ref": "#/$defs/identifier"},
+        "version": {"$ref": "#/$defs/semantic_version"},
+        "display_name": {"type": "string", "minLength": 1, "maxLength": 120, "pattern": r"^[^\r\n\u0000]+$"},
+        "description": {"type": "string", "minLength": 1, "maxLength": 500, "pattern": r"^[^\r\n\u0000]+$"},
+        "author": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["name"],
+            "properties": {
+                "name": {"type": "string", "minLength": 1, "maxLength": 120, "pattern": r"^[^\r\n\u0000]+$"},
+                "url": {"$ref": "#/$defs/public_url"},
+            },
+        },
+        "license": {"type": "string", "minLength": 1, "maxLength": 160, "pattern": r"^[^\r\n\u0000]+$"},
+        "source": {"$ref": "#/$defs/public_url"},
+        "capabilities": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": True,
+            "items": {"enum": sorted(CAPABILITY_ALLOWLIST)},
+        },
+        "compatibility": {"$ref": "#/$defs/compatibility"},
+        "required_components": {"type": "array", "items": {"$ref": "#/$defs/requirement"}},
+        "required_models": {"type": "array", "items": {"$ref": "#/$defs/requirement"}},
+        "permissions": {
+            "type": "array",
+            "uniqueItems": True,
+            "items": {"enum": sorted(PERMISSION_ALLOWLIST)},
+        },
+        "entrypoints": {"type": "array", "minItems": 1, "uniqueItems": True, "items": {"$ref": "#/$defs/entrypoint"}},
+        "resource_profile": {"$ref": "#/$defs/resource_profile"},
+        "availability": {"$ref": "#/$defs/availability"},
     },
 }

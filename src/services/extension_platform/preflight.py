@@ -8,6 +8,7 @@ from src.services.capability_planner.planner import plan_resources
 from src.shared.schemas.extension_manifest import (
     AVAILABILITY_STATUSES,
     ManifestValidationError,
+    STATIC_METADATA_CAPABILITIES,
     compare_versions,
     is_semver,
     validate_extension_manifest,
@@ -194,7 +195,8 @@ def preflight_extension(
             action = "Resolve the static discovery findings before attempting a runtime capability."
     for check in checks:
         status = _combine(status, check["status"])
-    if status == "operational" and (manifest["required_components"] or manifest["required_models"]):
+    runtime_capability_declared = bool(set(manifest["capabilities"]) - STATIC_METADATA_CAPABILITIES)
+    if status == "operational" and (manifest["required_components"] or manifest["required_models"] or runtime_capability_declared):
         status = "partial"
         reason = "Dry-run preflight verified dependency metadata only; it did not execute or import a runtime capability."
         action = "Run a bounded, separately authorized functional smoke before claiming operational status."
@@ -226,35 +228,47 @@ def preflight_extensions(
     models = config.get("models")
     hub_version = config.get("hub_version") if isinstance(config.get("hub_version"), str) else None
     platform = config.get("platform") if isinstance(config.get("platform"), str) else None
-    enabled = set(config.get("enabled_extensions", [])) if isinstance(config.get("enabled_extensions"), list) else set()
+    enabled_setting = config.get("enabled_extensions")
+    # An omitted setting means the caller intentionally wants a report/plan for
+    # every discovered descriptor.  A supplied list is an explicit allowlist;
+    # therefore an explicit empty list enables no extension and consumes no
+    # resource capacity.
+    enabled = {item for item in enabled_setting if isinstance(item, str)} if isinstance(enabled_setting, list) else None
     results: list[dict[str, Any]] = []
-    manifests: list[Mapping[str, Any]] = []
+    planning_manifests: list[Mapping[str, Any]] = []
+    eligible_results: list[dict[str, Any]] = []
     for record in records:
         if not isinstance(record, Mapping):
             continue
         result = preflight_extension(record, components=components, models=models, hub_version=hub_version, platform=platform)
-        if enabled and result["extension_id"] not in enabled and result["extension_id"] is not None:
+        planning_eligible = enabled is None or result["extension_id"] in enabled
+        if not planning_eligible:
             result = dict(result)
-            result["status"] = _combine(result["status"], "planned")
+            result["status"] = "planned"
             result["reason"] = "The extension is not enabled in the supplied extension configuration."
             result["action"] = "Add the extension id to enabled_extensions after reviewing its dry-run report."
             result["actions"] = sorted(set([*result["actions"], result["action"]]))
+        result["planning_eligible"] = planning_eligible
         results.append(result)
-        if isinstance(record.get("manifest"), Mapping):
+        if planning_eligible:
+            eligible_results.append(result)
+        if planning_eligible and isinstance(record.get("manifest"), Mapping):
             try:
-                manifests.append(validate_extension_manifest(record["manifest"]))
+                planning_manifests.append(validate_extension_manifest(record["manifest"]))
             except ManifestValidationError:
                 pass
-    status = "operational"
-    for result in results:
+    status = "planned" if enabled is not None and not eligible_results else "operational"
+    for result in eligible_results:
         status = _combine(status, result["status"])
-    resource_plan = plan_resources(manifests, hardware=config.get("hardware") if isinstance(config, Mapping) else None)
-    status = _combine(status, resource_plan["status"])
+    resource_plan = plan_resources(planning_manifests, hardware=config.get("hardware") if isinstance(config, Mapping) else None)
+    if eligible_results:
+        status = _combine(status, resource_plan["status"])
     counts = {item: sum(1 for result in results if result["status"] == item) for item in ("operational", "partial", "unavailable", "planned")}
     return {
         "contract_version": PREFLIGHT_VERSION,
         "dry_run": True,
         "status": status,
+        "planning_scope": "enabled_extensions" if enabled is not None else "all_discovered_extensions",
         "extensions": results,
         "counts": counts,
         "resource_plan": resource_plan,

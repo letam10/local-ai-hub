@@ -98,6 +98,13 @@ def _capacity_action(resource: str) -> str:
     return f"Run requests serially or provide additional {resource} capacity before executing a workload."
 
 
+def _physical_gpu_action(required_vram_gb: float) -> str:
+    return (
+        f"Provide a compatible GPU with at least {required_vram_gb:g} GB VRAM "
+        "or select an extension profile with a lower physical requirement."
+    )
+
+
 def plan_resources(
     requests: Iterable[Mapping[str, Any]],
     *,
@@ -148,13 +155,27 @@ def plan_resources(
                 item_status = _combine_status(item_status, "unavailable")
                 item_actions.append("Provide a compatible GPU or select an extension profile that does not require one.")
             else:
-                selected = next((gpu for gpu in compatible if gpu_usage[gpu.identifier] + float(profile["vram_gb"]) <= gpu.vram_gb), None)
-                if selected is None:
-                    item_status = _combine_status(item_status, "partial")
-                    item_actions.append(_capacity_action("GPU VRAM"))
+                required_vram_gb = float(profile["vram_gb"])
+                physically_fitting = [gpu for gpu in compatible if required_vram_gb <= gpu.vram_gb]
+                if not physically_fitting:
+                    item_status = _combine_status(item_status, "unavailable")
+                    item_actions.append(_physical_gpu_action(required_vram_gb))
+                elif mode == "serial":
+                    # Serial requests reuse a GPU after the preceding request is
+                    # complete, so their per-request physical fit must not be
+                    # accumulated as concurrent VRAM usage.
+                    assignment = physically_fitting[0].identifier
                 else:
-                    assignment = selected.identifier
-                    gpu_usage[selected.identifier] += float(profile["vram_gb"])
+                    selected = next(
+                        (gpu for gpu in physically_fitting if gpu_usage[gpu.identifier] + required_vram_gb <= gpu.vram_gb),
+                        None,
+                    )
+                    if selected is None:
+                        item_status = _combine_status(item_status, "partial")
+                        item_actions.append(_capacity_action("GPU VRAM"))
+                    else:
+                        assignment = selected.identifier
+                        gpu_usage[selected.identifier] += required_vram_gb
 
         accepted.append(
             {

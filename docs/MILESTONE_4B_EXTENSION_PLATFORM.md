@@ -50,6 +50,8 @@ An extension that declares components, models, or a runtime capability cannot be
 
 Preflight returns per-requirement status, a reason, and a clear corrective action. It neither confirms files on disk nor tries to repair, install, import, or launch a dependency.
 
+`enabled_extensions` is an explicit planning allowlist when supplied: a non-empty list plans only listed ids, and an explicit empty list plans none. Entries outside that allowlist remain visible as `planned` metadata but do not consume capacity or affect the aggregate status of enabled work. If the setting is omitted by a direct service caller, all discovered records are in scope for planning.
+
 ## Resource Planner
 
 `plan_resources` and `ResourcePlanner.plan` consume valid manifests and optional sanitized capacity metadata. They always return `dry_run: true` and report:
@@ -63,6 +65,8 @@ Preflight returns per-requirement status, a reason, and a clear corrective actio
 - Capacity or inventory remediation actions.
 
 The planner is a scheduling aid only. It does not allocate memory, inspect a physical GPU, start an inference backend, or alter a workload queue.
+
+For GPU requests, the planner first checks whether each request can physically fit on a compatible known device. An individually oversized request is `unavailable`; only requests that fit alone can become `partial` from parallel contention. In serial mode, independently fitting requests may reuse the same device after the prior request completes.
 
 ## Model and runtime cards
 
@@ -97,3 +101,5 @@ It writes JSON and Markdown descriptors only, refuses to overwrite a descriptor,
 ## Integration handoff
 
 This milestone deliberately does not connect to shared UI/API/job/module surfaces. An integration owner can consume `discover_extensions`, `preflight_extensions`, `build_compatibility_report`, and `plan_resources` after deciding the appropriate bounded API/UI contract. Until that owner adds and smoke-tests a route or tool, no route/tool should be presented as operational.
+
+Any future integration must treat discovery/preflight output as server-owned data and pass only those validated outputs to `build_compatibility_report`. It must not expose a route that accepts client-supplied manifests, discovery records, preflight records, or report mappings for public projection. `workflow_templates` remains runtime/unverified and therefore `partial` until a separate, strictly validated static template-descriptor contract is added.

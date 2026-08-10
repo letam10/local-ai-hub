@@ -12,9 +12,9 @@ from src.services.capability_planner.cards import (
     validate_runtime_card_collection,
 )
 from src.shared.schemas.extension_manifest import (
-    CAPABILITY_ALLOWLIST,
     EXTENSION_ID_PATTERN,
     ManifestValidationError,
+    STATIC_METADATA_CAPABILITIES,
     validate_extension_manifest,
 )
 
@@ -24,7 +24,6 @@ from .config import project_root
 
 DISCOVERY_VERSION = "extension-discovery.v1"
 _MAX_DESCRIPTOR_BYTES = 1_000_000
-_STATIC_CAPABILITIES = frozenset({"capability_pack", "metadata_catalog", "model_cards", "resource_planning", "runtime_cards", "workflow_templates"})
 
 
 def _issue(code: str, message: str, *, extension_id: str | None = None) -> dict[str, str | None]:
@@ -99,7 +98,7 @@ def _load_descriptor(extension_dir: Path, entrypoint: Mapping[str, str]) -> tupl
 def _runtime_required(manifest: Mapping[str, Any]) -> bool:
     if manifest["required_components"] or manifest["required_models"]:
         return True
-    return bool(set(manifest["capabilities"]) - _STATIC_CAPABILITIES)
+    return bool(set(manifest["capabilities"]) - STATIC_METADATA_CAPABILITIES)
 
 
 def _honest_status(manifest: Mapping[str, Any], descriptor_errors: list[dict[str, str]]) -> tuple[str, str, str]:
