@@ -40,6 +40,10 @@ _PRESET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 ARTIFACT_CHUNK_BYTES = 1024 * 1024
 
 
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"Non-finite JSON constant is not allowed: {value}.")
+
+
 def _bounded_int(value: object, default: int, *, minimum: int, maximum: int) -> int:
     try:
         candidate = int(value)
@@ -177,7 +181,15 @@ class HubHandler(BaseHTTPRequestHandler):
         LOG.info("%s - %s", self.address_string(), format % args)
 
     def _write(self, status: int, payload: object) -> None:
-        body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        try:
+            body = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError):
+            body = json.dumps(
+                {"status": "error", "error": "Hub khÃ´ng thá»ƒ serialize JSON an toÃ n."},
+                ensure_ascii=False,
+                indent=2,
+                allow_nan=False,
+            ).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -300,23 +312,32 @@ class HubHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _read_json(self) -> dict:
+    def _read_json(self, *, strict: bool = False) -> dict:
+        def invalid(message: str) -> dict:
+            if strict:
+                raise ValueError(message)
+            return {}
+
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length < 0 or length > 2 * 1024 * 1024:
-                return {}
+                return invalid("JSON request vá»£t giá»›i háº¡n kÃ­ch thÆ°á»›c.")
             chunks: list[bytes] = []
             remaining = length
             while remaining:
                 chunk = self.rfile.read(min(64 * 1024, remaining))
                 if not chunk:
-                    return {}
+                    return invalid("JSON request bá»‹ ngáº¯t trÆ°á»›c khi Ä‘á»§ dá»¯ liá»‡u.")
                 chunks.append(chunk)
                 remaining -= len(chunk)
             raw = b"".join(chunks) if length else b"{}"
-            value = json.loads(raw.decode("utf-8"))
-            return value if isinstance(value, dict) else {}
+            value = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
+            if not isinstance(value, dict):
+                return invalid("JSON request pháº£i lÃ  object.")
+            return value
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            if strict:
+                raise ValueError("JSON request khÃ´ng há»£p lá»‡ hoáº·c chá»©a sá»‘ non-finite.")
             return {}
 
     def _upload(self) -> None:
@@ -728,7 +749,7 @@ class HubHandler(BaseHTTPRequestHandler):
             self._creative(lambda: project_manager.create_project(self._read_json()))
             return
         if path == "/api/image-mask-studio/sessions":
-            self._image_mask_studio(lambda: image_mask_studio.create_session(self._read_json()))
+            self._image_mask_studio(lambda: image_mask_studio.create_session(self._read_json(strict=True)))
             return
         if path.startswith("/api/image-mask-studio/sessions/"):
             parts = path.strip("/").split("/")
@@ -736,40 +757,45 @@ class HubHandler(BaseHTTPRequestHandler):
                 session_id = parts[3]
                 suffix = parts[4:]
                 if suffix == ["undo"]:
-                    self._image_mask_studio(lambda: image_mask_studio.undo(session_id, self._read_json()))
+                    self._image_mask_studio(lambda: image_mask_studio.undo(session_id, self._read_json(strict=True)))
                     return
                 if suffix == ["redo"]:
-                    self._image_mask_studio(lambda: image_mask_studio.redo(session_id, self._read_json()))
+                    self._image_mask_studio(lambda: image_mask_studio.redo(session_id, self._read_json(strict=True)))
                     return
                 if suffix == ["save"]:
-                    self._image_mask_studio(lambda: image_mask_studio.save(session_id, self._read_json()))
+                    self._image_mask_studio(lambda: image_mask_studio.save(session_id, self._read_json(strict=True)))
                     return
                 if suffix == ["link-project"]:
-                    self._link_image_mask_studio_project(session_id, self._read_json())
+                    try:
+                        link_payload = self._read_json(strict=True)
+                    except ValueError as exc:
+                        self._write(400, {"status": "error", "error": str(exc)})
+                    else:
+                        self._link_image_mask_studio_project(session_id, link_payload)
                     return
                 if suffix == ["layers"]:
-                    self._image_mask_studio(lambda: image_mask_studio.add_layer(session_id, self._read_json()))
+                    self._image_mask_studio(lambda: image_mask_studio.add_layer(session_id, self._read_json(strict=True)))
                     return
                 if suffix == ["masks", "import"]:
-                    self._image_mask_studio(lambda: image_mask_studio.import_mask(session_id, self._read_json()))
+                    self._image_mask_studio(lambda: image_mask_studio.import_mask(session_id, self._read_json(strict=True)))
                     return
                 if suffix == ["presets"]:
-                    self._image_mask_studio(lambda: image_mask_studio.capture_preset(session_id, self._read_json()))
+                    self._image_mask_studio(lambda: image_mask_studio.capture_preset(session_id, self._read_json(strict=True)))
                     return
                 if len(suffix) == 3 and suffix[0] == "layers" and suffix[2] == "operations":
-                    self._image_mask_studio(lambda: image_mask_studio.apply_mask_operation(session_id, suffix[1], self._read_json()))
+                    self._image_mask_studio(lambda: image_mask_studio.apply_mask_operation(session_id, suffix[1], self._read_json(strict=True)))
                     return
                 if len(suffix) == 3 and suffix[0] == "layers" and suffix[2] == "move":
-                    self._image_mask_studio(lambda: image_mask_studio.move_layer(session_id, suffix[1], self._read_json()))
+                    self._image_mask_studio(lambda: image_mask_studio.move_layer(session_id, suffix[1], self._read_json(strict=True)))
                     return
                 if len(suffix) == 3 and suffix[0] == "layers" and suffix[2] == "remove":
-                    self._image_mask_studio(lambda: image_mask_studio.remove_layer(session_id, suffix[1], self._read_json()))
+                    self._image_mask_studio(lambda: image_mask_studio.remove_layer(session_id, suffix[1], self._read_json(strict=True)))
                     return
                 if len(suffix) == 3 and suffix[0] == "snapshots" and suffix[2] == "restore":
-                    self._image_mask_studio(lambda: image_mask_studio.restore_snapshot(session_id, suffix[1], self._read_json()))
+                    self._image_mask_studio(lambda: image_mask_studio.restore_snapshot(session_id, suffix[1], self._read_json(strict=True)))
                     return
                 if len(suffix) == 3 and suffix[0] == "presets" and suffix[2] == "apply":
-                    self._image_mask_studio(lambda: image_mask_studio.apply_preset(session_id, suffix[1], self._read_json()))
+                    self._image_mask_studio(lambda: image_mask_studio.apply_preset(session_id, suffix[1], self._read_json(strict=True)))
                     return
         if path == "/api/projects/import":
             self._creative(lambda: project_manager.import_project(self._read_json()))
@@ -852,10 +878,10 @@ class HubHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/image-mask-studio/sessions/"):
             parts = path.strip("/").split("/")
             if len(parts) == 4:
-                self._image_mask_studio(lambda: image_mask_studio.update_session(parts[3], self._read_json()))
+                self._image_mask_studio(lambda: image_mask_studio.update_session(parts[3], self._read_json(strict=True)))
                 return
             if len(parts) == 6 and parts[4] == "layers":
-                self._image_mask_studio(lambda: image_mask_studio.update_layer(parts[3], parts[5], self._read_json()))
+                self._image_mask_studio(lambda: image_mask_studio.update_layer(parts[3], parts[5], self._read_json(strict=True)))
                 return
             self._write(404, {"status": "error", "error": "Route Image & Mask Studio không tìm thấy."})
             return

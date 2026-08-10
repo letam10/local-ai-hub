@@ -22,6 +22,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_undo_entries": 32,
         "max_snapshots": 24,
         "max_presets": 120,
+        "max_state_bytes": 8 * 1024 * 1024,
     },
     "sam2_assist": {"configured": False},
 }
@@ -68,6 +69,7 @@ def normalize_config(value: object) -> dict[str, Any]:
             "max_undo_entries": _bounded(raw_limits.get("max_undo_entries"), defaults["max_undo_entries"], minimum=4, maximum=96),
             "max_snapshots": _bounded(raw_limits.get("max_snapshots"), defaults["max_snapshots"], minimum=4, maximum=96),
             "max_presets": _bounded(raw_limits.get("max_presets"), defaults["max_presets"], minimum=1, maximum=500),
+            "max_state_bytes": _bounded(raw_limits.get("max_state_bytes"), defaults["max_state_bytes"], minimum=64 * 1024, maximum=64 * 1024 * 1024),
         },
         # Only a real JSON boolean can change the conservative preflight.
         # Values such as the string "false", 1, or an object must never make

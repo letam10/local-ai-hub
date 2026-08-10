@@ -6,6 +6,7 @@ import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -193,6 +194,48 @@ class ImageMaskStudioManagerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.make_studio(temporary).create_session({"source_artifact_id": ASSET_A})
             self.assertEqual(path.read_bytes(), b"\xff\xfe\x00")
+
+    def test_non_finite_numbers_are_rejected_and_poisoned_state_is_preserved(self) -> None:
+        for token, value in (("NaN", float("nan")), ("Infinity", float("inf")), ("-Infinity", float("-inf"))):
+            with self.subTest(token=token), TemporaryDirectory() as temporary:
+                path = Path(temporary) / "image_mask_studio_state.json"
+                manager = self.make_studio(temporary)
+                session = manager.create_session({"source_artifact_id": ASSET_A})["session"]
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    manager.add_layer(session["id"], {
+                        "kind": "adjustment",
+                        "adjustment": {"kind": "exposure", "settings": {"amount": value}},
+                        "base_revision": session["revision"],
+                    })
+
+                valid = path.read_text(encoding="utf-8")
+                poisoned = valid.replace('"opacity": 1.0', f'"opacity": {token}', 1)
+                self.assertNotEqual(poisoned, valid)
+                path.write_text(poisoned, encoding="utf-8")
+                before = path.read_bytes()
+                recovery = self.make_studio(temporary).overview()["recovery"]
+                self.assertEqual(recovery["status"], "recovery_required")
+                with self.assertRaises(ValueError):
+                    self.make_studio(temporary).create_session({"source_artifact_id": ASSET_A})
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_oversize_state_is_rejected_before_open_and_roundtrip_stays_valid(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "image_mask_studio_state.json"
+            config = bounded_config()
+            config["limits"]["max_state_bytes"] = 64 * 1024
+            manager = ImageMaskStudioManager(path, artifact_describer=fake_artifact, config_provider=lambda: config)
+            session = manager.create_session({"source_artifact_id": ASSET_A})["session"]
+            reloaded = ImageMaskStudioManager(path, artifact_describer=fake_artifact, config_provider=lambda: config)
+            self.assertEqual(reloaded.get_session(session["id"])["session"]["id"], session["id"])
+
+            oversized = b"{" + (b"x" * (config["limits"]["max_state_bytes"] + 1))
+            path.write_bytes(oversized)
+            before = path.read_bytes()
+            with patch.object(Path, "open", side_effect=AssertionError("oversize state must not be opened")):
+                recovery = reloaded.overview()["recovery"]
+            self.assertEqual(recovery["status"], "recovery_required")
+            self.assertEqual(path.read_bytes(), before)
 
     def test_poisoned_history_cannot_swap_source_or_be_overwritten(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -611,6 +654,35 @@ const state = {workspaceTabs:{image:'studio'}, imageMaskStudio:{sessions:[sessio
 
 
 class ImageMaskStudioApiTests(unittest.TestCase):
+    def test_loopback_rejects_non_finite_json_before_studio_mutation(self) -> None:
+        with TemporaryDirectory() as temporary:
+            studio = ImageMaskStudioManager(Path(temporary) / "image_mask_studio_state.json", artifact_describer=fake_artifact, config_provider=bounded_config)
+            original_studio = api_server.image_mask_studio
+            server = api_server.HubHTTPServer(("127.0.0.1", 0), api_server.HubHandler)
+            thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+            api_server.image_mask_studio = studio
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            raw = b'{"title":"strict","source_artifact_id":"' + ASSET_A.encode("ascii") + b'","amount":NaN}'
+            try:
+                request = Request(
+                    base + "/api/image-mask-studio/sessions",
+                    data=raw,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(request, timeout=3)
+                self.assertEqual(raised.exception.code, 400)
+                payload = json.loads(raised.exception.read().decode("utf-8"))
+                self.assertEqual(payload["status"], "error")
+                self.assertFalse((Path(temporary) / "image_mask_studio_state.json").exists())
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+                api_server.image_mask_studio = original_studio
+
     def test_loopback_routes_keep_contract_opaque_and_return_conflict(self) -> None:
         with TemporaryDirectory() as temporary:
             studio = ImageMaskStudioManager(Path(temporary) / "image_mask_studio_state.json", artifact_describer=fake_artifact, config_provider=bounded_config)

@@ -7,6 +7,7 @@ machine paths and secrets are never copied into project or recipe manifests.
 
 from __future__ import annotations
 
+import math
 import re
 import uuid
 from collections.abc import Mapping
@@ -101,7 +102,11 @@ def safe_json(value: Any, *, depth: int = 0) -> Any:
 
     if depth > 4:
         raise ValueError("Metadata lồng quá sâu.")
-    if value is None or isinstance(value, (bool, int, float)):
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("Metadata must contain finite numbers only.")
         return value
     if isinstance(value, str):
         return _text(value, "Metadata", maximum=800, allow_empty=True)

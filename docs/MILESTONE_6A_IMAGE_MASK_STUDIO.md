@@ -75,6 +75,12 @@ API loopback /api/image-mask-studio/*
 
 ## State, policy và recovery
 
+`limits.max_state_bytes` mặc định 8 MiB và được normalize tối đa 64 MiB. Đây là
+byte ceiling trước parse: manager kiểm tra regular-file/identity/size/mtime,
+đọc tối đa trần + 1 byte, rồi fail-closed khi file quá lớn, bị thay thế hoặc
+thay đổi trong lúc đọc. `NaN`, `Infinity` và `-Infinity` bị từ chối ở API,
+metadata và state; file lỗi vẫn nguyên vẹn để người dùng recovery an toàn.
+
 Ba tệp có ownership khác nhau; chúng không được dùng thay cho nhau:
 
 | Tệp | Contract/nội dung | Vòng đời | Git |

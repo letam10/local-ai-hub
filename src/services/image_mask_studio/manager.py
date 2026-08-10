@@ -9,7 +9,9 @@ without pretending that a GPU-backed mask or inpaint engine has run.
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 import threading
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
@@ -30,6 +32,7 @@ from .schemas import (
     STATE_CONTRACT,
     STUDIO_CONTRACT,
     STUDIO_ID_RE,
+    bounded_float,
     canonical_json,
     copy_json,
     layer_summary,
@@ -53,6 +56,51 @@ from .schemas import (
 STATE_PATH = CONFIG_ROOT / "image_mask_studio_state.json"
 STATE_SCHEMA_VERSION = 1
 ATTACHMENT_ID_RE = re.compile(r"^attach_[a-f0-9]{32}$")
+
+
+class _StateReadError(ValueError):
+    """A persisted-state read that must enter recovery without overwriting."""
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"Non-finite JSON constant is not allowed: {value}.")
+
+
+def _state_stat_signature(value: os.stat_result) -> tuple[int, int, int, int]:
+    # Do not include ctime/atime: opening a file can update Windows access
+    # metadata while the content remains unchanged.  Identity, size and mtime
+    # are the stable mutation checks needed for this bounded read.
+    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
+
+
+def _read_bounded_state(path: Path, max_bytes: int) -> bytes:
+    """Read one immutable, regular state file with a strict byte ceiling."""
+
+    if max_bytes < 1:
+        raise _StateReadError("State byte ceiling is invalid.")
+    try:
+        before = os.lstat(path)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+            raise _StateReadError("State is not a bounded regular file.")
+        with path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if _state_stat_signature(before) != _state_stat_signature(opened):
+                raise _StateReadError("State changed before it could be read safely.")
+            data = handle.read(max_bytes + 1)
+            if len(data) > max_bytes or len(data) != before.st_size:
+                raise _StateReadError("State size changed or exceeded its byte ceiling.")
+            final = os.fstat(handle.fileno())
+            after = os.lstat(path)
+            if (
+                _state_stat_signature(before) != _state_stat_signature(final)
+                or _state_stat_signature(before) != _state_stat_signature(after)
+            ):
+                raise _StateReadError("State changed while it was being read safely.")
+            return data
+    except _StateReadError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise _StateReadError("State could not be read safely.") from exc
 
 
 class StudioConflictError(ValueError):
@@ -153,8 +201,11 @@ class ImageMaskStudioManager:
                 "action": "Chọn một artifact ảnh Hub để tạo layer nguồn không phá hủy.",
             }, False
         try:
-            source = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
+            source = json.loads(
+                _read_bounded_state(self.path, int(self._limits()["max_state_bytes"])).decode("utf-8"),
+                parse_constant=_reject_json_constant,
+            )
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
             return _default_state(), {
                 "status": "recovery_required",
                 "reason": "Bản nháp Image & Mask Studio không đọc được; Hub không tự ghi đè dữ liệu này.",
@@ -339,8 +390,7 @@ class ImageMaskStudioManager:
         )
         layer["id"] = opaque_id(raw.get("id"), LAYER_ID_RE, "Layer ID")
         layer["visible"] = bool(raw.get("visible", True))
-        opacity = raw.get("opacity", 1)
-        layer["opacity"] = max(0.0, min(1.0, float(opacity)))
+        layer["opacity"] = bounded_float(raw.get("opacity", 1), "Opacity", minimum=0, maximum=1)
         if kind == "mask":
             operations = raw.get("operations", [])
             if not isinstance(operations, list):
@@ -647,7 +697,7 @@ class ImageMaskStudioManager:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")
         try:
-            temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
             temporary.replace(self.path)
         finally:
             if temporary.exists():
@@ -908,6 +958,7 @@ class ImageMaskStudioManager:
                 "limits": {
                     "max_sessions": int(self._limits()["max_sessions"]),
                     "max_presets": int(self._limits()["max_presets"]),
+                    "max_state_bytes": int(self._limits()["max_state_bytes"]),
                     "session_count": len(state["sessions"]),
                     "preset_count": len(state["presets"]),
                 },

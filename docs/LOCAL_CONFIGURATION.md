@@ -12,6 +12,11 @@ chuẩn trên Windows; không tạo thêm thư mục config viết thường son
 
 ## Image & Mask Studio M6A
 
+`limits.max_state_bytes` mặc định là 8 MiB (giới hạn cấu hình 64 MiB). Đây là
+trần byte của autosave state, không phải giới hạn media. Hub kiểm tra regular
+file/identity/size/mtime, đọc tối đa trần + 1 byte và không ghi đè state nếu
+đọc hoặc parse thất bại. JSON inbound/persisted và metadata chỉ nhận số hữu hạn.
+
 M6A tách policy khỏi state runtime để policy không thể ghi đè bản nháp:
 
 | Tệp | Mục đích | Git |

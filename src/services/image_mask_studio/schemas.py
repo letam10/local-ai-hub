@@ -29,11 +29,11 @@ BRUSH_MODES = {"add", "subtract"}
 
 
 def copy_json(value: Any) -> Any:
-    return json.loads(json.dumps(value, ensure_ascii=False))
+    return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
 
 
 def canonical_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def opaque_id(value: object, pattern: re.Pattern[str], field: str) -> str:

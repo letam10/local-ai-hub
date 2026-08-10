@@ -393,6 +393,12 @@ Artifact ảnh Hub (opaque ID) → Studio session → layer/mask/adjustment
 
 ### State, policy và an toàn dữ liệu
 
+`Config/image_mask_studio.example.json` cũng đặt `limits.max_state_bytes` (mặc
+định 8 MiB). Manager kiểm tra kích thước trước khi parse, chỉ đọc tối đa trần +
+1 byte và fail-closed nếu state bị thay thế hoặc thay đổi trong lúc đọc. API,
+metadata và state đều từ chối `NaN`, `Infinity` và `-Infinity`; state lỗi được
+giữ nguyên và chuyển sang recovery chỉ đọc.
+
 | Tệp | Vai trò | Git |
 | --- | --- | --- |
 | `Config/image_mask_studio.example.json` | Mẫu policy được track: giới hạn session/layer/history/snapshot/preset và cờ hiển thị SAM2 partial | Track |
