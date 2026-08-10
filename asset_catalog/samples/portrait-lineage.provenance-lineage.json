@@ -1,0 +1,76 @@
+{
+  "schema_version": "provenance-lineage.v1",
+  "id": "portrait-lineage",
+  "label": "Portrait static provenance chain",
+  "retention_bound_days": 365,
+  "nodes": [
+    {
+      "id": "source-asset",
+      "kind": "asset",
+      "reference": "portrait-source",
+      "retention_days": 180
+    },
+    {
+      "id": "portrait-recipe-node",
+      "kind": "recipe",
+      "reference": "portrait-recipe",
+      "retention_days": 180
+    },
+    {
+      "id": "portrait-workflow-node",
+      "kind": "workflow",
+      "reference": "portrait-workflow",
+      "retention_days": 180
+    },
+    {
+      "id": "portrait-package-node",
+      "kind": "package",
+      "reference": "portrait-package",
+      "retention_days": 180
+    },
+    {
+      "id": "portrait-run-node",
+      "kind": "run",
+      "reference": "portrait-run",
+      "retention_days": 180
+    },
+    {
+      "id": "derivative-asset",
+      "kind": "asset",
+      "reference": "portrait-derivative",
+      "retention_days": 365
+    }
+  ],
+  "edges": [
+    {
+      "id": "source-to-recipe",
+      "from": "source-asset",
+      "to": "portrait-recipe-node",
+      "relation": "source_to_recipe"
+    },
+    {
+      "id": "recipe-to-workflow",
+      "from": "portrait-recipe-node",
+      "to": "portrait-workflow-node",
+      "relation": "recipe_to_workflow"
+    },
+    {
+      "id": "workflow-to-package",
+      "from": "portrait-workflow-node",
+      "to": "portrait-package-node",
+      "relation": "workflow_to_package"
+    },
+    {
+      "id": "package-to-run",
+      "from": "portrait-package-node",
+      "to": "portrait-run-node",
+      "relation": "package_to_run"
+    },
+    {
+      "id": "run-to-derivative",
+      "from": "portrait-run-node",
+      "to": "derivative-asset",
+      "relation": "run_to_derivative"
+    }
+  ]
+}
