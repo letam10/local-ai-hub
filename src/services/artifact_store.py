@@ -90,6 +90,7 @@ def _public(record: dict[str, Any]) -> dict[str, Any]:
         "size_bytes": record.get("size_bytes", 0),
         "media_type": record.get("media_type") or "application/octet-stream",
         "url": f"/api/artifacts/{record['id']}",
+        "created_at": record.get("created_at"),
     }
 
 
@@ -156,6 +157,24 @@ def describe(artifact_id: str) -> dict[str, Any] | None:
         return None
     path = resolve(artifact_id)
     return _public(record) if path is not None else None
+
+
+def list_artifacts(*, limit: int = 240) -> list[dict[str, Any]]:
+    """List safe metadata for Hub-owned artifacts without disclosing paths."""
+
+    bounded = max(1, min(500, int(limit)))
+    with _LOCK:
+        records = list(_load().values())
+    result: list[dict[str, Any]] = []
+    for record in sorted(records, key=lambda item: str(item.get("created_at") or ""), reverse=True):
+        if not isinstance(record, dict) or not isinstance(record.get("id"), str):
+            continue
+        path = resolve(record["id"])
+        if path is not None:
+            result.append(_public(record))
+        if len(result) >= bounded:
+            break
+    return result
 
 
 def open_artifact(artifact_id: str) -> tuple[bool, str]:

@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from src.services.artifact_store import describe as describe_artifact
 from src.services.artifact_store import open_artifact, resolve as resolve_artifact, stage_upload
 from src.services.job_manager.manager import job_manager
+from src.services.project_manager import project_manager
 from src.services.runtime_registry import applications, launch
 from src.shared.paths.registry import ROOT
 
@@ -217,6 +218,18 @@ class HubHandler(BaseHTTPRequestHandler):
             return
         self._write(201, {"status": "completed", "artifact": artifact})
 
+    def _creative(self, callback: object) -> None:
+        """Map local creative-workspace validation errors to safe API replies."""
+
+        try:
+            payload = callback()  # type: ignore[operator]
+        except KeyError:
+            self._write(404, {"status": "error", "error": "Không tìm thấy tài nguyên Creative Workspace."})
+        except ValueError as exc:
+            self._write(400, {"status": "error", "error": str(exc)})
+        else:
+            self._write(200, payload)
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
@@ -284,6 +297,36 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._write(200, {"status": "completed", "workflow": workflow})
         elif normalized == "/api/settings":
             self._write(200, _settings_payload())
+        elif normalized == "/api/creative/overview":
+            self._creative(project_manager.overview)
+        elif normalized == "/api/projects":
+            self._creative(project_manager.list_projects)
+        elif normalized == "/api/assets":
+            query = parse_qs(parsed.query)
+            self._creative(lambda: project_manager.list_assets(
+                query=str(query.get("query", [""])[0]),
+                tag=str(query.get("tag", [""])[0]),
+                favorite=str(query.get("favorite", [""])[0]).lower() in {"1", "true", "yes"},
+                collection_id=str(query.get("collection", [""])[0]),
+                project_id=str(query.get("project", [""])[0]),
+            ))
+        elif normalized == "/api/collections":
+            self._creative(project_manager.list_collections)
+        elif normalized == "/api/recipes":
+            self._creative(project_manager.list_recipes)
+        elif normalized == "/api/recipes/export-pack":
+            recipe_ids = parse_qs(parsed.query).get("id", [])
+            self._creative(lambda: project_manager.export_recipe_pack(recipe_ids or None))
+        elif normalized == "/api/workflow-gallery":
+            self._creative(project_manager.workflow_gallery)
+        elif normalized.startswith("/api/projects/") and normalized.endswith("/compare"):
+            self._creative(lambda: self._creative_or_404(project_manager.get_compare(normalized.split("/")[-2])))
+        elif normalized.startswith("/api/projects/") and normalized.endswith("/export"):
+            self._creative(lambda: project_manager.export_project(normalized.split("/")[-2]))
+        elif normalized.startswith("/api/projects/"):
+            self._creative(lambda: self._creative_or_404(project_manager.get_project(normalized.rsplit("/", 1)[-1])))
+        elif normalized.startswith("/api/recipes/"):
+            self._creative(lambda: self._creative_or_404(project_manager.get_recipe(normalized.rsplit("/", 1)[-1])))
         elif normalized == "/api/node-studio/registry":
             from src.services.node_studio.registry import registry_payload
 
@@ -331,6 +374,12 @@ class HubHandler(BaseHTTPRequestHandler):
         else:
             self._write(404, {"status": "error", "error": "Route not found."})
 
+    @staticmethod
+    def _creative_or_404(payload: object) -> object:
+        if payload is None:
+            raise KeyError("creative")
+        return payload
+
     def do_POST(self) -> None:  # noqa: N802
         path = unquote(urlparse(self.path).path.rstrip("/") or "/")
         if path == "/api/uploads":
@@ -374,6 +423,36 @@ class HubHandler(BaseHTTPRequestHandler):
             from src.services.storage_manager.overview import storage_summary
 
             self._write(200, storage_summary(force=True))
+            return
+        if path == "/api/projects":
+            self._creative(lambda: project_manager.create_project(self._read_json()))
+            return
+        if path == "/api/projects/import":
+            self._creative(lambda: project_manager.import_project(self._read_json()))
+            return
+        if path.startswith("/api/projects/") and path.endswith("/archive"):
+            self._creative(lambda: project_manager.archive_project(path.split("/")[-2], archived=True))
+            return
+        if path.startswith("/api/projects/") and path.endswith("/restore"):
+            self._creative(lambda: project_manager.archive_project(path.split("/")[-2], archived=False))
+            return
+        if path.startswith("/api/projects/") and path.endswith("/assets"):
+            self._creative(lambda: project_manager.add_project_asset(path.split("/")[-2], self._read_json()))
+            return
+        if path.startswith("/api/projects/") and path.endswith("/compare"):
+            self._creative(lambda: project_manager.update_compare(path.split("/")[-2], self._read_json()))
+            return
+        if path == "/api/collections":
+            self._creative(lambda: project_manager.create_collection(self._read_json()))
+            return
+        if path == "/api/recipes":
+            self._creative(lambda: project_manager.create_recipe(self._read_json()))
+            return
+        if path == "/api/recipes/import-pack":
+            self._creative(lambda: project_manager.import_recipe_pack(self._read_json()))
+            return
+        if path.startswith("/api/recipes/") and path.endswith("/apply"):
+            self._creative(lambda: project_manager.apply_recipe(path.split("/")[-2], self._read_json()))
             return
         if path == "/api/node-studio/validate":
             from src.services.node_studio.schema import validate_graph
@@ -426,6 +505,18 @@ class HubHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:  # noqa: N802
         path = unquote(urlparse(self.path).path.rstrip("/") or "/")
+        if path.startswith("/api/projects/"):
+            self._creative(lambda: project_manager.update_project(path.rsplit("/", 1)[-1], self._read_json()))
+            return
+        if path.startswith("/api/assets/"):
+            self._creative(lambda: project_manager.update_asset(path.rsplit("/", 1)[-1], self._read_json()))
+            return
+        if path.startswith("/api/collections/"):
+            self._creative(lambda: project_manager.update_collection(path.rsplit("/", 1)[-1], self._read_json()))
+            return
+        if path.startswith("/api/recipes/"):
+            self._creative(lambda: project_manager.update_recipe(path.rsplit("/", 1)[-1], self._read_json()))
+            return
         if not path.startswith("/api/comfyui/workflows/"):
             self._write(404, {"status": "error", "error": "Route not found."})
             return
