@@ -51,6 +51,20 @@ function writeWorkflowIndex(scope, value) {
   localStorage.setItem(workflowIndexKey(scope), JSON.stringify(value.slice(0, MAX_RECENT_WORKFLOWS)));
 }
 
+// Keep Recent rendering deterministic and independently testable.  The same
+// bounded catalog drives the DOM refresh after duplicate, rename and save.
+export function buildRecentWorkflowOptions(index, currentId = "") {
+  return (Array.isArray(index) ? index : [])
+    .filter((item) => item && typeof item.id === "string")
+    .slice(0, MAX_RECENT_WORKFLOWS)
+    .map((item) => ({
+      id: item.id,
+      title: String(item.title || item.id),
+      source: String(item.source || "local"),
+      selected: item.id === currentId,
+    }));
+}
+
 function emptyGraph(scope) {
   return { schema_version: 1, id: `local-${scope}`, title: `Workflow ${scope}`, scope, nodes: [], edges: [], groups: [] };
 }
@@ -226,6 +240,14 @@ class HubGraphEditor {
     if (title && title.value !== this.graphData.title) title.value = this.graphData.title || "";
     const heading = this.root.querySelector(".graph-editor__header h2");
     if (heading) heading.textContent = this.graphData.title || `Workflow ${this.scope}`;
+    this.refreshRecentControls();
+  }
+
+  refreshRecentControls() {
+    const recent = this.root?.querySelector("[data-graph-recent]");
+    if (!recent) return;
+    recent.innerHTML = `<option value="">Chọn workflow local…</option>${this.recentOptions()}`;
+    recent.value = this.graphData.id || "";
   }
 
   renderWorkflowStatus() {
@@ -234,12 +256,13 @@ class HubGraphEditor {
     const unsaved = this.isUnsaved();
     target.dataset.state = unsaved ? "unsaved" : "saved";
     target.textContent = unsaved ? "Có thay đổi chưa lưu" : this.recovered ? "Đã khôi phục autosave" : "Đã lưu local";
-    const recent = this.root.querySelector("[data-graph-recent]");
-    if (recent && recent.value !== this.graphData.id) recent.value = this.graphData.id || "";
+    this.refreshRecentControls();
   }
 
   recentOptions() {
-    return this.workflowIndex.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.title || item.id)} · ${escapeHtml(item.source || "local")}</option>`).join("");
+    return buildRecentWorkflowOptions(this.workflowIndex, this.graphData.id)
+      .map((item) => `<option value="${escapeHtml(item.id)}" ${item.selected ? "selected" : ""}>${escapeHtml(item.title)} · ${escapeHtml(item.source)}</option>`)
+      .join("");
   }
 
   async loadRecent(id) {
@@ -275,6 +298,8 @@ class HubGraphEditor {
     this.recovered = false;
     this.dirty = new Set(copy.nodes.map((node) => node.id));
     this.persist({ source: "duplicate" });
+    this.renderShellTitle();
+    this.renderWorkflowStatus();
     this.showToast("Đã tạo bản sao workflow; bấm Lưu local để xác nhận tên mới.");
   }
 
