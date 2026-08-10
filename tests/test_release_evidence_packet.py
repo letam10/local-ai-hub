@@ -122,11 +122,11 @@ class ReleaseEvidencePacketTests(unittest.TestCase):
         self.assertFalse(rejected["valid"])
         self.assertNotIn("private", json.dumps(rejected))
 
-        secret_identity = self.identity()
-        secret_identity["owner"] = "api" + "_key=hidden"
-        rejected_secret = build_release_evidence_packet(secret_identity, self.commands())
-        self.assertFalse(rejected_secret["valid"])
-        self.assertNotIn("hidden", json.dumps(rejected_secret))
+        credential_identity = self.identity()
+        credential_identity["owner"] = "api" + "_key=hidden"
+        rejected_credential = build_release_evidence_packet(credential_identity, self.commands())
+        self.assertFalse(rejected_credential["valid"])
+        self.assertNotIn("hidden", json.dumps(rejected_credential))
 
         client_identity = self.identity()
         client_identity["report_mapping"] = "client"
