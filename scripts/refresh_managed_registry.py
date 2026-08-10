@@ -9,12 +9,17 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from src.shared.version import PRODUCT_VERSION
+
 CONFIG = ROOT / "Config"
 RUNTIME = ROOT / "runtime"
 MODELS = ROOT / "Models"
@@ -80,7 +85,7 @@ def component_records() -> list[dict[str, Any]]:
     sam2_environment = environment_path("sam2")
     return [
         {
-            "id": "local_ai_api", "name": "Local AI API", "kind": "service", "status": "installed", "version": "3.0.0",
+            "id": "local_ai_api", "name": "Local AI API", "kind": "service", "status": "installed", "version": PRODUCT_VERSION,
             "path": str(ROOT), "executable": str(ROOT / "Environments" / "hub" / "Scripts" / "python.exe"),
             "environment": str(ROOT / "Environments" / "hub"), "port": 8765, "adapter": "first-party-single-window", "source": "Local AI Hub",
         },

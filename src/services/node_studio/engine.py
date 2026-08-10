@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ from .state import graph_runs
 
 
 ToolExecutor = Callable[[str, dict[str, Any], Any], dict[str, Any]]
+NODE_CACHE_MAX_ENTRIES = 256
 
 
 class NodeFailure(RuntimeError):
@@ -104,8 +106,9 @@ def _cache_is_usable(value: Any) -> bool:
 class NodeCache:
     """Process-local cache; no graph input, media or path is persisted to Git."""
 
-    def __init__(self) -> None:
-        self._values: dict[str, dict[str, Any]] = {}
+    def __init__(self, *, max_entries: int = NODE_CACHE_MAX_ENTRIES) -> None:
+        self._values: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._max_entries = max(1, int(max_entries))
         self._lock = threading.RLock()
 
     def get(self, key: str) -> dict[str, Any] | None:
@@ -114,11 +117,17 @@ class NodeCache:
             if value is None or not _cache_is_usable(value):
                 self._values.pop(key, None)
                 return None
+            self._values.move_to_end(key)
             return value
 
     def put(self, key: str, value: dict[str, Any]) -> None:
         with self._lock:
+            self._values.pop(key, None)
             self._values[key] = value
+            while len(self._values) > self._max_entries:
+                # This cache only forgets references.  Artifact ownership stays
+                # with Artifact Store and eviction must never delete files.
+                self._values.popitem(last=False)
 
     def clear(self) -> None:
         with self._lock:

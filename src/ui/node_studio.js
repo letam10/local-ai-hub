@@ -396,11 +396,11 @@ class HubGraphEditor {
           <div class="graph-editor__toolbar-group"><button class="button button--primary" type="button" data-graph-action="run" aria-label="Run Graph">Chạy workflow</button><button class="button" type="button" data-graph-action="validate">Kiểm tra</button><button class="button" type="button" data-graph-action="cancel" disabled>Hủy job</button><button class="button" type="button" data-graph-action="undo">Hoàn tác</button><button class="button" type="button" data-graph-action="redo">Làm lại</button></div>
           <div class="graph-editor__toolbar-group"><select data-graph-preset aria-label="Preset workflow"><option value="">Chọn template…</option>${this.presets.map((item) => `<option value="${escapeHtml(item.id)}" title="${escapeHtml(item.description || "")}">${escapeHtml(item.title)}${item.stage ? ` · ${escapeHtml(item.stage)}` : ""}</option>`).join("")}</select><button class="button" type="button" data-graph-action="save-local">Lưu local</button><button class="button" type="button" data-graph-action="export">Export JSON</button><label class="button graph-editor__import">Import JSON<input type="file" data-graph-import accept="application/json,.json" /></label></div>
         </div>
-        <div class="graph-editor__options"><label><input type="checkbox" data-graph-option="auto" ${this.autoPreview ? "checked" : ""} /> Preview tự động (Auto Preview)</label><label><input type="checkbox" data-graph-option="draft" ${this.draft ? "checked" : ""} /> Draft ảnh</label><span>Kéo socket để nối · wheel để zoom · kéo nền để pan · node sai type sẽ bị Hub từ chối</span></div>
+        <div class="graph-editor__options"><label><input type="checkbox" data-graph-option="auto" ${this.autoPreview ? "checked" : ""} /> Preview tự động (Auto Preview)</label><label><input type="checkbox" data-graph-option="draft" ${this.draft ? "checked" : ""} /> Draft ảnh</label><span>Bấm node để cộng dồn lựa chọn · Ctrl/Shift cũng cộng dồn · kéo nhóm để di chuyển · kéo vùng để chọn · bấm nền trống, Esc hoặc Xóa chọn để bỏ chọn</span></div>
         <div class="graph-editor__statusbar"><span data-graph-validation>Chưa kiểm tra workflow.</span><span class="graph-editor__availability">${this.availability.counts?.operational || 0} sẵn sàng · ${this.availability.counts?.partial || 0} partial · ${this.availability.counts?.unavailable || 0} unavailable</span></div>
         <div class="graph-editor__layout">
           <aside class="graph-palette"><input type="search" data-graph-search placeholder="Tìm node…" aria-label="Tìm node" /><div data-graph-palette></div></aside>
-          <div class="graph-canvas-shell"><canvas class="graph-canvas" data-graph-canvas></canvas><div class="graph-canvas__actions"><button type="button" data-graph-action="fit">Fit</button><button type="button" data-graph-action="delete">Xóa chọn</button></div><canvas class="graph-minimap" data-graph-minimap width="180" height="118" aria-label="Minimap graph"></canvas></div>
+          <div class="graph-canvas-shell"><canvas class="graph-canvas" data-graph-canvas></canvas><div class="graph-canvas__actions"><button type="button" data-graph-action="fit">Fit</button><button type="button" data-graph-action="clear-selection">Bỏ chọn</button><button type="button" data-graph-action="delete">Xóa chọn</button></div><canvas class="graph-minimap" data-graph-minimap width="180" height="118" aria-label="Minimap graph"></canvas></div>
           <aside class="graph-inspector" data-graph-inspector></aside>
         </div>
       </section>`;
@@ -414,7 +414,9 @@ class HubGraphEditor {
     this.liteCanvas.allow_dragnodes = true;
     this.liteCanvas.allow_reconnect_links = true;
     this.liteCanvas.allow_searchbox = true;
-    this.liteCanvas.multi_select = false;
+    // LiteGraph's true mode makes a plain click additive.  Ctrl/Shift stay
+    // additive too; explicit clear paths below keep the selection reversible.
+    this.liteCanvas.multi_select = true;
     this.liteCanvas.render_shadows = true;
     this.liteCanvas.render_connections_border = true;
     this.liteCanvas.links_render_mode = globalThis.LiteGraph.SPLINE_LINK;
@@ -422,6 +424,7 @@ class HubGraphEditor {
     this.liteCanvas.onAfterChange = () => this.captureAfterChange();
     this.liteCanvas.onSelectionChange = () => { this.renderInspector(); this.drawMinimap(); };
     this.liteCanvas.onNodeMoved = () => this.drawMinimap();
+    this.bindCanvasShortcuts();
     this.bindEvents();
     this.renderPalette();
     this.renderInspector();
@@ -454,17 +457,51 @@ class HubGraphEditor {
       if (event.target.matches("[data-graph-import]")) { this.importGraph(event.target.files?.[0]); }
     }, { signal });
     this.minimap.addEventListener("pointerdown", (event) => this.recenterFromMinimap(event), { signal });
-    document.addEventListener("keydown", (event) => {
-      if (!this.root.isConnected || event.defaultPrevented || /INPUT|TEXTAREA|SELECT/.test(event.target?.tagName || "")) return;
+    // LiteGraph owns a capture-phase canvas key handler.  Handle the Hub
+    // shortcuts from document capture first, otherwise LiteGraph prevents the
+    // Escape/Delete event before this adapter can make selection state and
+    // persistence consistent.
+    window.addEventListener("keydown", (event) => {
+      if (!this.root.isConnected || /INPUT|TEXTAREA|SELECT/.test(event.target?.tagName || "")) return;
+      if (this.handleSelectionShortcut(event)) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); event.shiftKey ? this.redo() : this.undo(); }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") { event.preventDefault(); this.redo(); }
-      if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); this.deleteSelected(); }
-    }, { signal });
+    }, { signal, capture: true });
     window.addEventListener("beforeunload", (event) => {
       if (!this.root.isConnected || !this.isUnsaved()) return;
       event.preventDefault();
       event.returnValue = "";
     }, { signal });
+  }
+
+  bindCanvasShortcuts() {
+    // LiteGraph owns the canvas capture listener and stops Escape/Delete.
+    // Wrap that exact listener instead of relying on a later DOM listener;
+    // this preserves all vendor shortcuts while making Hub selection clear
+    // and delete deterministic.
+    const liteGraphKeyHandler = this.liteCanvas?._key_callback;
+    if (!liteGraphKeyHandler) return;
+    const hubAwareKeyHandler = (event) => this.handleSelectionShortcut(event) || liteGraphKeyHandler(event);
+    this.canvasElement.removeEventListener("keydown", liteGraphKeyHandler, true);
+    this.liteCanvas._key_callback = hubAwareKeyHandler;
+    this.canvasElement.addEventListener("keydown", hubAwareKeyHandler, true);
+  }
+
+  handleSelectionShortcut(event) {
+    if (/INPUT|TEXTAREA|SELECT/.test(event.target?.tagName || "")) return false;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      this.clearSelection();
+      return true;
+    }
+    if (event.key === "Delete" || event.key === "Backspace") {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      this.deleteSelected();
+      return true;
+    }
+    return false;
   }
 
   resizeCanvas() {
@@ -579,6 +616,13 @@ class HubGraphEditor {
     if (!selected.length) return;
     this.mutate(() => selected.forEach((node) => this.liteGraph.remove(node)));
     this.liteCanvas.deselectAllNodes();
+  }
+
+  clearSelection() {
+    if (!this.liteCanvas) return;
+    this.liteCanvas.deselectAllNodes();
+    this.renderInspector();
+    this.drawMinimap();
   }
 
   changeProperty(element) {
@@ -912,6 +956,7 @@ class HubGraphEditor {
     if (action === "cancel") this.cancel();
     if (action === "undo") this.undo();
     if (action === "redo") this.redo();
+    if (action === "clear-selection") this.clearSelection();
     if (action === "delete") this.deleteSelected();
     if (action === "save-local") { this.saveLocal(); return; }
     if (action === "duplicate") this.duplicateWorkflow();

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from src.services.api.jobs import create_job, get_job_internal, update_job
+from src.services.api.jobs import TERMINAL_STATUSES, active_jobs, create_job, get_job_internal, update_job
 from src.services.process_manager.managed import terminate_owned_process
 from src.services.tool_smoke import record_completed
 
@@ -74,6 +74,11 @@ class HubJobManager:
         self._contexts: dict[str, JobContext] = {}
         self._runners: dict[str, Runner] = {}
         self._runner_specs: dict[str, RunnerSpec] = {}
+        # A cancel can arrive after the durable queued record exists but
+        # before ``submit`` has installed its in-process context.  Keep only
+        # that tiny hand-off tombstone so the future context starts cancelled
+        # instead of becoming a phantom active job.
+        self._pending_cancellations: set[str] = set()
         self._lock = threading.RLock()
         self._heavy_slot = threading.Semaphore(1)
 
@@ -107,6 +112,8 @@ class HubJobManager:
         record = create_job(tool, payload, device=device, resume_data=payload)
         context = JobContext(record["id"])
         with self._lock:
+            pending_cancel = record["id"] in self._pending_cancellations
+            self._pending_cancellations.discard(record["id"])
             self._contexts[record["id"]] = context
             self._runners[record["id"]] = runner
             self._runner_specs[record["id"]] = RunnerSpec(
@@ -116,6 +123,8 @@ class HubJobManager:
                 created_at=time.monotonic(),
             )
             self._trim_runner_specs_locked()
+            if pending_cancel:
+                context.cancel()
         # This private flag is session-scoped and is set only after the
         # in-process runner has been registered.
         update_job(record["id"], resume_available=True)
@@ -169,20 +178,69 @@ class HubJobManager:
                 self._heavy_slot.release()
             with self._lock:
                 self._contexts.pop(job_id, None)
+                self._pending_cancellations.discard(job_id)
                 self._trim_runner_specs_locked()
 
     def cancel(self, job_id: str) -> tuple[bool, str]:
         with self._lock:
+            # Re-read durable state while holding the context lock.  A worker
+            # can otherwise finish between an earlier queued snapshot and this
+            # cancellation, allowing a completed record to regress back into
+            # ``cancelling`` after its context has gone away.
+            record = get_job_internal(job_id)
+            if record is None:
+                return False, "Không tìm thấy job Hub."
+            if record.get("status") in TERMINAL_STATUSES:
+                return False, "Job này đã kết thúc."
             context = self._contexts.get(job_id)
-        record = get_job_internal(job_id)
-        if record is None:
-            return False, "Không tìm thấy job Hub."
-        if record.get("status") in {"completed", "failed", "cancelled", "unavailable"}:
-            return False, "Job này đã kết thúc."
-        if context:
-            context.cancel()
+            if context is not None:
+                context.cancel()
+            elif record.get("status") == "queued":
+                self._pending_cancellations.add(job_id)
+            else:
+                return False, "Job không còn context worker trong phiên Hub hiện tại; hãy tạo lại tác vụ từ workspace."
         update_job(job_id, status="cancelling", message="Đang dừng các process do Hub sở hữu.")
         return True, "Hub đang hủy job và chỉ dừng process do Hub tạo."
+
+    def cancel_all(self) -> tuple[int, list[str]]:
+        """Request cancellation for every active job owned by this Hub session."""
+
+        cancelled = 0
+        messages: list[str] = []
+        for record in active_jobs():
+            job_id = record.get("id")
+            if not isinstance(job_id, str):
+                continue
+            ok, message = self.cancel(job_id)
+            if ok:
+                cancelled += 1
+            else:
+                messages.append(message)
+        return cancelled, messages
+
+    def wait_for_idle(self, timeout_seconds: float = 12.0) -> tuple[bool, list[str]]:
+        """Boundedly wait until contexts and durable active statuses are terminal."""
+
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        while True:
+            with self._lock:
+                context_ids = set(self._contexts)
+            durable_active = [str(item.get("id")) for item in active_jobs() if item.get("id")]
+            if not context_ids and not durable_active:
+                return True, []
+            if time.monotonic() >= deadline:
+                return False, sorted(set(context_ids) | set(durable_active))
+            time.sleep(0.05)
+
+    def cancel_all_and_wait(self, timeout_seconds: float = 12.0) -> tuple[bool, str]:
+        """Cancel active Hub jobs without force-killing a non-cooperating worker."""
+
+        cancelled, messages = self.cancel_all()
+        ok, remaining = self.wait_for_idle(timeout_seconds)
+        if ok:
+            return True, f"Đã hủy và hoàn tất dừng {cancelled} job Hub."
+        detail = ", ".join(remaining[:4]) or "; ".join(messages[:2]) or "job đang dừng"
+        return False, f"Hub chưa thể dừng an toàn trong thời hạn; vẫn giữ cửa sổ mở. Job còn hoạt động: {detail}."
 
     def resume(self, job_id: str) -> tuple[bool, dict[str, Any] | str]:
         record = get_job_internal(job_id)

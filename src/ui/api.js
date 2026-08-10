@@ -98,6 +98,7 @@ export const formatStatus = (status) => ({
   queued: "Đang chờ",
   cancelling: "Đang hủy",
   cancelled: "Đã hủy",
+  interrupted: "Bị gián đoạn",
   completed: "Hoàn tất",
   failed: "Thất bại",
   partial: "Một phần",

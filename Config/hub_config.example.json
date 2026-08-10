@@ -14,6 +14,8 @@
   "auto_start_heavy_services": false,
   "comfyui_port": 8188,
   "comfyui_start_timeout_seconds": 300,
+  "upload_max_bytes": 8589934592,
+  "upload_disk_safety_bytes": 536870912,
   "overwrite_source": false,
   "ffmpeg_path": "${FFMPEG_PATH}",
   "ffprobe_path": "${FFPROBE_PATH}",

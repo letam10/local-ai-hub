@@ -13,15 +13,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from src.services.artifact_store import describe as describe_artifact
-from src.services.artifact_store import open_artifact, resolve as resolve_artifact, stage_upload
+from src.services.artifact_store import DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_UPLOAD_DISK_SAFETY_BYTES
+from src.services.artifact_store import UploadError, describe as describe_artifact, normalize_media_type
+from src.services.artifact_store import open_artifact, resolve as resolve_artifact, stage_upload_stream
 from src.services.job_manager.manager import job_manager
 from src.services.project_manager import project_manager
 from src.services.runtime_registry import applications, launch
 from src.shared.paths.registry import ROOT
+from src.shared.version import PRODUCT_VERSION
 
 from .config import hub_config
-from .core import component_statuses, get_job_or_error, health, submit_graph, submit_tool, tool_catalog
+from .core import component_statuses, get_job_or_error, health, prepare_owned_shutdown, submit_graph, submit_tool, tool_catalog
+from .jobs import flush as flush_jobs
+from .jobs import reconcile_startup
 from .jobs import get_job, list_jobs
 
 
@@ -32,6 +36,34 @@ _BOOTSTRAP_CACHE_SECONDS = 5.0
 _bootstrap_cache: tuple[float, dict] | None = None
 _bootstrap_lock = threading.RLock()
 _PRESET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
+ARTIFACT_CHUNK_BYTES = 1024 * 1024
+
+
+def _bounded_int(value: object, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        candidate = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, candidate))
+
+
+def _upload_limits() -> tuple[int, int]:
+    """Return bounded v1 upload limits from tracked/local Hub configuration."""
+
+    config = hub_config()
+    maximum = _bounded_int(
+        config.get("upload_max_bytes"),
+        DEFAULT_MAX_UPLOAD_BYTES,
+        minimum=1024,
+        maximum=64 * 1024 * 1024 * 1024,
+    )
+    safety = _bounded_int(
+        config.get("upload_disk_safety_bytes"),
+        DEFAULT_UPLOAD_DISK_SAFETY_BYTES,
+        minimum=0,
+        maximum=8 * 1024 * 1024 * 1024,
+    )
+    return maximum, safety
 
 
 class HubHTTPServer(ThreadingHTTPServer):
@@ -50,6 +82,7 @@ class HubHTTPServer(ThreadingHTTPServer):
 
 def _settings_payload() -> dict:
     config = hub_config()
+    upload_max_bytes, upload_disk_safety_bytes = _upload_limits()
     return {
         "status": "completed",
         "settings": {
@@ -62,6 +95,8 @@ def _settings_payload() -> dict:
             "api_port": int(config.get("api_port", 8765)),
             "mcp_transport": config.get("mcp_transport", "stdio"),
             "comfyui_port": int(config.get("comfyui_port", 8188)),
+            "upload_max_bytes": upload_max_bytes,
+            "upload_disk_safety_bytes": upload_disk_safety_bytes,
         },
     }
 
@@ -135,7 +170,7 @@ def _preset(name: str) -> dict | None:
 
 
 class HubHandler(BaseHTTPRequestHandler):
-    server_version = "LocalAIHub/3.0"
+    server_version = f"LocalAIHub/{PRODUCT_VERSION}"
 
     def log_message(self, format: str, *args: object) -> None:
         LOG.info("%s - %s", self.address_string(), format % args)
@@ -149,20 +184,94 @@ class HubHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _write_file(self, path: Path, name: str, media_type: str) -> None:
+    @staticmethod
+    def _range_bounds(value: str | None, size: int) -> tuple[int, int] | None | bool:
+        """Parse one RFC-style byte range.
+
+        ``None`` means no Range header, ``False`` means a malformed or
+        unsatisfiable request, and a tuple contains inclusive bounds.
+        """
+
+        if value is None:
+            return None
+        if not value.startswith("bytes=") or "," in value:
+            return False
+        specification = value[6:].strip()
+        if not specification or "-" not in specification or size < 1:
+            return False
+        start_text, end_text = (item.strip() for item in specification.split("-", 1))
         try:
-            body = path.read_bytes()
+            if not start_text:
+                suffix = int(end_text)
+                if suffix <= 0:
+                    return False
+                return max(0, size - suffix), size - 1
+            start = int(start_text)
+            if start < 0 or start >= size:
+                return False
+            if not end_text:
+                return start, size - 1
+            end = int(end_text)
+            if end < start:
+                return False
+            return start, min(end, size - 1)
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _safe_download_name(name: str) -> str:
+        return name.replace("\r", "").replace("\n", "").replace('"', "")[:180] or "artifact.bin"
+
+    def _write_file(self, path: Path, name: str, media_type: str, *, head: bool = False) -> None:
+        try:
+            size = path.stat().st_size
         except OSError:
             self._write(404, {"status": "error", "error": "Artifact Hub không còn tồn tại."})
             return
-        self.send_response(200)
-        self.send_header("Content-Type", media_type or mimetypes.guess_type(name)[0] or "application/octet-stream")
-        self.send_header("Content-Length", str(len(body)))
-        safe_name = name.replace('"', "")
-        self.send_header("Content-Disposition", f'inline; filename="{safe_name}"')
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        bounds = self._range_bounds(self.headers.get("Range"), size)
+        if bounds is False:
+            try:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.send_header("Accept-Ranges", "bytes")
+                self.end_headers()
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+                return
+            return
+        start, end = bounds if isinstance(bounds, tuple) else (0, max(0, size - 1))
+        length = end - start + 1 if size else 0
+        try:
+            self.send_response(206 if isinstance(bounds, tuple) else 200)
+            self.send_header("Content-Type", normalize_media_type(media_type, fallback_name=name))
+            self.send_header("Content-Length", str(length))
+            self.send_header("Accept-Ranges", "bytes")
+            if isinstance(bounds, tuple):
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            safe_name = self._safe_download_name(name)
+            self.send_header("Content-Disposition", f'inline; filename="{safe_name}"')
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+            return
+        if head or length == 0:
+            return
+        try:
+            with path.open("rb") as handle:
+                handle.seek(start)
+                remaining = length
+                while remaining:
+                    chunk = handle.read(min(ARTIFACT_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            # A browser navigation/cancel is normal and must not terminate the
+            # loopback request handler.
+            return
+        except OSError:
+            return
 
     def _write_static(self, path: str) -> None:
         relative = unquote(path[len("/ui/") :]) or "index.html"
@@ -195,28 +304,65 @@ class HubHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             if length < 0 or length > 2 * 1024 * 1024:
                 return {}
-            raw = self.rfile.read(length) if length else b"{}"
+            chunks: list[bytes] = []
+            remaining = length
+            while remaining:
+                chunk = self.rfile.read(min(64 * 1024, remaining))
+                if not chunk:
+                    return {}
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks) if length else b"{}"
             value = json.loads(raw.decode("utf-8"))
             return value if isinstance(value, dict) else {}
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
             return {}
 
     def _upload(self) -> None:
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            self._write(411, {"status": "error", "error": "Upload v1 yêu cầu Content-Length hợp lệ."})
+            return
         try:
-            length = int(self.headers.get("Content-Length", "0"))
+            length = int(raw_length)
         except ValueError:
             self._write(400, {"status": "error", "error": "Content-Length upload không hợp lệ."})
             return
-        if length <= 0 or length > 512 * 1024 * 1024:
-            self._write(413, {"status": "error", "error": "Upload phải lớn hơn 0 và không vượt 512 MiB."})
+        max_bytes, disk_safety_bytes = _upload_limits()
+        if length <= 0:
+            self._write(400, {"status": "error", "error": "Upload phải lớn hơn 0 byte."})
+            return
+        if length > max_bytes:
+            self._write(413, {"status": "error", "error": f"Upload vượt giới hạn {max_bytes // (1024 * 1024)} MiB của Hub."})
             return
         filename = unquote(self.headers.get("X-File-Name", "upload.bin"))
         try:
-            artifact = stage_upload(filename, self.rfile.read(length), self.headers.get("Content-Type"))
-        except (OSError, ValueError) as exc:
+            artifact = stage_upload_stream(
+                filename,
+                self.rfile,
+                length,
+                self.headers.get("Content-Type"),
+                max_bytes=max_bytes,
+                disk_safety_bytes=disk_safety_bytes,
+            )
+        except UploadError as exc:
             self._write(400, {"status": "error", "error": str(exc)})
             return
+        except OSError:
+            self._write(500, {"status": "error", "error": "Hub không thể ghi upload vào vùng tạm an toàn."})
+            return
+        except Exception:
+            self._write(500, {"status": "error", "error": "Hub không thể hoàn tất đăng ký upload an toàn."})
+            return
         self._write(201, {"status": "completed", "artifact": artifact})
+
+    def _serve_artifact(self, artifact_id: str, *, head: bool = False) -> None:
+        path_value = resolve_artifact(artifact_id)
+        artifact = describe_artifact(artifact_id)
+        if path_value is None or artifact is None:
+            self._write(404, {"status": "error", "error": "Không tìm thấy artifact Hub."})
+            return
+        self._write_file(path_value, str(artifact["name"]), str(artifact["media_type"]), head=head)
 
     def _creative(self, callback: object) -> None:
         """Map local creative-workspace validation errors to safe API replies."""
@@ -242,12 +388,7 @@ class HubHandler(BaseHTTPRequestHandler):
             self._write_static(path)
         elif normalized.startswith("/api/artifacts/"):
             artifact_id = normalized.rsplit("/", 1)[-1]
-            path_value = resolve_artifact(artifact_id)
-            artifact = describe_artifact(artifact_id)
-            if path_value is None or artifact is None:
-                self._write(404, {"status": "error", "error": "Không tìm thấy artifact Hub."})
-            else:
-                self._write_file(path_value, str(artifact["name"]), str(artifact["media_type"]))
+            self._serve_artifact(artifact_id)
         elif normalized in {"/", "/health"}:
             self._write(200, health(probe_gpu=False))
         elif normalized == "/api/bootstrap":
@@ -261,7 +402,9 @@ class HubHandler(BaseHTTPRequestHandler):
         elif normalized == "/components":
             self._write(200, {"status": "completed", "components": component_statuses()})
         elif normalized in {"/jobs", "/api/jobs"}:
-            self._write(200, {"status": "completed", "jobs": list_jobs()})
+            query = parse_qs(parsed.query)
+            limit = _bounded_int(query.get("limit", [None])[0], 200, minimum=1, maximum=500)
+            self._write(200, {"status": "completed", "jobs": list_jobs(limit=limit)})
         elif normalized.startswith("/jobs/"):
             self._write(*get_job_or_error(normalized.split("/", 2)[2]))
         elif normalized == "/api/dashboard":
@@ -374,6 +517,16 @@ class HubHandler(BaseHTTPRequestHandler):
         else:
             self._write(404, {"status": "error", "error": "Route not found."})
 
+    def do_HEAD(self) -> None:  # noqa: N802
+        path = unquote(urlparse(self.path).path)
+        normalized = path.rstrip("/") or "/"
+        if normalized.startswith("/api/artifacts/"):
+            self._serve_artifact(normalized.rsplit("/", 1)[-1], head=True)
+            return
+        self.send_response(404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     @staticmethod
     def _creative_or_404(payload: object) -> object:
         if payload is None:
@@ -413,6 +566,15 @@ class HubHandler(BaseHTTPRequestHandler):
             from src.modules.image_generation.backend.comfyui import shutdown_owned_idle
 
             self._write(200, shutdown_owned_idle())
+            return
+        if path == "/api/lifecycle/prepare-close":
+            self._write(*prepare_owned_shutdown())
+            return
+        if path == "/api/lifecycle/jobs/cancel-and-wait":
+            request = self._read_json()
+            timeout = _bounded_int(request.get("timeout_seconds"), 12, minimum=1, maximum=60)
+            ok, message = job_manager.cancel_all_and_wait(timeout)
+            self._write(200 if ok else 409, {"status": "completed" if ok else "timeout", "message": message})
             return
         if path == "/api/comfyui/advanced/start":
             from src.modules.image_generation.backend.comfyui import start_advanced
@@ -536,6 +698,7 @@ def main() -> int:
     except OSError as exc:
         LOG.error("Local AI Hub could not bind %s:%s: %s", host, port, exc)
         return 1
+    reconcile_startup()
     LOG.info("Local AI Hub listening on %s:%s", host, port)
     try:
         server.serve_forever(poll_interval=0.5)
@@ -543,6 +706,7 @@ def main() -> int:
         LOG.info("Stopping Local AI Hub")
     finally:
         shutdown_owned_idle()
+        flush_jobs()
         server.server_close()
     return 0
 

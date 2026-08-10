@@ -55,6 +55,86 @@ const sidebar = document.querySelector(".sidebar");
 const sidebarToggle = document.querySelector("#sidebar-toggle");
 const artifactPreviewLayer = document.querySelector("#artifact-preview-layer");
 let routeLoad = null;
+let desktopCloseLayer = null;
+
+const dismissDesktopClosePrompt = () => {
+  desktopCloseLayer?.remove();
+  desktopCloseLayer = null;
+};
+
+const desktopApi = () => globalThis.pywebview?.api || null;
+
+const invokeDesktopChoice = async (method, button, status) => {
+  const api = desktopApi();
+  if (!api?.[method]) {
+    status.textContent = "Desktop bridge chưa sẵn sàng; Hub vẫn được giữ mở an toàn.";
+    return null;
+  }
+  if (button) button.disabled = true;
+  try {
+    const result = await api[method]();
+    status.textContent = result?.message || "Đã nhận lựa chọn đóng Local AI Hub.";
+    return result;
+  } catch (error) {
+    status.textContent = `Không thể xử lý lựa chọn: ${error.message || error}`;
+    if (button) button.disabled = false;
+    return null;
+  }
+};
+
+const showDesktopClosePrompt = (detail = {}) => {
+  dismissDesktopClosePrompt();
+  const layer = document.createElement("section");
+  layer.className = "desktop-close-prompt";
+  layer.setAttribute("role", "dialog");
+  layer.setAttribute("aria-modal", "true");
+  layer.setAttribute("aria-labelledby", "desktop-close-title");
+  const card = document.createElement("div");
+  card.className = "desktop-close-prompt__card";
+  const eyebrow = document.createElement("span"); eyebrow.className = "eyebrow"; eyebrow.textContent = "JOBS ĐANG HOẠT ĐỘNG";
+  const title = document.createElement("h2"); title.id = "desktop-close-title"; title.textContent = "Bạn muốn xử lý Local AI Hub thế nào?";
+  const copy = document.createElement("p");
+  const count = Number(detail.active_jobs || 0);
+  copy.textContent = count > 0
+    ? `${count} job đang chờ, chuẩn bị, chạy hoặc hủy. Hub không tự dừng worker đang hoạt động.`
+    : "Hub đang chờ xác nhận an toàn trước khi đóng.";
+  const status = document.createElement("p"); status.className = `desktop-close-prompt__status ${detail.kind === "error" ? "is-error" : ""}`; status.setAttribute("role", "status"); status.textContent = detail.message || "Chọn một trong ba cách tiếp tục.";
+  const actions = document.createElement("div"); actions.className = "desktop-close-prompt__actions";
+  const returnButton = document.createElement("button"); returnButton.className = "button"; returnButton.type = "button"; returnButton.textContent = "Quay lại Hub";
+  const cancelButton = document.createElement("button"); cancelButton.className = "button button--danger"; cancelButton.type = "button"; cancelButton.textContent = "Hủy jobs và thoát";
+  const backgroundButton = document.createElement("button"); backgroundButton.className = "button button--primary"; backgroundButton.type = "button"; backgroundButton.textContent = "Giữ chạy nền vào khay";
+  const lockChoicesWhileCancelling = () => {
+    returnButton.disabled = true;
+    cancelButton.disabled = true;
+    backgroundButton.disabled = true;
+  };
+  returnButton.addEventListener("click", async () => {
+    const result = await invokeDesktopChoice("return_to_hub", returnButton, status);
+    if (result?.status === "completed") dismissDesktopClosePrompt();
+    else if (result?.status === "pending") lockChoicesWhileCancelling();
+    else returnButton.disabled = false;
+  });
+  cancelButton.addEventListener("click", async () => {
+    const result = await invokeDesktopChoice("cancel_jobs_and_exit", cancelButton, status);
+    if (result?.status === "pending") lockChoicesWhileCancelling();
+    else if (result?.status === "error") cancelButton.disabled = false;
+  });
+  backgroundButton.addEventListener("click", async () => {
+    const result = await invokeDesktopChoice("keep_running_in_background", backgroundButton, status);
+    if (result?.status === "completed") dismissDesktopClosePrompt();
+    else if (result?.status === "pending") lockChoicesWhileCancelling();
+    else backgroundButton.disabled = false;
+  });
+  actions.append(returnButton, cancelButton, backgroundButton);
+  const note = document.createElement("small"); note.textContent = "Chạy nền chỉ ẩn cửa sổ sau khi Windows đã tạo biểu tượng khay có lệnh Khôi phục và Thoát.";
+  card.append(eyebrow, title, copy, status, actions, note);
+  layer.append(card);
+  document.body.append(layer);
+  desktopCloseLayer = layer;
+  returnButton.focus();
+};
+
+window.addEventListener("local-ai-hub:close-request", (event) => showDesktopClosePrompt(event.detail || {}));
 
 const routeId = () => {
   const value = window.location.hash.replace(/^#\/?/, "").split("/")[0];
@@ -130,7 +210,7 @@ const updateTopbar = () => {
   topStatus.textContent = health.status ? `${formatStatus(health.status)} · Workflow trực tiếp` : "Đang khởi động API…";
   diskMetric.textContent = disk.free_bytes ? `Ổ đĩa ${formatGb(disk.free_bytes)} trống` : "Ổ đĩa —";
   gpuMetric.textContent = gpu.name ? `GPU ${gpu.name}` : "GPU chưa phát hiện";
-  const active = state.jobs.filter((job) => ["starting", "running", "cancelling"].includes(job.status)).length;
+  const active = state.jobs.filter((job) => ["queued", "starting", "running", "cancelling"].includes(job.status)).length;
   jobSummary.textContent = `Jobs: ${active} đang chạy · ${state.jobs.length} bản ghi`;
 };
 
@@ -593,7 +673,7 @@ document.addEventListener("click", async (event) => {
       state.lifecycle = { ...state.lifecycle, comfyui: state.comfyAdvanced.comfyui || {} };
       const workflows = await getComfyBridgeWorkflows();
       state.comfyWorkflows = workflows.workflows || [];
-      showToast("ComfyUI đang chạy trong backend ẩn; editor sẽ hiện trong cửa sổ Hub.");
+      showToast("Đã yêu cầu ComfyUI backend; Advanced vẫn partial cho đến khi Windows WebView acceptance pass.", "warning");
       render();
     } catch (error) {
       showToast(error.message, "error");
