@@ -4,15 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from typing import Any
 
-from src.shared.schemas.workflow_package import canonical_workflow_package_json
+from src.shared.schemas.workflow_package import canonical_workflow_package_json, compare_semver
 
 from .io import validated_package_result
-
-
-_SEMVER_PARTS = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
 
 
 def _change(kind: str, *, blueprint: str | None = None, entity_id: str | None = None) -> dict[str, str]:
@@ -59,8 +55,20 @@ def _append_entity_changes(changes: list[dict[str, str]], name: str, before: dic
             changes.append(_change(f"{singular}_changed", blueprint=name, entity_id=entity_id))
 
 
+def _append_contract_entity_changes(changes: list[dict[str, str]], before: list[dict[str, Any]], after: list[dict[str, Any]], prefix: str) -> None:
+    before_items = {item["id"]: item for item in before}
+    after_items = {item["id"]: item for item in after}
+    for entity_id in sorted(set(after_items) - set(before_items)):
+        changes.append(_change(f"{prefix}_added", entity_id=entity_id))
+    for entity_id in sorted(set(before_items) - set(after_items)):
+        changes.append(_change(f"{prefix}_removed", entity_id=entity_id))
+    for entity_id in sorted(set(before_items) & set(after_items)):
+        if _canonical(before_items[entity_id]) != _canonical(after_items[entity_id]):
+            changes.append(_change(f"{prefix}_changed", entity_id=entity_id))
+
+
 def diff_workflow_packages(before: object, after: object) -> dict[str, Any]:
-    """Compare two static packages without exposing old/new free-text values."""
+    """Compare every safe integration contract without projecting prior values."""
 
     source = validated_package_result(before)
     target = validated_package_result(after)
@@ -85,12 +93,27 @@ def diff_workflow_packages(before: object, after: object) -> dict[str, Any]:
         changes.append(_change("capability_added", entity_id=capability))
     for capability in sorted(set(source_package["capabilities"]) - set(target_package["capabilities"])):
         changes.append(_change("capability_removed", entity_id=capability))
-    source_operations = set(source_package["compatibility"]["required_node_types"])
-    target_operations = set(target_package["compatibility"]["required_node_types"])
+    source_compatibility = source_package["compatibility"]
+    target_compatibility = target_package["compatibility"]
+    if source_compatibility["hub_version"] != target_compatibility["hub_version"]:
+        changes.append(_change("hub_compatibility_changed"))
+    if source_compatibility["node_contract"] != target_compatibility["node_contract"]:
+        changes.append(_change("node_contract_changed"))
+    source_operations = set(source_compatibility["required_node_types"])
+    target_operations = set(target_compatibility["required_node_types"])
     for operation in sorted(target_operations - source_operations):
         changes.append(_change("required_node_type_added", entity_id=operation))
     for operation in sorted(source_operations - target_operations):
         changes.append(_change("required_node_type_removed", entity_id=operation))
+    if source_package["catalog_ready"] != target_package["catalog_ready"]:
+        changes.append(_change("catalog_ready_changed"))
+    _append_contract_entity_changes(changes, source_package["parameters"], target_package["parameters"], "parameter")
+    _append_contract_entity_changes(changes, source_package["requirements"]["models"], target_package["requirements"]["models"], "model_requirement")
+    _append_contract_entity_changes(changes, source_package["requirements"]["runtimes"], target_package["requirements"]["runtimes"], "runtime_requirement")
+    if _canonical(source_package["resource_hints"]) != _canonical(target_package["resource_hints"]):
+        changes.append(_change("resource_hints_changed"))
+    if _canonical(source_package["preview"]) != _canonical(target_package["preview"]):
+        changes.append(_change("preview_metadata_changed"))
     source_blueprints = _blueprints(source_package)
     target_blueprints = _blueprints(target_package)
     for blueprint_id in sorted(set(target_blueprints) - set(source_blueprints)):
@@ -114,11 +137,30 @@ def diff_workflow_packages(before: object, after: object) -> dict[str, Any]:
     }
 
 
-def _version_tuple(value: str) -> tuple[int, int, int]:
-    match = _SEMVER_PARTS.match(value)
-    if match is None:
-        return (0, 0, 0)
-    return tuple(int(item) for item in match.groups())
+_MANUAL_REVIEW_CHANGES = {
+    "blueprint_removed",
+    "catalog_ready_changed",
+    "capability_removed",
+    "hub_compatibility_changed",
+    "input_removed",
+    "input_changed",
+    "model_requirement_added",
+    "model_requirement_removed",
+    "model_requirement_changed",
+    "node_contract_changed",
+    "node_removed",
+    "node_changed",
+    "output_removed",
+    "output_changed",
+    "parameter_removed",
+    "parameter_changed",
+    "required_node_type_added",
+    "required_node_type_removed",
+    "resource_hints_changed",
+    "runtime_requirement_added",
+    "runtime_requirement_removed",
+    "runtime_requirement_changed",
+}
 
 
 def plan_workflow_migration(before: object, after: object) -> dict[str, Any]:
@@ -145,8 +187,9 @@ def plan_workflow_migration(before: object, after: object) -> dict[str, Any]:
             "action": "Treat the target as a separate package and request an explicit integration design.",
             "steps": [],
             "diff_digest": diff["deterministic_digest"],
+            "execution": "not_run",
         }
-    if _version_tuple(target["version"]) < _version_tuple(source["version"]):
+    if compare_semver(target["version"], source["version"]) < 0:
         return {
             "valid": True,
             "status": "unavailable",
@@ -155,6 +198,7 @@ def plan_workflow_migration(before: object, after: object) -> dict[str, Any]:
             "action": "Keep the newer package unchanged or supply a separately reviewed rollback contract.",
             "steps": [],
             "diff_digest": diff["deterministic_digest"],
+            "execution": "not_run",
         }
     changes = diff["changes"]
     if not changes:
@@ -163,14 +207,13 @@ def plan_workflow_migration(before: object, after: object) -> dict[str, Any]:
         action = "No migration action is required."
         steps: list[dict[str, str]] = []
     else:
-        risky_prefixes = ("blueprint_removed", "input_removed", "output_removed", "node_removed", "node_changed", "required_node_type_removed", "capability_removed")
-        risky = any(item["kind"].startswith(risky_prefixes) for item in changes)
+        risky = any(item["kind"] in _MANUAL_REVIEW_CHANGES for item in changes)
         status = "manual_review" if risky else "planned"
-        reason = "The dry-run found contract changes that require a human review." if risky else "The dry-run found additive static descriptor changes."
+        reason = "The dry-run found restrictive or changed integration contracts that require a human review." if risky else "The dry-run found additive static descriptor changes."
         action = "Review the listed contract changes before applying any integration update." if risky else "Revalidate the target package at the integration boundary before adoption."
         steps = [{"id": "validate-target-static", "action": "Revalidate the target descriptor using workflow-package.v1."}]
         if risky:
-            steps.append({"id": "review-breaking-contract", "action": "Review removed or changed typed interfaces manually."})
+            steps.append({"id": "review-breaking-contract", "action": "Review restrictive typed, compatibility, requirement, parameter, or resource contracts manually."})
         steps.append({"id": "update-reference-manually", "action": "Apply any consumer reference change outside this dry-run planner."})
     result = {
         "valid": True,

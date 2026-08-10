@@ -47,6 +47,8 @@ def _report(package_id: str | None) -> dict[str, Any]:
                 "version": record["version"],
                 "fingerprint": record["fingerprint"],
                 "availability": record["availability"],
+                "catalog_ready": record["catalog_ready"],
+                "integration_contract": record["integration_contract"],
                 "lint": {"status": lint["status"], "findings": lint["findings"]},
             }
         )
@@ -75,7 +77,7 @@ def _markdown(report: dict[str, Any]) -> str:
     ]
     if report["packages"]:
         for package in report["packages"]:
-            lines.append(f"- `{package['id']}` `{package['version']}` — availability `{package['availability']['status']}`, lint `{package['lint']['status']}`")
+            lines.append(f"- `{package['id']}` `{package['version']}` — availability `{package['availability']['status']}`, catalog-ready `{str(package['catalog_ready']).lower()}`, lint `{package['lint']['status']}`")
     else:
         lines.append("- No managed package passed static validation.")
     lines.extend(["", "## Human evaluation scenarios", ""])

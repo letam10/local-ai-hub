@@ -69,11 +69,28 @@ def lint_workflow_package(value: object) -> dict[str, Any]:
         findings.append(_finding("unused_declared_operation", "warning", "package", operation))
     for subgraph in sorted({item["id"] for item in package["subgraphs"]} - referenced_subgraphs):
         findings.append(_finding("unreferenced_subgraph", "warning", "package", subgraph))
+    if package["catalog_ready"] is not True:
+        findings.append(_finding("not_catalog_ready", "warning", "package", "catalog"))
     findings.sort(key=lambda item: (item.get("severity", ""), item.get("code", ""), item.get("blueprint", ""), item.get("entity_id", "")))
     return {
         "valid": True,
         "status": "clean" if not findings else "advisory",
         "fingerprint": validation["fingerprint"],
         "findings": findings,
+        "integration_contract": {
+            "catalog_ready": package["catalog_ready"],
+            "parameter_count": len(package["parameters"]),
+            "model_requirement_count": len(package["requirements"]["models"]),
+            "runtime_requirement_count": len(package["requirements"]["runtimes"]),
+            "resource_hint_summary": {
+                "cpu_minimum_cores": package["resource_hints"]["cpu"]["minimum_cores"],
+                "gpu_required": package["resource_hints"]["gpu"]["required"],
+                "minimum_vram_mb": package["resource_hints"]["gpu"]["minimum_vram_mb"],
+                "ram_minimum_mb": package["resource_hints"]["ram"]["minimum_mb"],
+                "disk_minimum_mb": package["resource_hints"]["disk"]["minimum_mb"],
+                "exclusive_group_count": len(package["resource_hints"]["exclusive_groups"]),
+            },
+            "preview_content_type": package["preview"]["content_type"],
+        },
         "execution": "not_run",
     }
