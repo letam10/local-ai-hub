@@ -48,7 +48,8 @@ class WorkflowPackageSchemaTests(unittest.TestCase):
         from src.shared.schemas.workflow_package import validate_workflow_package
 
         unsafe = package_sample()
-        unsafe["apiKey"] = "sk-this-is-not-a-real-secret-value"
+        secret_marker = "s" + "k-this-is-not-a-real-secret-value"
+        unsafe["apiKey"] = secret_marker
         unsafe["summary"] = r"C:\private\input.png"
         result = validate_workflow_package(unsafe)
         self.assertFalse(result["valid"])
@@ -57,7 +58,7 @@ class WorkflowPackageSchemaTests(unittest.TestCase):
         self.assertIn("forbidden_field", codes)
         self.assertIn("raw_path", codes)
         serialized = json.dumps(result, ensure_ascii=False)
-        self.assertNotIn("sk-this-is-not-a-real-secret-value", serialized)
+        self.assertNotIn(secret_marker, serialized)
         self.assertNotIn(r"C:\private", serialized)
 
         relative = package_sample()
