@@ -237,6 +237,21 @@ class ImageMaskStudioManagerTests(unittest.TestCase):
             self.assertEqual(recovery["status"], "recovery_required")
             self.assertEqual(path.read_bytes(), before)
 
+    def test_state_writer_refuses_oversize_serialization_without_replacing_file(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "image_mask_studio_state.json"
+            config = bounded_config()
+            config["limits"]["max_state_bytes"] = 64 * 1024
+            manager = ImageMaskStudioManager(path, artifact_describer=fake_artifact, config_provider=lambda: config)
+            manager.create_session({"source_artifact_id": ASSET_A})
+            before = path.read_bytes()
+            state, _recovery, _blocked = manager._load()
+            state["padding"] = "x" * (config["limits"]["max_state_bytes"] + 1)
+            with self.assertRaisesRegex(ValueError, "giới hạn byte"):
+                manager._save(state)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertFalse(path.with_suffix(".tmp").exists())
+
     def test_poisoned_history_cannot_swap_source_or_be_overwritten(self) -> None:
         with TemporaryDirectory() as temporary:
             path = Path(temporary) / "image_mask_studio_state.json"

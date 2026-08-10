@@ -66,11 +66,11 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError(f"Non-finite JSON constant is not allowed: {value}.")
 
 
-def _state_stat_signature(value: os.stat_result) -> tuple[int, int, int, int]:
+def _state_stat_signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
     # Do not include ctime/atime: opening a file can update Windows access
     # metadata while the content remains unchanged.  Identity, size and mtime
     # are the stable mutation checks needed for this bounded read.
-    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
+    return (value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode), value.st_size, value.st_mtime_ns)
 
 
 def _read_bounded_state(path: Path, max_bytes: int) -> bytes:
@@ -91,6 +91,8 @@ def _read_bounded_state(path: Path, max_bytes: int) -> bytes:
                 raise _StateReadError("State size changed or exceeded its byte ceiling.")
             final = os.fstat(handle.fileno())
             after = os.lstat(path)
+            if not stat.S_ISREG(after.st_mode):
+                raise _StateReadError("State path changed to a non-regular file.")
             if (
                 _state_stat_signature(before) != _state_stat_signature(final)
                 or _state_stat_signature(before) != _state_stat_signature(after)
@@ -694,10 +696,22 @@ class ImageMaskStudioManager:
         }
 
     def _save(self, state: Mapping[str, Any]) -> None:
+        maximum = int(self._limits()["max_state_bytes"])
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")
         try:
-            temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+            encoder = json.JSONEncoder(ensure_ascii=False, indent=2, allow_nan=False)
+            total = 0
+            with temporary.open("wb") as handle:
+                for piece in encoder.iterencode(state):
+                    encoded_piece = piece.encode("utf-8")
+                    total += len(encoded_piece)
+                    if total > maximum:
+                        raise ValueError("State Image & Mask Studio vượt giới hạn byte an toàn; giảm history/layer hoặc tạo workspace mới trước khi lưu.")
+                    handle.write(encoded_piece)
+                if total + 1 > maximum:
+                    raise ValueError("State Image & Mask Studio vượt giới hạn byte an toàn; giảm history/layer hoặc tạo workspace mới trước khi lưu.")
+                handle.write(b"\n")
             temporary.replace(self.path)
         finally:
             if temporary.exists():

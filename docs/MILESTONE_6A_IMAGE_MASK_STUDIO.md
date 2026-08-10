@@ -80,6 +80,8 @@ byte ceiling trước parse: manager kiểm tra regular-file/identity/size/mtime
 đọc tối đa trần + 1 byte, rồi fail-closed khi file quá lớn, bị thay thế hoặc
 thay đổi trong lúc đọc. `NaN`, `Infinity` và `-Infinity` bị từ chối ở API,
 metadata và state; file lỗi vẫn nguyên vẹn để người dùng recovery an toàn.
+Trước atomic replace, writer đếm byte từ `JSONEncoder.iterencode`; payload vượt
+trần bị từ chối và file state cũ vẫn được giữ nguyên.
 
 Ba tệp có ownership khác nhau; chúng không được dùng thay cho nhau:
 

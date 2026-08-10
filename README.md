@@ -398,6 +398,8 @@ Artifact ảnh Hub (opaque ID) → Studio session → layer/mask/adjustment
 1 byte và fail-closed nếu state bị thay thế hoặc thay đổi trong lúc đọc. API,
 metadata và state đều từ chối `NaN`, `Infinity` và `-Infinity`; state lỗi được
 giữ nguyên và chuyển sang recovery chỉ đọc.
+Writer cũng đếm byte serialized trước khi atomic replace nên không thể tự tạo
+state vượt trần rồi mới phát hiện ở lần mở sau.
 
 | Tệp | Vai trò | Git |
 | --- | --- | --- |
