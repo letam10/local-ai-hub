@@ -1,0 +1,372 @@
+{
+  "schema_version": "creative-recipe-catalog.v1",
+  "id": "catalog_creative_starter",
+  "version": "1.0.0",
+  "label": "Creative starter recipes",
+  "description": "Static image and video prompt recipes for planning before execution.",
+  "author": "Local AI Hub",
+  "license": "CC0-1.0",
+  "recipes": [
+    {
+      "schema_version": "creative-recipe.v1",
+      "id": "recipe_product_image",
+      "version": "1.0.0",
+      "label": "Product hero image",
+      "description": "A clean product presentation recipe for a square or landscape image.",
+      "author": "Local AI Hub",
+      "license": "CC0-1.0",
+      "media_kind": "image",
+      "prompt_template": "A polished product hero photograph of {{slot_subject}}, {{slot_surface}}, centered composition, controlled reflections, clear silhouette",
+      "negative_prompt": "blurry, unreadable marks, warped geometry, clutter",
+      "slots": [
+        {
+          "schema_version": "creative-prompt-slot.v1",
+          "id": "slot_subject",
+          "label": "Product subject",
+          "type": "text",
+          "required": true,
+          "default": "a premium desk object",
+          "description": "Short subject description without private references."
+        },
+        {
+          "schema_version": "creative-prompt-slot.v1",
+          "id": "slot_surface",
+          "label": "Surface",
+          "type": "enum",
+          "required": false,
+          "default": "warm stone",
+          "enum": ["warm stone", "matte paper", "soft gray sweep"]
+        }
+      ],
+      "variants": [
+        {
+          "schema_version": "creative-prompt-variant.v1",
+          "id": "variant_product_catalog",
+          "label": "Catalog neutral",
+          "prompt_template": "A catalog-ready product photograph of {{slot_subject}}, {{slot_surface}}, front three-quarter view, measured highlights",
+          "negative_prompt": "busy background, harsh glare, distorted edges",
+          "slot_values": [],
+          "style_pack_ids": ["style_product_clean"]
+        }
+      ],
+      "style_pack_ids": ["style_product_clean"],
+      "compatibility": {
+        "target_ids": ["target_image_basic"],
+        "required_capabilities": ["image.generate"],
+        "model_families": ["flux", "sdxl", "generic-image"]
+      },
+      "constraints": {
+        "aspect_ratios": ["1:1", "4:3", "16:9"],
+        "min_width": 512,
+        "max_width": 2048,
+        "min_height": 512,
+        "max_height": 2048,
+        "default_parameters": {
+          "width": 1024,
+          "height": 1024,
+          "steps": 28,
+          "seed": 4201,
+          "aspect_ratio": "1:1"
+        }
+      },
+      "preview": {
+        "title": "Product hero",
+        "summary": "Clean studio product composition.",
+        "tags": ["product", "image"],
+        "icon": "product"
+      },
+      "tags": ["product", "studio", "image"]
+    },
+    {
+      "schema_version": "creative-recipe.v1",
+      "id": "recipe_portrait_cinematic",
+      "version": "1.0.0",
+      "label": "Cinematic portrait",
+      "description": "A portrait planning recipe with explicit subject and mood slots.",
+      "author": "Local AI Hub",
+      "license": "CC0-1.0",
+      "media_kind": "image",
+      "prompt_template": "A cinematic portrait of {{slot_subject}}, {{slot_mood}}, natural skin texture, expressive eyes, soft depth of field",
+      "negative_prompt": "plastic skin, duplicate features, harsh artifacts, unreadable text",
+      "slots": [
+        {
+          "schema_version": "creative-prompt-slot.v1",
+          "id": "slot_subject",
+          "label": "Portrait subject",
+          "type": "text",
+          "required": true,
+          "description": "Use a safe, non-identifying description."
+        },
+        {
+          "schema_version": "creative-prompt-slot.v1",
+          "id": "slot_mood",
+          "label": "Mood",
+          "type": "enum",
+          "required": true,
+          "default": "quiet confidence",
+          "enum": ["quiet confidence", "warm curiosity", "focused intensity"]
+        }
+      ],
+      "variants": [],
+      "style_pack_ids": ["style_portrait_cinematic"],
+      "compatibility": {
+        "target_ids": ["target_image_basic"],
+        "required_capabilities": ["image.generate"],
+        "model_families": ["flux", "sdxl", "generic-image"]
+      },
+      "constraints": {
+        "aspect_ratios": ["2:3", "3:4", "1:1"],
+        "min_width": 512,
+        "max_width": 1536,
+        "min_height": 512,
+        "max_height": 2048,
+        "default_parameters": {
+          "width": 768,
+          "height": 1024,
+          "steps": 30,
+          "seed": 4210,
+          "aspect_ratio": "3:4"
+        }
+      },
+      "preview": {
+        "title": "Cinematic portrait",
+        "summary": "Portrait with soft cinematic light.",
+        "tags": ["portrait", "image"],
+        "icon": "portrait"
+      },
+      "tags": ["portrait", "cinematic", "image"]
+    },
+    {
+      "schema_version": "creative-recipe.v1",
+      "id": "recipe_image_edit_upscale",
+      "version": "1.0.0",
+      "label": "Image edit and upscale plan",
+      "description": "A declarative edit brief that stays a dry-run intent until a runtime owner is authorized.",
+      "author": "Local AI Hub",
+      "license": "CC0-1.0",
+      "media_kind": "image",
+      "prompt_template": "Refine {{slot_subject}} with {{slot_change}}, preserve the main composition and improve edge clarity",
+      "negative_prompt": "unintended crop, new subjects, oversharpening, artifacts",
+      "slots": [
+        {
+          "schema_version": "creative-prompt-slot.v1",
+          "id": "slot_subject",
+          "label": "Existing subject",
+          "type": "text",
+          "required": true,
+          "default": "the existing composition"
+        },
+        {
+          "schema_version": "creative-prompt-slot.v1",
+          "id": "slot_change",
+          "label": "Requested change",
+          "type": "enum",
+          "required": true,
+          "default": "gentle detail recovery",
+          "enum": ["gentle detail recovery", "clean background", "balanced color"]
+        }
+      ],
+      "variants": [],
+      "style_pack_ids": ["style_product_clean"],
+      "compatibility": {
+        "target_ids": ["target_image_edit"],
+        "required_capabilities": ["image.edit", "image.upscale"],
+        "model_families": ["flux", "generic-image"]
+      },
+      "constraints": {
+        "aspect_ratios": ["1:1", "4:3", "3:4", "16:9"],
+        "min_width": 512,
+        "max_width": 4096,
+        "min_height": 512,
+        "max_height": 4096,
+        "default_parameters": {
+          "width": 2048,
+          "height": 2048,
+          "steps": 24,
+          "seed": 4220,
+          "aspect_ratio": "1:1"
+        }
+      },
+      "preview": {
+        "title": "Edit and upscale",
+        "summary": "Static edit brief without source bytes or paths.",
+        "tags": ["edit", "upscale", "image"],
+        "icon": "edit"
+      },
+      "tags": ["edit", "upscale", "image"]
+    },
+    {
+      "schema_version": "creative-recipe.v1",
+      "id": "recipe_short_video_concept",
+      "version": "1.0.0",
+      "label": "Short video concept",
+      "description": "A bounded short-video storyboard prompt for planning camera motion and duration.",
+      "author": "Local AI Hub",
+      "license": "CC0-1.0",
+      "media_kind": "video",
+      "prompt_template": "A concise cinematic shot of {{slot_subject}}, {{slot_camera_move}}, coherent motion, clear beginning and end",
+      "negative_prompt": "flicker, broken motion, duplicated objects, unstable framing",
+      "slots": [
+        {
+          "schema_version": "creative-prompt-slot.v1",
+          "id": "slot_subject",
+          "label": "Video subject",
+          "type": "text",
+          "required": true,
+          "default": "a paper sculpture on a calm table"
+        },
+        {
+          "schema_version": "creative-prompt-slot.v1",
+          "id": "slot_camera_move",
+          "label": "Camera movement",
+          "type": "enum",
+          "required": true,
+          "default": "slow dolly",
+          "enum": ["slow dolly", "gentle orbit", "locked-off reveal"]
+        },
+        {
+          "schema_version": "creative-prompt-slot.v1",
+          "id": "slot_duration",
+          "label": "Duration seconds",
+          "type": "duration",
+          "required": true,
+          "default": 6,
+          "minimum": 1,
+          "maximum": 12,
+          "unit": "seconds"
+        }
+      ],
+      "variants": [
+        {
+          "schema_version": "creative-prompt-variant.v1",
+          "id": "variant_video_storyboard",
+          "label": "Storyboard reveal",
+          "prompt_template": "A short storyboard shot of {{slot_subject}}, {{slot_camera_move}}, reveal the form over a measured six second arc",
+          "negative_prompt": "rapid cuts, flicker, broken motion",
+          "slot_values": [{"slot_id": "slot_duration", "value": 6}],
+          "style_pack_ids": ["style_video_storyboard"]
+        }
+      ],
+      "style_pack_ids": ["style_video_storyboard"],
+      "compatibility": {
+        "target_ids": ["target_video_concept"],
+        "required_capabilities": ["video.generate"],
+        "model_families": ["sd-video", "generic-video"]
+      },
+      "constraints": {
+        "aspect_ratios": ["16:9", "9:16", "1:1"],
+        "max_frames": 288,
+        "max_duration_seconds": 12,
+        "max_fps": 30,
+        "default_parameters": {
+          "width": 768,
+          "height": 432,
+          "fps": 24,
+          "duration_seconds": 6,
+          "frames": 144,
+          "seed": 4230,
+          "aspect_ratio": "16:9"
+        }
+      },
+      "preview": {
+        "title": "Short video concept",
+        "summary": "A bounded motion concept, not an execution recipe.",
+        "tags": ["video", "storyboard"],
+        "icon": "video"
+      },
+      "tags": ["video", "concept", "storyboard"]
+    }
+  ],
+  "style_packs": [
+    {
+      "schema_version": "creative-style-pack.v1",
+      "id": "style_product_clean",
+      "version": "1.0.0",
+      "label": "Clean product light",
+      "description": "Neutral studio treatment for product and edit planning.",
+      "positive_prompt": "soft studio light, controlled reflections, clean neutral palette",
+      "negative_prompt": "busy set, harsh glare",
+      "media_kinds": ["image"],
+      "tags": ["product", "clean"],
+      "preview": {"title": "Clean product", "summary": "Neutral studio light.", "tags": ["image"], "icon": "product"},
+      "license": "CC0-1.0"
+    },
+    {
+      "schema_version": "creative-style-pack.v1",
+      "id": "style_portrait_cinematic",
+      "version": "1.0.0",
+      "label": "Cinematic portrait light",
+      "description": "Soft directional light and restrained color for portrait planning.",
+      "positive_prompt": "soft key light, subtle rim light, restrained cinematic color",
+      "negative_prompt": "flat lighting, plastic texture",
+      "media_kinds": ["image"],
+      "tags": ["portrait", "cinematic"],
+      "preview": {"title": "Portrait cinematic", "summary": "Soft directional portrait light.", "tags": ["image"], "icon": "portrait"},
+      "license": "CC0-1.0"
+    },
+    {
+      "schema_version": "creative-style-pack.v1",
+      "id": "style_video_storyboard",
+      "version": "1.0.0",
+      "label": "Storyboard motion",
+      "description": "Measured motion language for short-video concept planning.",
+      "positive_prompt": "measured camera motion, coherent temporal rhythm, readable silhouettes",
+      "negative_prompt": "flicker, unstable motion, sudden cuts",
+      "media_kinds": ["video"],
+      "tags": ["video", "motion"],
+      "preview": {"title": "Storyboard motion", "summary": "Measured short-video motion.", "tags": ["video"], "icon": "video"},
+      "license": "CC0-1.0"
+    }
+  ],
+  "targets": [
+    {
+      "schema_version": "creative-target-card.v1",
+      "id": "target_image_basic",
+      "version": "1.0.0",
+      "label": "Static image generation target",
+      "description": "Compatibility card only; runtime availability is not claimed.",
+      "media_kind": "image",
+      "capabilities": ["image.generate"],
+      "model_families": ["flux", "sdxl", "generic-image"],
+      "status": "partial",
+      "reason_code": "static_target_only",
+      "action_code": "review_runtime_evidence",
+      "preview": {"title": "Image generate", "summary": "Static image target card.", "tags": ["image"], "icon": "image"}
+    },
+    {
+      "schema_version": "creative-target-card.v1",
+      "id": "target_image_edit",
+      "version": "1.0.0",
+      "label": "Static image edit target",
+      "description": "Compatibility card only for edit and upscale planning.",
+      "media_kind": "image",
+      "capabilities": ["image.edit", "image.upscale"],
+      "model_families": ["flux", "generic-image"],
+      "status": "partial",
+      "reason_code": "static_target_only",
+      "action_code": "review_runtime_evidence",
+      "preview": {"title": "Image edit", "summary": "Static edit target card.", "tags": ["image", "edit"], "icon": "edit"}
+    },
+    {
+      "schema_version": "creative-target-card.v1",
+      "id": "target_video_concept",
+      "version": "1.0.0",
+      "label": "Static short-video target",
+      "description": "Compatibility card only; no video workload is launched by this milestone.",
+      "media_kind": "video",
+      "capabilities": ["video.generate"],
+      "model_families": ["sd-video", "generic-video"],
+      "status": "unavailable",
+      "reason_code": "runtime_not_authorized",
+      "action_code": "request_bounded_smoke",
+      "preview": {"title": "Video concept", "summary": "Static video target card.", "tags": ["video"], "icon": "video"}
+    }
+  ],
+  "preview": {
+    "title": "Creative recipe starter",
+    "summary": "Image and short-video planning recipes.",
+    "tags": ["recipes", "planning"],
+    "icon": "generic"
+  },
+  "tags": ["creative", "recipes", "planning"]
+}
