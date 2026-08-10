@@ -24,13 +24,13 @@
         <div class="top-actions">
           <span class="metric" id="disk-metric">Ổ đĩa —</span>
           <span class="metric" id="gpu-metric">GPU —</span>
-          <button class="icon-button sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Mở điều hướng" aria-controls="sidebar-nav" aria-expanded="false">☰</button>
-          <button class="icon-button" id="theme-toggle" type="button" title="Đổi giao diện">◐</button>
+          <button class="icon-button sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Mở điều hướng" aria-controls="sidebar" aria-expanded="false">☰</button>
+          <button class="icon-button" id="theme-toggle" type="button" title="Đổi giao diện" aria-label="Đổi giao diện">◐</button>
         </div>
       </header>
 
       <div class="workspace">
-        <aside class="sidebar" aria-label="Điều hướng module">
+        <aside class="sidebar" id="sidebar" aria-label="Điều hướng module">
           <div class="sidebar-caption">MODULE</div>
           <nav id="sidebar-nav"></nav>
           <div class="sidebar-note">
@@ -39,7 +39,7 @@
           </div>
         </aside>
 
-        <main class="main-panel" aria-live="polite">
+        <main class="main-panel" id="main-content" aria-live="polite">
           <div id="module-view" tabindex="-1"></div>
         </main>
       </div>
