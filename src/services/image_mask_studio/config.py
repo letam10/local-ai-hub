@@ -21,6 +21,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_points_per_stroke": 160,
         "max_undo_entries": 32,
         "max_snapshots": 24,
+        "max_presets": 120,
     },
     "sam2_assist": {"configured": False},
 }
@@ -66,8 +67,12 @@ def normalize_config(value: object) -> dict[str, Any]:
             "max_points_per_stroke": _bounded(raw_limits.get("max_points_per_stroke"), defaults["max_points_per_stroke"], minimum=2, maximum=512),
             "max_undo_entries": _bounded(raw_limits.get("max_undo_entries"), defaults["max_undo_entries"], minimum=4, maximum=96),
             "max_snapshots": _bounded(raw_limits.get("max_snapshots"), defaults["max_snapshots"], minimum=4, maximum=96),
+            "max_presets": _bounded(raw_limits.get("max_presets"), defaults["max_presets"], minimum=1, maximum=500),
         },
-        "sam2_assist": {"configured": bool(raw_sam2.get("configured", False))},
+        # Only a real JSON boolean can change the conservative preflight.
+        # Values such as the string "false", 1, or an object must never make
+        # an un-smoked integration look partially available.
+        "sam2_assist": {"configured": raw_sam2.get("configured") is True},
     }
 
 

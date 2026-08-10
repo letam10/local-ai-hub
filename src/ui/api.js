@@ -1,3 +1,12 @@
+export class HubApiError extends Error {
+  constructor(message, payload = {}, status = 0) {
+    super(message);
+    this.name = "HubApiError";
+    this.payload = payload;
+    this.status = status;
+  }
+}
+
 const request = async (path, options = {}) => {
   const response = await fetch(path, {
     ...options,
@@ -7,7 +16,7 @@ const request = async (path, options = {}) => {
   try { payload = await response.json(); } catch { payload = { status: "error", error: "Phản hồi không phải JSON." }; }
   if (!response.ok) {
     const message = payload.error || payload.reason || payload.message || `HTTP ${response.status}`;
-    throw new Error(message);
+    throw new HubApiError(message, payload, response.status);
   }
   return payload;
 };

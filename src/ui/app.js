@@ -627,7 +627,7 @@ const handleImageMaskForm = async (form) => {
     result = await restoreImageMaskSnapshot(session.id, values.snapshot_id, { base_revision: session.revision });
   } else if (kind === "capture-preset") {
     const values = Object.fromEntries(new FormData(form).entries());
-    result = await captureImageMaskPreset(session.id, { title: values.title || "" });
+    result = await captureImageMaskPreset(session.id, { title: values.title || "", base_revision: session.revision });
   } else if (kind === "import-mask") {
     const values = Object.fromEntries(new FormData(form).entries());
     result = await importImageMask(session.id, { mask: parseSafeObject(values.manifest, "Manifest mask"), base_revision: session.revision });
@@ -660,7 +660,13 @@ document.addEventListener("submit", async (event) => {
     const submit = imageMaskForm.querySelector("button[type=submit]"); if (submit) submit.disabled = true;
     inlineResult(imageMaskForm, "Đang validate bản nháp Studio an toàn…");
     try { showToast(await handleImageMaskForm(imageMaskForm), "success"); }
-    catch (error) { inlineResult(imageMaskForm, error.message, "error"); showToast(error.message, "error"); }
+    catch (error) {
+      if (imageMaskForm.dataset.imageMaskForm === "link-project" && error?.payload?.status === "pending_project_attach") {
+        try { await refreshImageMaskStudio(); } catch { /* Preserve the server error even if refresh is unavailable. */ }
+      }
+      inlineResult(imageMaskForm, error.message, "error");
+      showToast(error.message, "error");
+    }
     finally { if (submit) submit.disabled = false; }
     return;
   }

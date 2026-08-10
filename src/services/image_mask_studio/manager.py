@@ -9,8 +9,10 @@ without pretending that a GPU-backed mask or inpaint engine has run.
 from __future__ import annotations
 
 import json
+import re
 import threading
 from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -45,8 +47,12 @@ from .schemas import (
 )
 
 
-STATE_PATH = CONFIG_ROOT / "image_mask_studio.json"
+# Keep high-frequency user draft state separate from the small policy config
+# loaded by config.py (Config/image_mask_studio.json).  Both are ignored local
+# files; only image_mask_studio.example.json is tracked.
+STATE_PATH = CONFIG_ROOT / "image_mask_studio_state.json"
 STATE_SCHEMA_VERSION = 1
+ATTACHMENT_ID_RE = re.compile(r"^attach_[a-f0-9]{32}$")
 
 
 class StudioConflictError(ValueError):
@@ -54,7 +60,7 @@ class StudioConflictError(ValueError):
 
     def __init__(self, current_revision: int) -> None:
         self.current_revision = current_revision
-        super().__init__("Bản nháp đã thay đổi ở một cửa sổ khác; tải lại hoặc tạo recovery copy trước khi ghi tiếp.")
+        super().__init__("Bản nháp đã thay đổi ở một cửa sổ khác; tải lại hoặc chọn snapshot server trước khi ghi tiếp.")
 
 
 def _default_state() -> dict[str, Any]:
@@ -68,7 +74,23 @@ def _default_state() -> dict[str, Any]:
 
 
 def _timestamp(value: object) -> str:
-    return value if isinstance(value, str) and 1 <= len(value) <= 80 else now_iso()
+    """Return a canonical, non-private ISO-8601 timestamp.
+
+    Runtime state is user-local and can be edited or become partially corrupt.
+    It must never use a short arbitrary string as a public timestamp because
+    that would make an accidental local path visible through the API.
+    """
+
+    if not isinstance(value, str) or not (1 <= len(value) <= 80):
+        return now_iso()
+    candidate = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return now_iso()
+    if parsed.tzinfo is None:
+        return now_iso()
+    return parsed.astimezone(timezone.utc).isoformat()
 
 
 def _session_document(session: Mapping[str, Any]) -> dict[str, Any]:
@@ -132,7 +154,7 @@ class ImageMaskStudioManager:
             }, False
         try:
             source = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeError, json.JSONDecodeError):
             return _default_state(), {
                 "status": "recovery_required",
                 "reason": "Bản nháp Image & Mask Studio không đọc được; Hub không tự ghi đè dữ liệu này.",
@@ -149,7 +171,12 @@ class ImageMaskStudioManager:
         skipped = 0
         raw_sessions = source.get("sessions", {})
         if isinstance(raw_sessions, Mapping):
-            for session_id, raw in raw_sessions.items():
+            session_items = list(raw_sessions.items())
+            maximum_sessions = int(self._limits()["max_sessions"])
+            if len(session_items) > maximum_sessions:
+                skipped += len(session_items) - maximum_sessions
+                session_items = session_items[-maximum_sessions:]
+            for session_id, raw in session_items:
                 try:
                     session = self._normalize_loaded_session(session_id, raw)
                     state["sessions"][session_id] = session
@@ -160,7 +187,12 @@ class ImageMaskStudioManager:
 
         raw_presets = source.get("presets", {})
         if isinstance(raw_presets, Mapping):
-            for preset_id, raw in raw_presets.items():
+            preset_items = list(raw_presets.items())
+            maximum_presets = int(self._limits()["max_presets"])
+            if len(preset_items) > maximum_presets:
+                skipped += len(preset_items) - maximum_presets
+                preset_items = preset_items[-maximum_presets:]
+            for preset_id, raw in preset_items:
                 try:
                     preset = self._normalize_loaded_preset(preset_id, raw)
                     state["presets"][preset_id] = preset
@@ -179,8 +211,8 @@ class ImageMaskStudioManager:
             return state, {
                 "status": "recovered_partial",
                 "reason": f"Đã phục hồi {len(state['sessions'])} phiên và bỏ qua {skipped} bản ghi Studio không hợp lệ.",
-                "action": "Kiểm tra snapshot/export trước khi xóa dữ liệu local cũ.",
-            }, False
+                "action": "Studio đang ở chế độ chỉ đọc để không ghi đè state cũ; kiểm tra snapshot/export rồi tạo workspace local mới hoặc nhờ quản trị viên phục hồi.",
+            }, True
         return state, {
             "status": "clean",
             "reason": "Bản nháp Image & Mask Studio hợp lệ.",
@@ -197,12 +229,28 @@ class ImageMaskStudioManager:
         layers_raw = raw.get("layers", [])
         if not isinstance(layers_raw, list) or not layers_raw:
             raise ValueError("Session cần layer nguồn.")
+        if len(layers_raw) > int(self._limits()["max_layers_per_session"]):
+            raise ValueError("Session vượt giới hạn layer an toàn.")
         layers = [self._normalize_loaded_layer(layer) for layer in layers_raw]
         source_layers = [layer for layer in layers if layer["kind"] == "source"]
         if len(source_layers) != 1 or source_layers[0].get("artifact_id") != source_id:
             raise ValueError("Layer nguồn không khớp artifact nguồn.")
         if len({layer["id"] for layer in layers}) != len(layers):
             raise ValueError("Layer ID bị trùng.")
+        self._validate_layer_parentage(layers)
+        for layer in layers:
+            if layer["kind"] == "generated":
+                layer["provenance"] = self._generated_provenance(
+                    layer.get("provenance"),
+                    studio_id=studio_id,
+                    source_artifact_id=source_id,
+                    persisted=True,
+                )
+        allowed_attachment_artifacts = {source_id}
+        for layer in layers:
+            artifact_id = layer.get("artifact_id")
+            if isinstance(artifact_id, str):
+                allowed_attachment_artifacts.add(artifact_id)
         active = raw.get("active_layer_id")
         if active not in {layer["id"] for layer in layers}:
             active = source_layers[0]["id"]
@@ -216,17 +264,41 @@ class ImageMaskStudioManager:
             "layers": layers,
             "active_layer_id": active,
         }
-        undo = self._normalize_history(raw.get("undo", []))
-        redo = self._normalize_history(raw.get("redo", []))
-        snapshots = self._normalize_snapshots(raw.get("snapshots", []))
+        undo = self._normalize_history(
+            raw.get("undo", []), expected_source_id=source_id, expected_studio_id=studio_id,
+        )
+        redo = self._normalize_history(
+            raw.get("redo", []), expected_source_id=source_id, expected_studio_id=studio_id,
+        )
+        snapshots = self._normalize_snapshots(
+            raw.get("snapshots", []), expected_source_id=source_id, expected_studio_id=studio_id,
+        )
         saved_document = raw.get("saved_document")
         if not isinstance(saved_document, Mapping):
             saved_document = copy_json(document)
         else:
-            saved_document = self._normalize_document(saved_document)
+            saved_document = self._normalize_document(
+                saved_document, expected_source_id=source_id, expected_studio_id=studio_id,
+            )
         source_snapshot = raw.get("source_snapshot", {})
         if not isinstance(source_snapshot, Mapping):
             source_snapshot = {}
+        pending_attachment = self._normalize_pending_attachment(raw.get("pending_project_attach"))
+        if pending_attachment is not None:
+            if (
+                pending_attachment["revision"] != revision
+                or pending_attachment["project_id"] != project_id
+                or source_id not in pending_attachment["artifacts"]
+                or not set(pending_attachment["artifacts"]).issubset(allowed_attachment_artifacts)
+            ):
+                raise ValueError("Intent liên kết project pending không khớp revision, project, ảnh nguồn hoặc artifact Studio.")
+        completed_attachment = self._normalize_completed_attachment(
+            raw.get("completed_project_attach"),
+            session_revision=revision,
+            project_id=project_id,
+            source_artifact_id=source_id,
+            allowed_artifact_ids=allowed_attachment_artifacts,
+        )
         return {
             "contract_version": STUDIO_CONTRACT,
             "id": studio_id,
@@ -244,7 +316,8 @@ class ImageMaskStudioManager:
             "dirty": bool(raw.get("dirty", _document_signature(document) != _document_signature(saved_document))),
             "autosaved_at": _timestamp(raw.get("autosaved_at")),
             "explicit_saved_at": _timestamp(raw.get("explicit_saved_at")),
-            "pending_project_attach": self._normalize_pending_attachment(raw.get("pending_project_attach")),
+            "pending_project_attach": pending_attachment,
+            "completed_project_attach": completed_attachment,
             "created_at": _timestamp(raw.get("created_at")),
             "updated_at": _timestamp(raw.get("updated_at")),
             "last_action": safe_text(raw.get("last_action", "Khôi phục bản nháp"), "Mô tả thao tác", maximum=120),
@@ -272,9 +345,12 @@ class ImageMaskStudioManager:
             operations = raw.get("operations", [])
             if not isinstance(operations, list):
                 raise ValueError("Mask operations không hợp lệ.")
+            maximum_operations = int(self._limits()["max_mask_operations"])
+            if len(operations) > maximum_operations:
+                raise ValueError("Mask vượt giới hạn thao tác an toàn.")
             max_points = int(self._limits()["max_points_per_stroke"])
             normalized_operations: list[dict[str, Any]] = []
-            for operation in operations[: int(self._limits()["max_mask_operations"])]:
+            for operation in operations:
                 normalized = normalize_mask_operation(operation, max_points=max_points)
                 if isinstance(operation, Mapping) and isinstance(operation.get("id"), str):
                     normalized["id"] = safe_text(operation["id"], "Mask operation ID", maximum=80)
@@ -284,15 +360,112 @@ class ImageMaskStudioManager:
             layer["operations"] = normalized_operations
         return layer
 
-    def _normalize_document(self, raw: Mapping[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _generated_provenance(
+        raw: object,
+        *,
+        studio_id: str,
+        source_artifact_id: str,
+        persisted: bool = False,
+    ) -> dict[str, Any]:
+        """Project untrusted generated-layer metadata below stable ownership.
+
+        The source and Studio identity describe server-owned provenance.  They
+        cannot be supplied by a browser or inherited from a different Studio
+        when a preset is reused.  Persisted legacy records are normalized into
+        the same shape instead of projecting their claimed owner fields.
+        """
+
+        if raw is None:
+            metadata_raw: object = {}
+        elif not isinstance(raw, Mapping):
+            raise ValueError("Provenance layer dẫn xuất phải là JSON object an toàn.")
+        else:
+            reserved = {"studio_id", "source_artifact_id"}
+            if not persisted and any(key in raw for key in reserved):
+                raise ValueError("Provenance không được ghi đè Studio ID hoặc ảnh nguồn.")
+            metadata_raw = raw.get("metadata") if "metadata" in raw else {key: value for key, value in raw.items() if key not in reserved}
+        if not isinstance(metadata_raw, Mapping):
+            raise ValueError("Metadata provenance phải là JSON object an toàn.")
+        metadata = safe_json(metadata_raw)
+        if not isinstance(metadata, Mapping):  # defensive for injected helpers
+            raise ValueError("Metadata provenance phải là JSON object an toàn.")
+        return {
+            "studio_id": studio_id,
+            "source_artifact_id": source_artifact_id,
+            "metadata": metadata,
+        }
+
+    @staticmethod
+    def _validate_layer_parentage(
+        layers: list[Mapping[str, Any]],
+        *,
+        allow_external_parents: bool = False,
+    ) -> None:
+        """Require generated-layer parents to stay within an acyclic stack.
+
+        A reusable preset can contain a generated layer that originally pointed
+        at the source layer omitted from its preset payload.  Such references
+        are permitted only while normalizing the isolated preset; applying it
+        remaps or removes them before the combined session is validated.
+        """
+
+        layer_ids = {str(layer["id"]) for layer in layers}
+        parents: dict[str, str] = {}
+        for layer in layers:
+            if layer.get("kind") != "generated":
+                continue
+            parent = layer.get("parent_layer_id")
+            if parent is None:
+                continue
+            child_id = str(layer["id"])
+            if not isinstance(parent, str) or parent == child_id:
+                raise ValueError("Layer dẫn xuất có parent không hợp lệ.")
+            if parent not in layer_ids:
+                if allow_external_parents:
+                    continue
+                raise ValueError("Layer dẫn xuất có parent không thuộc stack Studio.")
+            parents[child_id] = parent
+        for child_id in parents:
+            seen: set[str] = set()
+            cursor = child_id
+            while cursor in parents:
+                if cursor in seen:
+                    raise ValueError("Layer dẫn xuất có vòng lineage không hợp lệ.")
+                seen.add(cursor)
+                cursor = parents[cursor]
+
+    def _normalize_document(
+        self,
+        raw: Mapping[str, Any],
+        *,
+        expected_source_id: str | None = None,
+        expected_studio_id: str | None = None,
+    ) -> dict[str, Any]:
         source_id = normalize_artifact_id(raw.get("source_artifact_id"), "Ảnh nguồn")
+        if expected_source_id is not None and source_id != expected_source_id:
+            raise ValueError("Snapshot không được thay ảnh nguồn immutable của Studio.")
         layers_raw = raw.get("layers", [])
         if not isinstance(layers_raw, list) or not layers_raw:
             raise ValueError("Snapshot không có layer.")
+        if len(layers_raw) > int(self._limits()["max_layers_per_session"]):
+            raise ValueError("Snapshot vượt giới hạn layer an toàn.")
         layers = [self._normalize_loaded_layer(item) for item in layers_raw]
         source = [item for item in layers if item["kind"] == "source"]
         if len(source) != 1 or source[0].get("artifact_id") != source_id:
             raise ValueError("Snapshot có layer nguồn không hợp lệ.")
+        if len({item["id"] for item in layers}) != len(layers):
+            raise ValueError("Snapshot có Layer ID bị trùng.")
+        self._validate_layer_parentage(layers)
+        if expected_studio_id is not None:
+            for layer in layers:
+                if layer["kind"] == "generated":
+                    layer["provenance"] = self._generated_provenance(
+                        layer.get("provenance"),
+                        studio_id=expected_studio_id,
+                        source_artifact_id=source_id,
+                        persisted=True,
+                    )
         active = raw.get("active_layer_id")
         if active not in {item["id"] for item in layers}:
             active = source[0]["id"]
@@ -304,41 +477,60 @@ class ImageMaskStudioManager:
             "active_layer_id": active,
         }
 
-    def _normalize_history(self, raw: object) -> list[dict[str, Any]]:
+    def _normalize_history(
+        self,
+        raw: object,
+        *,
+        expected_source_id: str,
+        expected_studio_id: str,
+    ) -> list[dict[str, Any]]:
         if not isinstance(raw, list):
-            return []
+            raise ValueError("History Studio không hợp lệ.")
         limit = int(self._limits()["max_undo_entries"])
+        if len(raw) > limit:
+            raise ValueError("History Studio vượt giới hạn an toàn.")
         values: list[dict[str, Any]] = []
-        for item in raw[-limit:]:
-            if isinstance(item, Mapping):
-                try:
-                    values.append(self._normalize_document(item))
-                except ValueError:
-                    continue
+        for item in raw:
+            if not isinstance(item, Mapping):
+                raise ValueError("History Studio chứa document không hợp lệ.")
+            values.append(self._normalize_document(
+                item,
+                expected_source_id=expected_source_id,
+                expected_studio_id=expected_studio_id,
+            ))
         return values
 
-    def _normalize_snapshots(self, raw: object) -> list[dict[str, Any]]:
+    def _normalize_snapshots(
+        self,
+        raw: object,
+        *,
+        expected_source_id: str,
+        expected_studio_id: str,
+    ) -> list[dict[str, Any]]:
         if not isinstance(raw, list):
-            return []
+            raise ValueError("Snapshot Studio không hợp lệ.")
         limit = int(self._limits()["max_snapshots"])
+        if len(raw) > limit:
+            raise ValueError("Snapshot Studio vượt giới hạn an toàn.")
         snapshots: list[dict[str, Any]] = []
-        for item in raw[-limit:]:
+        for item in raw:
             if not isinstance(item, Mapping):
-                continue
-            try:
-                snapshot_id = opaque_id(item.get("id"), SNAPSHOT_ID_RE, "Snapshot ID")
-                revision = item.get("revision")
-                if not isinstance(revision, int) or revision < 1:
-                    raise ValueError
-                snapshots.append({
-                    "id": snapshot_id,
-                    "label": safe_text(item.get("label", "Snapshot"), "Nhãn snapshot", maximum=120),
-                    "revision": revision,
-                    "created_at": _timestamp(item.get("created_at")),
-                    "document": self._normalize_document(item.get("document", {})),
-                })
-            except (TypeError, ValueError):
-                continue
+                raise ValueError("Snapshot Studio chứa bản ghi không hợp lệ.")
+            snapshot_id = opaque_id(item.get("id"), SNAPSHOT_ID_RE, "Snapshot ID")
+            revision = item.get("revision")
+            if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+                raise ValueError("Revision snapshot không hợp lệ.")
+            snapshots.append({
+                "id": snapshot_id,
+                "label": safe_text(item.get("label", "Snapshot"), "Nhãn snapshot", maximum=120),
+                "revision": revision,
+                "created_at": _timestamp(item.get("created_at")),
+                "document": self._normalize_document(
+                    item.get("document", {}),
+                    expected_source_id=expected_source_id,
+                    expected_studio_id=expected_studio_id,
+                ),
+            })
         return snapshots
 
     def _normalize_loaded_preset(self, preset_id: object, raw: object) -> dict[str, Any]:
@@ -348,11 +540,16 @@ class ImageMaskStudioManager:
         layers = raw.get("layers", [])
         if not isinstance(layers, list):
             raise ValueError("Layers preset không hợp lệ.")
+        if len(layers) > int(self._limits()["max_layers_per_session"]) - 1:
+            raise ValueError("Preset vượt giới hạn layer an toàn.")
         normalized = [self._normalize_loaded_layer(item) for item in layers]
         # Presets never own a source image; applying one must preserve the
         # target session's immutable source layer.
         if any(item["kind"] == "source" for item in normalized):
             raise ValueError("Preset không được thay layer nguồn.")
+        if len({item["id"] for item in normalized}) != len(normalized):
+            raise ValueError("Preset có Layer ID bị trùng.")
+        self._validate_layer_parentage(normalized, allow_external_parents=True)
         return {
             "contract_version": PRESET_CONTRACT,
             "id": identifier,
@@ -363,20 +560,87 @@ class ImageMaskStudioManager:
             "source_studio_id": raw.get("source_studio_id") if isinstance(raw.get("source_studio_id"), str) and STUDIO_ID_RE.fullmatch(raw["source_studio_id"]) else None,
         }
 
-    @staticmethod
-    def _normalize_pending_attachment(raw: object) -> dict[str, Any] | None:
-        if not isinstance(raw, Mapping):
+    def _normalize_pending_attachment(self, raw: object) -> dict[str, Any] | None:
+        if raw is None:
             return None
+        if not isinstance(raw, Mapping):
+            raise ValueError("Intent liên kết project pending không hợp lệ.")
         project_id = raw.get("project_id")
         artifacts = raw.get("artifacts")
-        if not isinstance(project_id, str) or not PROJECT_ID_RE.fullmatch(project_id) or not isinstance(artifacts, list):
-            return None
-        safe_artifacts = [item for item in artifacts if isinstance(item, str) and item.startswith("artifact_")]
+        intent_id = raw.get("intent_id")
+        revision = raw.get("revision")
+        if (
+            not isinstance(project_id, str)
+            or not PROJECT_ID_RE.fullmatch(project_id)
+            or not isinstance(artifacts, list)
+            or len(artifacts) > int(self._limits()["max_layers_per_session"])
+            or not isinstance(intent_id, str)
+            or not ATTACHMENT_ID_RE.fullmatch(intent_id)
+            or not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 1
+        ):
+            raise ValueError("Intent liên kết project pending không hợp lệ.")
+        safe_artifacts: list[str] = []
+        for item in artifacts:
+            try:
+                safe_artifacts.append(normalize_artifact_id(item))
+            except ValueError as exc:
+                raise ValueError("Intent liên kết project pending chứa artifact không hợp lệ.") from exc
+        unique_artifacts = list(dict.fromkeys(safe_artifacts))
+        if not unique_artifacts or len(safe_artifacts) != len(artifacts) or len(unique_artifacts) != len(artifacts):
+            raise ValueError("Intent liên kết project pending chứa artifact trùng hoặc trống.")
         return {
+            "intent_id": intent_id,
             "project_id": project_id,
-            "artifacts": safe_artifacts[:48],
-            "revision": raw.get("revision") if isinstance(raw.get("revision"), int) else 1,
+            "artifacts": unique_artifacts,
+            "revision": revision,
             "created_at": _timestamp(raw.get("created_at")),
+        }
+
+    def _normalize_completed_attachment(
+        self,
+        raw: object,
+        *,
+        session_revision: int,
+        project_id: str | None,
+        source_artifact_id: str,
+        allowed_artifact_ids: set[str],
+    ) -> dict[str, Any] | None:
+        """Keep one exact completed-link fingerprint for safe idempotent retry."""
+
+        if raw is None:
+            return None
+        if not isinstance(raw, Mapping):
+            raise ValueError("Liên kết project đã hoàn tất không hợp lệ.")
+        completed_project_id = raw.get("project_id")
+        artifacts = raw.get("artifacts")
+        revision = raw.get("revision")
+        if (
+            not isinstance(completed_project_id, str)
+            or not PROJECT_ID_RE.fullmatch(completed_project_id)
+            or not isinstance(artifacts, list)
+            or len(artifacts) > int(self._limits()["max_layers_per_session"])
+            or not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 1
+            or revision > session_revision
+        ):
+            raise ValueError("Liên kết project đã hoàn tất không hợp lệ.")
+        normalized_artifacts = [normalize_artifact_id(item) for item in artifacts]
+        if (
+            not normalized_artifacts
+            or len(set(normalized_artifacts)) != len(normalized_artifacts)
+            or source_artifact_id not in normalized_artifacts
+            or not set(normalized_artifacts).issubset(allowed_artifact_ids)
+            or completed_project_id != project_id
+        ):
+            raise ValueError("Liên kết project đã hoàn tất không khớp Studio hiện tại.")
+        return {
+            "project_id": completed_project_id,
+            "artifacts": normalized_artifacts,
+            "revision": revision,
+            "completed_at": _timestamp(raw.get("completed_at")),
         }
 
     def _save(self, state: Mapping[str, Any]) -> None:
@@ -440,6 +704,13 @@ class ImageMaskStudioManager:
         if not isinstance(value, int) or isinstance(value, bool) or value != session["revision"]:
             raise StudioConflictError(int(session["revision"]))
 
+    def _assert_session_editable(self, session: Mapping[str, Any], value: object) -> None:
+        """Guard edits while a durable cross-store attachment is pending."""
+
+        self._assert_base_revision(session, value)
+        if isinstance(session.get("pending_project_attach"), Mapping):
+            raise ValueError("Liên kết project đang chờ hoàn tất; hãy thử lại liên kết hoặc tải lại Studio trước khi chỉnh bản nháp.")
+
     @staticmethod
     def _find_layer(session: Mapping[str, Any], layer_id: object, *, kind: str | None = None) -> dict[str, Any]:
         identifier = opaque_id(layer_id, LAYER_ID_RE, "Layer ID")
@@ -466,6 +737,9 @@ class ImageMaskStudioManager:
         limit = int(self._limits()["max_undo_entries"])
         del undo[:-limit]
         session["redo"] = []
+        # A completed bridge fingerprint is valid only for this exact document
+        # revision.  Any document mutation must require a fresh Project link.
+        session["completed_project_attach"] = None
         session["revision"] += 1
         session["autosaved_at"] = now_iso()
         session["updated_at"] = session["autosaved_at"]
@@ -475,10 +749,17 @@ class ImageMaskStudioManager:
 
     @staticmethod
     def _apply_document(session: dict[str, Any], document: Mapping[str, Any]) -> None:
+        if document.get("source_artifact_id") != session.get("source_artifact_id"):
+            raise ValueError("Không thể áp dụng document làm thay đổi ảnh nguồn immutable của Studio.")
+        layers = document.get("layers")
+        if not isinstance(layers, list):
+            raise ValueError("Document Studio không có layer hợp lệ.")
+        source_layers = [layer for layer in layers if isinstance(layer, Mapping) and layer.get("kind") == "source"]
+        if len(source_layers) != 1 or source_layers[0].get("artifact_id") != session.get("source_artifact_id"):
+            raise ValueError("Document Studio không giữ layer nguồn immutable.")
         session["title"] = document["title"]
         session["project_id"] = document.get("project_id")
-        session["source_artifact_id"] = document["source_artifact_id"]
-        session["layers"] = copy_json(document["layers"])
+        session["layers"] = copy_json(layers)
         session["active_layer_id"] = document.get("active_layer_id")
 
     def _session_preview_artifact(self, document: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -513,6 +794,10 @@ class ImageMaskStudioManager:
 
     def _public_session(self, session: Mapping[str, Any], *, detail: bool = False) -> dict[str, Any]:
         source = self._artifact(str(session["source_artifact_id"]), require_image=True)
+        pending = copy_json(session.get("pending_project_attach"))
+        if isinstance(pending, dict):
+            # Intent tokens are only for the server-side two-phase bridge.
+            pending.pop("intent_id", None)
         result: dict[str, Any] = {
             "contract_version": STUDIO_CONTRACT,
             "id": session["id"],
@@ -535,7 +820,7 @@ class ImageMaskStudioManager:
             "mask_count": sum(1 for layer in session["layers"] if layer["kind"] == "mask"),
             "history": {"can_undo": bool(session["undo"]), "can_redo": bool(session["redo"]), "undo_count": len(session["undo"]), "redo_count": len(session["redo"])},
             "snapshots": [_snapshot_public(item) for item in session["snapshots"]],
-            "pending_project_attach": copy_json(session.get("pending_project_attach")),
+            "pending_project_attach": pending,
             "created_at": session["created_at"],
             "updated_at": session["updated_at"],
             "provenance": {
@@ -564,7 +849,8 @@ class ImageMaskStudioManager:
     def preflight(self) -> dict[str, Any]:
         """Return capability-specific, non-executable status truthfully."""
 
-        configured = bool(self._config().get("sam2_assist", {}).get("configured", False))
+        sam2_config = self._config().get("sam2_assist", {})
+        configured = isinstance(sam2_config, Mapping) and sam2_config.get("configured") is True
         sam2 = {
             "id": "sam2_assisted_mask",
             "title": "SAM2-assisted mask",
@@ -619,6 +905,12 @@ class ImageMaskStudioManager:
                 "sessions": sessions[: int(self._limits()["max_sessions"])],
                 "recent_sessions": recent,
                 "presets": [self._public_preset(item) for item in sorted(state["presets"].values(), key=lambda value: str(value.get("updated_at") or ""), reverse=True)[:48]],
+                "limits": {
+                    "max_sessions": int(self._limits()["max_sessions"]),
+                    "max_presets": int(self._limits()["max_presets"]),
+                    "session_count": len(state["sessions"]),
+                    "preset_count": len(state["presets"]),
+                },
                 "recovery": recovery,
                 "preflight": self.preflight(),
             }
@@ -666,6 +958,7 @@ class ImageMaskStudioManager:
                 "autosaved_at": timestamp,
                 "explicit_saved_at": timestamp,
                 "pending_project_attach": None,
+                "completed_project_attach": None,
                 "created_at": timestamp,
                 "updated_at": timestamp,
                 "last_action": "Tạo phiên không phá hủy",
@@ -684,7 +977,7 @@ class ImageMaskStudioManager:
 
         def mutate(state: dict[str, Any]) -> dict[str, Any]:
             session = self._get_session(state, session_id)
-            self._assert_base_revision(session, payload.get("base_revision"))
+            self._assert_session_editable(session, payload.get("base_revision"))
             before = _session_document(session)
             changed = False
             if "title" in payload:
@@ -715,7 +1008,7 @@ class ImageMaskStudioManager:
 
         def mutate(state: dict[str, Any]) -> dict[str, Any]:
             session = self._get_session(state, session_id)
-            self._assert_base_revision(session, payload.get("base_revision"))
+            self._assert_session_editable(session, payload.get("base_revision"))
             if len(session["layers"]) >= int(self._limits()["max_layers_per_session"]):
                 raise ValueError("Đã đạt giới hạn layer của Studio.")
             before = _session_document(session)
@@ -728,11 +1021,11 @@ class ImageMaskStudioManager:
                 artifact_id=artifact_id,
                 adjustment=payload.get("adjustment"),
                 parent_layer_id=parent_layer if kind == "generated" else None,
-                provenance={
-                    "studio_id": session_id,
-                    "source_artifact_id": session["source_artifact_id"],
-                    **(safe_json(payload.get("provenance", {})) if kind == "generated" else {}),
-                } if kind == "generated" else None,
+                provenance=self._generated_provenance(
+                    payload.get("provenance"),
+                    studio_id=session["id"],
+                    source_artifact_id=session["source_artifact_id"],
+                ) if kind == "generated" else None,
             )
             session["layers"].append(layer)
             session["active_layer_id"] = layer["id"]
@@ -750,7 +1043,7 @@ class ImageMaskStudioManager:
 
         def mutate(state: dict[str, Any]) -> dict[str, Any]:
             session = self._get_session(state, session_id)
-            self._assert_base_revision(session, payload.get("base_revision"))
+            self._assert_session_editable(session, payload.get("base_revision"))
             layer = self._find_layer(session, layer_id)
             if layer["kind"] == "source" and "artifact_id" in payload:
                 raise ValueError("Ảnh nguồn là immutable; tạo Studio mới để đổi source.")
@@ -776,7 +1069,7 @@ class ImageMaskStudioManager:
 
         def mutate(state: dict[str, Any]) -> dict[str, Any]:
             session = self._get_session(state, session_id)
-            self._assert_base_revision(session, payload.get("base_revision"))
+            self._assert_session_editable(session, payload.get("base_revision"))
             layer = self._find_layer(session, layer_id)
             if layer["kind"] == "source":
                 raise ValueError("Layer nguồn luôn giữ ở đáy stack không phá hủy.")
@@ -797,10 +1090,15 @@ class ImageMaskStudioManager:
 
         def mutate(state: dict[str, Any]) -> dict[str, Any]:
             session = self._get_session(state, session_id)
-            self._assert_base_revision(session, source.get("base_revision"))
+            self._assert_session_editable(session, source.get("base_revision"))
             layer = self._find_layer(session, layer_id)
             if layer["kind"] == "source":
                 raise ValueError("Không thể xóa layer nguồn immutable.")
+            if any(
+                item.get("kind") == "generated" and item.get("parent_layer_id") == layer["id"]
+                for item in session["layers"]
+            ):
+                raise ValueError("Không thể gỡ layer đang là parent của artifact dẫn xuất; gỡ artifact dẫn xuất trước để giữ lineage không phá hủy.")
             before = _session_document(session)
             session["layers"] = [item for item in session["layers"] if item["id"] != layer["id"]]
             if session.get("active_layer_id") == layer["id"]:
@@ -817,7 +1115,7 @@ class ImageMaskStudioManager:
 
         def mutate(state: dict[str, Any]) -> dict[str, Any]:
             session = self._get_session(state, session_id)
-            self._assert_base_revision(session, payload.get("base_revision"))
+            self._assert_session_editable(session, payload.get("base_revision"))
             layer = self._find_layer(session, layer_id, kind="mask")
             operations = layer.get("operations", [])
             if len(operations) >= int(self._limits()["max_mask_operations"]):
@@ -845,7 +1143,7 @@ class ImageMaskStudioManager:
 
         def mutate(state: dict[str, Any]) -> dict[str, Any]:
             session = self._get_session(state, session_id)
-            self._assert_base_revision(session, source.get("base_revision"))
+            self._assert_session_editable(session, source.get("base_revision"))
             if not session["undo"]:
                 raise ValueError("Không còn thao tác nào để hoàn tác.")
             current = _session_document(session)
@@ -869,7 +1167,7 @@ class ImageMaskStudioManager:
 
         def mutate(state: dict[str, Any]) -> dict[str, Any]:
             session = self._get_session(state, session_id)
-            self._assert_base_revision(session, source.get("base_revision"))
+            self._assert_session_editable(session, source.get("base_revision"))
             if not session["redo"]:
                 raise ValueError("Không còn thao tác nào để làm lại.")
             current = _session_document(session)
@@ -893,7 +1191,7 @@ class ImageMaskStudioManager:
 
         def mutate(state: dict[str, Any]) -> dict[str, Any]:
             session = self._get_session(state, session_id)
-            self._assert_base_revision(session, source.get("base_revision"))
+            self._assert_session_editable(session, source.get("base_revision"))
             session["saved_document"] = _session_document(session)
             timestamp = now_iso()
             session["explicit_saved_at"] = timestamp
@@ -912,7 +1210,7 @@ class ImageMaskStudioManager:
 
         def mutate(state: dict[str, Any]) -> dict[str, Any]:
             session = self._get_session(state, session_id)
-            self._assert_base_revision(session, source.get("base_revision"))
+            self._assert_session_editable(session, source.get("base_revision"))
             identifier = opaque_id(snapshot_id, SNAPSHOT_ID_RE, "Snapshot ID")
             snapshot = next((item for item in session["snapshots"] if item["id"] == identifier), None)
             if not isinstance(snapshot, Mapping):
@@ -1012,11 +1310,16 @@ class ImageMaskStudioManager:
         operations = source_mask.get("operations", [])
         if not isinstance(operations, list):
             raise ValueError("Danh sách thao tác mask import không hợp lệ.")
-        normalized_ops = [normalize_mask_operation(item, max_points=int(self._limits()["max_points_per_stroke"])) for item in operations[: int(self._limits()["max_mask_operations"])]]
+        if len(operations) > int(self._limits()["max_mask_operations"]):
+            raise ValueError("Mask import vượt giới hạn thao tác an toàn; không có thao tác nào bị cắt bớt.")
+        normalized_ops = [
+            normalize_mask_operation(item, max_points=int(self._limits()["max_points_per_stroke"]))
+            for item in operations
+        ]
 
         def mutate(state: dict[str, Any]) -> dict[str, Any]:
             session = self._get_session(state, session_id)
-            self._assert_base_revision(session, payload.get("base_revision"))
+            self._assert_session_editable(session, payload.get("base_revision"))
             if len(session["layers"]) >= int(self._limits()["max_layers_per_session"]):
                 raise ValueError("Đã đạt giới hạn layer của Studio.")
             before = _session_document(session)
@@ -1037,6 +1340,9 @@ class ImageMaskStudioManager:
 
         def mutate(state: dict[str, Any]) -> dict[str, Any]:
             session = self._get_session(state, session_id)
+            self._assert_session_editable(session, payload.get("base_revision"))
+            if len(state["presets"]) >= int(self._limits()["max_presets"]):
+                raise ValueError("Đã đạt giới hạn preset Image & Mask Studio cục bộ.")
             title = safe_text(payload.get("title") or f"{session['title']} preset", "Tên preset", maximum=120)
             layers = [layer_summary(layer) for layer in session["layers"] if layer["kind"] != "source"]
             preset_id = new_id("maskpreset")
@@ -1060,17 +1366,39 @@ class ImageMaskStudioManager:
 
         def mutate(state: dict[str, Any]) -> dict[str, Any]:
             session = self._get_session(state, session_id)
-            self._assert_base_revision(session, source.get("base_revision"))
+            self._assert_session_editable(session, source.get("base_revision"))
             preset = state["presets"].get(opaque_id(preset_id, PRESET_ID_RE, "Preset ID"))
             if not isinstance(preset, Mapping):
                 raise KeyError(preset_id)
             copied_layers: list[dict[str, Any]] = []
+            old_to_new: dict[str, str] = {}
             for raw in preset.get("layers", []):
                 layer = self._normalize_loaded_layer(raw)
+                old_id = layer["id"]
+                if old_id in old_to_new:
+                    raise ValueError("Preset có Layer ID bị trùng.")
+                artifact_id = layer.get("artifact_id")
+                if isinstance(artifact_id, str):
+                    self._require_image_artifact(artifact_id, "Artifact của preset")
                 layer["id"] = new_id("layer")
-                if layer["kind"] == "generated" and layer.get("parent_layer_id") not in {item["id"] for item in session["layers"]}:
-                    layer.pop("parent_layer_id", None)
+                old_to_new[old_id] = layer["id"]
                 copied_layers.append(layer)
+            existing_layer_ids = {item["id"] for item in session["layers"]}
+            for layer in copied_layers:
+                if layer["kind"] != "generated":
+                    continue
+                parent_layer_id = layer.get("parent_layer_id")
+                if parent_layer_id in old_to_new:
+                    layer["parent_layer_id"] = old_to_new[parent_layer_id]
+                elif parent_layer_id not in existing_layer_ids:
+                    layer.pop("parent_layer_id", None)
+                layer["provenance"] = self._generated_provenance(
+                    layer.get("provenance"),
+                    studio_id=session["id"],
+                    source_artifact_id=session["source_artifact_id"],
+                    persisted=True,
+                )
+            self._validate_layer_parentage([*session["layers"], *copied_layers])
             if len(session["layers"]) + len(copied_layers) > int(self._limits()["max_layers_per_session"]):
                 raise ValueError("Preset vượt giới hạn layer của Studio đích.")
             before = _session_document(session)
@@ -1103,27 +1431,80 @@ class ImageMaskStudioManager:
                 artifact_id = layer.get("artifact_id")
                 if isinstance(artifact_id, str):
                     allowed.add(artifact_id)
-            artifact_ids = [normalize_artifact_id(item) for item in requested] if isinstance(requested, list) else sorted(allowed)
+            artifact_ids = list(dict.fromkeys(normalize_artifact_id(item) for item in requested)) if isinstance(requested, list) else sorted(allowed)
+            if session["source_artifact_id"] not in artifact_ids:
+                artifact_ids.insert(0, session["source_artifact_id"])
             if not artifact_ids or any(item not in allowed for item in artifact_ids):
                 raise ValueError("Chỉ có thể liên kết artifact thuộc Studio hiện tại.")
             for artifact_id in artifact_ids:
                 self._require_image_artifact(artifact_id, "Artifact liên kết project")
+            pending = session.get("pending_project_attach")
+            if isinstance(pending, Mapping):
+                if (
+                    pending.get("project_id") == project_id
+                    and pending.get("artifacts") == artifact_ids
+                    and pending.get("revision") == session["revision"]
+                    and isinstance(pending.get("intent_id"), str)
+                    and ATTACHMENT_ID_RE.fullmatch(pending["intent_id"])
+                ):
+                    self._touch_recent(state, session_id)
+                    return {
+                        "session": self._public_session(session, detail=True),
+                        "attachment": copy_json(pending),
+                        "already_completed": False,
+                    }
+                raise ValueError("Liên kết project trước đang chờ hoàn tất; hãy thử lại cùng intent hoặc tải lại Studio trước khi đổi đích.")
+            completed = session.get("completed_project_attach")
+            if (
+                isinstance(completed, Mapping)
+                and completed.get("project_id") == project_id
+                and completed.get("artifacts") == artifact_ids
+                and completed.get("revision") == session["revision"]
+            ):
+                self._touch_recent(state, session_id)
+                return {
+                    "session": self._public_session(session, detail=True),
+                    "attachment": copy_json(completed),
+                    "already_completed": True,
+                }
+            before = _session_document(session)
             session["project_id"] = project_id
+            # Preparing an intent is a revisioned mutation even if the selected
+            # project is unchanged.  Subsequent edits are blocked until this
+            # exact token/revision has either completed or remained pending.
+            self._mark_mutation(session, before, "Chuẩn bị liên kết Studio vào project")
             session["pending_project_attach"] = {
+                "intent_id": new_id("attach"),
                 "project_id": project_id,
-                "artifacts": list(dict.fromkeys(artifact_ids)),
+                "artifacts": artifact_ids,
                 "revision": session["revision"],
                 "created_at": now_iso(),
             }
-            session["updated_at"] = now_iso()
             self._touch_recent(state, session_id)
-            return {"session": self._public_session(session, detail=True), "attachment": copy_json(session["pending_project_attach"])}
+            return {
+                "session": self._public_session(session, detail=True),
+                "attachment": copy_json(session["pending_project_attach"]),
+                "already_completed": False,
+            }
 
         result = self._mutate(mutate)
-        return {"status": "pending_project_attach", **result}
+        return {"status": "completed" if result.pop("already_completed", False) else "pending_project_attach", **result}
 
-    def complete_project_attachment(self, session_id: str, *, project_id: str, artifact_ids: list[str]) -> dict[str, Any]:
+    def complete_project_attachment(
+        self,
+        session_id: str,
+        *,
+        project_id: str,
+        artifact_ids: list[str],
+        intent_id: str,
+        expected_revision: int,
+    ) -> dict[str, Any]:
         """Mark a previously persisted attachment intent as completed."""
+
+        if not ATTACHMENT_ID_RE.fullmatch(intent_id):
+            raise ValueError("Intent liên kết project không hợp lệ.")
+        if not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision < 1:
+            raise ValueError("Revision liên kết project không hợp lệ.")
 
         def mutate(state: dict[str, Any]) -> dict[str, Any]:
             session = self._get_session(state, session_id)
@@ -1132,8 +1513,16 @@ class ImageMaskStudioManager:
                 raise ValueError("Không có liên kết project pending tương ứng.")
             if set(artifact_ids) != set(pending.get("artifacts", [])):
                 raise ValueError("Kết quả liên kết project không khớp intent đã lưu.")
+            if pending.get("intent_id") != intent_id or pending.get("revision") != expected_revision or session["revision"] != expected_revision:
+                raise StudioConflictError(int(session["revision"]))
             session["project_id"] = project_id
             session["pending_project_attach"] = None
+            session["completed_project_attach"] = {
+                "project_id": project_id,
+                "artifacts": list(pending["artifacts"]),
+                "revision": expected_revision,
+                "completed_at": now_iso(),
+            }
             session["updated_at"] = now_iso()
             session["last_action"] = "Đã liên kết artifact Studio vào project"
             self._touch_recent(state, session_id)

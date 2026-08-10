@@ -387,7 +387,7 @@ class HubHandler(BaseHTTPRequestHandler):
                 "status": "conflict",
                 "error": str(exc),
                 "current_revision": exc.current_revision,
-                "action": "Tải lại bản nháp server hoặc tạo recovery copy trước khi ghi tiếp.",
+                "action": "Tải lại bản nháp server hoặc chọn snapshot trước khi ghi tiếp.",
             })
         except KeyError:
             self._write(404, {"status": "error", "error": "Không tìm thấy phiên hoặc layer Image & Mask Studio."})
@@ -415,26 +415,66 @@ class HubHandler(BaseHTTPRequestHandler):
         if not isinstance(attachment, dict) or not isinstance(session, dict):
             self._write(500, {"status": "error", "error": "Hub không thể chuẩn bị liên kết project an toàn."})
             return
+        if prepared.get("status") == "completed":
+            self._write(200, {
+                "status": "completed",
+                "session": session,
+                "project": None,
+                "attachment": attachment,
+                "idempotent": True,
+            })
+            return
         project_id = attachment.get("project_id")
         artifact_ids = attachment.get("artifacts")
-        if not isinstance(project_id, str) or not isinstance(artifact_ids, list):
+        intent_id = attachment.get("intent_id")
+        attachment_revision = attachment.get("revision")
+        if (
+            not isinstance(project_id, str)
+            or not isinstance(artifact_ids, list)
+            or not isinstance(intent_id, str)
+            or not isinstance(attachment_revision, int)
+            or isinstance(attachment_revision, bool)
+        ):
             self._write(500, {"status": "error", "error": "Intent liên kết project không hợp lệ."})
             return
+        public_attachment = {key: value for key, value in attachment.items() if key != "intent_id"}
+        selected_ids = set(artifact_ids)
         layers = session.get("layers", [])
         mask_ids = [
             layer.get("artifact_id")
             for layer in layers
-            if isinstance(layer, dict) and layer.get("kind") == "mask" and isinstance(layer.get("artifact_id"), str)
+            if (
+                isinstance(layer, dict)
+                and layer.get("kind") == "mask"
+                and isinstance(layer.get("artifact_id"), str)
+                and layer["artifact_id"] in selected_ids
+            )
         ]
         try:
             linked = project_manager.attach_image_mask_studio_revision(project_id, {
                 "studio_id": session_id,
-                "revision": session.get("revision"),
+                "revision": attachment_revision,
                 "source_artifact_id": session.get("source_artifact_id"),
                 "artifact_ids": artifact_ids,
                 "mask_artifact_ids": mask_ids,
             })
-            completed = image_mask_studio.complete_project_attachment(session_id, project_id=project_id, artifact_ids=artifact_ids)
+            completed = image_mask_studio.complete_project_attachment(
+                session_id,
+                project_id=project_id,
+                artifact_ids=artifact_ids,
+                intent_id=intent_id,
+                expected_revision=attachment_revision,
+            )
+        except StudioConflictError as exc:
+            self._write(409, {
+                "status": "pending_project_attach",
+                "error": str(exc),
+                "session": session,
+                "attachment": public_attachment,
+                "current_revision": exc.current_revision,
+                "action": "Studio đã thay đổi; tải lại snapshot server và thử lại liên kết project từ revision hiện tại.",
+            })
+            return
         except (KeyError, ValueError) as exc:
             # The intent is already durable.  Keep it for an explicit retry
             # rather than discarding a valid Studio draft after a project-side
@@ -443,11 +483,11 @@ class HubHandler(BaseHTTPRequestHandler):
                 "status": "pending_project_attach",
                 "error": str(exc),
                 "session": session,
-                "attachment": attachment,
+                "attachment": public_attachment,
                 "action": "Khắc phục project đích rồi thử liên kết lại; Studio không mất bản nháp.",
             })
             return
-        self._write(200, {"status": "completed", "session": completed.get("session"), "project": linked.get("project"), "attachment": attachment})
+        self._write(200, {"status": "completed", "session": completed.get("session"), "project": linked.get("project"), "attachment": public_attachment})
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)

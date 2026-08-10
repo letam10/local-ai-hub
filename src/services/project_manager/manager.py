@@ -11,6 +11,7 @@ import json
 import re
 import threading
 from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,8 @@ from .schemas import (
 STATE_PATH = CONFIG_ROOT / "creative_workspace.json"
 _STATE_VERSION = 1
 _IMAGE_MASK_STUDIO_ID_RE = re.compile(r"^studio_[a-f0-9]{32}$")
+_MAX_IMAGE_MASK_LINKS_PER_ARTIFACT = 32
+_MAX_IMAGE_MASK_LINKS_PER_PROJECT = 96
 
 
 def _default_state() -> dict[str, Any]:
@@ -72,7 +75,18 @@ def _copy(value: Any) -> Any:
 
 
 def _timestamp(value: object) -> str:
-    return value if isinstance(value, str) and len(value) <= 80 else now_iso()
+    """Normalize local persisted timestamps before exposing Project metadata."""
+
+    if not isinstance(value, str) or not (1 <= len(value) <= 80):
+        return now_iso()
+    candidate = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return now_iso()
+    if parsed.tzinfo is None:
+        return now_iso()
+    return parsed.astimezone(timezone.utc).isoformat()
 
 
 class CreativeProjectManager:
@@ -119,6 +133,9 @@ class CreativeProjectManager:
                         raise ValueError
                     project = normalize_project(raw, allow_id=True)
                     project["id"] = project_id
+                    project["image_mask_studio_links"] = self._normalize_image_mask_project_links(
+                        raw.get("image_mask_studio_links", []), project["asset_ids"],
+                    )
                     project["created_at"] = _timestamp(raw.get("created_at") if isinstance(raw, Mapping) else None)
                     project["updated_at"] = _timestamp(raw.get("updated_at") if isinstance(raw, Mapping) else None)
                     project["compare_board_id"] = raw.get("compare_board_id") if isinstance(raw, Mapping) and isinstance(raw.get("compare_board_id"), str) and COMPARE_ID_RE.fullmatch(raw["compare_board_id"]) else None
@@ -280,6 +297,60 @@ class CreativeProjectManager:
         }
 
     @staticmethod
+    def _normalize_image_mask_project_links(raw: object, project_asset_ids: list[str]) -> list[dict[str, Any]]:
+        """Validate small, opaque Studio provenance records owned by a Project."""
+
+        if raw is None:
+            return []
+        if not isinstance(raw, list) or len(raw) > _MAX_IMAGE_MASK_LINKS_PER_PROJECT:
+            raise ValueError("Danh sách lineage Image & Mask Studio của Project không hợp lệ.")
+        project_assets = set(project_asset_ids)
+        links: list[dict[str, Any]] = []
+        identities: set[tuple[str, int]] = set()
+        for item in raw:
+            if not isinstance(item, Mapping):
+                raise ValueError("Record lineage Image & Mask Studio của Project không hợp lệ.")
+            studio_id = item.get("studio_id")
+            revision = item.get("revision")
+            source_id = item.get("source_artifact_id")
+            artifact_ids = item.get("artifact_ids")
+            mask_ids = item.get("mask_artifact_ids", [])
+            if (
+                not isinstance(studio_id, str)
+                or not _IMAGE_MASK_STUDIO_ID_RE.fullmatch(studio_id)
+                or not isinstance(revision, int)
+                or isinstance(revision, bool)
+                or revision < 1
+                or not is_artifact_id(source_id)
+                or not isinstance(artifact_ids, list)
+                or not artifact_ids
+                or len(artifact_ids) > MAX_ASSETS_PER_PROJECT
+                or not all(is_artifact_id(value) for value in artifact_ids)
+                or not isinstance(mask_ids, list)
+                or not all(is_artifact_id(value) for value in mask_ids)
+            ):
+                raise ValueError("Record lineage Image & Mask Studio của Project không hợp lệ.")
+            unique_artifacts = list(dict.fromkeys(artifact_ids))
+            unique_masks = list(dict.fromkeys(mask_ids))
+            if (
+                source_id not in unique_artifacts
+                or set(unique_artifacts) - project_assets
+                or set(unique_masks) - set(unique_artifacts)
+                or (studio_id, revision) in identities
+            ):
+                raise ValueError("Record lineage Image & Mask Studio của Project không khớp artifact/revision.")
+            identities.add((studio_id, revision))
+            links.append({
+                "studio_id": studio_id,
+                "revision": revision,
+                "source_artifact_id": source_id,
+                "artifact_ids": unique_artifacts,
+                "mask_artifact_ids": unique_masks,
+                "created_at": _timestamp(item.get("created_at")),
+            })
+        return links
+
+    @staticmethod
     def _touch_project(state: dict[str, Any], project_id: str) -> None:
         project = state["projects"][project_id]
         project["updated_at"] = now_iso()
@@ -302,6 +373,7 @@ class CreativeProjectManager:
             "tags": list(project.get("tags", [])),
             "asset_count": len(project.get("asset_ids", [])),
             "recipe_count": len(project.get("recipe_ids", [])),
+            "image_mask_studio_link_count": len(project.get("image_mask_studio_links", [])),
             "selected_asset_id": project.get("selected_asset_id"),
             "selected_recipe_id": project.get("selected_recipe_id"),
             "workflow_preset": project.get("workflow_preset"),
@@ -425,6 +497,7 @@ class CreativeProjectManager:
                 "project": self._public_project(project, state),
                 "assets": [self._decorate_asset(asset_id, state) for asset_id in project.get("asset_ids", [])],
                 "recipes": [self._public_recipe(state["recipes"][recipe_id]) for recipe_id in project.get("recipe_ids", []) if recipe_id in state["recipes"]],
+                "image_mask_studio_links": _copy(project.get("image_mask_studio_links", [])),
                 "compare": board,
                 "recovery": recovery,
             }
@@ -445,6 +518,7 @@ class CreativeProjectManager:
                 "created_at": timestamp,
                 "updated_at": timestamp,
                 "compare_board_id": board_id,
+                "image_mask_studio_links": [],
             }
             state["projects"][project_id] = project
             state["compare_boards"][board_id] = self._new_board(board_id, project_id)
@@ -556,14 +630,24 @@ class CreativeProjectManager:
         unique_ids = list(dict.fromkeys(str(item) for item in artifact_ids))
         if source_id not in unique_ids:
             unique_ids.insert(0, source_id)
+        unique_mask_ids = list(dict.fromkeys(str(item) for item in mask_ids))
+        if any(item not in unique_ids for item in unique_mask_ids):
+            raise ValueError("Mask artifact IDs phải thuộc đúng tập artifact Studio được liên kết.")
         if any(self._artifact(item) is None for item in unique_ids):
             raise ValueError("Một artifact Studio không còn khả dụng trong Hub.")
-        provenance = safe_json({
+        studio_link = safe_json({
             "image_mask_studio_id": studio_id,
             "image_mask_revision": revision,
             "source_artifact_id": source_id,
-            "mask_artifact_ids": list(dict.fromkeys(mask_ids)),
+            "mask_artifact_ids": unique_mask_ids,
         })
+        project_link_core = {
+            "studio_id": studio_id,
+            "revision": revision,
+            "source_artifact_id": source_id,
+            "artifact_ids": unique_ids,
+            "mask_artifact_ids": unique_mask_ids,
+        }
 
         def mutate(state: dict[str, Any]) -> dict[str, Any]:
             project = state["projects"].get(project_id)
@@ -572,9 +656,31 @@ class CreativeProjectManager:
             additions = [item for item in unique_ids if item not in project["asset_ids"]]
             if len(project["asset_ids"]) + len(additions) > MAX_ASSETS_PER_PROJECT:
                 raise ValueError("Project đã đạt giới hạn asset reference.")
+            project_links = project.get("image_mask_studio_links", [])
+            if not isinstance(project_links, list) or not all(isinstance(item, Mapping) for item in project_links):
+                raise ValueError("Danh sách lineage Image & Mask Studio của Project không hợp lệ; không thể ghi đè.")
+            same_identity = [
+                item for item in project_links
+                if item.get("studio_id") == studio_id and item.get("revision") == revision
+            ]
+            if same_identity:
+                if any(any(item.get(key) != value for key, value in project_link_core.items()) for item in same_identity):
+                    raise ValueError("Studio revision đã có lineage Project khác; không thể ghi đè provenance hiện có.")
+            else:
+                if len(project_links) >= _MAX_IMAGE_MASK_LINKS_PER_PROJECT:
+                    raise ValueError("Project đã đạt giới hạn lineage Image & Mask Studio; export hoặc archive record cũ trước khi thêm.")
+                project_links.append({**project_link_core, "created_at": now_iso()})
+                project["image_mask_studio_links"] = project_links
             for artifact_id in unique_ids:
                 if artifact_id not in project["asset_ids"]:
                     project["asset_ids"].append(artifact_id)
+                # The source can be shared by many projects/Studio sessions.
+                # Attaching it must not overwrite its global metadata or
+                # provenance.  Non-source artifacts retain one immutable
+                # parent source, while their M6 relationships are appended as
+                # bounded records instead of replacing prior provenance.
+                if artifact_id == source_id:
+                    continue
                 metadata = state["asset_metadata"].get(artifact_id, {
                     "contract_version": ASSET_CONTRACT,
                     "tags": [],
@@ -583,9 +689,24 @@ class CreativeProjectManager:
                     "recipe_id": None,
                     "provenance": {},
                 })
-                if artifact_id != source_id:
-                    metadata["parent_artifact_id"] = source_id
-                metadata["provenance"] = provenance
+                existing_parent = metadata.get("parent_artifact_id")
+                if existing_parent is not None and existing_parent != source_id:
+                    raise ValueError("Artifact dẫn xuất/mask đã có lineage từ một ảnh nguồn khác; không thể ghi đè provenance hiện có.")
+                existing_provenance = metadata.get("provenance", {})
+                if not isinstance(existing_provenance, Mapping):
+                    raise ValueError("Artifact dẫn xuất/mask có provenance cục bộ không tương thích; không thể ghi đè để liên kết Studio.")
+                provenance_copy = _copy(dict(existing_provenance))
+                existing_links = provenance_copy.get("image_mask_studio_links", [])
+                if not isinstance(existing_links, list) or not all(isinstance(item, Mapping) for item in existing_links):
+                    raise ValueError("Artifact dẫn xuất/mask có danh sách lineage Studio không hợp lệ; không thể ghi đè.")
+                links = [_copy(dict(item)) for item in existing_links]
+                if studio_link not in links:
+                    if len(links) >= _MAX_IMAGE_MASK_LINKS_PER_ARTIFACT:
+                        raise ValueError("Artifact đã đạt giới hạn lineage Studio; tạo artifact dẫn xuất mới hoặc dọn lineage có chủ đích.")
+                    links.append(studio_link)
+                provenance_copy["image_mask_studio_links"] = links
+                metadata["parent_artifact_id"] = source_id
+                metadata["provenance"] = safe_json(provenance_copy)
                 metadata["updated_at"] = now_iso()
                 state["asset_metadata"][artifact_id] = metadata
             project["selected_asset_id"] = unique_ids[-1]
@@ -593,7 +714,7 @@ class CreativeProjectManager:
             return {
                 "project": self._public_project(project, state),
                 "artifact_ids": unique_ids,
-                "provenance": provenance,
+                "provenance": studio_link,
             }
 
         result = self._mutate(mutate)
@@ -891,7 +1012,12 @@ class CreativeProjectManager:
             raise ValueError("Conflict policy phải là copy, skip hoặc replace.")
         if not isinstance(manifest, Mapping) or manifest.get("contract_version") != PROJECT_EXPORT_CONTRACT:
             raise ValueError("Project manifest không đúng contract creative-project-export.v1.")
-        normalized_project = normalize_project(manifest.get("project"), allow_id=True)
+        raw_project = manifest.get("project")
+        normalized_project = normalize_project(raw_project, allow_id=True)
+        normalized_studio_links = self._normalize_image_mask_project_links(
+            raw_project.get("image_mask_studio_links", []) if isinstance(raw_project, Mapping) else [],
+            normalized_project["asset_ids"],
+        )
         raw_recipes = manifest.get("recipes", [])
         raw_assets = manifest.get("assets", [])
         raw_board = manifest.get("compare", {})
@@ -932,6 +1058,7 @@ class CreativeProjectManager:
                 "created_at": existing_project.get("created_at", timestamp),
                 "updated_at": timestamp,
                 "compare_board_id": board_id,
+                "image_mask_studio_links": _copy(normalized_studio_links),
             }
             state["projects"][target_id] = project
             missing_asset_ids: list[str] = []
