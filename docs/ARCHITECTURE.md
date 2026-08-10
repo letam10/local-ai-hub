@@ -14,6 +14,8 @@ source canonical.
   dashboard và public response contract.
 - `src/services/node_studio/`: registry node typed, schema validator, DAG
   engine và trạng thái run/provenance trong bộ nhớ.
+- `src/services/image_mask_studio/`: session Image & Mask khai báo, bounded,
+  recovery-safe; chỉ tham chiếu Artifact Store bằng opaque ID.
 - `src/services/job_manager/`: queue, progress, cancel/resume và GPU slot;
   chỉ quản lý tiến trình do Hub tạo.
 - `src/modules/`: adapter cho ComfyUI, FFmpeg, SAM2, AnimeSR, Whisper và các
@@ -213,6 +215,127 @@ unknown public record trả `404`; route không nhận raw path hoặc command.
 
 Xem [MILESTONE_4A_CREATIVE_PROJECTS.md](MILESTONE_4A_CREATIVE_PROJECTS.md) để
 biết flow UX, import/export/recovery và ma trận kiểm thử bounded.
+
+## Milestone 6A — Image & Mask Studio ownership
+
+Image & Mask Studio là một editor **khai báo** nằm trên Artifact Store và
+Creative Project. Nó không phải image renderer, adapter inference hay job
+runner. Bất kỳ pixel mới nào phải được một công cụ đã được ủy quyền tạo và đăng
+ký trước qua Artifact Store; Studio chỉ nhận public record/opaque ID sau đó.
+
+```text
+Artifact Store (file + immutable opaque artifact ID)
+        ↑ public image record / safe URL
+ImageMaskStudioManager (session + layer/mask vector + history/snapshot)
+        ↑ validated loopback JSON, optimistic revision
+API / UI Image AI → Project Manager attachment + provenance metadata
+```
+
+### Phân chia module và dữ liệu local
+
+| Module/tệp | Sở hữu | Không sở hữu |
+| --- | --- | --- |
+| `src/services/image_mask_studio/schemas.py` | Opaque Studio/layer/snapshot/preset ID, allowlist layer/mask/adjustment, giới hạn hình học và contract | Raw path, data URL, pixel buffer, executable hoặc backend command |
+| `src/services/image_mask_studio/manager.py` | Session declarative, autosave, history, snapshot, preset, safe recovery và pending project-link intent | File artifact, copy/xóa media, rasterize mask hoặc inference |
+| `src/services/image_mask_studio/config.py` | Policy cục bộ nhỏ và các giới hạn bounded; cờ SAM2 chỉ hạ/nâng giữa `unavailable` và `partial` | Path model, URL backend, lệnh, tên model, secret hoặc cờ `operational` giả |
+| `src/services/artifact_store.py` | Artifact image canonical và public projection | State/session/layer/brush của Studio |
+| `src/services/project_manager/manager.py` | Gắn reference Studio idempotent về media/reference, provenance revision theo Project và shared-artifact lineage bounded | Pixel/canvas/state đầy đủ của Studio |
+| `src/services/api/api_server.py` | HTTP mapping, 400/404/409 path-safe response, liên kết hai bước Studio → Project | UI state hoặc filesystem/browser access trực tiếp |
+| `src/ui/image_mask_studio.js` | Pointer canvas → brush vector tọa độ chuẩn hóa, Escape hủy nét nháp | Rasterize/upload pixel hoặc gọi shell |
+| `src/ui/pages.js`, `src/ui/app.js`, `src/ui/api.js` | UI, accessibility state, form/event và loopback client | Tin tưởng raw path/manifest tự do hoặc tự submit job/model |
+
+Ba tệp local không bị lẫn ownership:
+
+| Tệp | Nội dung | Git |
+| --- | --- | --- |
+| `Config/image_mask_studio.example.json` | Template policy `image-mask-studio-config.v1`, `schema_version: 1` | Track |
+| `Config/image_mask_studio.json` | Policy máy cục bộ tùy chọn: limits và `sam2_assist.configured` | Ignore |
+| `Config/image_mask_studio_state.json` | State runtime `image-mask-studio-state.v1`: session, preset, recent index, history và snapshot | Ignore |
+
+State được ghi qua sibling `*.tmp` rồi replace nguyên tử. File state hỏng hoặc
+sai top-level contract trả `recovery_required` và chặn mutation, không tự ghi
+đè. Record session/preset/history/snapshot vượt contract hoặc giới hạn đưa Studio
+vào `recovered_partial` **chỉ đọc** để không làm mất phần state chưa thể phục hồi;
+response nêu action recovery. Policy sai chỉ fallback về default bảo thủ, không
+được dùng để biến backend chưa smoke thành operational.
+
+### Contract công khai và lineage
+
+| Contract | Mục đích | Reference được phép |
+| --- | --- | --- |
+| `image-mask-studio.v1` | Session public, revision, layer stack, history/snapshot summary và provenance | `studio_`, `layer_`, `snapshot_`, `project_`, `artifact_` opaque ID |
+| `image-mask-studio-state.v1` | State local persisted cho session/preset/recent | Chỉ JSON declarative bounded; không có pixels/path/callable |
+| `image-mask-export.v1` | Xuất/import mask layer đã validate | Source/mask artifact opaque ID, operation và Studio provenance |
+| `image-mask-preset.v1` | Layer summary có thể áp dụng lại | Layer metadata/mask operation/adjustment JSON safe |
+| `creative-asset.v1` | Project-side lineage/provenance sau khi gắn | Artifact reference, parent immutable và `image_mask_studio_links` bounded, không chứa Studio state |
+
+Layer được allowlist là `source`, `mask`, `adjustment`, `generated`. Mask chỉ
+nhận `brush`, `invert`, `feather`, `grow`, `shrink`; brush là `add` hoặc
+`subtract`, với tọa độ 0–1 và số điểm bounded. Adjustment chỉ nhận
+`brightness`, `contrast`, `saturation`, `exposure`, `temperature`, `crop` cùng
+JSON an toàn. Undo/redo, snapshot và preset lưu **mô tả** layer, không nhân bản
+media. Generated parent phải thuộc stack acyclic; Hub không gỡ parent khi child
+còn tham chiếu. Xóa layer chỉ bỏ reference Studio, không gọi Artifact Store để
+xóa file.
+
+Project link dùng một intent durable có token/revision trước, khóa mutation của
+phiên cho đến khi completion xác nhận đúng token/revision, sau đó Project Manager
+xác minh mọi artifact là opaque image artifact thuộc session và thêm reference
+idempotent về media/reference. Mỗi Project giữ record Studio ID/revision, source,
+tập artifact và chỉ mask artifact nằm trong tập đã chọn, kể cả source-only link.
+Artifact dùng chung không bị ghi đè: parent đầu tiên là immutable; link Studio
+cùng source được append bounded, còn claim source khác bị từ chối. Project không
+nhận canvas data URL, raw path hoặc manifest tùy ý. Nếu bước Project lỗi, intent
+được giữ cho một lần retry/recovery có chủ đích.
+
+### HTTP surface M6A
+
+| Route | Chức năng |
+| --- | --- |
+| `GET /api/image-mask-studio/overview`, `/preflight` | Session/preset/recovery và trạng thái capability có reason/action |
+| `GET /api/image-mask-studio/sessions/{id}` | Chi tiết layer stack của một opaque Studio ID |
+| `POST /api/image-mask-studio/sessions`, `PUT /sessions/{id}` | Tạo từ image artifact Hub; đổi title/project với `base_revision` tùy chọn |
+| `POST /sessions/{id}/layers`, `PUT /layers/{layer}` | Thêm/cập nhật layer metadata đã validate |
+| `POST /layers/{layer}/operations`, `/move`, `/remove` | Thao tác mask, đổi thứ tự hoặc gỡ reference không phá hủy |
+| `POST /sessions/{id}/undo`, `/redo`, `/save` | History bounded và explicit local save/snapshot |
+| `GET /sessions/{id}/compare`, `POST /snapshots/{snapshot}/restore` | So sánh/khôi phục metadata snapshot |
+| `GET /layers/{layer}/export`, `POST /masks/import` | Mask manifest safe export/import |
+| `POST /presets`, `/presets/{preset}/apply`, `/link-project` | Preset declarative và workflow gắn Project hai bước |
+
+Unknown opaque record trả `404`; payload/ID/schema không hợp lệ trả `400`.
+Mutation với `base_revision` cũ trả `409` kèm revision hiện tại và action tải lại
+bản nháp server trước khi ghi tiếp. API công khai không projection raw filesystem path,
+pixels, input bytes, private state path, secret hay callable runtime.
+
+### Preflight và giới hạn trung thực
+
+`local_non_destructive_layers` là `operational` vì không gọi model và chỉ ghi
+metadata/vector bounded. `sam2_assisted_mask` là `unavailable` theo mặc định;
+nếu policy local đặt `sam2_assist.configured: true`, nó chỉ lên `partial` và vẫn
+cần smoke runtime được ủy quyền. `image_inpaint` và `image_outpaint` là
+`unavailable` cho đến khi có adapter an toàn cùng smoke riêng. Mọi card phải giữ
+`status`, `reason`, `action`; không dùng sự tồn tại của cài đặt SAM2 hay Qwen
+image-to-image làm bằng chứng thay thế.
+
+Trong resource-safety override, M6A không khởi chạy/kiểm tra SAM2, inpaint,
+outpaint, ComfyUI, FFmpeg hay workload GPU/video. Evidence runtime đó là
+`deferred due GPU/resource contention`, không phải tính năng hoạt động.
+
+### Extension point và kiểm thử
+
+- Một renderer/mask engine tương lai phải có adapter và bounded functional smoke
+  riêng. Nó đăng ký output qua Artifact Store trước, rồi mới tạo `generated`
+  layer/provenance bằng opaque artifact ID; không được ghi đè source hay để UI
+  gửi path/command.
+- Import mask chỉ nhận contract/layer allowlist đã validate; export không phải là
+  ảnh PNG. Muốn trao đổi pixel, dùng Artifact Store contract riêng.
+- Test mục tiêu là `tests/test_milestone6_image_mask_studio.py`: contract
+  manager/schema, safe recovery, revision conflict, mask import/export, preset,
+  project lineage, loopback API và canvas/UI bounded. Chúng dùng fixture nhỏ,
+  không chứng minh hoặc khởi chạy inference/GPU/video.
+
+Chi tiết UX và hướng dẫn vận hành nằm ở
+[MILESTONE_6A_IMAGE_MASK_STUDIO.md](MILESTONE_6A_IMAGE_MASK_STUDIO.md).
 
 ## M4A Reliability & Large Media ownership
 

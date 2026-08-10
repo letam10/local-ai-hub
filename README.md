@@ -53,7 +53,7 @@ API chỉ bind loopback `127.0.0.1`; UI không nhận command shell, executable 
 | AnimeSR | Upload, queue, scale, chunk, cancel/resume; RIFE/Real-ESRGAN giữ `partial` khi chưa có CLI contract đã xác minh |
 | Whisper | Transcript/SRT, dịch khi backend hỗ trợ và burn subtitle qua FFmpeg ẩn |
 | Voice Studio | Qwen3-TTS, Voice Design/Clone và Seed-VC qua worker nền |
-| Image AI | Quick FLUX/Qwen qua ComfyUI API, Hub Nodes và ComfyUI Advanced nhúng trong cùng cửa sổ |
+| Image AI | Quick FLUX/Qwen qua ComfyUI API, Hub Nodes, Image & Mask Studio không phá hủy và ComfyUI Advanced nhúng trong cùng cửa sổ |
 | Media | Probe, trim, concat, resize/crop/rotate/FPS, transcode, audio/subtitle, frames và image sequence qua FFmpeg allowlist |
 | OCR | Ảnh/PDF qua PaddleOCR worker, xuất text/Markdown/JSON/tables khi backend có sẵn |
 
@@ -78,7 +78,7 @@ ComfyUI, AIRI hay tiến trình người dùng không liên quan.
 ```text
 D:\LocalAIHub\
 |- src\                 # UI, API, worker và desktop shell
-|- Config\              # chỉ file *.example.json được theo dõi Git
+|- Config\              # chỉ file *.example.json được theo dõi Git; policy/state local bị ignore
 |- runtime\             # portable applications/engines, bị Git bỏ qua
 |- Models\              # model local, bị Git bỏ qua
 |- Environments\        # Hub và environment đã migrate, bị Git bỏ qua
@@ -356,6 +356,83 @@ AnimeSR/RIFE hoặc ComfyUI video. Bằng chứng functional video tiếp tục 
 `deferred due GPU/resource contention`.
 
 Chi tiết đầy đủ: [MILESTONE_4A_CREATIVE_PROJECTS.md](docs/MILESTONE_4A_CREATIVE_PROJECTS.md).
+
+## MILESTONE 6A — Image & Mask Studio không phá hủy
+
+Image & Mask Studio là workspace con của **Image AI**, dành cho việc tổ chức
+layer, mask vector, adjustment metadata và artifact dẫn xuất đã có trong Hub.
+Nó không thay thế ảnh nguồn, không render pixel, không tự tạo PNG mask/output
+và không khởi chạy model. Canvas chỉ ghi hình học brush đã chuẩn hóa và metadata
+bounded; mọi pixel vẫn thuộc Artifact Store.
+
+```text
+Artifact ảnh Hub (opaque ID) → Studio session → layer/mask/adjustment
+                         → autosave + undo/redo + snapshot/preset
+                         → so sánh metadata / liên kết Project + provenance
+```
+
+- Tạo phiên từ một image artifact đã đăng ký; thêm source, mask, adjustment
+  hoặc generated layer. Gỡ layer chỉ gỡ reference Studio, không xóa artifact.
+- Brush `add`/`subtract`, `invert`, `feather`, `grow`, `shrink`, thứ tự/độ mờ/
+  visibility layer và adjustment đều là thao tác khai báo không phá hủy.
+- Mỗi chỉnh sửa làm thay đổi document Studio được autosave cục bộ và tăng
+  `revision`, có undo/redo bounded, snapshot, compare trước/sau và preset để
+  áp dụng lại. Lưu preset hoặc hoàn tất pending link không thay document nên
+  không tăng revision. Ghi đồng thời dùng `base_revision`; conflict yêu cầu tải
+  lại bản nháp server trước khi ghi tiếp.
+- Mask export/import dùng manifest đã validate. Muốn có PNG mask hoặc output
+  mới, dùng một công cụ đã được ủy quyền, đăng ký/tải artifact qua Hub, rồi gắn
+  opaque artifact ID vào layer; Studio không nhận raw path, data URL hay bytes.
+- Liên kết Project idempotent về reference/media: Studio lưu pending intent có
+  token/revision trước, khóa chỉnh sửa cùng phiên cho đến khi hoàn tất/retry,
+  rồi Project Manager chỉ nhận reference artifact thuộc chính phiên và record
+  provenance revision theo từng Project; không copy media, không ghi đè lineage
+  đã có của artifact dùng chung và không thay đổi ownership Artifact Store. Lần
+  gửi lại đúng project/artifact/revision đã completed trả thành công mà không
+  tạo intent, snapshot hay revision mới.
+
+### State, policy và an toàn dữ liệu
+
+| Tệp | Vai trò | Git |
+| --- | --- | --- |
+| `Config/image_mask_studio.example.json` | Mẫu policy được track: giới hạn session/layer/history/snapshot/preset và cờ hiển thị SAM2 partial | Track |
+| `Config/image_mask_studio.json` | Policy máy cục bộ tùy chọn, copy từ example khi cần tinh chỉnh giới hạn | Ignore |
+| `Config/image_mask_studio_state.json` | Bản nháp, session, snapshot và preset runtime; Hub tự tạo/ghi nguyên tử | Ignore |
+
+Hai tệp local trên là độc lập. Không dùng policy config để lưu bản nháp và không
+commit state/pixel/model/secret. Nếu state không đọc được, sai contract hoặc có
+record/session/history/snapshot vượt contract, Hub trả `recovery_required` hoặc
+`recovered_partial` ở chế độ **chỉ đọc** và **không tự ghi đè** state cũ. Kiểm tra
+snapshot/export trước khi tạo workspace local mới hoặc nhờ quản trị viên phục hồi.
+
+### Trạng thái capability trung thực
+
+`local_non_destructive_layers` là đường metadata cục bộ đã có contract. SAM2
+chỉ là `partial` khi `sam2_assist.configured: true` và vẫn cần smoke runtime
+được ủy quyền; nếu chưa cấu hình, nó là `unavailable`. Inpaint có mask và
+outpaint luôn `unavailable` cho đến khi có adapter an toàn và smoke riêng. Trong
+resource-safety override, SAM2/inpaint/outpaint không được khởi chạy; bằng chứng
+functional GPU/video tiếp tục là `deferred due GPU/resource contention`.
+
+### Kiểm tra M6A có giới hạn
+
+```powershell
+cd D:\LocalAIHub
+node --check src\ui\image_mask_studio.js
+node --check src\ui\api.js
+node --check src\ui\app.js
+node --check src\ui\pages.js
+python -m unittest -v tests\test_milestone6_image_mask_studio.py
+python scripts\ci_validate.py
+git diff --check
+```
+
+Các kiểm tra M6A chỉ dùng JSON, artifact tổng hợp nhỏ, loopback HTTP và hợp đồng
+UI/canvas. Chúng không chứng minh SAM2, inpaint, outpaint, ComfyUI, FFmpeg hay
+bất kỳ inference/GPU/video runtime nào hoạt động.
+
+Chi tiết về contract, API, recovery, security boundary và extension point nằm ở
+[MILESTONE_6A_IMAGE_MASK_STUDIO.md](docs/MILESTONE_6A_IMAGE_MASK_STUDIO.md).
 
 ## M4A Reliability & Large Media Hardening
 

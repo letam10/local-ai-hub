@@ -1,16 +1,34 @@
-# Local configuration
+# Cấu hình cục bộ
 
 `Config/components.json`, `Config/model_registry.json`, `Config/hub_config.json`
-and `Config/local.json` are machine-local and ignored. Commit only the matching
-`*.example.json` templates. The V2 examples also include
-`Config/app.example.json` and `Config/models.example.json`.
+và `Config/local.json` là tệp theo máy và bị Git ignore. Chỉ commit các mẫu
+`*.example.json` tương ứng. Nhóm mẫu V2 còn có `Config/app.example.json` và
+`Config/models.example.json`.
 
-For Windows launchers, copy `Config/local.env.example.cmd` to the ignored
-`Config/local.env.cmd` and fill in only local filesystem paths. Do not put
-tokens, passwords or API keys in either file. `Config/` is the canonical case
-on Windows; do not create a parallel lowercase config directory.
+Với launcher Windows, sao chép `Config/local.env.example.cmd` thành
+`Config/local.env.cmd` (bị ignore) rồi chỉ điền các path local cần thiết. Không
+đặt token, mật khẩu hay API key vào một trong hai tệp. `Config/` là cách viết
+chuẩn trên Windows; không tạo thêm thư mục config viết thường song song.
 
-Use environment variables or the local configuration to provide paths for
-external installations, for example `SAM2_HOME`, `ANIMESR_HOME`,
-`WHISPER_HOME`, `FFMPEG_PATH`, `FFPROBE_PATH`, `AIRI_EXECUTABLE` and
-`LOCAL_AI_HOME`. Never put secrets or absolute personal paths in tracked files.
+## Image & Mask Studio M6A
+
+M6A tách policy khỏi state runtime để policy không thể ghi đè bản nháp:
+
+| Tệp | Mục đích | Git |
+| --- | --- | --- |
+| `Config/image_mask_studio.example.json` | Mẫu `image-mask-studio-config.v1` có limits (gồm preset) và `sam2_assist.configured` | Track |
+| `Config/image_mask_studio.json` | Policy máy cục bộ tùy chọn; có thể copy từ example để chỉnh giới hạn bounded | Ignore |
+| `Config/image_mask_studio_state.json` | Session/autosave/snapshot/preset runtime `image-mask-studio-state.v1`; do Hub quản lý | Ignore |
+
+`image_mask_studio.json` không chứa path model, backend URL, lệnh, tên model,
+pixel, prompt cá nhân hay secret. Chỉ JSON boolean thật `true` mới cho phép UI
+hiển thị SAM2 là `partial`; chuỗi như `"false"` vẫn bị coi là chưa cấu hình và
+không chứng minh hoặc ép backend thành
+`operational`. `image_mask_studio_state.json` không phải file cấu hình để copy
+hoặc commit; không sửa tay khi Hub đang chạy. Nếu state hỏng, Hub sẽ báo
+`recovery_required` hoặc `recovered_partial` chỉ đọc và không tự ghi đè tệp đó.
+
+Dùng biến môi trường hoặc cấu hình local cho path các cài đặt ngoài, ví dụ
+`SAM2_HOME`, `ANIMESR_HOME`, `WHISPER_HOME`, `FFMPEG_PATH`, `FFPROBE_PATH`,
+`AIRI_EXECUTABLE` và `LOCAL_AI_HOME`. Không bao giờ đặt secret hoặc absolute
+personal path trong tệp được track.
