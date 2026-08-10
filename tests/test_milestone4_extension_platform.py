@@ -12,6 +12,7 @@ from src.shared.schemas.extension_manifest import (
     validate_extension_manifest,
     version_satisfies,
 )
+from src.services.capability_planner import CardValidationError, plan_resources, validate_model_card, validate_runtime_card
 
 
 def valid_manifest() -> dict:
@@ -82,6 +83,81 @@ class ExtensionManifestSchemaTests(unittest.TestCase):
         self.assertFalse(version_satisfies("4.2.1", "latest"))
 
 
+def valid_model_card() -> dict:
+    return {
+        "schema_version": "model-card.v1",
+        "id": "metadata-embedder",
+        "display_name": "Metadata Embedder",
+        "version": "1.0.0",
+        "lineage": ["Local AI Hub sample metadata descriptor"],
+        "license": "MIT",
+        "source": "https://example.invalid/local-ai-hub/models/metadata-embedder",
+        "intended_use": ["Illustrate static capability-pack model metadata."],
+        "limitations": ["This is documentation only and is not an installed model."],
+        "compatibility": {"platforms": ["windows"], "required_components": [], "required_models": []},
+    }
+
+
+class CapabilityPlannerTests(unittest.TestCase):
+    def test_model_and_runtime_cards_reject_machine_paths_and_keep_lineage(self) -> None:
+        card = validate_model_card(valid_model_card())
+        self.assertEqual(card["lineage"], ["Local AI Hub sample metadata descriptor"])
+        unsafe = valid_model_card()
+        unsafe["local_path"] = r"D:\\private\\model.bin"
+        with self.assertRaises(CardValidationError):
+            validate_model_card(unsafe)
+
+        runtime = {
+            **valid_model_card(),
+            "schema_version": "runtime-card.v1",
+            "id": "metadata-runtime",
+            "runtime_kind": "adapter",
+            "capabilities": ["metadata_catalog"],
+        }
+        self.assertEqual(validate_runtime_card(runtime)["runtime_kind"], "adapter")
+
+    def test_resource_plan_is_dry_run_and_detects_mutual_exclusion(self) -> None:
+        first = valid_manifest()
+        first["id"] = "gpu-catalog-a"
+        first["resource_profile"] = {
+            "cpu": {"class": "moderate", "threads": 2},
+            "gpu": {"required": True, "vendor": "nvidia", "device_class": "discrete"},
+            "vram_gb": 4,
+            "ram_gb": 2,
+            "disk_gb": 1,
+            "exclusive_resource_groups": ["gpu:primary"],
+        }
+        second = deepcopy(first)
+        second["id"] = "gpu-catalog-b"
+        result = plan_resources(
+            [first, second],
+            hardware={
+                "cpu_threads": 8,
+                "ram_gb": 16,
+                "disk_gb": 100,
+                "gpus": [{"id": "rtx4060", "vendor": "nvidia", "device_class": "discrete", "vram_gb": 8}],
+            },
+        )
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["conflicts"][0]["group"], "gpu:primary")
+        self.assertNotIn("path", str(result).lower())
+
+    def test_unknown_hardware_never_claims_gpu_readiness(self) -> None:
+        value = valid_manifest()
+        value["id"] = "gpu-catalog-unknown"
+        value["resource_profile"] = {
+            "cpu": {"class": "moderate", "threads": 2},
+            "gpu": {"required": True, "vendor": "nvidia", "device_class": "discrete"},
+            "vram_gb": 4,
+            "ram_gb": 2,
+            "disk_gb": 1,
+            "exclusive_resource_groups": [],
+        }
+        result = plan_resources([value])
+        self.assertEqual(result["status"], "partial")
+        self.assertIn("hardware inventory", result["requests"][0]["additional_actions"][0])
+
+
 if __name__ == "__main__":
     unittest.main()
-
