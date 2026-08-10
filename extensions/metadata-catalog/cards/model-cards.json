@@ -1,0 +1,29 @@
+{
+  "schema_version": "model-cards.v1",
+  "cards": [
+    {
+      "schema_version": "model-card.v1",
+      "id": "metadata-embedder",
+      "display_name": "Metadata Embedder Descriptor",
+      "version": "1.0.0",
+      "lineage": [
+        "Local AI Hub static metadata sample"
+      ],
+      "license": "MIT",
+      "source": "https://github.com/local-ai-hub/local-ai-hub",
+      "intended_use": [
+        "Demonstrate model-card metadata without distributing a model."
+      ],
+      "limitations": [
+        "This card does not represent an installed or runnable model."
+      ],
+      "compatibility": {
+        "platforms": [
+          "windows"
+        ],
+        "required_components": [],
+        "required_models": []
+      }
+    }
+  ]
+}
