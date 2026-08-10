@@ -213,3 +213,62 @@ unknown public record trả `404`; route không nhận raw path hoặc command.
 
 Xem [MILESTONE_4A_CREATIVE_PROJECTS.md](MILESTONE_4A_CREATIVE_PROJECTS.md) để
 biết flow UX, import/export/recovery và ma trận kiểm thử bounded.
+
+## M4A Reliability & Large Media ownership
+
+Product release version nằm duy nhất ở `src/shared/version.py` (`4.0.0`). Nó
+được projection vào `/health`, HTTP server header và tracked component example;
+không đổi schema/contract version riêng của job, graph hoặc creative records.
+
+| Module | Sở hữu hardening | Không sở hữu |
+| --- | --- | --- |
+| `src/app/desktop_lifecycle.py` | Decision gate close, bounded cancel wait, cleanup authorization | Kill force worker hoặc lifecycle API external |
+| `src/app/tray.py` | Windows Restore/Exit notification area sau khi đăng ký thành công | Hide không có restore surface, dependency tray mới |
+| `src/app/main.py` | Own-vs-external API boundary, pywebview bridge, admission recheck, late process registration | Job runner/model runtime implementation |
+| `src/services/api/jobs.py` | Coalesced durable public jobs, interrupted recovery, hot/cold bounded history | Callable retry runner, raw input/path/resume payload |
+| `src/services/job_manager/manager.py` | Context cancel and bounded terminal wait | Force shutdown khi timeout |
+| `src/services/artifact_store.py` | Stream upload staging, SHA-256, atomic register, owned token cleanup | Client filesystem path hoặc arbitrary destination |
+| `src/services/api/api_server.py` | Artifact range/HEAD stream, Content-Length upload gate, graceful flush | Static UI stream change hoặc GPU/media execution |
+| `src/services/node_studio/engine.py` | 256-entry LRU reference cache | Artifact file deletion on eviction |
+| `src/services/node_studio/state.py` | All active + 100 terminal path-safe graph snapshots | Persistent graph/media cache |
+
+### Reliability contracts
+
+`active = queued | starting | running | cancelling`. Desktop native closing is
+vetoed when `active > 0`; only a zero-active normal close or a completed
+cancel-and-wait marks cleanup authorized. For an owned API, `POST
+/api/lifecycle/prepare-close` acquires the submission gate, rejects new work
+and rechecks durable active jobs atomically before cleanup. If the recheck sees
+work, admission reopens and the three-choice decision remains visible.
+
+The API's own startup reconciliation maps stale active durable records to
+terminal `interrupted` with a recreation action. Only current-session
+`failed`, `cancelled` and `unavailable` jobs may project `resumable=true`.
+An externally managed API is never terminated, idled or globally cancelled by
+this desktop; its active jobs still veto close so the user can return or keep
+the visible Hub in the tray.
+
+Artifact `GET` supports one RFC-style range and streams at 1 MiB; multi-range
+or invalid requests return `416` with `Content-Range: bytes */<size>`. Artifact
+IDs remain opaque and all records resolve within owned roots. `POST /api/uploads`
+requires content length, validates configured 8 GiB default/safety margin,
+streams at 4 MiB, hashes and atomic-renames inside `Temp/uploads/`; failed token
+parts are removed without touching other data.
+
+`Config/jobs.json` and `Archive/Jobs/` are ignored runtime state. The hot file
+keeps every active record and 500 newest terminal record; archival JSONL rotates
+at 16 MiB and retains at most 30 files. Progress writes are coalesced around
+500 ms; terminal/create transitions and graceful API shutdown flush immediately.
+
+ComfyUI Advanced is a partial bridge pending the manual Windows WebView
+acceptance documented in
+[MILESTONE_4A_RELIABILITY_HARDENING.md](MILESTONE_4A_RELIABILITY_HARDENING.md).
+The current resource override defers that evidence; no iframe/runtime presence
+is treated as an operational claim.
+
+`tests/windows_lifecycle_smoke.py --run` is an opt-in real Windows acceptance
+fixture. It uses a `pythonw` child, a test-owned loopback server and CPU-only
+dummy processes to prove cold start, a second external-API desktop instance,
+zero-active cleanup, background/restore, cooperative cancellation and native
+tray re-registration. It never starts the production API, probes GPU hardware
+or executes media/model work.

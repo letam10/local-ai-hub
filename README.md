@@ -356,3 +356,47 @@ AnimeSR/RIFE hoặc ComfyUI video. Bằng chứng functional video tiếp tục 
 `deferred due GPU/resource contention`.
 
 Chi tiết đầy đủ: [MILESTONE_4A_CREATIVE_PROJECTS.md](docs/MILESTONE_4A_CREATIVE_PROJECTS.md).
+
+## M4A Reliability & Large Media Hardening
+
+Batch hardening M4A bổ sung close gate an toàn cho job đang chạy, persistence
+bounded, streaming artifact/upload và cache state có giới hạn. Product version
+Hub công khai là **4.0.0**; các contract `job.v2`, `node-run.v2` và Creative
+`*.v1` vẫn giữ version độc lập.
+
+- Khi đóng desktop có active job (`queued`, `starting`, `running`,
+  `cancelling`), Hub đưa đúng ba lựa chọn: **Quay lại Hub**, **Hủy jobs và
+  thoát**, hoặc **Giữ chạy nền vào khay**. Khi WebView đang loading/chuyển
+  trang, bridge thử gửi lại rồi dùng trang lựa chọn local; nếu cả hai bề mặt
+  không thể render, thao tác đóng vẫn bị veto và cửa sổ được giữ mở an toàn.
+  Không có force-kill tự động khi timeout. Với API do shell/service khác sở
+  hữu, active job vẫn đi qua decision gate, nhưng desktop không gửi lệnh hủy,
+  shutdown hay idle-backend cleanup tới external owner.
+- Artifact download sử dụng streaming + single byte ranges/HEAD. Upload v1 bắt
+  buộc `Content-Length`, ghi 4 MiB/chunk vào `Temp/uploads/*.part`, kiểm tra
+  SHA-256/disk và atomic register. Default 8 GiB/safety margin 512 MiB nằm ở
+  [`Config/hub_config.example.json`](Config/hub_config.example.json).
+- `Config/jobs.json` local chỉ giữ active jobs + 500 terminal gần nhất;
+  terminal cũ vào `Archive/Jobs/` (đều ignored), rotate ở 16 MiB/file và giữ
+  tối đa 30 file. Restart biến active record cũ thành `interrupted` có action
+  tạo lại; chỉ `failed`, `cancelled`, `unavailable` có runner trong phiên hiện
+  tại mới hiện retry. Callable/retry payload không bao giờ persist.
+- Node cache là LRU 256; GraphRunRegistry giữ mọi active run + 100 terminal
+  mới nhất. Multi-select Hub Nodes dùng plain-click additive và có blank canvas/
+  Esc/**Bỏ chọn** để reset selection.
+- ComfyUI Advanced vẫn **partial** cho đến Windows WebView manual acceptance.
+  Trong resource override, checklist này và video smoke là `deferred due
+  GPU/resource contention`, không được diễn giải thành operational.
+
+Smoke Windows opt-in dùng `pythonw`, HTTP fixture loopback, child CPU dummy và
+tray native để xác minh cold start, instance thứ hai dùng API external, close
+zero-active, background/restore, cancel cooperative và cleanup. Nó không gọi
+`/api/bootstrap`, không khởi chạy AI/GPU/video và chỉ chạy khi port `8765`
+đang trống:
+
+```powershell
+& 'D:\LocalAIHub\Environments\hub\Scripts\python.exe' tests\windows_lifecycle_smoke.py --run
+```
+
+Xem flow, API ranges/upload, ownership, checklist ComfyUI và Windows lifecycle
+evidence tại [MILESTONE_4A_RELIABILITY_HARDENING.md](docs/MILESTONE_4A_RELIABILITY_HARDENING.md).
