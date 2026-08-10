@@ -20,6 +20,14 @@ def _safe_root(root: Path | None) -> Path:
     return (root or project_root()).resolve()
 
 
+def _capability_pack_id(extension_id: str) -> str:
+    """Keep the generated companion identifier within the shared 64-char bound."""
+
+    if len(extension_id) <= 59:
+        return f"{extension_id}-pack"
+    return f"{extension_id[:59].rstrip('-')}-pack"
+
+
 def generate_extension_scaffold(extension_id: str, *, root: Path | None = None, display_name: str | None = None) -> dict[str, Any]:
     """Create a minimal static descriptor tree under ``<root>/extensions`` only.
 
@@ -75,7 +83,7 @@ def generate_extension_scaffold(extension_id: str, *, root: Path | None = None, 
     }
     capability_pack = {
         "schema_version": "capability-pack.v1",
-        "id": f"{extension_id}-pack",
+        "id": _capability_pack_id(extension_id),
         "display_name": f"{title} capability pack",
         "description": "Declarative capability metadata only.",
         "capabilities": ["capability_pack", "metadata_catalog", "resource_planning"],
@@ -94,4 +102,3 @@ def generate_extension_scaffold(extension_id: str, *, root: Path | None = None, 
     for relative_name, contents in files.items():
         (destination / relative_name).write_text(contents, encoding="utf-8")
     return {"status": "created", "extension_id": extension_id, "files": sorted(files)}
-

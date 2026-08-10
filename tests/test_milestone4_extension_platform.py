@@ -206,9 +206,20 @@ class ExtensionPlatformTests(unittest.TestCase):
             result = generate_extension_scaffold("generated-catalog", root=root, display_name="Generated Catalog")
             self.assertEqual(result["status"], "created")
             self.assertEqual(set(result["files"]), {"README.md", "capability-pack.json", "extension.json"})
+            (root / "extensions" / "generated-catalog" / "untrusted.py").write_text("raise RuntimeError('must not run')", encoding="utf-8")
             discovery = discover_extensions(root)
         self.assertEqual(discovery["extensions"][0]["status"], "planned")
         self.assertEqual(discovery["extensions"][0]["extension_id"], "generated-catalog")
+
+    def test_generator_keeps_companion_descriptor_id_within_manifest_bounds(self) -> None:
+        extension_id = "catalog-" + "a" * 56
+        self.assertEqual(len(extension_id), 64)
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            generate_extension_scaffold(extension_id, root=root)
+            discovery = discover_extensions(root)
+        pack = discovery["extensions"][0]["descriptors"]["capability_packs"][0]
+        self.assertLessEqual(len(pack["id"]), 64)
 
 
 if __name__ == "__main__":

@@ -34,9 +34,9 @@ def _issue(code: str, message: str, *, extension_id: str | None = None) -> dict[
 
 
 def _read_json_descriptor(path: Path) -> Any:
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > _MAX_DESCRIPTOR_BYTES:
-        raise ValueError("descriptor_not_readable")
     try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > _MAX_DESCRIPTOR_BYTES:
+            raise ValueError("descriptor_not_readable")
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("descriptor_not_json") from exc
@@ -44,7 +44,13 @@ def _read_json_descriptor(path: Path) -> Any:
 
 def _resolve_descriptor(extension_dir: Path, relative_path: str) -> Path | None:
     try:
-        candidate = (extension_dir / relative_path).resolve()
+        unresolved = extension_dir / relative_path
+        current = extension_dir
+        for part in Path(relative_path).parts:
+            current = current / part
+            if current.is_symlink():
+                return None
+        candidate = unresolved.resolve()
         candidate.relative_to(extension_dir.resolve())
     except (OSError, ValueError):
         return None
@@ -300,4 +306,3 @@ class ExtensionDiscovery:
 
     def discover(self) -> dict[str, Any]:
         return discover_extensions(self._root)
-

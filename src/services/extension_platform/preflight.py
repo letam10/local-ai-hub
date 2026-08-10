@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from typing import Any, Iterable, Mapping
 
 from src.services.capability_planner.planner import plan_resources
@@ -37,7 +36,7 @@ def _inventory_index(value: Any) -> dict[str, dict[str, str]]:
 
     records: Iterable[Any]
     if isinstance(value, Mapping):
-        records = [{"id": identifier, **item} if isinstance(item, Mapping) else {"id": identifier, "status": item} for identifier, item in value.items()]
+        records = [{**item, "id": identifier} if isinstance(item, Mapping) else {"id": identifier, "status": item} for identifier, item in value.items()]
     elif isinstance(value, list):
         records = value
     else:
@@ -260,4 +259,3 @@ def preflight_extensions(
         "counts": counts,
         "resource_plan": resource_plan,
     }
-
