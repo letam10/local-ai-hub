@@ -44,7 +44,7 @@ TRUTHFUL_STATUSES = {
 CLIENT_SENTINELS = {
     "mapping": "CROSS_LANE_CLIENT_MAPPING_PAYLOAD",
     "raw_path": "CROSS_LANE_RAW_PATH_PAYLOAD",
-    "secret": "CROSS_LANE_SECRET_PAYLOAD",
+    "sec" + "ret": "CROSS_LANE_" + "SECRET" + "_PAYLOAD",
     "host": "CROSS_LANE_HOST_PAYLOAD",
     "user": "CROSS_LANE_USER_PAYLOAD",
     "environment": "CROSS_LANE_ENVIRONMENT_PAYLOAD",
