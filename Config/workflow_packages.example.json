@@ -4,6 +4,8 @@
     "enabled_package_ids": [
       "local-ai-hub.image-review"
     ],
+    "require_catalog_ready": true,
+    "require_unique_id_version": true,
     "allow_import": false,
     "allow_execution": false
   },
@@ -11,6 +13,8 @@
     "require_static_validation": true,
     "allow_network_fetch": false,
     "allow_model_download": false,
+    "allow_runtime_configuration": false,
+    "allow_preview_payload": false,
     "allow_workflow_mutation": false
   }
 }

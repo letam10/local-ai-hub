@@ -24,6 +24,61 @@
       "hub.metadata.annotate"
     ]
   },
+  "catalog_ready": true,
+  "parameters": [
+    {
+      "id": "review_mode",
+      "type": "ENUM",
+      "default": "standard",
+      "bounds": null,
+      "enum": [
+        "standard",
+        "strict"
+      ],
+      "description": "A static review-policy label for an integrating host."
+    }
+  ],
+  "requirements": {
+    "models": [
+      {
+        "id": "hub.image-inspection-model",
+        "version": "1.0.0"
+      }
+    ],
+    "runtimes": [
+      {
+        "id": "hub.typed-runtime",
+        "version": ">=1.0.0"
+      }
+    ]
+  },
+  "resource_hints": {
+    "cpu": {
+      "minimum_cores": 1,
+      "recommended_cores": 2
+    },
+    "gpu": {
+      "required": false,
+      "vendor": "none",
+      "minimum_vram_mb": 0
+    },
+    "ram": {
+      "minimum_mb": 512,
+      "recommended_mb": 1024
+    },
+    "disk": {
+      "minimum_mb": 256,
+      "recommended_mb": 512
+    },
+    "exclusive_groups": [
+      "image-review"
+    ]
+  },
+  "preview": {
+    "kind": "opaque-preview.v1",
+    "id": "image-review-preview",
+    "content_type": "metadata"
+  },
   "workflow": {
     "schema_version": "subgraph-blueprint.v1",
     "id": "image-review-flow",
