@@ -9,7 +9,7 @@ from typing import Any
 
 from src.shared.schemas.workflow_package import IDENTIFIER_RE, PACKAGE_ID_RE, SEMVER_RE, validate_evaluation_scenario
 
-from .io import safe_import_workflow_package
+from .io import _DuplicateJsonKey, _duplicate_key_guard, _non_finite_number, safe_import_workflow_package
 from .linting import lint_workflow_package
 
 
@@ -28,6 +28,11 @@ def _contained(path: Path, root: Path) -> bool:
 def _read_managed_json(path: Path) -> bytes | None:
     if path.is_symlink() or not _contained(path, MANAGED_PACKAGE_ROOT):
         return None
+    parent = path.parent
+    while parent != MANAGED_PACKAGE_ROOT:
+        if parent.is_symlink():
+            return None
+        parent = parent.parent
     try:
         return path.read_bytes()
     except OSError:
@@ -85,8 +90,8 @@ def discover_managed_packages() -> dict[str, Any]:
             errors.append({"code": "managed_scenario_refused"})
             continue
         try:
-            scenario = json.loads(payload.decode("utf-8", errors="strict"))
-        except (UnicodeDecodeError, ValueError):
+            scenario = json.loads(payload.decode("utf-8", errors="strict"), object_pairs_hook=_duplicate_key_guard, parse_constant=_non_finite_number)
+        except (_DuplicateJsonKey, UnicodeDecodeError, ValueError):
             errors.append({"code": "managed_scenario_invalid"})
             continue
         validation = validate_evaluation_scenario(scenario)
@@ -128,7 +133,13 @@ def load_managed_package(package_id: object, version: object = None) -> dict[str
             candidates.append(imported)
     if not candidates:
         return {"found": False, "status": "unavailable", "reason": "No matching managed package passed static validation.", "action": "Check the managed catalog ID and version."}
-    selected = sorted(candidates, key=lambda item: str(item["package"]["version"]))[-1]
+    def semver_key(item: dict[str, Any]) -> tuple[int, int, int, int, str]:
+        version_text = str(item["package"]["version"])
+        core, _, prerelease = version_text.partition("-")
+        major, minor, patch = (int(part) for part in core.split("."))
+        return major, minor, patch, 1 if not prerelease else 0, prerelease
+
+    selected = sorted(candidates, key=semver_key)[-1]
     return {
         "found": True,
         "status": "partial",

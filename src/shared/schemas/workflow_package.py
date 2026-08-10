@@ -59,6 +59,7 @@ _WINDOWS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _UNC_PATH_RE = re.compile(r"^(?:\\\\|//)")
 _ABSOLUTE_PATH_RE = re.compile(r"^(?:/|~[\\/])")
 _PARENT_PATH_RE = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
+_RELATIVE_PATH_RE = re.compile(r"^(?:[A-Za-z0-9._-]+[\\/])+[A-Za-z0-9._-]+$")
 _SECRET_RE = re.compile(
     r"(?:\bsk-[A-Za-z0-9_-]{12,}|\bgh[pous]_[A-Za-z0-9]{12,}|\bgithub_pat_[A-Za-z0-9_]{12,}|"
     r"\bAKIA[0-9A-Z]{12,}|\bBearer\s+[A-Za-z0-9._~+/-]{12,})",
@@ -75,6 +76,7 @@ _EMBEDDED_BINARY_RE = re.compile(
 )
 _FILE_URI_RE = re.compile(r"\bfile://", re.IGNORECASE)
 _CREDENTIAL_URL_RE = re.compile(r"https?://[^/\s:@]+:[^@\s]+@", re.IGNORECASE)
+_URL_RE = re.compile(r"\b(?:https?|ftp)://", re.IGNORECASE)
 _LONG_BLOB_RE = re.compile(r"^[A-Za-z0-9+/=_-]{512,}$")
 
 _FORBIDDEN_KEY_TOKENS = {
@@ -353,10 +355,10 @@ def _safe_text(value: object, errors: list[dict[str, str]], location: str, *, mi
         return False
     if "\x00" in value:
         _append(errors, "control_character", "NUL characters are not permitted.", location)
-    if _WINDOWS_PATH_RE.search(value) or _UNC_PATH_RE.search(value) or _ABSOLUTE_PATH_RE.search(value) or _PARENT_PATH_RE.search(value):
+    if _WINDOWS_PATH_RE.search(value) or _UNC_PATH_RE.search(value) or _ABSOLUTE_PATH_RE.search(value) or _PARENT_PATH_RE.search(value) or _RELATIVE_PATH_RE.fullmatch(value):
         _append(errors, "raw_path", "Raw filesystem paths are not permitted in workflow packages.", location)
-    if _FILE_URI_RE.search(value) or _CREDENTIAL_URL_RE.search(value):
-        _append(errors, "unsafe_uri", "Filesystem URIs and credential-bearing URLs are not permitted.", location)
+    if _FILE_URI_RE.search(value) or _CREDENTIAL_URL_RE.search(value) or _URL_RE.search(value):
+        _append(errors, "unsafe_uri", "URLs and filesystem URIs are not permitted in workflow packages.", location)
     if _SECRET_RE.search(value):
         _append(errors, "secret_detected", "Secrets and credential-like values are not permitted.", location)
     if _COMMAND_RE.search(value):
