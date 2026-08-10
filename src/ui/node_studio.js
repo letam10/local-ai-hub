@@ -65,6 +65,32 @@ export function buildRecentWorkflowOptions(index, currentId = "") {
     }));
 }
 
+// A Recipe is metadata, not an executable backend claim.  Applying it only
+// fills the corresponding editable graph properties and leaves the graph
+// unsaved until the creator explicitly confirms it.
+export function applyRecipeToGraph(graph, application = {}) {
+  const next = clone(graph) || {};
+  const settings = application.settings && typeof application.settings === "object" ? application.settings : {};
+  const prompt = String(application.prompt || "");
+  const negative = String(application.negative_prompt || "");
+  const seed = Number(application.seed);
+  for (const node of next.nodes || []) {
+    node.data ||= {};
+    if (node.type === "prompt_text") node.data.text = prompt;
+    if (["flux_generate", "qwen_image", "image_edit"].includes(node.type)) {
+      if (negative) node.data.negative_prompt = negative;
+      for (const key of ["width", "height", "steps"]) if (Number.isFinite(Number(settings[key]))) node.data[key] = Number(settings[key]);
+      if (Number.isFinite(seed)) node.data.seed = seed;
+    }
+    if (node.type === "seed" && Number.isFinite(seed)) node.data.value = seed;
+    if (node.type === "resolution") {
+      for (const key of ["width", "height"]) if (Number.isFinite(Number(settings[key]))) node.data[key] = Number(settings[key]);
+    }
+    if (node.type === "sampler_settings" && Number.isFinite(Number(settings.steps))) node.data.steps = Number(settings.steps);
+  }
+  return next;
+}
+
 function emptyGraph(scope) {
   return { schema_version: 1, id: `local-${scope}`, title: `Workflow ${scope}`, scope, nodes: [], edges: [], groups: [] };
 }
@@ -108,10 +134,14 @@ function propertyControl(node, property) {
 }
 
 class HubGraphEditor {
-  constructor(root, { showToast }) {
+  constructor(root, { showToast, recipeApplication = null, initialPresetId = null, onRecipeApplied = () => {}, onPresetApplied = () => {} }) {
     this.root = root;
     this.scope = root.dataset.scope || "image";
     this.showToast = showToast;
+    this.recipeApplication = recipeApplication;
+    this.initialPresetId = initialPresetId;
+    this.onRecipeApplied = onRecipeApplied;
+    this.onPresetApplied = onPresetApplied;
     this.registry = new Map();
     this.availability = { counts: {}, nodes: [] };
     this.presets = [];
@@ -155,10 +185,21 @@ class HubGraphEditor {
       this.workflowIndex = readWorkflowIndex(this.scope);
       this.configureLiteGraph();
       const saved = this.readLocalGraph();
-      if (saved) { this.graphData = saved; this.recovered = true; }
+      if (this.initialPresetId) {
+        await this.loadPreset(this.initialPresetId, { quiet: true, render: false });
+        this.recovered = false;
+        this.onPresetApplied(this.initialPresetId);
+      } else if (saved) { this.graphData = saved; this.recovered = true; }
       else await this.loadPreset(PRESET_BY_SCOPE[this.scope], { quiet: true, render: false });
+      if (this.recipeApplication && this.scope === "image") {
+        this.graphData = applyRecipeToGraph(this.graphData, this.recipeApplication);
+        this.recovered = false;
+        this.unsaved = true;
+        this.persist({ source: "recipe" });
+        this.onRecipeApplied(this.recipeApplication);
+      }
       this.savedFingerprint = graphFingerprint(this.graphData);
-      this.unsaved = !this.recovered;
+      this.unsaved = this.unsaved || !this.recovered;
       this.dirty = new Set(this.graphData.nodes.map((node) => node.id));
       this.renderShell();
       this.hydrateLiteGraph(this.graphData);

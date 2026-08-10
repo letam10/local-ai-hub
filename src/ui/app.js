@@ -1,17 +1,29 @@
 import {
   cancelJob,
   closeOwnedBackends,
+  createCollection,
+  createProject,
+  createRecipe,
+  addProjectAsset,
+  applyRecipe,
+  archiveProject,
+  exportProject,
+  exportRecipePack,
   formatGb,
   formatStatus,
   getBootstrap,
   getComfyAdvanced,
   getComfyBridgeWorkflow,
   getComfyBridgeWorkflows,
+  getCreativeOverview,
   getHealth,
   getJobs,
   getLifecycle,
   getModels,
   getStorage,
+  getProject,
+  importProject,
+  importRecipePack,
   launchApplication,
   openArtifact,
   resumeJob,
@@ -19,6 +31,10 @@ import {
   scanStorage,
   startComfyAdvanced,
   submitJob,
+  updateAsset,
+  updateCollection,
+  updateProject,
+  updateProjectCompare,
   uploadFile,
 } from "./api.js";
 import { disposeNodeStudios, mountNodeStudios } from "./node_studio.js";
@@ -26,6 +42,7 @@ import { NAVIGATION, renderPage } from "./pages.js";
 
 const state = {
   health: {}, components: [], tools: [], applications: [], jobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", apiStatus: "loading", apiError: "",
+  creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
 };
 const view = document.querySelector("#module-view");
 const nav = document.querySelector("#sidebar-nav");
@@ -123,7 +140,15 @@ const render = () => {
   view.innerHTML = `${renderApiState()}${renderPage(routeId(), state)}`;
   view.focus({ preventScroll: true });
   updateTopbar();
-  if (view.querySelector("[data-node-studio]")) mountNodeStudios({ showToast });
+  if (view.querySelector("[data-node-studio]")) {
+    mountNodeStudios({
+      showToast,
+      recipeApplication: state.pendingNodeRecipe,
+      initialPresetId: state.pendingGalleryPreset,
+      onRecipeApplied: () => { state.pendingNodeRecipe = null; },
+      onPresetApplied: () => { state.pendingGalleryPreset = null; },
+    });
+  }
 };
 
 const applyBootstrap = (payload) => {
@@ -150,6 +175,27 @@ const refreshFast = async ({ quiet = false } = {}) => {
   if (failed && !quiet) showToast("API đang khởi động hoặc một snapshot nhanh chưa sẵn sàng.", "warning");
 };
 
+const refreshCreative = async ({ renderView = true } = {}) => {
+  state.creativeLoading = true;
+  try {
+    const creative = await getCreativeOverview();
+    state.creative = creative || {};
+    const projects = state.creative.projects || [];
+    const selected = state.selectedProjectId && projects.some((item) => item.id === state.selectedProjectId)
+      ? state.selectedProjectId
+      : (state.creative.recent_projects || [])[0]?.id || projects.find((item) => item.status === "active")?.id || projects[0]?.id || "";
+    state.selectedProjectId = selected;
+    if (selected) {
+      try { state.creativeProject = await getProject(selected); }
+      catch { state.creativeProject = null; state.selectedProjectId = ""; }
+    } else state.creativeProject = null;
+    return state.creative;
+  } finally {
+    state.creativeLoading = false;
+    if (renderView && routeId() === "projects") render();
+  }
+};
+
 const loadRouteData = async ({ scan = false } = {}) => {
   const route = routeId();
   if (route === "models") {
@@ -167,6 +213,17 @@ const loadRouteData = async ({ scan = false } = {}) => {
     if (results[1].status === "fulfilled") state.comfyAdvanced = results[1].value;
     if (results[2].status === "fulfilled") state.comfyWorkflows = results[2].value.workflows || [];
     render();
+  }
+  if (route === "projects") {
+    if (routeLoad) return routeLoad;
+    state.creativeLoading = true;
+    render();
+    routeLoad = refreshCreative({ renderView: true }).catch((error) => {
+      state.creative = { ...state.creative, recovery: { status: "recovery_required", reason: error.message || "Không thể tải Creative Workspace.", action: "Kiểm tra API Hub rồi thử lại." } };
+      showToast(error.message || "Không thể tải Creative Workspace.", "error");
+      if (routeId() === "projects") render();
+    }).finally(() => { routeLoad = null; });
+    return routeLoad;
   }
   return undefined;
 };
@@ -277,12 +334,115 @@ const renderFilePreview = (input) => {
   }
 };
 
+const splitTags = (value) => String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+const numberOr = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+const downloadJson = (name, value) => {
+  const blob = new Blob([JSON.stringify(value, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url; link.download = name; link.hidden = true;
+  document.body.append(link); link.click(); link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+};
+
+const recipeVariables = (raw) => String(raw || "").split(";").map((entry) => entry.trim()).filter(Boolean).map((entry) => {
+  const [name = "", label = name, fallback = "", required = ""] = entry.split("|").map((part) => part.trim());
+  return { name, label: label || name, default: fallback, required: required.toLowerCase() === "required" };
+});
+
+const handleCreativeForm = async (form) => {
+  const kind = form.dataset.creativeForm;
+  const values = Object.fromEntries(new FormData(form).entries());
+  if (kind === "asset-filter") {
+    state.assetFilters = { query: String(values.query || ""), tag: String(values.tag || "").trim().toLowerCase(), collection: String(values.collection || ""), favorite: values.favorite === "on" };
+    render();
+    return "Đã áp dụng bộ lọc Asset Library.";
+  }
+  if (kind === "gallery-filter") {
+    state.galleryFilters = { query: String(values.query || ""), category: String(values.category || "") };
+    render();
+    return "Đã áp dụng bộ lọc template.";
+  }
+  let result;
+  if (kind === "create-project") {
+    result = await createProject({ title: values.title, description: values.description || "", tags: splitTags(values.tags) });
+    state.selectedProjectId = result.project?.id || "";
+  } else if (kind === "rename-project") {
+    result = await updateProject(form.dataset.projectId, { title: values.title, description: values.description || "", tags: splitTags(values.tags), workflow_preset: values.workflow_preset || null });
+  } else if (kind === "import-project") {
+    result = await importProject({ manifest: JSON.parse(String(values.manifest || "{}")), conflict: values.conflict || "copy" });
+    state.selectedProjectId = result.project?.id || state.selectedProjectId;
+  } else if (kind === "asset-tags") {
+    result = await updateAsset(form.dataset.assetId, { tags: splitTags(values.tags) });
+  } else if (kind === "asset-collection") {
+    const collection = (state.creative.collections || []).find((item) => item.id === values.collection_id);
+    if (!collection) throw new Error("Chọn collection hợp lệ trước khi thêm asset.");
+    result = await updateCollection(collection.id, { asset_ids: [...new Set([...(collection.asset_ids || []), form.dataset.assetId])] });
+  } else if (kind === "create-collection") {
+    result = await createCollection({ title: values.title, tags: splitTags(values.tags), asset_ids: [] });
+  } else if (kind === "create-recipe") {
+    result = await createRecipe({
+      title: values.title,
+      prompt_template: values.prompt_template || "",
+      variables: recipeVariables(values.variables),
+      style_block: values.style_block || "",
+      negative_block: values.negative_block || "",
+      model: values.model || "flux",
+      seed: Math.max(0, Math.trunc(numberOr(values.seed, 42))),
+      settings: { width: Math.max(256, Math.trunc(numberOr(values.width, 768))), height: Math.max(256, Math.trunc(numberOr(values.height, 768))), steps: Math.max(1, Math.trunc(numberOr(values.steps, 20))) },
+      workflow_preset: values.workflow_preset || null,
+      project_id: values.project_id || null,
+      tags: splitTags(values.tags),
+    });
+  } else if (kind === "import-recipe-pack") {
+    result = await importRecipePack({ pack: JSON.parse(String(values.pack || "{}")), conflict: values.conflict || "copy" });
+  } else if (kind === "compare-add") {
+    if (!values.artifact_id) throw new Error("Project chưa có artifact để đưa vào Compare Board.");
+    result = await updateProjectCompare(form.dataset.projectId, { artifact_id: values.artifact_id, label: values.label || values.artifact_id });
+  } else if (kind === "apply-recipe") {
+    const recipeId = form.dataset.recipeId;
+    const recipeValues = {};
+    for (const [key, value] of Object.entries(values)) if (key.startsWith("variable_")) recipeValues[key.slice("variable_".length)] = value;
+    result = await applyRecipe(recipeId, { project_id: state.selectedProjectId || undefined, values: recipeValues });
+    state.pendingRecipeName = result.recipe?.title || "Recipe";
+    if (values.target === "nodes") {
+      state.pendingNodeRecipe = result.node_studio;
+      state.workspaceTabs.image = "nodes";
+    } else {
+      state.pendingQuickRecipe = result.quick;
+      state.workspaceTabs.image = "quick";
+    }
+    window.location.hash = "#/image";
+    return `Đã áp dụng ${state.pendingRecipeName}.`;
+  } else {
+    throw new Error("Creative form không được nhận diện.");
+  }
+  await refreshCreative({ renderView: false });
+  render();
+  return result?.project?.title ? `Đã cập nhật ${result.project.title}.` : "Đã lưu Creative Workspace local.";
+};
+
 document.addEventListener("change", (event) => {
   const input = event.target.closest("input[type=file][data-asset-key]");
   if (input) renderFilePreview(input);
+  const projectSelect = event.target.closest("[data-project-select]");
+  if (projectSelect) {
+    state.selectedProjectId = projectSelect.value || "";
+    refreshCreative().catch((error) => showToast(error.message, "error"));
+  }
 });
 
 document.addEventListener("submit", async (event) => {
+  const creativeForm = event.target.closest("form[data-creative-form]");
+  if (creativeForm) {
+    event.preventDefault();
+    const submit = creativeForm.querySelector("button[type=submit]"); if (submit) submit.disabled = true;
+    inlineResult(creativeForm, "Đang kiểm tra dữ liệu local an toàn…");
+    try { showToast(await handleCreativeForm(creativeForm), "success"); }
+    catch (error) { inlineResult(creativeForm, error.message, "error"); showToast(error.message, "error"); }
+    finally { if (submit) submit.disabled = false; }
+    return;
+  }
   const form = event.target.closest("form[data-job-form]");
   if (!form) return;
   event.preventDefault();
@@ -308,6 +468,101 @@ document.addEventListener("click", async (event) => {
   if (event.target.closest("[data-refresh-api]")) { await initialize(); return; }
   const route = event.target.closest("[data-route]");
   if (route) { sidebar?.classList.remove("is-open"); sidebarToggle?.setAttribute("aria-expanded", "false"); window.location.hash = `#/${route.dataset.route}`; return; }
+  if (event.target.closest("[data-refresh-creative]")) {
+    try { await refreshCreative(); showToast("Đã làm mới Creative Workspace."); }
+    catch (error) { showToast(error.message, "error"); }
+    return;
+  }
+  const creativeTab = event.target.closest("[data-creative-tab]");
+  if (creativeTab) { state.creativeTab = creativeTab.dataset.creativeTab || "projects"; render(); return; }
+  const projectOpen = event.target.closest("[data-project-open]");
+  if (projectOpen) {
+    state.selectedProjectId = projectOpen.dataset.projectOpen || "";
+    try { await refreshCreative(); } catch (error) { showToast(error.message, "error"); }
+    return;
+  }
+  const projectArchive = event.target.closest("[data-project-archive]");
+  if (projectArchive) {
+    projectArchive.disabled = true;
+    try { await archiveProject(projectArchive.dataset.projectArchive, true); await refreshCreative(); showToast("Đã archive project; artifact gốc không bị xóa."); }
+    catch (error) { showToast(error.message, "error"); projectArchive.disabled = false; }
+    return;
+  }
+  const projectRestore = event.target.closest("[data-project-restore]");
+  if (projectRestore) {
+    projectRestore.disabled = true;
+    try { await archiveProject(projectRestore.dataset.projectRestore, false); state.selectedProjectId = projectRestore.dataset.projectRestore || ""; await refreshCreative(); showToast("Đã khôi phục project."); }
+    catch (error) { showToast(error.message, "error"); projectRestore.disabled = false; }
+    return;
+  }
+  const exportProjectButton = event.target.closest("[data-export-project]");
+  if (exportProjectButton) {
+    exportProjectButton.disabled = true;
+    try {
+      const result = await exportProject(exportProjectButton.dataset.exportProject);
+      downloadJson("local-ai-hub-project-manifest.json", result.manifest);
+      showToast("Đã export manifest project an toàn.", "success");
+    } catch (error) { showToast(error.message, "error"); }
+    finally { exportProjectButton.disabled = false; }
+    return;
+  }
+  const exportPack = event.target.closest("[data-export-recipe-pack]");
+  if (exportPack) {
+    exportPack.disabled = true;
+    try { const result = await exportRecipePack(); downloadJson("local-ai-hub-recipe-pack.json", result.pack); showToast("Đã export Recipe Pack an toàn.", "success"); }
+    catch (error) { showToast(error.message, "error"); }
+    finally { exportPack.disabled = false; }
+    return;
+  }
+  const attachAsset = event.target.closest("[data-attach-asset]");
+  if (attachAsset) {
+    const projectId = state.selectedProjectId;
+    if (!projectId) { showToast("Chọn project trước khi thêm asset.", "warning"); return; }
+    attachAsset.disabled = true;
+    try { await addProjectAsset(projectId, { artifact_id: attachAsset.dataset.attachAsset }); await refreshCreative(); showToast("Đã tham chiếu artifact vào project; file gốc không bị sao chép.", "success"); }
+    catch (error) { showToast(error.message, "error"); attachAsset.disabled = false; }
+    return;
+  }
+  const favoriteAsset = event.target.closest("[data-asset-favorite]");
+  if (favoriteAsset) {
+    favoriteAsset.disabled = true;
+    try { await updateAsset(favoriteAsset.dataset.assetFavorite, { favorite: favoriteAsset.dataset.nextFavorite === "true" }); await refreshCreative(); showToast("Đã cập nhật favorite asset.", "success"); }
+    catch (error) { showToast(error.message, "error"); favoriteAsset.disabled = false; }
+    return;
+  }
+  const compareSelect = event.target.closest("[data-compare-select], [data-compare-favorite]");
+  if (compareSelect) {
+    compareSelect.disabled = true;
+    try {
+      await updateProjectCompare(compareSelect.dataset.projectId, { selected_artifact_id: compareSelect.dataset.compareSelect || compareSelect.dataset.compareFavorite, favorite_selected: Boolean(compareSelect.dataset.compareFavorite) });
+      await refreshCreative(); showToast(compareSelect.dataset.compareFavorite ? "Đã chọn và favorite artifact." : "Đã chọn artifact trên Compare Board.", "success");
+    } catch (error) { showToast(error.message, "error"); compareSelect.disabled = false; }
+    return;
+  }
+  const applyQuick = event.target.closest("[data-apply-recipe-quick]");
+  const applyNodes = event.target.closest("[data-apply-recipe-nodes]");
+  if (applyQuick || applyNodes) {
+    const button = applyQuick || applyNodes;
+    button.disabled = true;
+    try {
+      const result = await applyRecipe(button.dataset.applyRecipeQuick || button.dataset.applyRecipeNodes, { project_id: state.selectedProjectId || undefined });
+      state.pendingRecipeName = result.recipe?.title || "Recipe";
+      if (applyNodes) { state.pendingNodeRecipe = result.node_studio; state.workspaceTabs.image = "nodes"; }
+      else { state.pendingQuickRecipe = result.quick; state.workspaceTabs.image = "quick"; }
+      window.location.hash = "#/image";
+      showToast(`Đã áp dụng ${state.pendingRecipeName}; bạn có thể chỉnh trước khi tạo job.`, "success");
+    } catch (error) { showToast(error.message, "error"); button.disabled = false; }
+    return;
+  }
+  const galleryUse = event.target.closest("[data-gallery-use]");
+  if (galleryUse) {
+    state.pendingGalleryPreset = galleryUse.dataset.galleryUse || null;
+    const scope = ["image", "media", "sam2", "animesr"].includes(galleryUse.dataset.galleryScope) ? galleryUse.dataset.galleryScope : "image";
+    state.workspaceTabs[scope] = "nodes";
+    window.location.hash = `#/${scope}`;
+    showToast("Đang mở template trong Hub Nodes; trạng thái backend vẫn theo preflight.");
+    return;
+  }
   const tab = event.target.closest("[data-workspace-tab]");
   if (tab) { const [module, name] = tab.dataset.workspaceTab.split(":"); state.workspaceTabs[module] = name; render(); return; }
   const jobFilter = event.target.closest("[data-job-filter]");

@@ -58,6 +58,32 @@ export const getDirtyNodes = (graph, changedNodeIds) => request("/api/node-studi
 export const runNodeGraph = (graph, draft = false) => request("/api/node-studio/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ graph, draft }) });
 export const getNodeRun = (jobId) => request(`/api/node-studio/runs/${encodeURIComponent(jobId)}`);
 
+// Milestone 4A creative workspace: all records are local metadata and opaque
+// artifact IDs.  The client never receives filesystem paths or secret fields.
+export const getCreativeOverview = () => request("/api/creative/overview");
+export const getProjects = () => request("/api/projects");
+export const getProject = (id) => request(`/api/projects/${encodeURIComponent(id)}`);
+export const createProject = (payload) => request("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const updateProject = (id, payload) => request(`/api/projects/${encodeURIComponent(id)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const archiveProject = (id, archived = true) => request(`/api/projects/${encodeURIComponent(id)}/${archived ? "archive" : "restore"}`, { method: "POST" });
+export const addProjectAsset = (projectId, payload) => request(`/api/projects/${encodeURIComponent(projectId)}/assets`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const getProjectCompare = (projectId) => request(`/api/projects/${encodeURIComponent(projectId)}/compare`);
+export const updateProjectCompare = (projectId, payload) => request(`/api/projects/${encodeURIComponent(projectId)}/compare`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const exportProject = (projectId) => request(`/api/projects/${encodeURIComponent(projectId)}/export`);
+export const importProject = (payload) => request("/api/projects/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const getAssets = ({ query = "", tag = "", favorite = false, collection = "", project = "" } = {}) => request(`/api/assets?${new URLSearchParams({ query, tag, favorite: String(favorite), collection, project })}`);
+export const updateAsset = (id, payload) => request(`/api/assets/${encodeURIComponent(id)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const getCollections = () => request("/api/collections");
+export const createCollection = (payload) => request("/api/collections", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const updateCollection = (id, payload) => request(`/api/collections/${encodeURIComponent(id)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const getRecipes = () => request("/api/recipes");
+export const createRecipe = (payload) => request("/api/recipes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const updateRecipe = (id, payload) => request(`/api/recipes/${encodeURIComponent(id)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const applyRecipe = (id, payload = {}) => request(`/api/recipes/${encodeURIComponent(id)}/apply`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const exportRecipePack = (ids = []) => request(`/api/recipes/export-pack${ids.length ? `?${ids.map((id) => `id=${encodeURIComponent(id)}`).join("&")}` : ""}`);
+export const importRecipePack = (payload) => request("/api/recipes/import-pack", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const getWorkflowGallery = () => request("/api/workflow-gallery");
+
 export const formatGb = (bytes) => {
   const value = Number(bytes || 0) / (1024 ** 3);
   return `${value.toFixed(value >= 10 ? 1 : 2)} GB`;
