@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -21,6 +22,7 @@ from src.services.tool_smoke import record_completed
 
 
 Runner = Callable[[dict[str, Any], "JobContext"], dict[str, Any]]
+MAX_RUNNER_SPECS = 64
 
 
 def _now() -> str:
@@ -57,12 +59,41 @@ class JobContext:
         update_job(self.job_id, progress=max(0, min(100, int(value))), message=message)
 
 
+@dataclass(frozen=True)
+class RunnerSpec:
+    """Process-local retry metadata; never persisted as a callable."""
+
+    runner: Runner
+    device: str | None
+    heavy: bool
+    created_at: float
+
+
 class HubJobManager:
     def __init__(self) -> None:
         self._contexts: dict[str, JobContext] = {}
         self._runners: dict[str, Runner] = {}
+        self._runner_specs: dict[str, RunnerSpec] = {}
         self._lock = threading.RLock()
         self._heavy_slot = threading.Semaphore(1)
+
+    def _trim_runner_specs_locked(self) -> None:
+        """Bound process-local retry state while preserving active runners."""
+
+        overflow = len(self._runner_specs) - MAX_RUNNER_SPECS
+        if overflow <= 0:
+            return
+        candidates = sorted(self._runner_specs.items(), key=lambda item: item[1].created_at)
+        for job_id, _spec in candidates:
+            if overflow <= 0:
+                break
+            if job_id in self._contexts:
+                continue
+            self._runner_specs.pop(job_id, None)
+            self._runners.pop(job_id, None)
+            # Keep the public contract truthful if a terminal job is evicted.
+            update_job(job_id, resume_available=False)
+            overflow -= 1
 
     def submit(
         self,
@@ -78,6 +109,17 @@ class HubJobManager:
         with self._lock:
             self._contexts[record["id"]] = context
             self._runners[record["id"]] = runner
+            self._runner_specs[record["id"]] = RunnerSpec(
+                runner=runner,
+                device=device,
+                heavy=bool(heavy),
+                created_at=time.monotonic(),
+            )
+            self._trim_runner_specs_locked()
+        # This private flag is session-scoped and is set only after the
+        # in-process runner has been registered.
+        update_job(record["id"], resume_available=True)
+        record["resume_available"] = True
         thread = threading.Thread(
             target=self._run,
             args=(record["id"], tool, payload, runner, context, heavy),
@@ -127,6 +169,7 @@ class HubJobManager:
                 self._heavy_slot.release()
             with self._lock:
                 self._contexts.pop(job_id, None)
+                self._trim_runner_specs_locked()
 
     def cancel(self, job_id: str) -> tuple[bool, str]:
         with self._lock:
@@ -148,11 +191,14 @@ class HubJobManager:
         if record.get("status") not in {"cancelled", "failed", "unavailable"}:
             return False, "Chỉ có thể thử lại job đã hủy, thất bại hoặc chưa khả dụng."
         with self._lock:
-            runner = self._runners.get(job_id)
+            spec = self._runner_specs.get(job_id)
+            runner = spec.runner if spec else self._runners.get(job_id)
         payload = record.get("resume_data")
         if runner is None or not isinstance(payload, dict):
             return False, "Job không còn runner trong phiên Hub hiện tại; hãy tạo lại tác vụ từ workspace."
-        return True, self.submit(str(record.get("tool") or "job"), payload, runner, device=record.get("device"), heavy=True)
+        device = spec.device if spec else record.get("device")
+        heavy = spec.heavy if spec else bool(record.get("heavy", True))
+        return True, self.submit(str(record.get("tool") or "job"), payload, runner, device=device, heavy=heavy)
 
 
 job_manager = HubJobManager()

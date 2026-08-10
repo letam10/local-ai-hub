@@ -28,7 +28,16 @@ def _load() -> None:
         with JOBS_PATH.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
         if isinstance(data, dict):
-            _jobs.update({str(key): value for key, value in data.items() if isinstance(value, dict)})
+            for key, value in data.items():
+                if not isinstance(value, dict):
+                    continue
+                # Runner callables are process-local and deliberately never
+                # survive an API restart.  Reset this private flag while
+                # loading durable records so stale jobs cannot advertise a
+                # retry button in a fresh Hub session.
+                value = dict(value)
+                value["resume_available"] = False
+                _jobs[str(key)] = value
     except (OSError, json.JSONDecodeError):
         return
 
@@ -69,6 +78,7 @@ def create_job(
             "device": device,
             "error": None,
             "resume_data": resume_data if resume_data is not None else (dict(input_data) if isinstance(input_data, dict) else None),
+            "resume_available": False,
             "result": None,
             "next_action": None,
         }
@@ -117,7 +127,11 @@ def public_job(record: dict[str, Any]) -> dict[str, Any]:
         result["result"] = publicize(result["result"])
     if result.get("error"):
         result["error"] = publicize(result["error"])
-    result["resumable"] = bool(record.get("resume_data")) and record.get("status") in {"cancelled", "failed", "unavailable"}
+    terminal = record.get("status") in {"cancelled", "failed", "unavailable"}
+    resumable = bool(record.get("resume_data")) and terminal and record.get("resume_available") is True
+    result["resumable"] = resumable
+    if terminal and bool(record.get("resume_data")) and not resumable:
+        result["next_action"] = "Job thuộc phiên Hub trước hoặc runner không còn; hãy tạo lại tác vụ từ workspace."
     return result
 
 
