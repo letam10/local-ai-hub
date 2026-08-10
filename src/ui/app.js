@@ -7,8 +7,12 @@ import {
   addProjectAsset,
   applyRecipe,
   archiveProject,
+  addImageMaskLayer,
+  applyImageMaskOperation,
+  applyImageMaskPreset,
   exportProject,
   exportRecipePack,
+  exportImageMask,
   formatGb,
   formatStatus,
   getBootstrap,
@@ -16,6 +20,9 @@ import {
   getComfyBridgeWorkflow,
   getComfyBridgeWorkflows,
   getCreativeOverview,
+  getImageMaskCompare,
+  getImageMaskSession,
+  getImageMaskStudioOverview,
   getHealth,
   getJobs,
   getLifecycle,
@@ -24,25 +31,39 @@ import {
   getProject,
   importProject,
   importRecipePack,
+  importImageMask,
   launchApplication,
   openArtifact,
   resumeJob,
+  redoImageMaskSession,
+  removeImageMaskLayer,
+  restoreImageMaskSnapshot,
+  saveImageMaskSession,
   saveComfyBridgeWorkflow,
   scanStorage,
   startComfyAdvanced,
   submitJob,
   updateAsset,
+  updateImageMaskLayer,
+  updateImageMaskSession,
   updateCollection,
   updateProject,
   updateProjectCompare,
+  undoImageMaskSession,
+  moveImageMaskLayer,
+  createImageMaskSession,
+  captureImageMaskPreset,
+  linkImageMaskProject,
   uploadFile,
 } from "./api.js";
 import { disposeNodeStudios, mountNodeStudios } from "./node_studio.js";
+import { mountImageMaskCanvases } from "./image_mask_studio.js";
 import { NAVIGATION, renderPage } from "./pages.js";
 
 const state = {
   health: {}, components: [], tools: [], applications: [], jobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", apiStatus: "loading", apiError: "",
   creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
+  imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
 };
 const view = document.querySelector("#module-view");
 const nav = document.querySelector("#sidebar-nav");
@@ -56,6 +77,7 @@ const sidebarToggle = document.querySelector("#sidebar-toggle");
 const artifactPreviewLayer = document.querySelector("#artifact-preview-layer");
 let routeLoad = null;
 let desktopCloseLayer = null;
+let disposeImageMaskCanvases = () => {};
 
 const dismissDesktopClosePrompt = () => {
   desktopCloseLayer?.remove();
@@ -216,6 +238,7 @@ const updateTopbar = () => {
 
 const render = () => {
   disposeNodeStudios();
+  disposeImageMaskCanvases();
   renderNavigation();
   view.innerHTML = `${renderApiState()}${renderPage(routeId(), state)}`;
   view.focus({ preventScroll: true });
@@ -227,6 +250,22 @@ const render = () => {
       initialPresetId: state.pendingGalleryPreset,
       onRecipeApplied: () => { state.pendingNodeRecipe = null; },
       onPresetApplied: () => { state.pendingGalleryPreset = null; },
+    });
+  }
+  if (view.querySelector("[data-mask-canvas]")) {
+    disposeImageMaskCanvases = mountImageMaskCanvases(view, {
+      onStroke: async ({ studioId, layerId, mode, size, strength, points }) => {
+        const session = state.imageMaskSession?.session;
+        if (!session || session.id !== studioId) return;
+        try {
+          await applyImageMaskOperation(studioId, layerId, { base_revision: session.revision, operation: "brush", mode, size, strength, points });
+          await refreshImageMaskStudio();
+          showToast(`Đã autosave nét ${mode === "subtract" ? "trừ" : "thêm"} mask.`, "success");
+        } catch (error) {
+          showToast(error.message || "Không thể lưu nét mask.", "error");
+        }
+      },
+      onCancel: () => { /* Escape only discards the unsaved pointer draft. */ },
     });
   }
 };
@@ -276,6 +315,39 @@ const refreshCreative = async ({ renderView = true } = {}) => {
   }
 };
 
+const refreshImageMaskStudio = async ({ renderView = true, before = "", after = "" } = {}) => {
+  state.imageMaskLoading = true;
+  try {
+    const [overviewResult, creativeResult] = await Promise.allSettled([getImageMaskStudioOverview(), getCreativeOverview()]);
+    if (overviewResult.status !== "fulfilled") throw overviewResult.reason;
+    state.imageMaskStudio = overviewResult.value || {};
+    if (creativeResult.status === "fulfilled") state.creative = creativeResult.value || state.creative;
+    const sessions = state.imageMaskStudio.sessions || [];
+    const selected = state.selectedImageMaskSessionId && sessions.some((item) => item.id === state.selectedImageMaskSessionId)
+      ? state.selectedImageMaskSessionId
+      : (state.imageMaskStudio.recent_sessions || [])[0]?.id || sessions[0]?.id || "";
+    state.selectedImageMaskSessionId = selected;
+    if (!selected) {
+      state.imageMaskSession = null;
+      state.imageMaskCompare = null;
+      state.selectedImageMaskLayerId = "";
+      return state.imageMaskStudio;
+    }
+    const detail = await getImageMaskSession(selected);
+    state.imageMaskSession = detail || null;
+    const layers = detail?.session?.layers || [];
+    if (!layers.some((layer) => layer.id === state.selectedImageMaskLayerId)) {
+      state.selectedImageMaskLayerId = detail?.session?.active_layer_id || layers.at(-1)?.id || "";
+    }
+    try { state.imageMaskCompare = await getImageMaskCompare(selected, before, after); }
+    catch { state.imageMaskCompare = null; }
+    return state.imageMaskStudio;
+  } finally {
+    state.imageMaskLoading = false;
+    if (renderView && routeId() === "image" && state.workspaceTabs.image === "studio") render();
+  }
+};
+
 const loadRouteData = async ({ scan = false } = {}) => {
   const route = routeId();
   if (route === "models") {
@@ -292,6 +364,11 @@ const loadRouteData = async ({ scan = false } = {}) => {
     if (results[0].status === "fulfilled") state.lifecycle = results[0].value;
     if (results[1].status === "fulfilled") state.comfyAdvanced = results[1].value;
     if (results[2].status === "fulfilled") state.comfyWorkflows = results[2].value.workflows || [];
+    try { await refreshImageMaskStudio({ renderView: false }); }
+    catch (error) {
+      state.imageMaskStudio = { ...state.imageMaskStudio, recovery: { status: "recovery_required", reason: error.message || "Không thể tải Image & Mask Studio.", action: "Kiểm tra API Hub rồi thử lại." } };
+      if (state.workspaceTabs.image === "studio") showToast(error.message || "Không thể tải Image & Mask Studio.", "error");
+    }
     render();
   }
   if (route === "projects") {
@@ -502,6 +579,70 @@ const handleCreativeForm = async (form) => {
   return result?.project?.title ? `Đã cập nhật ${result.project.title}.` : "Đã lưu Creative Workspace local.";
 };
 
+const parseSafeObject = (value, label) => {
+  const parsed = JSON.parse(String(value || "{}"));
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error(`${label} phải là JSON object.`);
+  return parsed;
+};
+
+const activeImageMaskSession = () => state.imageMaskSession?.session || null;
+
+const handleImageMaskForm = async (form) => {
+  const kind = form.dataset.imageMaskForm;
+  const session = activeImageMaskSession();
+  let result;
+  if (kind === "create-session") {
+    const payload = await toPayload(form);
+    const sourceArtifactId = payload.source_artifact_id || payload.existing_source_artifact_id;
+    if (!sourceArtifactId) throw new Error("Chọn hoặc tải một artifact ảnh nguồn trước khi tạo Studio.");
+    result = await createImageMaskSession({ title: payload.title || "", source_artifact_id: sourceArtifactId, project_id: payload.project_id || null });
+    state.selectedImageMaskSessionId = result.session?.id || "";
+    state.selectedImageMaskLayerId = result.session?.active_layer_id || "";
+    state.pendingImageMaskSourceId = "";
+  } else if (!session) {
+    throw new Error("Chọn một phiên Image & Mask Studio trước.");
+  } else if (kind === "update-layer") {
+    const values = Object.fromEntries(new FormData(form).entries());
+    const layerId = form.dataset.layerId;
+    const payload = { base_revision: session.revision, name: values.name || "", opacity: numberOr(values.opacity, 1), visible: Boolean(form.querySelector('[name="visible"]')?.checked), active: true };
+    if ((session.layers || []).find((layer) => layer.id === layerId)?.kind === "adjustment") {
+      payload.adjustment = { kind: values.adjustment_kind || "brightness", settings: parseSafeObject(values.adjustment_settings, "Settings adjustment") };
+    }
+    result = await updateImageMaskLayer(session.id, layerId, payload);
+  } else if (kind === "add-layer") {
+    const values = await toPayload(form);
+    const payload = { base_revision: session.revision, kind: values.kind, name: values.name || "" };
+    if (values.kind === "adjustment") payload.adjustment = { kind: values.adjustment_kind || "brightness", settings: parseSafeObject(values.adjustment_settings, "Settings adjustment") };
+    if (values.layer_artifact_id) payload.artifact_id = values.layer_artifact_id;
+    if (values.kind === "generated") payload.parent_layer_id = state.selectedImageMaskLayerId || session.active_layer_id;
+    result = await addImageMaskLayer(session.id, payload);
+    state.selectedImageMaskLayerId = result.layer?.id || state.selectedImageMaskLayerId;
+  } else if (kind === "compare") {
+    const values = Object.fromEntries(new FormData(form).entries());
+    state.imageMaskCompare = await getImageMaskCompare(session.id, values.before_snapshot_id || "", values.after_snapshot_id || "");
+    render();
+    return "Đã cập nhật so sánh Trước / Sau từ snapshot Studio.";
+  } else if (kind === "restore-snapshot") {
+    const values = Object.fromEntries(new FormData(form).entries());
+    result = await restoreImageMaskSnapshot(session.id, values.snapshot_id, { base_revision: session.revision });
+  } else if (kind === "capture-preset") {
+    const values = Object.fromEntries(new FormData(form).entries());
+    result = await captureImageMaskPreset(session.id, { title: values.title || "" });
+  } else if (kind === "import-mask") {
+    const values = Object.fromEntries(new FormData(form).entries());
+    result = await importImageMask(session.id, { mask: parseSafeObject(values.manifest, "Manifest mask"), base_revision: session.revision });
+    state.selectedImageMaskLayerId = result.layer?.id || state.selectedImageMaskLayerId;
+  } else if (kind === "link-project") {
+    const values = Object.fromEntries(new FormData(form).entries());
+    if (!values.project_id) throw new Error("Chọn project trước khi liên kết artifact Studio.");
+    result = await linkImageMaskProject(session.id, { project_id: values.project_id, base_revision: session.revision });
+  } else {
+    throw new Error("Biểu mẫu Image & Mask Studio không được nhận diện.");
+  }
+  await refreshImageMaskStudio();
+  return result?.preset?.title ? `Đã lưu preset ${result.preset.title}.` : result?.layer?.name ? `Đã cập nhật layer ${result.layer.name}.` : "Đã autosave Image & Mask Studio cục bộ.";
+};
+
 document.addEventListener("change", (event) => {
   const input = event.target.closest("input[type=file][data-asset-key]");
   if (input) renderFilePreview(input);
@@ -513,6 +654,16 @@ document.addEventListener("change", (event) => {
 });
 
 document.addEventListener("submit", async (event) => {
+  const imageMaskForm = event.target.closest("form[data-image-mask-form]");
+  if (imageMaskForm) {
+    event.preventDefault();
+    const submit = imageMaskForm.querySelector("button[type=submit]"); if (submit) submit.disabled = true;
+    inlineResult(imageMaskForm, "Đang validate bản nháp Studio an toàn…");
+    try { showToast(await handleImageMaskForm(imageMaskForm), "success"); }
+    catch (error) { inlineResult(imageMaskForm, error.message, "error"); showToast(error.message, "error"); }
+    finally { if (submit) submit.disabled = false; }
+    return;
+  }
   const creativeForm = event.target.closest("form[data-creative-form]");
   if (creativeForm) {
     event.preventDefault();
@@ -551,6 +702,113 @@ document.addEventListener("click", async (event) => {
   if (event.target.closest("[data-refresh-creative]")) {
     try { await refreshCreative(); showToast("Đã làm mới Creative Workspace."); }
     catch (error) { showToast(error.message, "error"); }
+    return;
+  }
+  if (event.target.closest("[data-refresh-image-mask-studio]")) {
+    try { await refreshImageMaskStudio(); showToast("Đã làm mới Image & Mask Studio."); }
+    catch (error) { showToast(error.message, "error"); }
+    return;
+  }
+  const openImageMaskStudio = event.target.closest("[data-open-image-mask-studio]");
+  if (openImageMaskStudio) {
+    state.pendingImageMaskSourceId = openImageMaskStudio.dataset.openImageMaskStudio || "";
+    state.workspaceTabs.image = "studio";
+    window.location.hash = "#/image";
+    return;
+  }
+  const openImageMaskSession = event.target.closest("[data-image-mask-open]");
+  if (openImageMaskSession) {
+    state.selectedImageMaskSessionId = openImageMaskSession.dataset.imageMaskOpen || "";
+    state.selectedImageMaskLayerId = "";
+    try { await refreshImageMaskStudio(); }
+    catch (error) { showToast(error.message, "error"); }
+    return;
+  }
+  const imageMaskLayerSelect = event.target.closest("[data-image-mask-layer-select]");
+  if (imageMaskLayerSelect) {
+    state.selectedImageMaskLayerId = imageMaskLayerSelect.dataset.imageMaskLayerSelect || "";
+    render();
+    return;
+  }
+  const imageMaskSession = activeImageMaskSession();
+  const imageMaskLayerVisible = event.target.closest("[data-image-mask-layer-visible]");
+  if (imageMaskLayerVisible && imageMaskSession) {
+    imageMaskLayerVisible.disabled = true;
+    try {
+      await updateImageMaskLayer(imageMaskSession.id, imageMaskLayerVisible.dataset.imageMaskLayerVisible, { base_revision: imageMaskSession.revision, visible: imageMaskLayerVisible.dataset.nextVisible === "true" });
+      await refreshImageMaskStudio();
+      showToast("Đã cập nhật hiển thị layer.");
+    } catch (error) { showToast(error.message, "error"); imageMaskLayerVisible.disabled = false; }
+    return;
+  }
+  const imageMaskLayerMove = event.target.closest("[data-image-mask-layer-move]");
+  if (imageMaskLayerMove && imageMaskSession) {
+    imageMaskLayerMove.disabled = true;
+    try {
+      await moveImageMaskLayer(imageMaskSession.id, imageMaskLayerMove.dataset.imageMaskLayerMove, { base_revision: imageMaskSession.revision, direction: imageMaskLayerMove.dataset.direction });
+      await refreshImageMaskStudio();
+      showToast("Đã sắp xếp lại stack layer.");
+    } catch (error) { showToast(error.message, "error"); imageMaskLayerMove.disabled = false; }
+    return;
+  }
+  const imageMaskLayerRemove = event.target.closest("[data-image-mask-layer-remove]");
+  if (imageMaskLayerRemove && imageMaskSession) {
+    imageMaskLayerRemove.disabled = true;
+    try {
+      await removeImageMaskLayer(imageMaskSession.id, imageMaskLayerRemove.dataset.imageMaskLayerRemove, { base_revision: imageMaskSession.revision });
+      state.selectedImageMaskLayerId = "";
+      await refreshImageMaskStudio();
+      showToast("Đã gỡ layer khỏi Studio; artifact gốc không bị xóa.");
+    } catch (error) { showToast(error.message, "error"); imageMaskLayerRemove.disabled = false; }
+    return;
+  }
+  if (event.target.closest("[data-image-mask-undo]") && imageMaskSession) {
+    try { await undoImageMaskSession(imageMaskSession.id, { base_revision: imageMaskSession.revision }); await refreshImageMaskStudio(); showToast("Đã hoàn tác Studio."); }
+    catch (error) { showToast(error.message, "error"); }
+    return;
+  }
+  if (event.target.closest("[data-image-mask-redo]") && imageMaskSession) {
+    try { await redoImageMaskSession(imageMaskSession.id, { base_revision: imageMaskSession.revision }); await refreshImageMaskStudio(); showToast("Đã làm lại Studio."); }
+    catch (error) { showToast(error.message, "error"); }
+    return;
+  }
+  if (event.target.closest("[data-image-mask-save]") && imageMaskSession) {
+    try { await saveImageMaskSession(imageMaskSession.id, { base_revision: imageMaskSession.revision }); await refreshImageMaskStudio(); showToast("Đã lưu bản nháp Studio cục bộ.", "success"); }
+    catch (error) { showToast(error.message, "error"); }
+    return;
+  }
+  const imageMaskOperation = event.target.closest("[data-image-mask-operation]");
+  if (imageMaskOperation && imageMaskSession) {
+    const selectedLayer = (imageMaskSession.layers || []).find((layer) => layer.id === state.selectedImageMaskLayerId) || {};
+    if (selectedLayer.kind !== "mask") { showToast("Chọn một mask layer trước khi áp dụng thao tác.", "warning"); return; }
+    imageMaskOperation.disabled = true;
+    try {
+      const amount = numberOr(view.querySelector("[data-mask-operation-amount]")?.value, 0.08);
+      await applyImageMaskOperation(imageMaskSession.id, selectedLayer.id, { base_revision: imageMaskSession.revision, operation: imageMaskOperation.dataset.imageMaskOperation, amount });
+      await refreshImageMaskStudio();
+      showToast("Đã autosave thao tác mask non-destructive.", "success");
+    } catch (error) { showToast(error.message, "error"); imageMaskOperation.disabled = false; }
+    return;
+  }
+  const imageMaskExport = event.target.closest("[data-image-mask-export]");
+  if (imageMaskExport && imageMaskSession) {
+    imageMaskExport.disabled = true;
+    try {
+      const exported = await exportImageMask(imageMaskSession.id, imageMaskExport.dataset.imageMaskExport);
+      downloadJson("local-ai-hub-mask-manifest.json", exported.mask);
+      showToast("Đã export manifest mask an toàn; không có path hoặc pixel bí mật.", "success");
+    } catch (error) { showToast(error.message, "error"); }
+    finally { imageMaskExport.disabled = false; }
+    return;
+  }
+  if (event.target.closest("[data-image-mask-apply-preset]") && imageMaskSession) {
+    const presetId = view.querySelector("[data-image-mask-preset]")?.value;
+    if (!presetId) { showToast("Chọn preset trước khi áp dụng.", "warning"); return; }
+    try {
+      await applyImageMaskPreset(imageMaskSession.id, presetId, { base_revision: imageMaskSession.revision });
+      await refreshImageMaskStudio();
+      showToast("Đã áp dụng preset vào stack không phá hủy.", "success");
+    } catch (error) { showToast(error.message, "error"); }
     return;
   }
   const creativeTab = event.target.closest("[data-creative-tab]");
@@ -644,7 +902,15 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const tab = event.target.closest("[data-workspace-tab]");
-  if (tab) { const [module, name] = tab.dataset.workspaceTab.split(":"); state.workspaceTabs[module] = name; render(); return; }
+  if (tab) {
+    const [module, name] = tab.dataset.workspaceTab.split(":");
+    state.workspaceTabs[module] = name;
+    if (module === "image" && name === "studio") {
+      try { await refreshImageMaskStudio(); }
+      catch (error) { showToast(error.message, "error"); render(); }
+    } else render();
+    return;
+  }
   const jobFilter = event.target.closest("[data-job-filter]");
   if (jobFilter) { state.jobFilter = jobFilter.dataset.jobFilter || "all"; render(); return; }
   if (event.target.closest("#theme-toggle") || event.target.closest("[data-cycle-theme]")) { cycleTheme(); return; }
@@ -712,6 +978,23 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (event.target.closest("[data-close-backends]")) { try { const result = await closeOwnedBackends(); showToast(result.stopped?.length ? "Đã dừng backend Hub-owned rảnh." : "Không có backend Hub-owned cần dừng."); await refreshFast({ quiet: true }); } catch (error) { showToast(error.message, "error"); } }
+});
+
+document.addEventListener("keydown", async (event) => {
+  if (routeId() !== "image" || state.workspaceTabs.image !== "studio") return;
+  const target = event.target;
+  if (target?.matches?.("input, textarea, select, [contenteditable=true]")) return;
+  const session = activeImageMaskSession();
+  if (!session || !(event.ctrlKey || event.metaKey)) return;
+  if (event.key.toLowerCase() === "z" && !event.shiftKey && session.history?.can_undo) {
+    event.preventDefault();
+    try { await undoImageMaskSession(session.id, { base_revision: session.revision }); await refreshImageMaskStudio(); showToast("Hoàn tác bằng phím tắt."); }
+    catch (error) { showToast(error.message, "error"); }
+  } else if ((event.key.toLowerCase() === "y" || (event.key.toLowerCase() === "z" && event.shiftKey)) && session.history?.can_redo) {
+    event.preventDefault();
+    try { await redoImageMaskSession(session.id, { base_revision: session.revision }); await refreshImageMaskStudio(); showToast("Làm lại bằng phím tắt."); }
+    catch (error) { showToast(error.message, "error"); }
+  }
 });
 
 window.addEventListener("hashchange", async () => { render(); await loadRouteData(); });

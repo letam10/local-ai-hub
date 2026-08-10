@@ -8,6 +8,7 @@ the existing opaque artifact registry.
 from __future__ import annotations
 
 import json
+import re
 import threading
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -50,6 +51,7 @@ from .schemas import (
 
 STATE_PATH = CONFIG_ROOT / "creative_workspace.json"
 _STATE_VERSION = 1
+_IMAGE_MASK_STUDIO_ID_RE = re.compile(r"^studio_[a-f0-9]{32}$")
 
 
 def _default_state() -> dict[str, Any]:
@@ -523,6 +525,76 @@ class CreativeProjectManager:
             state["asset_metadata"][artifact_id] = metadata
             self._touch_project(state, project_id)
             return {"project": self._public_project(project, state), "asset": self._decorate_asset(artifact_id, state)}
+
+        result = self._mutate(mutate)
+        return {"status": "completed", **result}
+
+    def attach_image_mask_studio_revision(self, project_id: str, payload: object) -> dict[str, Any]:
+        """Idempotently link already-owned Studio artifacts to one project.
+
+        Image & Mask Studio writes its own small draft state.  This narrow
+        bridge deliberately receives only opaque artifact IDs and provenance
+        metadata after that draft has durably recorded a pending intent.  It
+        never receives pixels, paths, canvas data URLs or arbitrary manifests.
+        """
+
+        if not PROJECT_ID_RE.fullmatch(project_id) or not isinstance(payload, Mapping):
+            raise ValueError("Liên kết Image & Mask Studio không hợp lệ.")
+        studio_id = payload.get("studio_id")
+        if not isinstance(studio_id, str) or not _IMAGE_MASK_STUDIO_ID_RE.fullmatch(studio_id):
+            raise ValueError("Studio ID không hợp lệ.")
+        revision = payload.get("revision")
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+            raise ValueError("Revision Studio không hợp lệ.")
+        source_id = payload.get("source_artifact_id")
+        artifact_ids = payload.get("artifact_ids")
+        mask_ids = payload.get("mask_artifact_ids", [])
+        if not is_artifact_id(source_id) or not isinstance(artifact_ids, list) or not artifact_ids or not all(is_artifact_id(item) for item in artifact_ids):
+            raise ValueError("Liên kết Studio chỉ nhận artifact ID opaque hợp lệ.")
+        if not isinstance(mask_ids, list) or not all(is_artifact_id(item) for item in mask_ids):
+            raise ValueError("Mask artifact IDs không hợp lệ.")
+        unique_ids = list(dict.fromkeys(str(item) for item in artifact_ids))
+        if source_id not in unique_ids:
+            unique_ids.insert(0, source_id)
+        if any(self._artifact(item) is None for item in unique_ids):
+            raise ValueError("Một artifact Studio không còn khả dụng trong Hub.")
+        provenance = safe_json({
+            "image_mask_studio_id": studio_id,
+            "image_mask_revision": revision,
+            "source_artifact_id": source_id,
+            "mask_artifact_ids": list(dict.fromkeys(mask_ids)),
+        })
+
+        def mutate(state: dict[str, Any]) -> dict[str, Any]:
+            project = state["projects"].get(project_id)
+            if project is None:
+                raise KeyError(project_id)
+            additions = [item for item in unique_ids if item not in project["asset_ids"]]
+            if len(project["asset_ids"]) + len(additions) > MAX_ASSETS_PER_PROJECT:
+                raise ValueError("Project đã đạt giới hạn asset reference.")
+            for artifact_id in unique_ids:
+                if artifact_id not in project["asset_ids"]:
+                    project["asset_ids"].append(artifact_id)
+                metadata = state["asset_metadata"].get(artifact_id, {
+                    "contract_version": ASSET_CONTRACT,
+                    "tags": [],
+                    "favorite": False,
+                    "parent_artifact_id": None,
+                    "recipe_id": None,
+                    "provenance": {},
+                })
+                if artifact_id != source_id:
+                    metadata["parent_artifact_id"] = source_id
+                metadata["provenance"] = provenance
+                metadata["updated_at"] = now_iso()
+                state["asset_metadata"][artifact_id] = metadata
+            project["selected_asset_id"] = unique_ids[-1]
+            self._touch_project(state, project_id)
+            return {
+                "project": self._public_project(project, state),
+                "artifact_ids": unique_ids,
+                "provenance": provenance,
+            }
 
         result = self._mutate(mutate)
         return {"status": "completed", **result}

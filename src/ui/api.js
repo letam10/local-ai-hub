@@ -84,6 +84,29 @@ export const exportRecipePack = (ids = []) => request(`/api/recipes/export-pack$
 export const importRecipePack = (payload) => request("/api/recipes/import-pack", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
 export const getWorkflowGallery = () => request("/api/workflow-gallery");
 
+// Image & Mask Studio is a declarative local editor.  Its public API carries
+// opaque artifact/session IDs only; pixels remain in the Artifact Store.
+export const getImageMaskStudioOverview = (projectId = "") => request(`/api/image-mask-studio/overview${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`);
+export const getImageMaskStudioPreflight = () => request("/api/image-mask-studio/preflight");
+export const getImageMaskSession = (id) => request(`/api/image-mask-studio/sessions/${encodeURIComponent(id)}`);
+export const createImageMaskSession = (payload) => request("/api/image-mask-studio/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const updateImageMaskSession = (id, payload) => request(`/api/image-mask-studio/sessions/${encodeURIComponent(id)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const addImageMaskLayer = (id, payload) => request(`/api/image-mask-studio/sessions/${encodeURIComponent(id)}/layers`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const updateImageMaskLayer = (sessionId, layerId, payload) => request(`/api/image-mask-studio/sessions/${encodeURIComponent(sessionId)}/layers/${encodeURIComponent(layerId)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const moveImageMaskLayer = (sessionId, layerId, payload) => request(`/api/image-mask-studio/sessions/${encodeURIComponent(sessionId)}/layers/${encodeURIComponent(layerId)}/move`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const removeImageMaskLayer = (sessionId, layerId, payload) => request(`/api/image-mask-studio/sessions/${encodeURIComponent(sessionId)}/layers/${encodeURIComponent(layerId)}/remove`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const applyImageMaskOperation = (sessionId, layerId, payload) => request(`/api/image-mask-studio/sessions/${encodeURIComponent(sessionId)}/layers/${encodeURIComponent(layerId)}/operations`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const undoImageMaskSession = (id, payload) => request(`/api/image-mask-studio/sessions/${encodeURIComponent(id)}/undo`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const redoImageMaskSession = (id, payload) => request(`/api/image-mask-studio/sessions/${encodeURIComponent(id)}/redo`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const saveImageMaskSession = (id, payload) => request(`/api/image-mask-studio/sessions/${encodeURIComponent(id)}/save`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const getImageMaskCompare = (id, before = "", after = "") => request(`/api/image-mask-studio/sessions/${encodeURIComponent(id)}/compare?${new URLSearchParams({ ...(before ? { before } : {}), ...(after ? { after } : {}) })}`);
+export const restoreImageMaskSnapshot = (sessionId, snapshotId, payload) => request(`/api/image-mask-studio/sessions/${encodeURIComponent(sessionId)}/snapshots/${encodeURIComponent(snapshotId)}/restore`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const exportImageMask = (sessionId, layerId) => request(`/api/image-mask-studio/sessions/${encodeURIComponent(sessionId)}/layers/${encodeURIComponent(layerId)}/export`);
+export const importImageMask = (sessionId, payload) => request(`/api/image-mask-studio/sessions/${encodeURIComponent(sessionId)}/masks/import`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const captureImageMaskPreset = (sessionId, payload) => request(`/api/image-mask-studio/sessions/${encodeURIComponent(sessionId)}/presets`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const applyImageMaskPreset = (sessionId, presetId, payload) => request(`/api/image-mask-studio/sessions/${encodeURIComponent(sessionId)}/presets/${encodeURIComponent(presetId)}/apply`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const linkImageMaskProject = (sessionId, payload) => request(`/api/image-mask-studio/sessions/${encodeURIComponent(sessionId)}/link-project`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+
 export const formatGb = (bytes) => {
   const value = Number(bytes || 0) / (1024 ** 3);
   return `${value.toFixed(value >= 10 ? 1 : 2)} GB`;

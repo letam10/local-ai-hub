@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from src.services.artifact_store import DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_UPLOAD_DISK_SAFETY_BYTES
 from src.services.artifact_store import UploadError, describe as describe_artifact, normalize_media_type
 from src.services.artifact_store import open_artifact, resolve as resolve_artifact, stage_upload_stream
+from src.services.image_mask_studio import StudioConflictError, image_mask_studio
 from src.services.job_manager.manager import job_manager
 from src.services.project_manager import project_manager
 from src.services.runtime_registry import applications, launch
@@ -376,6 +377,78 @@ class HubHandler(BaseHTTPRequestHandler):
         else:
             self._write(200, payload)
 
+    def _image_mask_studio(self, callback: object) -> None:
+        """Map Studio validation/concurrency errors without exposing state paths."""
+
+        try:
+            payload = callback()  # type: ignore[operator]
+        except StudioConflictError as exc:
+            self._write(409, {
+                "status": "conflict",
+                "error": str(exc),
+                "current_revision": exc.current_revision,
+                "action": "Tải lại bản nháp server hoặc tạo recovery copy trước khi ghi tiếp.",
+            })
+        except KeyError:
+            self._write(404, {"status": "error", "error": "Không tìm thấy phiên hoặc layer Image & Mask Studio."})
+        except ValueError as exc:
+            self._write(400, {"status": "error", "error": str(exc)})
+        else:
+            self._write(200, payload)
+
+    def _link_image_mask_studio_project(self, session_id: str, payload: object) -> None:
+        """Complete a persisted Studio-to-project attachment intent safely."""
+
+        try:
+            prepared = image_mask_studio.prepare_project_attachment(session_id, payload)
+        except StudioConflictError as exc:
+            self._write(409, {"status": "conflict", "error": str(exc), "current_revision": exc.current_revision, "action": "Tải lại Studio trước khi liên kết project."})
+            return
+        except KeyError:
+            self._write(404, {"status": "error", "error": "Không tìm thấy phiên Image & Mask Studio."})
+            return
+        except ValueError as exc:
+            self._write(400, {"status": "error", "error": str(exc)})
+            return
+        attachment = prepared.get("attachment") if isinstance(prepared, dict) else None
+        session = prepared.get("session") if isinstance(prepared, dict) else None
+        if not isinstance(attachment, dict) or not isinstance(session, dict):
+            self._write(500, {"status": "error", "error": "Hub không thể chuẩn bị liên kết project an toàn."})
+            return
+        project_id = attachment.get("project_id")
+        artifact_ids = attachment.get("artifacts")
+        if not isinstance(project_id, str) or not isinstance(artifact_ids, list):
+            self._write(500, {"status": "error", "error": "Intent liên kết project không hợp lệ."})
+            return
+        layers = session.get("layers", [])
+        mask_ids = [
+            layer.get("artifact_id")
+            for layer in layers
+            if isinstance(layer, dict) and layer.get("kind") == "mask" and isinstance(layer.get("artifact_id"), str)
+        ]
+        try:
+            linked = project_manager.attach_image_mask_studio_revision(project_id, {
+                "studio_id": session_id,
+                "revision": session.get("revision"),
+                "source_artifact_id": session.get("source_artifact_id"),
+                "artifact_ids": artifact_ids,
+                "mask_artifact_ids": mask_ids,
+            })
+            completed = image_mask_studio.complete_project_attachment(session_id, project_id=project_id, artifact_ids=artifact_ids)
+        except (KeyError, ValueError) as exc:
+            # The intent is already durable.  Keep it for an explicit retry
+            # rather than discarding a valid Studio draft after a project-side
+            # limit or recovery error.
+            self._write(409, {
+                "status": "pending_project_attach",
+                "error": str(exc),
+                "session": session,
+                "attachment": attachment,
+                "action": "Khắc phục project đích rồi thử liên kết lại; Studio không mất bản nháp.",
+            })
+            return
+        self._write(200, {"status": "completed", "session": completed.get("session"), "project": linked.get("project"), "attachment": attachment})
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
@@ -442,6 +515,31 @@ class HubHandler(BaseHTTPRequestHandler):
             self._write(200, _settings_payload())
         elif normalized == "/api/creative/overview":
             self._creative(project_manager.overview)
+        elif normalized == "/api/image-mask-studio/overview":
+            query = parse_qs(parsed.query)
+            self._image_mask_studio(lambda: image_mask_studio.overview(project_id=query.get("project", [None])[0]))
+        elif normalized == "/api/image-mask-studio/preflight":
+            self._image_mask_studio(image_mask_studio.preflight)
+        elif normalized == "/api/image-mask-studio/sessions":
+            query = parse_qs(parsed.query)
+            self._image_mask_studio(lambda: image_mask_studio.overview(project_id=query.get("project", [None])[0]))
+        elif normalized.startswith("/api/image-mask-studio/sessions/") and normalized.endswith("/compare"):
+            session_id = normalized.split("/")[-2]
+            query = parse_qs(parsed.query)
+            self._image_mask_studio(lambda: self._creative_or_404(image_mask_studio.compare(
+                session_id,
+                before_snapshot_id=query.get("before", [None])[0],
+                after_snapshot_id=query.get("after", [None])[0],
+            )))
+        elif normalized.startswith("/api/image-mask-studio/sessions/") and normalized.endswith("/export"):
+            parts = normalized.strip("/").split("/")
+            if len(parts) != 7 or parts[4] != "layers":
+                self._write(404, {"status": "error", "error": "Route Image & Mask Studio không tìm thấy."})
+            else:
+                self._image_mask_studio(lambda: image_mask_studio.export_mask(parts[3], parts[5]))
+        elif normalized.startswith("/api/image-mask-studio/sessions/"):
+            session_id = normalized.rsplit("/", 1)[-1]
+            self._image_mask_studio(lambda: self._creative_or_404(image_mask_studio.get_session(session_id)))
         elif normalized == "/api/projects":
             self._creative(project_manager.list_projects)
         elif normalized == "/api/assets":
@@ -589,6 +687,50 @@ class HubHandler(BaseHTTPRequestHandler):
         if path == "/api/projects":
             self._creative(lambda: project_manager.create_project(self._read_json()))
             return
+        if path == "/api/image-mask-studio/sessions":
+            self._image_mask_studio(lambda: image_mask_studio.create_session(self._read_json()))
+            return
+        if path.startswith("/api/image-mask-studio/sessions/"):
+            parts = path.strip("/").split("/")
+            if len(parts) >= 4:
+                session_id = parts[3]
+                suffix = parts[4:]
+                if suffix == ["undo"]:
+                    self._image_mask_studio(lambda: image_mask_studio.undo(session_id, self._read_json()))
+                    return
+                if suffix == ["redo"]:
+                    self._image_mask_studio(lambda: image_mask_studio.redo(session_id, self._read_json()))
+                    return
+                if suffix == ["save"]:
+                    self._image_mask_studio(lambda: image_mask_studio.save(session_id, self._read_json()))
+                    return
+                if suffix == ["link-project"]:
+                    self._link_image_mask_studio_project(session_id, self._read_json())
+                    return
+                if suffix == ["layers"]:
+                    self._image_mask_studio(lambda: image_mask_studio.add_layer(session_id, self._read_json()))
+                    return
+                if suffix == ["masks", "import"]:
+                    self._image_mask_studio(lambda: image_mask_studio.import_mask(session_id, self._read_json()))
+                    return
+                if suffix == ["presets"]:
+                    self._image_mask_studio(lambda: image_mask_studio.capture_preset(session_id, self._read_json()))
+                    return
+                if len(suffix) == 3 and suffix[0] == "layers" and suffix[2] == "operations":
+                    self._image_mask_studio(lambda: image_mask_studio.apply_mask_operation(session_id, suffix[1], self._read_json()))
+                    return
+                if len(suffix) == 3 and suffix[0] == "layers" and suffix[2] == "move":
+                    self._image_mask_studio(lambda: image_mask_studio.move_layer(session_id, suffix[1], self._read_json()))
+                    return
+                if len(suffix) == 3 and suffix[0] == "layers" and suffix[2] == "remove":
+                    self._image_mask_studio(lambda: image_mask_studio.remove_layer(session_id, suffix[1], self._read_json()))
+                    return
+                if len(suffix) == 3 and suffix[0] == "snapshots" and suffix[2] == "restore":
+                    self._image_mask_studio(lambda: image_mask_studio.restore_snapshot(session_id, suffix[1], self._read_json()))
+                    return
+                if len(suffix) == 3 and suffix[0] == "presets" and suffix[2] == "apply":
+                    self._image_mask_studio(lambda: image_mask_studio.apply_preset(session_id, suffix[1], self._read_json()))
+                    return
         if path == "/api/projects/import":
             self._creative(lambda: project_manager.import_project(self._read_json()))
             return
@@ -667,6 +809,16 @@ class HubHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:  # noqa: N802
         path = unquote(urlparse(self.path).path.rstrip("/") or "/")
+        if path.startswith("/api/image-mask-studio/sessions/"):
+            parts = path.strip("/").split("/")
+            if len(parts) == 4:
+                self._image_mask_studio(lambda: image_mask_studio.update_session(parts[3], self._read_json()))
+                return
+            if len(parts) == 6 and parts[4] == "layers":
+                self._image_mask_studio(lambda: image_mask_studio.update_layer(parts[3], parts[5], self._read_json()))
+                return
+            self._write(404, {"status": "error", "error": "Route Image & Mask Studio không tìm thấy."})
+            return
         if path.startswith("/api/projects/"):
             self._creative(lambda: project_manager.update_project(path.rsplit("/", 1)[-1], self._read_json()))
             return
