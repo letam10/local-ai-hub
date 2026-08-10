@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
+import stat
 from typing import Any
 
 from src.shared.schemas.asset_intelligence import MAX_DESCRIPTOR_BYTES, OPAQUE_ID_RE, validate_provenance_lineage, validate_smart_collection
@@ -30,34 +32,93 @@ def _contained(path: Path, root: Path) -> bool:
         return False
 
 
-def _read_managed_json(path: Path) -> tuple[bytes | None, str | None]:
-    """Apply containment and a stat-size cap before reading a descriptor."""
+def _managed_descriptor_path_safe(path: Path) -> bool:
+    """Confirm the fixed managed root and every descriptor parent stay non-symlinked."""
 
-    if path.is_symlink() or not _contained(path, MANAGED_ASSET_ROOT):
-        return None, "managed_descriptor_refused"
+    root = MANAGED_ASSET_ROOT
+    if root.is_symlink() or path.is_symlink() or not _contained(path, root):
+        return False
     parent = path.parent
-    while parent != MANAGED_ASSET_ROOT:
-        if parent.is_symlink():
-            return None, "managed_descriptor_refused"
+    while parent != root:
+        if parent == parent.parent or parent.is_symlink():
+            return False
         parent = parent.parent
+    return True
+
+
+def _stat_snapshot(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    """Return stable descriptor identity and content metadata across lstat/fstat on Windows."""
+
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        value.st_mtime_ns,
+    )
+
+
+def _read_managed_json(path: Path) -> tuple[bytes | None, str | None]:
+    """Read one fixed-root descriptor with bounded allocation and mutation checks."""
+
+    if not _managed_descriptor_path_safe(path):
+        return None, "managed_descriptor_refused"
     try:
-        size = path.stat().st_size
+        before = path.lstat()
     except OSError:
         return None, "managed_descriptor_refused"
-    if size <= 0 or size > MAX_DESCRIPTOR_BYTES:
+    if not stat.S_ISREG(before.st_mode):
+        return None, "managed_descriptor_refused"
+    if before.st_size <= 0 or before.st_size > MAX_DESCRIPTOR_BYTES:
         return None, "managed_descriptor_size"
+
+    descriptor_fd: int | None = None
+    payload: bytes | None = None
+    opened: os.stat_result | None = None
+    after_descriptor: os.stat_result | None = None
+    error: str | None = None
     try:
-        payload = path.read_bytes()
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor_fd = os.open(path, flags)
+        opened = os.fstat(descriptor_fd)
+        if not stat.S_ISREG(opened.st_mode):
+            error = "managed_descriptor_refused"
+        elif opened.st_size <= 0 or opened.st_size > MAX_DESCRIPTOR_BYTES:
+            error = "managed_descriptor_size"
+        elif _stat_snapshot(before) != _stat_snapshot(opened) or not _managed_descriptor_path_safe(path):
+            error = "managed_descriptor_refused"
+        else:
+            current = path.lstat()
+            if _stat_snapshot(opened) != _stat_snapshot(current):
+                error = "managed_descriptor_refused"
+            else:
+                payload = os.read(descriptor_fd, MAX_DESCRIPTOR_BYTES + 1)
+                after_descriptor = os.fstat(descriptor_fd)
     except OSError:
+        error = "managed_descriptor_refused"
+    finally:
+        if descriptor_fd is not None:
+            try:
+                os.close(descriptor_fd)
+            except OSError:
+                error = "managed_descriptor_refused"
+
+    if error is not None:
+        return None, error
+    if payload is None or opened is None or after_descriptor is None:
         return None, "managed_descriptor_refused"
-    try:
-        post_read_size = path.stat().st_size
-    except OSError:
-        return None, "managed_descriptor_refused"
-    if path.is_symlink() or not _contained(path, MANAGED_ASSET_ROOT):
-        return None, "managed_descriptor_refused"
-    if len(payload) != size or post_read_size != size or len(payload) > MAX_DESCRIPTOR_BYTES:
+    if len(payload) > MAX_DESCRIPTOR_BYTES:
         return None, "managed_descriptor_size"
+    if len(payload) != opened.st_size or _stat_snapshot(opened) != _stat_snapshot(after_descriptor):
+        return None, "managed_descriptor_refused"
+    if not _managed_descriptor_path_safe(path):
+        return None, "managed_descriptor_refused"
+    try:
+        after_path = path.lstat()
+    except OSError:
+        return None, "managed_descriptor_refused"
+    if _stat_snapshot(opened) != _stat_snapshot(after_path):
+        return None, "managed_descriptor_refused"
     return payload, None
 
 

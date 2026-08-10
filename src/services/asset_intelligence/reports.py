@@ -114,9 +114,13 @@ def diff_asset_catalogs(before: object, after: object) -> dict[str, Any]:
     source_catalog = source["catalog"]
     target_catalog = target["catalog"]
     assert isinstance(source_catalog, dict) and isinstance(target_catalog, dict)
+    source_fingerprint = source["fingerprint"]
+    target_fingerprint = target["fingerprint"]
     changes: list[dict[str, str]] = []
     if source_catalog["id"] != target_catalog["id"]:
         changes.append({"kind": "catalog_id_changed"})
+    if source_catalog["label"] != target_catalog["label"]:
+        changes.append({"kind": "catalog_metadata_changed"})
     source_assets = _assets_by_id(source_catalog)
     target_assets = _assets_by_id(target_catalog)
     for asset_id in sorted(set(target_assets) - set(source_assets)):
@@ -134,12 +138,14 @@ def diff_asset_catalogs(before: object, after: object) -> dict[str, Any]:
         changes.append({"kind": "exact_duplicate_group_added", "asset_id": assets[0]})
     for _digest, assets in sorted(source_groups - target_groups):
         changes.append({"kind": "exact_duplicate_group_removed", "asset_id": assets[0]})
+    if source_fingerprint != target_fingerprint and not changes:
+        changes.append({"kind": "catalog_contract_changed"})
     changes.sort(key=lambda item: (item["kind"], item.get("asset_id", "")))
     return {
         "valid": True,
         "status": "unchanged" if not changes else "changed",
-        "from": {"id": source_catalog["id"], "fingerprint": source["fingerprint"]},
-        "to": {"id": target_catalog["id"], "fingerprint": target["fingerprint"]},
+        "from": {"id": source_catalog["id"], "fingerprint": source_fingerprint},
+        "to": {"id": target_catalog["id"], "fingerprint": target_fingerprint},
         "changes": changes,
         "deterministic_digest": hashlib.sha256((canonical_asset_catalog_json(source_catalog) + "\n" + canonical_asset_catalog_json(target_catalog)).encode("utf-8")).hexdigest(),
         "execution": "not_run",
@@ -178,13 +184,24 @@ def plan_asset_catalog_migration(before: object, after: object) -> dict[str, Any
         action = "No migration action is required."
         steps: list[dict[str, str]] = []
     else:
-        risky = any(change["kind"] in {"asset_removed", "asset_changed", "exact_duplicate_group_removed"} for change in changes)
+        change_kinds = {change["kind"] for change in changes}
+        metadata_changed = "catalog_metadata_changed" in change_kinds
+        risky = bool(change_kinds & {"asset_removed", "asset_changed", "exact_duplicate_group_removed", "catalog_contract_changed"})
         status = "manual_review" if risky else "planned"
-        reason = "The dry-run found removed or changed asset metadata requiring human review." if risky else "The dry-run found additive static catalog metadata."
-        action = "Review changed asset records manually; this plan does not change any asset." if risky else "Revalidate the target catalog before managed adoption."
-        steps = [{"id": "validate-target-static", "action": "Revalidate the target using asset-catalog.v1."}]
         if risky:
-            steps.append({"id": "review-asset-contract", "action": "Review removed or changed asset/duplicate metadata manually."})
+            reason = "The dry-run found removed or changed catalog or asset metadata requiring human review."
+            action = "Review changed catalog or asset contracts manually; this plan does not change any asset."
+        elif metadata_changed:
+            reason = "The dry-run found catalog-level metadata changes requiring static review."
+            action = "Review the changed catalog metadata and revalidate the target before managed adoption."
+        else:
+            reason = "The dry-run found additive static catalog metadata."
+            action = "Revalidate the target catalog before managed adoption."
+        steps = [{"id": "validate-target-static", "action": "Revalidate the target using asset-catalog.v1."}]
+        if metadata_changed:
+            steps.append({"id": "review-catalog-metadata", "action": "Review the changed catalog metadata without copying its values into this plan."})
+        if risky:
+            steps.append({"id": "review-asset-contract", "action": "Review removed or changed catalog, asset, or duplicate metadata manually."})
         steps.append({"id": "apply-reference-manually", "action": "Apply any approved consumer reference change outside this dry-run plan."})
     result = {
         "valid": True,

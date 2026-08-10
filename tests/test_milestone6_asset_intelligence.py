@@ -7,6 +7,7 @@ import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.services.asset_intelligence import (
@@ -312,7 +313,22 @@ class Milestone6AssetIntelligenceTests(unittest.TestCase):
         unchanged = diff_asset_catalogs(before, reordered)
         self.assertTrue(unchanged["valid"])
         self.assertEqual(unchanged["status"], "unchanged")
+        self.assertEqual(unchanged["from"]["fingerprint"], unchanged["to"]["fingerprint"])
         self.assertEqual(plan_asset_catalog_migration(before, reordered)["status"], "not_required")
+
+        metadata_only = copy.deepcopy(before)
+        metadata_label = "Renamed catalog metadata"
+        metadata_only["label"] = metadata_label
+        metadata_diff = diff_asset_catalogs(before, metadata_only)
+        metadata_plan = plan_asset_catalog_migration(before, metadata_only)
+        self.assertNotEqual(metadata_diff["from"]["fingerprint"], metadata_diff["to"]["fingerprint"])
+        self.assertEqual(metadata_diff["status"], "changed")
+        self.assertEqual(metadata_diff["changes"], [{"kind": "catalog_metadata_changed"}])
+        self.assertNotEqual(metadata_plan["status"], "not_required")
+        self.assertEqual(metadata_plan["status"], "planned")
+        self.assertIn("review-catalog-metadata", [step["id"] for step in metadata_plan["steps"]])
+        self.assertNotIn(metadata_label, json.dumps({"diff": metadata_diff, "plan": metadata_plan}, sort_keys=True))
+        self.assertFalse(metadata_diff["status"] == "unchanged" and metadata_diff["from"]["fingerprint"] != metadata_diff["to"]["fingerprint"])
 
         after = copy.deepcopy(before)
         after["assets"][0]["asset"]["bytes"] += 1
@@ -346,7 +362,7 @@ class Milestone6AssetIntelligenceTests(unittest.TestCase):
         oversized = b"{" + (b" " * MAX_DESCRIPTOR_BYTES)
         self.assertEqual(safe_import_asset_catalog(oversized)["errors"][0]["code"], "payload_size")
 
-    def test_managed_discovery_rejects_ambiguous_identities_and_checks_size_before_read(self) -> None:
+    def test_managed_discovery_rejects_ambiguous_identities_and_checks_size_before_open(self) -> None:
         catalog = self.catalog()
         lineage = self.lineage()
         collection = self.collection()
@@ -377,7 +393,7 @@ class Milestone6AssetIntelligenceTests(unittest.TestCase):
 
             oversized_path = root / "oversized.asset-catalog.json"
             oversized_path.write_bytes(b"{" + (b" " * MAX_DESCRIPTOR_BYTES))
-            with patch.object(catalog_module, "MANAGED_ASSET_ROOT", root), patch.object(Path, "read_bytes", side_effect=AssertionError("must not read oversized descriptor")):
+            with patch.object(catalog_module, "MANAGED_ASSET_ROOT", root), patch.object(catalog_module.os, "open", side_effect=AssertionError("must not open oversized descriptor")):
                 self.assertEqual(catalog_module._read_managed_json(oversized_path), (None, "managed_descriptor_size"))
 
             outside = Path(temporary) / "outside.asset-catalog.json"
@@ -392,6 +408,57 @@ class Milestone6AssetIntelligenceTests(unittest.TestCase):
             else:
                 with patch.object(catalog_module, "MANAGED_ASSET_ROOT", root):
                     self.assertEqual(catalog_module._read_managed_json(symlink), (None, "managed_descriptor_refused"))
+
+    def test_managed_descriptor_reader_uses_one_bounded_read_and_refuses_state_change(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary) / "asset_catalog"
+            root.mkdir()
+            descriptor = root / "bounded.asset-catalog.json"
+            descriptor.write_bytes(b"{}")
+
+            real_read = catalog_module.os.read
+            with patch.object(catalog_module, "MANAGED_ASSET_ROOT", root), patch.object(Path, "read_bytes", side_effect=AssertionError("read_bytes is not permitted")), patch.object(catalog_module.os, "read", wraps=real_read) as bounded_read:
+                payload, error = catalog_module._read_managed_json(descriptor)
+            self.assertEqual((payload, error), (b"{}", None))
+            self.assertEqual(bounded_read.call_count, 1)
+            self.assertEqual(bounded_read.call_args.args[1], MAX_DESCRIPTOR_BYTES + 1)
+
+            descriptor.write_bytes(b"{}")
+            real_open = catalog_module.os.open
+            read_calls: list[int] = []
+
+            def grow_before_open(path: object, flags: int) -> int:
+                descriptor.write_bytes(b"x" * (MAX_DESCRIPTOR_BYTES + 1))
+                return real_open(path, flags)
+
+            def guarded_read(_descriptor_fd: int, byte_count: int) -> bytes:
+                read_calls.append(byte_count)
+                return b""
+
+            with patch.object(catalog_module, "MANAGED_ASSET_ROOT", root), patch.object(catalog_module.os, "open", side_effect=grow_before_open), patch.object(catalog_module.os, "read", side_effect=guarded_read):
+                self.assertEqual(catalog_module._read_managed_json(descriptor), (None, "managed_descriptor_size"))
+            self.assertEqual(read_calls, [])
+
+            descriptor.write_bytes(b"{}")
+            real_fstat = catalog_module.os.fstat
+            fstat_calls = 0
+
+            def changed_after_read(descriptor_fd: int) -> object:
+                nonlocal fstat_calls
+                fstat_calls += 1
+                result = real_fstat(descriptor_fd)
+                if fstat_calls == 2:
+                    return SimpleNamespace(
+                        st_dev=result.st_dev,
+                        st_ino=result.st_ino,
+                        st_mode=result.st_mode,
+                        st_size=result.st_size,
+                        st_mtime_ns=result.st_mtime_ns + 1,
+                    )
+                return result
+
+            with patch.object(catalog_module, "MANAGED_ASSET_ROOT", root), patch.object(catalog_module.os, "fstat", side_effect=changed_after_read):
+                self.assertEqual(catalog_module._read_managed_json(descriptor), (None, "managed_descriptor_refused"))
 
     def test_static_reports_retention_plan_and_provider_cards_do_not_claim_runtime_work(self) -> None:
         catalog = self.catalog()
