@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from src.shared.schemas.extension_manifest import (
@@ -13,6 +16,18 @@ from src.shared.schemas.extension_manifest import (
     version_satisfies,
 )
 from src.services.capability_planner import CardValidationError, plan_resources, validate_model_card, validate_runtime_card
+from src.services.extension_platform import (
+    build_compatibility_report,
+    compatibility_report_json,
+    discover_extensions,
+    generate_extension_scaffold,
+    load_extension_config,
+    preflight_extensions,
+    render_compatibility_markdown,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def valid_manifest() -> dict:
@@ -157,6 +172,43 @@ class CapabilityPlannerTests(unittest.TestCase):
         result = plan_resources([value])
         self.assertEqual(result["status"], "partial")
         self.assertIn("hardware inventory", result["requests"][0]["additional_actions"][0])
+
+
+class ExtensionPlatformTests(unittest.TestCase):
+    def test_static_discovery_reads_only_managed_descriptors_and_keeps_status_honest(self) -> None:
+        discovery = discover_extensions(ROOT)
+        records = {item["extension_id"]: item for item in discovery["extensions"] if item["extension_id"]}
+        self.assertEqual(discovery["managed_root"], "extensions")
+        self.assertEqual(records["metadata-catalog"]["status"], "operational")
+        self.assertEqual(records["image-resource-advisor"]["status"], "partial")
+        self.assertEqual(records["metadata-catalog"]["entrypoints"][0], {"kind": "capability_pack"})
+        self.assertNotIn("D:\\", json.dumps(discovery))
+        self.assertNotIn("execute_shell", json.dumps(discovery))
+
+    def test_preflight_and_reports_are_dry_run_and_export_both_formats(self) -> None:
+        discovery = discover_extensions(ROOT)
+        configuration = load_extension_config(ROOT)
+        preflight = preflight_extensions(discovery, configuration=configuration)
+        results = {item["extension_id"]: item for item in preflight["extensions"]}
+        self.assertTrue(preflight["dry_run"])
+        self.assertEqual(results["metadata-catalog"]["status"], "operational")
+        self.assertEqual(results["image-resource-advisor"]["status"], "partial")
+        self.assertTrue(preflight["resource_plan"]["dry_run"])
+        report = build_compatibility_report(discovery, preflight=preflight)
+        self.assertEqual(json.loads(compatibility_report_json(report))["report_version"], "extension-compatibility-report.v1")
+        markdown = render_compatibility_markdown(report)
+        self.assertIn("Image Resource Advisor", markdown)
+        self.assertNotIn("D:\\", markdown)
+
+    def test_generator_is_scoped_to_extensions_and_produces_planned_static_descriptor(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result = generate_extension_scaffold("generated-catalog", root=root, display_name="Generated Catalog")
+            self.assertEqual(result["status"], "created")
+            self.assertEqual(set(result["files"]), {"README.md", "capability-pack.json", "extension.json"})
+            discovery = discover_extensions(root)
+        self.assertEqual(discovery["extensions"][0]["status"], "planned")
+        self.assertEqual(discovery["extensions"][0]["extension_id"], "generated-catalog")
 
 
 if __name__ == "__main__":
