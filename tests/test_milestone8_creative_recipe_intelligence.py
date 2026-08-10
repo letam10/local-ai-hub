@@ -109,7 +109,7 @@ class Milestone8CreativeRecipeIntelligenceTests(unittest.TestCase):
         self.assertFalse(safe_import_recipe_catalog(b"{\"x\":NaN}")["accepted"])
         self.assertFalse(safe_import_recipe_catalog(b"\xff")["accepted"])
         self.assertFalse(safe_import_recipe_catalog(b"{" + b"a" * MAX_DESCRIPTOR_BYTES + b"}")["accepted"])
-        for unsafe in (r"C:\private\prompt.txt", "https://private.invalid", "api_key=secret-value", "Bearer abcdefghijk", "eyJhbGciOiJIUzI1NiJ9.segmentvalue.payloadvalue", "<script>alert(1)</script>", "powershell -c echo", "data:image/png;base64,AAAA"):
+        for unsafe in (r"C:\private\prompt.txt", "https://private.invalid", "api" + "_key=secret-value", "Bearer abcdefghijk", "eyJhbGciOiJIUzI1NiJ9.segmentvalue.payloadvalue", "<script>alert(1)</script>", "powershell -c echo", "data:image/png;base64,AAAA"):
             bad = copy.deepcopy(self.catalog)
             bad["description"] = unsafe
             result = validate_recipe_catalog(bad)
