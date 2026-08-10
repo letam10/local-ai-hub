@@ -265,3 +265,94 @@ contention`.
 
 Xem chi tiết contract tại [MILESTONE_3_UNIFIED_CREATIVE_UX.md](docs/MILESTONE_3_UNIFIED_CREATIVE_UX.md)
 và ownership tại [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## MILESTONE 4A — Creative Projects, Asset Library và Reproducible Recipes
+
+Milestone 4A bổ sung một lớp tổ chức sáng tạo cục bộ phía trên workflow đang có:
+
+```text
+Project → Artifact đã có trong Hub → Recipe có version → Workflow template
+        → Compare Board → chọn/favorite → quay lại Recipe
+```
+
+`Projects & Recipes` trong thanh điều hướng không tạo một backend inference mới.
+Nó chỉ tổ chức metadata nhỏ, an toàn và có version cho những artifact mà Hub đã
+đăng ký. Artifact vẫn thuộc Artifact Store; project không copy media, output,
+model, environment hoặc bí mật.
+
+### Creative Project workspace
+
+- Tạo, mở, đổi tên, archive/khôi phục và chọn lại project gần đây. Recent bị
+  giới hạn 12 project và dữ liệu project dùng `creative-project.v1`.
+- Workspace local dùng `creative-workspace.v1`; file thực tế là
+  `Config/creative_workspace.json`, bị Git ignore. Mẫu rỗng, hợp lệ và được
+  theo dõi là [`Config/creative_workspace.example.json`](Config/creative_workspace.example.json).
+- Lỗi JSON/top-level không hợp lệ luôn trả trạng thái `recovery_required` và
+  **không bị Hub tự ghi đè**. Bản ghi con không hợp lệ được bỏ qua có kiểm soát
+  với trạng thái `partial_recovery`.
+- Export/import Project Manifest dùng `creative-project-export.v1`, chỉ chứa
+  relative/opaque reference, recipe metadata và compare metadata. Conflict
+  được chọn rõ là `copy`, `skip` hoặc `replace`.
+
+### Asset Library và Compare Board
+
+Asset Library hiển thị contact sheet/preview cho image artifact, placeholder
+cho media khác, tìm theo tên/tag, filter favorite/collection và gắn asset hiện
+có vào project mà không sao chép file. Mọi action public dùng ID dạng
+`artifact_<opaque-id>`; không nhận hoặc trả raw filesystem path. Tag, favorite,
+collection, lineage (`parent_artifact_id`/derived ID) và provenance đều là
+metadata JSON an toàn.
+
+Compare Board tối đa 8 artifact thuộc cùng một project. Nó so sánh
+metadata/settings/provenance, lưu lựa chọn hiện tại, có thể favorite lựa chọn
+và mở lại recipe liên quan. Không có thao tác compare nào chạy FFmpeg, encode,
+upscale hoặc inference.
+
+### Prompt, Recipe và Template Gallery
+
+Recipe `creative-recipe.v1` có prompt template, variables, style block,
+negative block, seed, model, settings, tags và version. Mỗi lần sửa qua API
+tăng version; áp dụng recipe chỉ điền các field **có thể chỉnh** của Image AI
+Quick hoặc Image Hub Nodes, rồi người dùng quyết định có tạo job hay không.
+Recipe Pack `creative-recipe-pack.v1` có import/export validation và cùng
+chính sách conflict an toàn.
+
+Workflow Template Gallery đọc các JSON đã theo dõi trong [`workflows/`](workflows/),
+lọc theo category/search và nạp template vào scope Hub Nodes tương ứng. Card
+luôn hiển thị preflight thật từ node registry: `partial`/`unavailable` kèm
+reason/action không được nâng thành `operational` chỉ vì template tồn tại.
+
+### Bản đồ thư mục M4A
+
+| Đường dẫn | Ownership M4A |
+| --- | --- |
+| `src/services/project_manager/` | Schema, validation, safe recovery, Project/Asset/Recipe/Compare CRUD và import/export contract |
+| `src/services/artifact_store.py` | Registry artifact canonical; M4A chỉ đọc/publicize opaque record đã đăng ký |
+| `src/services/api/api_server.py` | Route `/api/creative`, `/api/projects`, `/api/assets`, `/api/collections`, `/api/recipes`, `/api/workflow-gallery` |
+| `src/ui/pages.js` | Creative Workspace, empty/loading/error states, contact sheet, forms và Gallery card |
+| `src/ui/app.js`, `src/ui/api.js` | Client API, state/event layer, download manifest/pack và handoff Quick/Hub Nodes |
+| `src/ui/node_studio.js` | Áp dụng Recipe vào graph editable và nạp tracked template; không chạy graph tự động |
+| `Config/creative_workspace.example.json` | Mẫu state/contract, không phải user workspace thực tế |
+| `tests/test_milestone4_projects.py` | Contract, recovery, public opaque response, recipe graph và loopback API bounded |
+| `docs/MILESTONE_4A_CREATIVE_PROJECTS.md` | Contract chi tiết, extension point, limitations và test gate |
+
+### Kiểm tra M4A có giới hạn
+
+```powershell
+cd D:\LocalAIHub
+node --check src\ui\api.js
+node --check src\ui\app.js
+node --check src\ui\pages.js
+node --check src\ui\node_studio.js
+python -m unittest -v tests\test_milestone4_projects.py
+python scripts\ci_validate.py
+git diff --check
+```
+
+Các kiểm tra trên chỉ dùng JSON nhỏ, loopback HTTP và graph recipe trong bộ
+nhớ. Không benchmark. Khi resource-safety override còn hiệu lực, M4A không chạy
+FFmpeg/NVENC, video generation/transform/upscale/interpolation/encode,
+AnimeSR/RIFE hoặc ComfyUI video. Bằng chứng functional video tiếp tục được ghi
+`deferred due GPU/resource contention`.
+
+Chi tiết đầy đủ: [MILESTONE_4A_CREATIVE_PROJECTS.md](docs/MILESTONE_4A_CREATIVE_PROJECTS.md).

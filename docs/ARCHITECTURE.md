@@ -122,3 +122,94 @@ encode, AnimeSR/RIFE hoặc ComfyUI video. Functional video evidence được gh
 
 Chi tiết UX, contract và lệnh kiểm tra nằm ở
 [MILESTONE_3_UNIFIED_CREATIVE_UX.md](MILESTONE_3_UNIFIED_CREATIVE_UX.md).
+
+## Milestone 4A — Creative Project ownership
+
+Milestone 4A là lớp metadata/local workspace, không phải pipeline AI mới. Nó
+không sở hữu file media, không scan filesystem tùy ý và không tự chạy workflow:
+
+```text
+Artifact Store (file + opaque artifact ID)
+        ↑ public, path-safe record
+Project Manager (project / asset metadata / recipe / compare)
+        ↑ validated JSON contract
+API loopback → UI state/event layer → Quick hoặc Hub Nodes editable state
+```
+
+### Phân chia module
+
+| Module | Sở hữu | Không sở hữu |
+| --- | --- | --- |
+| `src/services/artifact_store.py` | Registry và public opaque record của artifact | Project title, recipe, collection hoặc raw M4A metadata |
+| `src/services/project_manager/schemas.py` | ID opaque, giới hạn, validation, safe text/JSON và contract version | Đọc file artifact hoặc thực thi backend |
+| `src/services/project_manager/manager.py` | CRUD state, safe recovery, lineage metadata, Project/Recipe Pack/Compare serialization | Copy/move/delete media, model, output, secret hoặc environment |
+| `src/services/api/api_server.py` | Mapping HTTP status, JSON bounded và public M4A routes | Logic UI hoặc raw path disclosure |
+| `src/ui/api.js` | Thin loopback client | Shell/direct filesystem access |
+| `src/ui/pages.js` | Accessible states, contact sheet, Gallery/Compare/Recipe controls | Mutable backend state |
+| `src/ui/app.js` | Route data, events, browser download JSON và handoff editable UI | Job submission tự động từ recipe/template |
+| `src/ui/node_studio.js` | Clone/fill editable graph from Recipe; load tracked preset | Auto-run graph hoặc nâng availability |
+
+State thực tế là `Config/creative_workspace.json` và bị Git ignore. Chỉ
+`Config/creative_workspace.example.json` được track làm mẫu schema rỗng. State
+ghi qua temporary sibling `*.tmp` rồi replace nguyên tử. Nếu top-level state
+không đọc được hoặc không phải JSON object, manager trả `recovery_required` và
+chặn mutation để không ghi đè dữ liệu. Nếu một số record con hỏng, manager giữ
+record hợp lệ và trả `partial_recovery` cùng next action.
+
+### Contract dữ liệu công khai
+
+| Contract | Mục đích | Reference được phép |
+| --- | --- | --- |
+| `creative-workspace.v1` | Local maps cho project/recipe/metadata/collection/board | opaque project, recipe, collection, compare, artifact ID |
+| `creative-project.v1` | Project public/metadata | opaque artifact ID, recipe ID, preset ID |
+| `creative-asset.v1` | Artifact Store record được decorate tag/favorite/lineage/provenance | opaque artifact parent/child và recipe ID |
+| `creative-recipe.v1` | Prompt template, variables, blocks, seed/model/settings/version | preset ID; JSON safe only |
+| `creative-recipe-pack.v1` | Chia sẻ recipe đã validate | recipe record |
+| `creative-project-export.v1` | Export project/recipe refs/metadata/compare | opaque/relative metadata only |
+| `creative-compare.v1` | Tối đa 8 artifact cùng project và selection/diff | opaque artifact ID |
+
+`safe_json` từ chối key `path`, `*_path`, `secret`, `token`, credential/password
+và string giống Windows drive/UNC path. Public API không gửi raw filesystem
+path, input, resume data hoặc callable runtime state. URL artifact, nếu có, là
+endpoint Hub đã publicize, không phải machine path.
+
+### API loopback M4A
+
+| Route | Chức năng |
+| --- | --- |
+| `GET /api/creative/overview` | Snapshot Project, Asset, Recipe, Collection, Gallery và recovery |
+| `GET/POST /api/projects`, `GET/PUT /api/projects/{id}` | List/create/read/update project |
+| `POST /api/projects/{id}/archive`, `/restore` | Archive/restore metadata, không xóa artifact |
+| `POST /api/projects/{id}/assets` | Thêm reference tới artifact Hub hiện có |
+| `GET/POST /api/projects/{id}/compare` | Read/update Compare Board |
+| `GET /api/projects/{id}/export`, `POST /api/projects/import` | Project Manifest với conflict policy |
+| `GET /api/assets`, `PUT /api/assets/{opaque-id}` | Filter/search + tag/favorite/lineage/recipe metadata |
+| `GET/POST /api/collections`, `PUT /api/collections/{id}` | Collection chứa opaque asset reference |
+| `GET/POST /api/recipes`, `PUT /api/recipes/{id}` | Recipe lifecycle, version tăng khi update |
+| `POST /api/recipes/{id}/apply` | Render variable, trả Quick/Node editable application; không tạo job |
+| `GET /api/recipes/export-pack`, `POST /api/recipes/import-pack` | Recipe Pack safe import/export |
+| `GET /api/workflow-gallery` | Tracked template + capability preflight/reason/action |
+
+Mutation JSON bị giới hạn 2 MB bởi handler chung. Invalid ID/schema trả `400`,
+unknown public record trả `404`; route không nhận raw path hoặc command.
+
+### Extension point và limitation
+
+- Adapter/job mới phải đăng ký output qua Artifact Store trước khi user có thể
+  gắn asset vào Project. Project Manager không nhận `Path` hoặc upload bytes.
+- Extension chỉ có thể công bố metadata/provenance JSON nhỏ nếu pass `safe_json`;
+  không đưa API key, environment state, model weight, callable hoặc raw path vào
+  manifest.
+- Workflow Gallery chỉ đọc JSON track trong `workflows/`; `partial` hoặc
+  `unavailable` từ node registry luôn thắng card state và xuất reason/action.
+- Recipe application chỉ clone/fill Quick form hoặc graph đang chỉnh. Nó không
+  bypass confirmation, không enqueue job và không làm backend partial thành
+  operational.
+- Compare Board là presentation/selection metadata, không decode/encode,
+  transform, upscale hoặc generate media.
+- Trong resource override, evidence video/GPU vẫn `deferred due GPU/resource
+  contention`; không chạy FFmpeg/NVENC, AnimeSR/RIFE, ComfyUI video hoặc can
+  thiệp process video của task khác.
+
+Xem [MILESTONE_4A_CREATIVE_PROJECTS.md](MILESTONE_4A_CREATIVE_PROJECTS.md) để
+biết flow UX, import/export/recovery và ma trận kiểm thử bounded.
