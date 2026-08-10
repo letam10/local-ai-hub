@@ -115,7 +115,7 @@ const isMobileNavigation = () => {
 const syncSidebarState = () => {
   if (!sidebar || !sidebarToggle) return;
   const mobile = isMobileNavigation();
-  sidebarToggle.setAttribute("aria-controls", "sidebar-nav");
+  sidebarToggle.setAttribute("aria-controls", "sidebar");
   if (mobile) {
     sidebar.classList.remove("is-collapsed");
     sidebar.classList.toggle("is-open", sidebarState.mobileOpen);

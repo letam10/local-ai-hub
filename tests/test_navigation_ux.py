@@ -58,6 +58,7 @@ class NavigationUxTests(unittest.TestCase):
 
     def test_aria_state_and_resize_are_synchronized_without_focus_trap(self) -> None:
         self.assertIn("const syncSidebarState = () =>", self.app)
+        self.assertIn('sidebarToggle.setAttribute("aria-controls", "sidebar")', self.app)
         self.assertIn('sidebarToggle.setAttribute("aria-expanded", String(sidebarState.mobileOpen))', self.app)
         self.assertIn('sidebarToggle.setAttribute("aria-expanded", String(!sidebarState.desktopCollapsed))', self.app)
         self.assertIn('sidebarToggle.setAttribute("aria-label", sidebarState.mobileOpen ? "Close navigation" : "Open navigation")', self.app)
