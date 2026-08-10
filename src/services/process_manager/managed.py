@@ -133,7 +133,11 @@ def run_json_worker(
                     terminate_owned_process(process)
                     return {"status": "error", "error": f"{label} vượt quá thời gian cho phép của Hub."}
                 time.sleep(0.15)
-            stdout = process.stdout.read() if process.stdout else b""
+            if process.stdout:
+                try:
+                    stdout = process.stdout.read()
+                finally:
+                    process.stdout.close()
         finally:
             if owner:
                 owner.detach_process(process)
@@ -186,7 +190,11 @@ def run_command(
                     terminate_owned_process(process)
                     return -3, f"{label} vượt quá thời gian cho phép của Hub."
                 time.sleep(0.15)
-            stdout = process.stdout.read() if process.stdout else b""
+            if process.stdout:
+                try:
+                    stdout = process.stdout.read()
+                finally:
+                    process.stdout.close()
         finally:
             if owner:
                 owner.detach_process(process)

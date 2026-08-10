@@ -1,0 +1,74 @@
+{
+  "schema_version": "extension-manifest.v1",
+  "id": "metadata-catalog",
+  "version": "1.0.0",
+  "display_name": "Metadata Catalog",
+  "description": "A static capability pack that demonstrates catalog, card, and planning metadata.",
+  "author": {
+    "name": "Local AI Hub"
+  },
+  "license": "MIT",
+  "source": "https://github.com/local-ai-hub/local-ai-hub",
+  "capabilities": [
+    "capability_pack",
+    "metadata_catalog",
+    "model_cards",
+    "resource_planning",
+    "runtime_cards"
+  ],
+  "compatibility": {
+    "hub": {
+      "min_version": "4.0.0",
+      "max_version": "4.99.99"
+    },
+    "platforms": [
+      "windows"
+    ]
+  },
+  "required_components": [],
+  "required_models": [],
+  "permissions": [
+    "plan_resources",
+    "read_capability_cards",
+    "read_extension_metadata",
+    "render_compatibility_report"
+  ],
+  "entrypoints": [
+    {
+      "kind": "capability_pack",
+      "path": "capability-pack.json"
+    },
+    {
+      "kind": "model_cards",
+      "path": "cards/model-cards.json"
+    },
+    {
+      "kind": "runtime_cards",
+      "path": "cards/runtime-cards.json"
+    },
+    {
+      "kind": "documentation",
+      "path": "README.md"
+    }
+  ],
+  "resource_profile": {
+    "cpu": {
+      "class": "light",
+      "threads": 1
+    },
+    "gpu": {
+      "required": false,
+      "vendor": "none",
+      "device_class": "none"
+    },
+    "vram_gb": 0,
+    "ram_gb": 0.25,
+    "disk_gb": 0.01,
+    "exclusive_resource_groups": []
+  },
+  "availability": {
+    "status": "operational",
+    "reason": "This sample contains static metadata descriptors only.",
+    "action": "Use its compatibility report or resource planner without launching a workload."
+  }
+}

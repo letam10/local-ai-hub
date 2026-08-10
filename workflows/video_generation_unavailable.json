@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "video-generation-unavailable",
+  "title": "Video — Prompt Generate (backend unavailable) → Export",
+  "description": "Template minh hoạ contract prompt-to-video; giữ unavailable cho tới khi backend generation local có bounded smoke.",
+  "scope": "media",
+  "stage": "video-creative",
+  "requires": ["local video-generation adapter", "model/backend smoke"],
+  "nodes": [
+    {"id": "prompt", "type": "prompt_text", "position": {"x": 70, "y": 250}, "data": {"text": "Một cảnh fly-through thành phố ban đêm, chuyển động mượt"}},
+    {"id": "generate", "type": "video_generate", "position": {"x": 380, "y": 250}, "data": {"width": 768, "height": 432, "duration": 4, "fps": 24, "seed": 42}},
+    {"id": "upscale", "type": "video_upscale", "position": {"x": 700, "y": 250}, "data": {"backend": "ffmpeg_scale", "scale": 2}},
+    {"id": "interpolate", "type": "frame_interpolate", "position": {"x": 990, "y": 250}, "data": {"mode": "target_fps", "target_fps": 48, "backend": "ffmpeg_minterpolate"}},
+    {"id": "encode", "type": "encode", "position": {"x": 1280, "y": 250}, "data": {"container": "mp4", "codec": "auto", "rate_control": "quality", "quality": 20, "bitrate_kbps": 6000, "max_bitrate_kbps": 9000, "buffer_kbps": 12000, "preset": "medium", "pixel_format": "", "audio_codec": "aac", "audio_bitrate_kbps": 192, "prefer_gpu": false, "multipass": false}},
+    {"id": "preview", "type": "preview_video", "position": {"x": 1570, "y": 250}, "data": {}},
+    {"id": "save", "type": "save_video", "position": {"x": 1820, "y": 250}, "data": {}},
+    {"id": "export", "type": "export_video", "position": {"x": 2070, "y": 250}, "data": {}}
+  ],
+  "edges": [
+    {"id": "prompt_to_generate", "source": {"node": "prompt", "port": "text"}, "target": {"node": "generate", "port": "prompt"}},
+    {"id": "generate_to_upscale", "source": {"node": "generate", "port": "video"}, "target": {"node": "upscale", "port": "video"}},
+    {"id": "upscale_to_interpolate", "source": {"node": "upscale", "port": "video"}, "target": {"node": "interpolate", "port": "video"}},
+    {"id": "interpolate_to_encode", "source": {"node": "interpolate", "port": "video"}, "target": {"node": "encode", "port": "video"}},
+    {"id": "encode_to_preview", "source": {"node": "encode", "port": "video"}, "target": {"node": "preview", "port": "video"}},
+    {"id": "preview_to_save", "source": {"node": "preview", "port": "video"}, "target": {"node": "save", "port": "video"}},
+    {"id": "save_to_export", "source": {"node": "save", "port": "video"}, "target": {"node": "export", "port": "video"}}
+  ],
+  "groups": []
+}

@@ -3,12 +3,55 @@
 from __future__ import annotations
 
 import threading
+import re
 from datetime import datetime, timezone
 from typing import Any
 
+from src.services.artifact_store import publicize
+
+
+_LOCAL_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\)")
+ACTIVE_RUN_STATUSES = frozenset({"queued", "starting", "running", "cancelling"})
+MAX_TERMINAL_RUNS = 100
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _public_artifacts(value: Any, *, path: str = "") -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        artifact_id = value.get("id")
+        if isinstance(artifact_id, str) and artifact_id.startswith("artifact_"):
+            found.append({
+                "artifact_id": artifact_id,
+                "name": value.get("name"),
+                "media_type": value.get("media_type"),
+                "url": value.get("url"),
+                "output_path": path or "output",
+            })
+        for key, child in value.items():
+            found.extend(_public_artifacts(child, path=f"{path}.{key}" if path else str(key)))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            found.extend(_public_artifacts(child, path=f"{path}[{index}]"))
+    return found
+
+
+def _safe_output(value: Any) -> Any:
+    """Apply the public artifact conversion and scrub raw paths at the state boundary."""
+
+    try:
+        value = publicize(value)
+    except Exception:  # pragma: no cover - defensive boundary for worker payloads
+        pass
+    if isinstance(value, dict):
+        return {str(key): _safe_output(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_safe_output(child) for child in value]
+    if isinstance(value, str) and _LOCAL_PATH.search(value):
+        return "[đường-dẫn-cục-bộ]"
+    return value
 
 
 class GraphRunRegistry:
@@ -17,6 +60,20 @@ class GraphRunRegistry:
     def __init__(self) -> None:
         self._runs: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
+        self._sequence = 0
+
+    def _prune_terminal_locked(self) -> None:
+        """Keep all active runs and the newest bounded terminal snapshots."""
+
+        terminal = sorted(
+            (item for item in self._runs.values() if str(item.get("status")) not in ACTIVE_RUN_STATUSES),
+            key=lambda item: (str(item.get("finished_at") or item.get("created_at") or ""), int(item.get("_sequence") or 0)),
+            reverse=True,
+        )
+        for item in terminal[MAX_TERMINAL_RUNS:]:
+            job_id = item.get("job_id")
+            if isinstance(job_id, str):
+                self._runs.pop(job_id, None)
 
     def begin(self, job_id: str, graph: dict[str, Any]) -> None:
         nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
@@ -24,13 +81,18 @@ class GraphRunRegistry:
             current = self._runs.get(job_id)
             if current:
                 return
+            self._sequence += 1
             self._runs[job_id] = {
+                "contract_version": "node-run.v2",
                 "status": "queued",
                 "job_id": job_id,
                 "graph_id": str(graph.get("id") or "untitled"),
                 "title": str(graph.get("title") or "Untitled workflow"),
                 "created_at": _now(),
                 "finished_at": None,
+                "next_action": None,
+                "_sequence": self._sequence,
+                "provenance": [],
                 "nodes": {
                     str(node.get("id")): {
                         "id": str(node.get("id")),
@@ -43,8 +105,20 @@ class GraphRunRegistry:
                     if isinstance(node, dict) and node.get("id")
                 },
             }
+            self._prune_terminal_locked()
 
-    def update_node(self, job_id: str, node_id: str, *, status: str, progress: int, message: str = "", output: Any = None, error: str | None = None) -> None:
+    def update_node(
+        self,
+        job_id: str,
+        node_id: str,
+        *,
+        status: str,
+        progress: int,
+        message: str = "",
+        output: Any = None,
+        error: str | None = None,
+        next_action: str | None = None,
+    ) -> None:
         with self._lock:
             run = self._runs.get(job_id)
             if not run:
@@ -54,13 +128,29 @@ class GraphRunRegistry:
                 return
             node.update({"status": status, "progress": max(0, min(100, int(progress))), "message": message})
             if output is not None:
+                output = _safe_output(output)
                 node["output"] = output
             if error:
                 node["error"] = error
+            if next_action:
+                node["next_action"] = next_action
+                run["next_action"] = next_action
+            if output is not None:
+                existing = {item.get("artifact_id") for item in run["provenance"] if isinstance(item, dict)}
+                for artifact in _public_artifacts(output):
+                    artifact_id = artifact.get("artifact_id")
+                    if artifact_id in existing:
+                        continue
+                    run["provenance"].append({
+                        **artifact,
+                        "node_id": node_id,
+                        "node_type": node.get("type"),
+                    })
+                    existing.add(artifact_id)
             if status == "running":
                 run["status"] = "running"
 
-    def finish(self, job_id: str, *, status: str, error: str | None = None) -> None:
+    def finish(self, job_id: str, *, status: str, error: str | None = None, next_action: str | None = None) -> None:
         with self._lock:
             run = self._runs.get(job_id)
             if not run:
@@ -69,6 +159,9 @@ class GraphRunRegistry:
             run["finished_at"] = _now()
             if error:
                 run["error"] = error
+            if next_action:
+                run["next_action"] = next_action
+            self._prune_terminal_locked()
 
     def snapshot(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -78,7 +171,8 @@ class GraphRunRegistry:
             # All callers supply already-public artifact metadata.  Copying still
             # prevents a handler from mutating the live worker state.
             return {
-                **{key: value for key, value in run.items() if key != "nodes"},
+                **{key: value for key, value in run.items() if key not in {"nodes", "_sequence"}},
+                "provenance": [dict(item) for item in run.get("provenance", [])],
                 "nodes": [dict(item) for item in run["nodes"].values()],
             }
 

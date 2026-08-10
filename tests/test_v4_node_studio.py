@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import os
 import threading
 import time
 import unittest
@@ -21,6 +22,23 @@ class _Context:
 
     def progress(self, value: int, message: str | None = None) -> None:
         self.progress_updates.append((value, message))
+
+
+class _MediaOwner:
+    def __init__(self, job_id: str) -> None:
+        self.job_id = job_id
+        self.cancelled = False
+        self.processes: list[object] = []
+
+    def attach_process(self, process: object, _label: str) -> None:
+        self.processes.append(process)
+
+    def detach_process(self, process: object) -> None:
+        if process in self.processes:
+            self.processes.remove(process)
+
+    def progress(self, _value: int, _message: str | None = None) -> None:
+        return None
 
 
 class NodeStudioSchemaTests(unittest.TestCase):
@@ -237,10 +255,202 @@ class NodeStudioContractTests(unittest.TestCase):
 
         self.assertEqual(set(PORT_TYPES), {"IMAGE", "MASK", "VIDEO", "AUDIO", "TEXT", "NUMBER", "BOOLEAN", "MODEL", "METADATA"})
         required = {
-            "load_image", "flux_generate", "qwen_image", "comfyui_workflow", "sam2_segment", "grounding_dino", "rfdetr_detect", "image_compare",
-            "load_video", "probe_media", "trim_cut", "concat", "extract_audio", "replace_audio", "subtitle_burn", "frame_interpolate", "encode", "animesr_upscale",
+            "load_image", "flux_generate", "qwen_image", "image_edit", "image_upscale", "comfyui_workflow", "sam2_segment", "grounding_dino", "rfdetr_detect", "image_compare",
+            "load_video", "video_generate", "video_transform", "video_upscale", "probe_media", "trim_cut", "concat", "extract_audio", "replace_audio", "subtitle_burn", "frame_interpolate", "encode", "animesr_upscale",
         }
         self.assertTrue(required.issubset(NODE_DEFINITIONS))
+
+    def test_image_nodes_publish_typed_availability_contract(self) -> None:
+        from src.services.node_studio.registry import NODE_DEFINITIONS, registry_payload
+
+        for node_type in ("flux_generate", "qwen_image", "image_edit", "image_upscale"):
+            definition = NODE_DEFINITIONS[node_type].public()
+            self.assertEqual(definition["availability"]["status"], definition["status"])
+            self.assertTrue(definition["availability"]["reason"])
+            self.assertTrue(definition["availability"]["action"])
+
+        payload = registry_payload("image")
+        self.assertEqual(payload["contract_version"], "node-studio.v2")
+        self.assertEqual(set(payload["availability"]["counts"]), {"operational", "partial", "unavailable"})
+        self.assertIn("image_upscale", {item["type"] for item in payload["nodes"]})
+
+    def test_image_templates_cover_generate_edit_upscale_and_export(self) -> None:
+        from src.services.node_studio.schema import validate_graph
+
+        create = json.loads((ROOT / "workflows" / "image_create_upscale.json").read_text(encoding="utf-8"))
+        edit = json.loads((ROOT / "workflows" / "image_edit_upscale.json").read_text(encoding="utf-8"))
+        self.assertTrue(validate_graph(create, require_runnable=True)["valid"])
+        edit_validation = validate_graph(edit)
+        self.assertTrue(edit_validation["valid"], edit_validation["errors"])
+        self.assertIn("image_edit", {item["type"] for item in edit["nodes"]})
+        self.assertIn("image_upscale", {item["type"] for item in create["nodes"]})
+        self.assertEqual(edit["nodes"][0]["data"]["asset_id"], "")
+        edge_targets = {(item["target"]["node"], item["target"]["port"]) for item in edit["edges"]}
+        self.assertIn(("edit", "image"), edge_targets)
+
+    def test_video_templates_cover_transform_generation_and_export_contracts(self) -> None:
+        from src.services.node_studio.registry import NODE_DEFINITIONS
+        from src.services.node_studio.schema import validate_graph
+
+        transform = json.loads((ROOT / "workflows" / "video_creative_pipeline.json").read_text(encoding="utf-8"))
+        generation = json.loads((ROOT / "workflows" / "video_generation_unavailable.json").read_text(encoding="utf-8"))
+        self.assertTrue(validate_graph(transform)["valid"])
+        self.assertTrue(validate_graph(generation, require_runnable=True)["valid"])
+        self.assertEqual(NODE_DEFINITIONS["video_generate"].status, "unavailable")
+        self.assertEqual(NODE_DEFINITIONS["video_upscale"].status, "partial")
+        transform_types = {item["type"] for item in transform["nodes"]}
+        self.assertTrue({"video_transform", "video_upscale", "frame_interpolate", "encode", "preview_video", "save_video", "export_video"}.issubset(transform_types))
+
+    def test_video_generation_returns_honest_unavailable_action(self) -> None:
+        from src.services.node_studio.engine import execute_graph
+
+        result = execute_graph(
+            {
+                "schema_version": 1,
+                "id": "video-generation-status",
+                "nodes": [
+                    {"id": "prompt", "type": "prompt_text", "data": {"text": "Một cảnh ngắn"}},
+                    {"id": "generate", "type": "video_generate", "data": {}},
+                ],
+                "edges": [{"id": "prompt_generate", "source": {"node": "prompt", "port": "text"}, "target": {"node": "generate", "port": "prompt"}}],
+            },
+            _Context("job_video_generation_status"),
+            lambda *_args: self.fail("video_generate must not call an unavailable backend"),
+        )
+        self.assertEqual(result["status"], "unavailable")
+        self.assertTrue(result["next_action"])
+
+    def test_video_upscale_command_is_allowlisted(self) -> None:
+        from src.modules.media_editor.backend import adapter
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ffmpeg = root / "ffmpeg.exe"
+            source = root / "source.mp4"
+            target = root / "target.mp4"
+            ffmpeg.write_bytes(b"")
+            source.write_bytes(b"input")
+            with patch.object(adapter, "_paths", return_value=(ffmpeg, None)):
+                command = adapter._command({"operation": "video_upscale", "scale": 2}, source, target)
+        assert command is not None
+        command_text = " ".join(command)
+        self.assertIn("trunc(iw*2.0/2)*2", command_text)
+        self.assertIn("-c:a", command)
+
+    def test_resize_commands_preserve_ffmpeg_aspect_sentinel(self) -> None:
+        from src.modules.media_editor.backend import adapter
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ffmpeg = root / "ffmpeg.exe"
+            source = root / "source.mp4"
+            target = root / "target.mp4"
+            ffmpeg.write_bytes(b"")
+            source.write_bytes(b"input")
+            with patch.object(adapter, "_paths", return_value=(ffmpeg, None)):
+                video_command = adapter._command({"operation": "resize", "width": 16, "height": -2}, source, target)
+                image_command = adapter._command({"operation": "image_resize", "width": 16, "height": -2}, source, target)
+        assert video_command is not None
+        assert image_command is not None
+        self.assertIn("scale=16:-2", video_command)
+        self.assertIn("scale=16:-2", image_command)
+
+    def test_default_video_resize_sentinel_preserves_aspect_through_upscale(self) -> None:
+        if os.environ.get("LOCALAIHUB_RUN_VIDEO_SMOKE") != "1":
+            self.skipTest("Video smoke is opt-in: set LOCALAIHUB_RUN_VIDEO_SMOKE=1 when resources are available")
+
+        from src.modules.media_editor.backend import adapter
+        from src.services import artifact_store
+        from src.services.node_studio import engine as node_engine
+        from src.services.process_manager import managed
+
+        ffmpeg, ffprobe = adapter._paths()
+        if ffmpeg is None or not ffmpeg.is_file() or ffprobe is None or not ffprobe.is_file():
+            self.skipTest("Canonical FFmpeg/ffprobe is not installed")
+
+        job_id = "test_video_resize_sentinel"
+        template = json.loads((ROOT / "workflows" / "video_creative_pipeline.json").read_text(encoding="utf-8"))
+        transform_data = next(item["data"] for item in template["nodes"] if item["type"] == "video_transform")
+        self.assertEqual(transform_data.get("height"), -2)
+        try:
+            with TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "input.mp4"
+                seed = adapter.run_hidden(
+                    [
+                        str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y",
+                        "-f", "lavfi", "-i", "color=c=blue:s=16x16:r=4", "-t", "1",
+                        "-pix_fmt", "yuv420p", "-c:v", "libx264", str(source),
+                    ],
+                    capture_output=True,
+                    timeout=30,
+                    check=False,
+                )
+                self.assertEqual(seed.returncode, 0, seed.stderr.decode("utf-8", errors="replace"))
+
+                output_root = root / "output"
+                owner = _MediaOwner(job_id)
+                upload_root = root / "uploads"
+                index_path = root / "artifacts.json"
+                log_root = root / "logs"
+                with (
+                    patch.object(artifact_store, "UPLOAD_ROOT", upload_root),
+                    patch.object(artifact_store, "OUTPUT_ROOT", output_root),
+                    patch.object(artifact_store, "INDEX_PATH", index_path),
+                    patch.object(adapter, "OUTPUT_ROOT", output_root),
+                    patch.object(node_engine, "OUTPUT_ROOT", output_root),
+                    patch.object(managed, "LOG_ROOT", log_root),
+                ):
+                    uploaded = artifact_store.stage_upload("input.mp4", source.read_bytes(), "video/mp4")
+                    graph = json.loads(json.dumps(template))
+                    for node in graph["nodes"]:
+                        if node["type"] == "load_video":
+                            node["data"]["asset_id"] = uploaded["id"]
+                        elif node["type"] == "video_transform":
+                            node["data"]["width"] = 16
+                        elif node["type"] == "frame_interpolate":
+                            node["data"]["mode"] = "off"
+                        elif node["type"] == "encode":
+                            node["data"].update({"codec": "libx264", "prefer_gpu": False, "preset": "ultrafast"})
+
+                    def execute_tool(tool: str, payload: dict, context: _MediaOwner) -> dict:
+                        if tool == "run_media_operation":
+                            return adapter.run_operation(payload, context)
+                        raise AssertionError(f"Unexpected tool in bounded graph: {tool}")
+
+                    result = node_engine.execute_graph(graph, owner, execute_tool)
+                    self.assertEqual(result.get("status"), "completed", result)
+                    self.assertEqual(len(result.get("nodes", [])), 9)
+                    upscale_node = next(item for item in result["nodes"] if item["id"] == "upscale")
+                    upscale_artifact = upscale_node["output"]["video"]["id"]
+                    upscale_path = artifact_store.resolve(upscale_artifact)
+                    self.assertIsNotNone(upscale_path)
+                    details = adapter.probe(str(upscale_path))
+
+                self.assertEqual(details.get("status"), "completed", details)
+                video_stream = next(stream for stream in details["streams"] if stream.get("codec_type") == "video")
+                self.assertEqual((video_stream["width"], video_stream["height"]), (32, 32))
+
+            self.assertFalse(owner.processes, "FFmpeg child processes must be detached after the bounded smoke")
+        finally:
+            node_engine.node_cache.clear()
+
+    def test_graph_run_provenance_is_public_and_deduplicated(self) -> None:
+        from src.services.node_studio.state import GraphRunRegistry
+
+        registry = GraphRunRegistry()
+        artifact_id = "artifact_" + "a" * 32
+        registry.begin("job_provenance", {"id": "image-test", "nodes": [{"id": "upscale", "type": "image_upscale"}]})
+        output = {"image": {"id": artifact_id, "name": "result.png", "media_type": "image/png", "path": r"D:\private\result.png"}, "copy": {"id": artifact_id}}
+        registry.update_node("job_provenance", "upscale", status="completed", progress=100, output=output, next_action="Kiểm tra preview.")
+        registry.finish("job_provenance", status="completed")
+        snapshot = registry.snapshot("job_provenance")
+        assert snapshot is not None
+        self.assertEqual(snapshot["contract_version"], "node-run.v2")
+        self.assertEqual(len(snapshot["provenance"]), 1)
+        self.assertNotIn("D:\\private", str(snapshot))
+        self.assertNotIn("D:\\private", str(snapshot["nodes"][0]["output"]))
+        self.assertEqual(snapshot["next_action"], "Kiểm tra preview.")
 
     def test_ui_and_api_keep_node_studio_offline_and_bounded(self) -> None:
         ui = (ROOT / "src" / "ui" / "node_studio.js").read_text(encoding="utf-8")
@@ -254,6 +464,8 @@ class NodeStudioContractTests(unittest.TestCase):
         self.assertNotIn("chooseOutput", ui)
         self.assertNotIn("connectInput", ui)
         self.assertIn("/api/node-studio/run", api)
+        self.assertIn("/api/node-studio/availability", api)
+        self.assertIn("contract_version", api)
         self.assertIn("cycle_detected", schema)
         self.assertNotIn("cdn", ui.lower())
 

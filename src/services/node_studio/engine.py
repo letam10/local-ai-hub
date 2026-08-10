@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -19,12 +20,14 @@ from .state import graph_runs
 
 
 ToolExecutor = Callable[[str, dict[str, Any], Any], dict[str, Any]]
+NODE_CACHE_MAX_ENTRIES = 256
 
 
 class NodeFailure(RuntimeError):
-    def __init__(self, message: str, *, status: str = "failed") -> None:
+    def __init__(self, message: str, *, status: str = "failed", next_action: str | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.next_action = next_action
 
 
 @dataclass(frozen=True)
@@ -103,8 +106,9 @@ def _cache_is_usable(value: Any) -> bool:
 class NodeCache:
     """Process-local cache; no graph input, media or path is persisted to Git."""
 
-    def __init__(self) -> None:
-        self._values: dict[str, dict[str, Any]] = {}
+    def __init__(self, *, max_entries: int = NODE_CACHE_MAX_ENTRIES) -> None:
+        self._values: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._max_entries = max(1, int(max_entries))
         self._lock = threading.RLock()
 
     def get(self, key: str) -> dict[str, Any] | None:
@@ -113,11 +117,17 @@ class NodeCache:
             if value is None or not _cache_is_usable(value):
                 self._values.pop(key, None)
                 return None
+            self._values.move_to_end(key)
             return value
 
     def put(self, key: str, value: dict[str, Any]) -> None:
         with self._lock:
+            self._values.pop(key, None)
             self._values[key] = value
+            while len(self._values) > self._max_entries:
+                # This cache only forgets references.  Artifact ownership stays
+                # with Artifact Store and eviction must never delete files.
+                self._values.popitem(last=False)
 
     def clear(self) -> None:
         with self._lock:
@@ -233,6 +243,7 @@ def _media_result(result: dict[str, Any], *, expected_output: str) -> dict[str, 
 def _run_media(node_type: str, data: dict[str, Any], inputs: dict[str, Any], context: Any, execute_tool: ToolExecutor) -> dict[str, Any]:
     operations = {
         "image_resize": "image_resize",
+        "image_upscale": "image_upscale",
         "image_crop": "image_crop",
         "image_rotate": "image_rotate",
         "image_flip": "image_flip",
@@ -276,6 +287,41 @@ def _run_frame_interpolate(data: dict[str, Any], inputs: dict[str, Any], context
     result = execute_tool("run_media_operation", {"operation": "frame_interpolate", "path": str(source.path), **data}, context)
     output = _media_result(result, expected_output="video")
     output.setdefault("metadata", {}).update({"requested_backend": data.get("backend", "ffmpeg_minterpolate")})
+    return output
+
+
+def _run_video_transform(data: dict[str, Any], inputs: dict[str, Any], context: Any, execute_tool: ToolExecutor) -> dict[str, Any]:
+    source = _input_artifact(inputs, "video")
+    operation = str(data.get("operation") or "resize")
+    if operation not in {"resize", "crop", "rotate", "fps", "transcode"}:
+        raise NodeFailure("Video Transform không nằm trong allowlist.")
+    result = execute_tool("run_media_operation", {"operation": operation, "path": str(source.path), **data}, context)
+    output = _media_result(result, expected_output="video")
+    output.setdefault("metadata", {}).update({"operation": operation, "creative_prompt": str(inputs.get("prompt") or "")})
+    return output
+
+
+def _run_video_upscale(data: dict[str, Any], inputs: dict[str, Any], context: Any, execute_tool: ToolExecutor) -> dict[str, Any]:
+    source = _input_artifact(inputs, "video")
+    backend = str(data.get("backend") or "ffmpeg_scale")
+    if backend == "animesr":
+        result = execute_tool("upscale_anime_video", {"path": str(source.path), **data}, context)
+        if result.get("status") != "completed":
+            raise NodeFailure(
+                str(result.get("error") or result.get("reason") or "AnimeSR video upscale không hoàn tất."),
+                status=str(result.get("status") or "failed"),
+            )
+        output_value = result.get("output")
+        if not isinstance(output_value, str) or not output_value:
+            raise NodeFailure("AnimeSR không trả output video hợp lệ.")
+        return {"video": _artifact_from_path(output_value), "metadata": {"backend": "animesr", "scale": data.get("scale")}}
+    if backend != "ffmpeg_scale":
+        raise NodeFailure("Video Upscale backend không nằm trong allowlist.")
+    output = _media_result(
+        execute_tool("run_media_operation", {"operation": "video_upscale", "path": str(source.path), **data}, context),
+        expected_output="video",
+    )
+    output.setdefault("metadata", {}).update({"backend": "ffmpeg_scale", "ai_upscaler": False, "scale": data.get("scale")})
     return output
 
 
@@ -447,14 +493,24 @@ def _run_node(definition: NodeDefinition, data: dict[str, Any], inputs: dict[str
         before = _input_artifact(inputs, "a")
         after = _input_artifact(inputs, "b")
         return {"a": before, "b": after, "comparison": {"before": before, "after": after}}
-    if runner == "media":
+    if runner in {"media", "image_upscale"}:
         return _run_media(definition.type, data, inputs, context, execute_tool)
     if runner == "frame_interpolate":
         return _run_frame_interpolate(data, inputs, context, execute_tool)
+    if runner == "video_transform":
+        return _run_video_transform(data, inputs, context, execute_tool)
+    if runner == "video_upscale":
+        return _run_video_upscale(data, inputs, context, execute_tool)
     if runner == "encode":
         return _run_encode(data, inputs, context, execute_tool)
     if runner in {"flux", "qwen"}:
         return _run_image_generation(definition, data, inputs, context, execute_tool, draft=draft)
+    if runner == "video_generate":
+        raise NodeFailure(
+            "Video generation backend chưa khả dụng trong Hub.",
+            status="unavailable",
+            next_action=definition.status_action,
+        )
     if runner == "comfyui_workflow":
         return _run_comfyui_workflow(data, inputs, context, draft=draft)
     if runner == "grounding":
@@ -553,13 +609,18 @@ def execute_graph(graph: dict[str, Any], context: Any, execute_tool: ToolExecuto
             context.progress(progress, f"Node Studio: {index + 1}/{total} node hoàn tất.")
     except NodeFailure as exc:
         message = str(publicize(str(exc)))
-        graph_runs.update_node(str(context.job_id), node_id, status=exc.status, progress=0, message=message, error=message)
-        graph_runs.finish(str(context.job_id), status=exc.status, error=message)
-        return {"status": "unavailable" if exc.status == "unavailable" else "error", "error": message, "failed_node": node_id, "nodes": public_nodes}
+        definition = get_definition(str(node.get("type") or ""))
+        next_action = exc.next_action or (definition.status_action if definition and definition.status != "operational" else None)
+        graph_runs.update_node(str(context.job_id), node_id, status=exc.status, progress=0, message=message, error=message, next_action=next_action)
+        graph_runs.finish(str(context.job_id), status=exc.status, error=message, next_action=next_action)
+        snapshot = graph_runs.snapshot(str(context.job_id)) or {}
+        return {"status": "unavailable" if exc.status == "unavailable" else "error", "error": message, "next_action": next_action, "failed_node": node_id, "nodes": public_nodes, "provenance": snapshot.get("provenance", [])}
     except Exception as exc:  # pragma: no cover - protects the background job thread
         message = str(publicize(str(exc)))
-        graph_runs.update_node(str(context.job_id), node_id, status="failed", progress=0, message=message, error=message)
-        graph_runs.finish(str(context.job_id), status="failed", error=message)
-        return {"status": "error", "error": message, "failed_node": node_id, "nodes": public_nodes}
+        graph_runs.update_node(str(context.job_id), node_id, status="failed", progress=0, message=message, error=message, next_action="Kiểm tra log job và cấu hình backend rồi thử lại.")
+        graph_runs.finish(str(context.job_id), status="failed", error=message, next_action="Kiểm tra log job và cấu hình backend rồi thử lại.")
+        snapshot = graph_runs.snapshot(str(context.job_id)) or {}
+        return {"status": "error", "error": message, "next_action": "Kiểm tra log job và cấu hình backend rồi thử lại.", "failed_node": node_id, "nodes": public_nodes, "provenance": snapshot.get("provenance", [])}
     graph_runs.finish(str(context.job_id), status="completed")
-    return {"status": "completed", "graph_id": value.get("id"), "draft": bool(draft), "nodes": public_nodes}
+    snapshot = graph_runs.snapshot(str(context.job_id)) or {}
+    return {"status": "completed", "graph_id": value.get("id"), "draft": bool(draft), "nodes": public_nodes, "provenance": snapshot.get("provenance", [])}

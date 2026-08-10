@@ -1,0 +1,17 @@
+{
+  "contract_version": "image-mask-studio-config.v1",
+  "schema_version": 1,
+  "limits": {
+    "max_sessions": 120,
+    "max_layers_per_session": 48,
+    "max_mask_operations": 256,
+    "max_points_per_stroke": 160,
+    "max_undo_entries": 32,
+    "max_snapshots": 24,
+    "max_presets": 120,
+    "max_state_bytes": 8388608
+  },
+  "sam2_assist": {
+    "configured": false
+  }
+}

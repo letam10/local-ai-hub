@@ -45,12 +45,16 @@ class NodeDefinition:
     outputs: tuple[Port, ...] = ()
     properties: tuple[dict[str, Any], ...] = ()
     status: str = "operational"
+    status_reason: str | None = None
+    status_action: str | None = None
     heavy: bool = False
     annotation: bool = False
     supports_draft: bool = False
     version: int = 1
 
     def public(self) -> dict[str, Any]:
+        default_reason = "Sẵn sàng trong Hub." if self.status == "operational" else "Adapter đã khai báo nhưng chưa có bounded smoke tương ứng."
+        default_action = "Có thể chạy khi input hợp lệ." if self.status == "operational" else "Kiểm tra backend và chạy bounded smoke trước khi dùng production."
         return {
             "type": self.type,
             "title": self.title,
@@ -61,6 +65,11 @@ class NodeDefinition:
             "outputs": [item.public() for item in self.outputs],
             "properties": [dict(item) for item in self.properties],
             "status": self.status,
+            "availability": {
+                "status": self.status,
+                "reason": self.status_reason or default_reason,
+                "action": self.status_action or default_action,
+            },
             "heavy": self.heavy,
             "annotation": self.annotation,
             "supports_draft": self.supports_draft,
@@ -91,6 +100,8 @@ def _node(
     outputs: tuple[Port, ...] = (),
     properties: tuple[dict[str, Any], ...] = (),
     status: str = "operational",
+    status_reason: str | None = None,
+    status_action: str | None = None,
     heavy: bool = False,
     annotation: bool = False,
     supports_draft: bool = False,
@@ -105,6 +116,8 @@ def _node(
         outputs=outputs,
         properties=properties,
         status=status,
+        status_reason=status_reason,
+        status_action=status_action,
         heavy=heavy,
         annotation=annotation,
         supports_draft=supports_draft,
@@ -127,7 +140,7 @@ _DEFINITIONS: tuple[NodeDefinition, ...] = (
     _node("save_image", "Save Image", "utility", "Đánh dấu artifact image cuối cùng; không ghi đè source.", "passthrough", inputs=(_port("image", "IMAGE", required=True),), outputs=(_port("image", "IMAGE"),)),
     _node("save_video", "Save Video", "utility", "Đánh dấu artifact video cuối cùng; không ghi đè source.", "passthrough", inputs=(_port("video", "VIDEO", required=True),), outputs=(_port("video", "VIDEO"),)),
     _node("export_mask", "Export Mask", "vision", "Xuất mask artifact Hub.", "passthrough", inputs=(_port("mask", "MASK", required=True),), outputs=(_port("mask", "MASK"),)),
-    _node("export_video", "Export Mask/Video", "vision", "Xuất video mask/tracking artifact Hub.", "passthrough", inputs=(_port("video", "VIDEO", required=True),), outputs=(_port("video", "VIDEO"),)),
+    _node("export_video", "Export Video", "video", "Xuất video artifact cuối cùng trong vùng Hub; không ghi đè source.", "passthrough", inputs=(_port("video", "VIDEO", required=True),), outputs=(_port("video", "VIDEO"),)),
     _node("comment", "Comment", "annotation", "Ghi chú không tham gia execution.", "annotation", properties=(_prop("text", "Comment", "textarea", "Ghi chú workflow"),), annotation=True),
     _node("group", "Group", "annotation", "Nhóm trực quan cho các node trong graph JSON.", "annotation", properties=(_prop("title", "Tên nhóm", "text", "Nhóm"), _prop("color", "Màu", "color", "#4d7dff")), annotation=True),
 
@@ -135,9 +148,11 @@ _DEFINITIONS: tuple[NodeDefinition, ...] = (
     _node("resolution", "Resolution", "image", "Width/height có thể nối tới generator.", "resolution", outputs=(_port("width", "NUMBER"), _port("height", "NUMBER"), _port("settings", "METADATA")), properties=(_prop("width", "Width", "number", 768, min=256, max=2048, step=64), _prop("height", "Height", "number", 768, min=256, max=2048, step=64))),
     _node("seed", "Seed", "image", "Seed tái lập khi backend hỗ trợ.", "number", outputs=(_port("seed", "NUMBER"),), properties=(_prop("value", "Seed", "number", 42, min=0),)),
     _node("sampler_settings", "Steps / Sampler", "image", "Steps và sampler được adapter image hỗ trợ.", "metadata", outputs=(_port("settings", "METADATA"),), properties=(_prop("steps", "Steps", "number", 20, min=1, max=80), _prop("sampler", "Sampler", "select", "backend_default", options=["backend_default"]))),
-    _node("flux_generate", "FLUX Generate", "image", "Compile graph Hub thành request ComfyUI FLUX.", "flux", inputs=(_port("prompt", "TEXT", required=True), _port("image", "IMAGE"), _port("width", "NUMBER"), _port("height", "NUMBER"), _port("seed", "NUMBER"), _port("settings", "METADATA")), outputs=(_port("image", "IMAGE"), _port("metadata", "METADATA")), properties=(_prop("width", "Width", "number", 768, min=256, max=2048, step=64), _prop("height", "Height", "number", 768, min=256, max=2048, step=64), _prop("steps", "Steps", "number", 20, min=1, max=80), _prop("seed", "Seed", "number", 42, min=0), _prop("negative_prompt", "Negative prompt", "text", "")), status="partial", heavy=True, supports_draft=True),
-    _node("qwen_image", "Qwen Image Generate/Edit", "image", "Compile graph Hub thành request ComfyUI Qwen Image.", "qwen", inputs=(_port("prompt", "TEXT", required=True), _port("image", "IMAGE"), _port("width", "NUMBER"), _port("height", "NUMBER"), _port("seed", "NUMBER"), _port("settings", "METADATA")), outputs=(_port("image", "IMAGE"), _port("metadata", "METADATA")), properties=(_prop("width", "Width", "number", 768, min=256, max=2048, step=64), _prop("height", "Height", "number", 768, min=256, max=2048, step=64), _prop("steps", "Steps", "number", 20, min=1, max=80), _prop("seed", "Seed", "number", 42, min=0), _prop("negative_prompt", "Negative prompt", "text", "")), status="partial", heavy=True, supports_draft=True),
-    _node("image_resize", "Resize", "image", "Resize image qua FFmpeg allowlist.", "media", inputs=(_port("image", "IMAGE", required=True),), outputs=(_port("image", "IMAGE"),), properties=(_prop("width", "Width", "number", 1280, min=2), _prop("height", "Height", "number", -2, min=-2)), status="partial"),
+    _node("flux_generate", "FLUX Generate", "image", "Compile graph Hub thành request ComfyUI FLUX.", "flux", inputs=(_port("prompt", "TEXT", required=True), _port("image", "IMAGE"), _port("width", "NUMBER"), _port("height", "NUMBER"), _port("seed", "NUMBER"), _port("settings", "METADATA")), outputs=(_port("image", "IMAGE"), _port("metadata", "METADATA")), properties=(_prop("width", "Width", "number", 768, min=256, max=2048, step=64), _prop("height", "Height", "number", 768, min=256, max=2048, step=64), _prop("steps", "Steps", "number", 20, min=1, max=80), _prop("seed", "Seed", "number", 42, min=0), _prop("negative_prompt", "Negative prompt", "text", "")), status="partial", status_reason="ComfyUI và bộ model FLUX chưa có bounded generation smoke trong Hub.", status_action="Khởi động ComfyUI, kiểm tra model FLUX và chạy một ảnh thử nhỏ.", heavy=True, supports_draft=True),
+    _node("qwen_image", "Qwen Image Generate", "image", "Compile graph Hub thành request ComfyUI Qwen Image.", "qwen", inputs=(_port("prompt", "TEXT", required=True), _port("image", "IMAGE"), _port("width", "NUMBER"), _port("height", "NUMBER"), _port("seed", "NUMBER"), _port("settings", "METADATA")), outputs=(_port("image", "IMAGE"), _port("metadata", "METADATA")), properties=(_prop("width", "Width", "number", 768, min=256, max=2048, step=64), _prop("height", "Height", "number", 768, min=256, max=2048, step=64), _prop("steps", "Steps", "number", 20, min=1, max=80), _prop("seed", "Seed", "number", 42, min=0), _prop("negative_prompt", "Negative prompt", "text", "")), status="partial", status_reason="ComfyUI và bộ model Qwen Image chưa có bounded generation smoke trong Hub.", status_action="Khởi động ComfyUI, kiểm tra model Qwen Image và chạy một ảnh thử nhỏ.", heavy=True, supports_draft=True),
+    _node("image_edit", "Image Edit / Image-to-Image", "image", "Chỉnh ảnh bằng prompt và IMAGE artifact qua Qwen Image.", "qwen", inputs=(_port("prompt", "TEXT", required=True), _port("image", "IMAGE", required=True), _port("width", "NUMBER"), _port("height", "NUMBER"), _port("seed", "NUMBER"), _port("settings", "METADATA")), outputs=(_port("image", "IMAGE"), _port("metadata", "METADATA")), properties=(_prop("width", "Width", "number", 768, min=256, max=2048, step=64), _prop("height", "Height", "number", 768, min=256, max=2048, step=64), _prop("steps", "Steps", "number", 20, min=1, max=80), _prop("seed", "Seed", "number", 42, min=0), _prop("negative_prompt", "Negative prompt", "text", "")), status="partial", status_reason="Qwen Image edit cần ComfyUI workflow hỗ trợ input image và chưa có bounded smoke trong Hub.", status_action="Cấu hình workflow image-to-image trong ComfyUI rồi chạy smoke với một ảnh nhỏ.", heavy=True, supports_draft=True),
+    _node("image_resize", "Resize", "image", "Resize image qua FFmpeg allowlist.", "media", inputs=(_port("image", "IMAGE", required=True),), outputs=(_port("image", "IMAGE"),), properties=(_prop("width", "Width", "number", 1280, min=2), _prop("height", "Height", "number", -2, min=-2)), status="partial", status_reason="FFmpeg image transform chưa có bounded smoke trong phiên Hub này.", status_action="Kiểm tra FFmpeg canonical rồi chạy smoke với một ảnh nhỏ."),
+    _node("image_upscale", "Upscale Image (FFmpeg fallback)", "image", "Phóng ảnh theo tỉ lệ qua FFmpeg; không giả nhận đây là AI upscaler.", "image_upscale", inputs=(_port("image", "IMAGE", required=True),), outputs=(_port("image", "IMAGE"), _port("metadata", "METADATA")), properties=(_prop("scale", "Scale", "select", 2, options=[2, 3, 4]),), status="partial", status_reason="FFmpeg scale fallback có contract; AI upscaler chuyên dụng chưa được bounded smoke.", status_action="Dùng fallback để kiểm tra pipeline; cấu hình Real-ESRGAN/AnimeSR riêng nếu cần AI upscale."),
     _node("image_crop", "Crop", "image", "Crop image qua FFmpeg allowlist.", "media", inputs=(_port("image", "IMAGE", required=True),), outputs=(_port("image", "IMAGE"),), properties=(_prop("width", "Width", "number", 720, min=2), _prop("height", "Height", "number", 720, min=2), _prop("x", "X", "number", 0, min=0), _prop("y", "Y", "number", 0, min=0)), status="partial"),
     _node("image_rotate", "Rotate", "image", "Rotate image qua FFmpeg allowlist.", "media", inputs=(_port("image", "IMAGE", required=True),), outputs=(_port("image", "IMAGE"),), properties=(_prop("degrees", "Degrees", "select", 90, options=[90, 180, 270]),), status="partial"),
     _node("image_flip", "Flip", "image", "Flip image qua FFmpeg allowlist.", "media", inputs=(_port("image", "IMAGE", required=True),), outputs=(_port("image", "IMAGE"),), properties=(_prop("axis", "Axis", "select", "horizontal", options=["horizontal", "vertical"]),), status="partial"),
@@ -145,6 +160,49 @@ _DEFINITIONS: tuple[NodeDefinition, ...] = (
     _node("mask_apply", "Mask Apply", "image", "Áp mask bằng Pillow khi environment Hub có Pillow.", "mask_apply", inputs=(_port("image", "IMAGE", required=True), _port("mask", "MASK", required=True)), outputs=(_port("image", "IMAGE"),), status="partial"),
     _node("mask_composite", "Mask Composite", "image", "Composite foreground/mask bằng Pillow khi khả dụng.", "mask_composite", inputs=(_port("image", "IMAGE", required=True), _port("mask", "MASK", required=True)), outputs=(_port("image", "IMAGE"),), status="partial"),
     _node("image_compare", "Image Compare A/B", "image", "Giữ hai IMAGE artifacts để Inspector hiển thị before/after.", "compare", inputs=(_port("a", "IMAGE", required=True, label="Before"), _port("b", "IMAGE", required=True, label="After")), outputs=(_port("a", "IMAGE"), _port("b", "IMAGE"), _port("comparison", "METADATA"))),
+
+    # Video creative workflow
+    _node(
+        "video_generate",
+        "Video Generate (backend partial)",
+        "video",
+        "Prompt TEXT → video backend local; giữ rõ unavailable khi chưa có adapter generation đã smoke.",
+        "video_generate",
+        inputs=(_port("prompt", "TEXT", required=True), _port("video", "VIDEO")),
+        outputs=(_port("video", "VIDEO"), _port("metadata", "METADATA")),
+        properties=(_prop("width", "Width", "number", 768, min=64, max=2048, step=2), _prop("height", "Height", "number", 432, min=64, max=2048, step=2), _prop("duration", "Duration (s)", "number", 4, min=1, max=30, step=1), _prop("fps", "FPS", "number", 24, min=1, max=60), _prop("seed", "Seed", "number", 42, min=0)),
+        status="unavailable",
+        status_reason="Hub chưa có video-generation adapter local được bounded smoke; không giả nhận prompt thành output.",
+        status_action="Dùng Video Transform với video artifact hoặc cấu hình backend video local rồi chạy smoke trước.",
+        heavy=True,
+    ),
+    _node(
+        "video_transform",
+        "Video Transform",
+        "video",
+        "Video artifact + creative prompt tuỳ chọn → transform FFmpeg allowlist.",
+        "video_transform",
+        inputs=(_port("video", "VIDEO", required=True), _port("prompt", "TEXT")),
+        outputs=(_port("video", "VIDEO"), _port("metadata", "METADATA")),
+        properties=(_prop("operation", "Transform", "select", "resize", options=["resize", "crop", "rotate", "fps", "transcode"]), _prop("width", "Width", "number", 1280, min=2), _prop("height", "Height", "number", -2, min=-2), _prop("degrees", "Degrees", "select", 90, options=[90, 180, 270]), _prop("fps", "FPS", "number", 30, min=1, max=120), _prop("crf", "CRF", "number", 18, min=14, max=32)),
+        status="partial",
+        status_reason="FFmpeg transform có adapter nhưng chưa có bounded video smoke trong phiên này.",
+        status_action="Chọn một video nhỏ, chạy transform rồi kiểm tra preview/provenance trong Jobs.",
+    ),
+    _node(
+        "video_upscale",
+        "Video Upscale (AnimeSR / FFmpeg)",
+        "video",
+        "Upscale video qua AnimeSR khi sẵn sàng hoặc fallback FFmpeg scale; status không giả nhận AI.",
+        "video_upscale",
+        inputs=(_port("video", "VIDEO", required=True),),
+        outputs=(_port("video", "VIDEO"), _port("metadata", "METADATA")),
+        properties=(_prop("backend", "Backend", "select", "ffmpeg_scale", options=["ffmpeg_scale", "animesr"]), _prop("scale", "Scale", "select", 2, options=[2, 3, 4])),
+        status="partial",
+        status_reason="FFmpeg scale fallback có contract; AnimeSR direct worker vẫn cần bounded smoke riêng.",
+        status_action="Dùng ffmpeg_scale để smoke pipeline; chọn AnimeSR chỉ khi environment và worker đã sẵn sàng.",
+        heavy=True,
+    ),
 
     # SAM2 and vision
     _node("grounding_prompt", "Grounding Prompt", "vision", "Prompt TEXT cho Grounding DINO.", "text", outputs=(_port("text", "TEXT"),), properties=(_prop("text", "Prompt", "text", "person . object ."),)),
@@ -180,6 +238,8 @@ _DEFINITIONS: tuple[NodeDefinition, ...] = (
         outputs=(_port("image", "IMAGE"), _port("metadata", "METADATA")),
         properties=(_prop("workflow_id", "Bridge workflow ID", "text", "flux_quick"), _prop("prompt", "Prompt fallback", "textarea", ""), _prop("width", "Width", "number", 768, min=256, max=2048, step=64), _prop("height", "Height", "number", 768, min=256, max=2048, step=64), _prop("steps", "Steps", "number", 20, min=1, max=80), _prop("seed", "Seed", "number", 42, min=0), _prop("negative_prompt", "Negative prompt", "text", "")),
         status="partial",
+        status_reason="ComfyUI bridge chưa có bounded generation smoke trong Hub.",
+        status_action="Kiểm tra bridge workflow và ComfyUI trước khi chạy.",
         heavy=True,
         supports_draft=True,
     ),
@@ -224,11 +284,19 @@ def registry_payload(scope: str | None = None) -> dict[str, Any]:
         capabilities = encoder_capabilities()
     except Exception as exc:  # pragma: no cover - optional runtime may be absent
         capabilities = {"available": False, "reason": str(exc)}
+    definitions = list(definitions_for_scope(scope))
+    counts = {status: sum(1 for item in definitions if item.status == status) for status in ("operational", "partial", "unavailable")}
     return {
         "status": "completed",
+        "contract_version": "node-studio.v2",
         "schema_version": GRAPH_SCHEMA_VERSION,
         "port_types": list(PORT_TYPES),
         "scope": scope or "all",
-        "nodes": [item.public() for item in definitions_for_scope(scope)],
+        "nodes": [item.public() for item in definitions],
+        "availability": {
+            "counts": counts,
+            "honest_statuses": ["operational", "partial", "unavailable"],
+            "rule": "Node partial/unavailable không được coi là đã chạy nếu chưa có bounded smoke.",
+        },
         "encoder_capabilities": capabilities,
     }

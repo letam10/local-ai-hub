@@ -1,0 +1,88 @@
+{
+  "schema_version": "extension-manifest.v1",
+  "id": "image-resource-advisor",
+  "version": "1.0.0",
+  "display_name": "Image Resource Advisor",
+  "description": "A static sample of an image capability with explicit model, component, and GPU planning requirements.",
+  "author": {
+    "name": "Local AI Hub"
+  },
+  "license": "Verify upstream license before use",
+  "source": "https://github.com/local-ai-hub/local-ai-hub",
+  "capabilities": [
+    "capability_pack",
+    "image_generation",
+    "model_cards",
+    "resource_planning",
+    "runtime_cards"
+  ],
+  "compatibility": {
+    "hub": {
+      "min_version": "4.0.0",
+      "max_version": "4.99.99"
+    },
+    "platforms": [
+      "windows"
+    ]
+  },
+  "required_components": [
+    {
+      "id": "comfyui",
+      "version": ">=0.0.0"
+    }
+  ],
+  "required_models": [
+    {
+      "id": "qwen-image-2512",
+      "version": ">=2512.0.0"
+    }
+  ],
+  "permissions": [
+    "inspect_component_status",
+    "inspect_model_status",
+    "plan_resources",
+    "read_capability_cards",
+    "read_extension_metadata",
+    "render_compatibility_report"
+  ],
+  "entrypoints": [
+    {
+      "kind": "capability_pack",
+      "path": "capability-pack.json"
+    },
+    {
+      "kind": "model_cards",
+      "path": "cards/model-cards.json"
+    },
+    {
+      "kind": "runtime_cards",
+      "path": "cards/runtime-cards.json"
+    },
+    {
+      "kind": "documentation",
+      "path": "README.md"
+    }
+  ],
+  "resource_profile": {
+    "cpu": {
+      "class": "moderate",
+      "threads": 4
+    },
+    "gpu": {
+      "required": true,
+      "vendor": "nvidia",
+      "device_class": "discrete"
+    },
+    "vram_gb": 7.5,
+    "ram_gb": 12,
+    "disk_gb": 20,
+    "exclusive_resource_groups": [
+      "gpu:primary"
+    ]
+  },
+  "availability": {
+    "status": "partial",
+    "reason": "This descriptor requires separately configured ComfyUI and model evidence; discovery does not launch either one.",
+    "action": "Review dependency preflight and run a bounded approved smoke before enabling image generation."
+  }
+}

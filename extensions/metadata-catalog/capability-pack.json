@@ -1,0 +1,19 @@
+{
+  "schema_version": "capability-pack.v1",
+  "id": "metadata-catalog-pack",
+  "display_name": "Metadata Catalog capability pack",
+  "description": "Static metadata, model card, runtime card, and planning descriptors.",
+  "capabilities": [
+    "capability_pack",
+    "metadata_catalog",
+    "model_cards",
+    "resource_planning",
+    "runtime_cards"
+  ],
+  "model_card_ids": [
+    "metadata-embedder"
+  ],
+  "runtime_card_ids": [
+    "metadata-runtime"
+  ]
+}

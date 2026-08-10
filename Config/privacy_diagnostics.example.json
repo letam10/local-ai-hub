@@ -1,0 +1,27 @@
+{
+  "schema_version": "privacy-diagnostics.config.v1",
+  "managed_policy_root": "repository-managed",
+  "allow_external_policy_root": false,
+  "allowed_formats": [
+    "json",
+    "markdown"
+  ],
+  "consent": {
+    "required": true,
+    "default_state": "required",
+    "default_scope": "diagnostics"
+  },
+  "retention": {
+    "classification": "diagnostic",
+    "days": 7
+  },
+  "runtime": {
+    "probe_enabled": false,
+    "command_execution": false,
+    "environment_capture": false,
+    "path_capture": false,
+    "log_capture": false,
+    "attachment_capture": false
+  },
+  "execution": "not_run"
+}

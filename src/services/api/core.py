@@ -5,17 +5,19 @@ from __future__ import annotations
 import os
 import re
 import socket
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from src.services.artifact_store import resolve
+from src.shared.version import PRODUCT_VERSION
 from src.services.job_manager.manager import JobContext, job_manager
 from src.services.tool_smoke import passed as smoke_passed
 
 from .config import BASE_DIR, component, components, hub_config
 from .gpu import gpu_policy, query_gpu
-from .jobs import get_job, list_jobs
+from .jobs import active_jobs, get_job, list_jobs
 
 
 TOOL_COMPONENTS = {
@@ -63,6 +65,46 @@ SMOKE_ELIGIBLE_TOOLS = {
     "generate_qwen_image",
 }
 
+# Desktop shutdown must close submission admission and recheck the durable
+# queue under one server-owned lock.  The desktop never races a new job into
+# an API process it is about to terminate.
+_submission_gate = threading.RLock()
+_submissions_quiesced = False
+
+
+def _submission_closed_payload() -> tuple[int, dict[str, Any]]:
+    return 409, {
+        "status": "closing",
+        "error": "Hub đang đóng phiên desktop sở hữu API; không nhận job mới.",
+        "next_action": "Chờ Hub đóng xong hoặc mở lại Hub rồi tạo tác vụ mới.",
+    }
+
+
+def prepare_owned_shutdown() -> tuple[int, dict[str, Any]]:
+    """Atomically quiesce submission and recheck active Hub work.
+
+    This route is meaningful only to the desktop process that owns the API.
+    A nonzero recheck immediately reopens admission and asks the desktop to
+    show its three-choice active-job decision instead of terminating workers.
+    """
+
+    global _submissions_quiesced
+    with _submission_gate:
+        _submissions_quiesced = True
+        active = active_jobs()
+        if active:
+            _submissions_quiesced = False
+            return 409, {
+                "status": "active_jobs",
+                "active_jobs": len(active),
+                "message": "Hub phát hiện job mới hoặc đang hoạt động; cửa sổ vẫn được giữ mở để chọn cách xử lý an toàn.",
+            }
+        return 200, {
+            "status": "ready_to_close",
+            "active_jobs": 0,
+            "message": "Hub đã khóa nhận job mới và có thể đóng API do desktop này sở hữu.",
+        }
+
 # A direct adapter stays partial until its bounded functional smoke records a
 # completion.  The UI may still submit it; the result remains truthful.
 TOOL_CAPABILITIES = {
@@ -86,6 +128,32 @@ TOOL_CAPABILITIES = {
     "run_media_operation": ("partial", "FFmpeg allowlist đã cấu hình; mỗi thao tác ghi output cần smoke V3 riêng."),
     "generate_flux": ("partial", "FLUX workflow gọi trực tiếp ComfyUI API; chưa có smoke generation V3 được ghi nhận."),
     "generate_qwen_image": ("partial", "Qwen Image workflow gọi trực tiếp ComfyUI API; chưa có smoke generation V3 được ghi nhận."),
+}
+
+# Keep the UI's "Bước tiếp theo" contract alongside the truthful capability
+# status.  These actions are guidance only; they never imply that an un-smoked
+# backend is operational.
+TOOL_ACTIONS = {
+    "parse_screen": "Chọn một screenshot nhỏ rồi chạy bounded smoke khi tài nguyên sẵn sàng.",
+    "detect_objects": "Chọn một ảnh nhỏ và xác minh detector trước khi dùng batch.",
+    "ground_objects": "Nhập prompt ngắn, kiểm tra boxes rồi mới nối sang SAM2.",
+    "segment_image": "Tải ảnh và kiểm tra mask trong Jobs; chưa có smoke thì giữ partial.",
+    "segment_from_box": "Kéo box trên preview, sau đó kiểm tra mask artifact trong Jobs.",
+    "segment_from_points": "Chọn điểm trên preview và kiểm tra mask artifact trong Jobs.",
+    "segment_from_text": "Xác minh Grounding DINO trước khi chạy pipeline text → mask.",
+    "track_video_object": "Chỉ chạy với clip ngắn sau khi resource override được gỡ.",
+    "ocr_document": "Tải một ảnh/PDF nhỏ và kiểm tra text artifact trước khi chạy batch.",
+    "transcribe_media": "Chọn media ngắn và kiểm tra transcript/SRT trước khi dịch hoặc burn.",
+    "create_subtitled_video": "Xác minh transcript trước; video smoke hiện deferred do resource contention.",
+    "text_to_speech": "Nhập một câu ngắn và kiểm tra audio artifact sau bounded smoke.",
+    "design_voice": "Dùng sample ngắn, không đưa reference cá nhân vào log hoặc PR.",
+    "clone_voice": "Chỉ dùng reference đã được phép và kiểm tra output local.",
+    "convert_voice": "Kiểm tra source/target artifact ID trước khi queue.",
+    "upscale_anime_video": "Video smoke hiện deferred do resource contention; giữ trạng thái partial.",
+    "probe_media": "Đọc metadata là read-only; mở JSON result trong Jobs.",
+    "run_media_operation": "Chọn operation allowlist và kiểm tra output artifact, không ghi đè source.",
+    "generate_flux": "Chọn template Image AI; generation smoke hiện deferred nếu ComfyUI/GPU đang bận.",
+    "generate_qwen_image": "Chọn ảnh input nếu edit; generation smoke hiện deferred nếu ComfyUI/GPU đang bận.",
 }
 
 
@@ -176,11 +244,11 @@ def health(*, probe_gpu: bool = False) -> dict[str, Any]:
         disk: dict[str, int] | None = {"free_bytes": free, "total_bytes": total, "used_bytes": used}
     except OSError:
         disk = None
-    active = [item for item in list_jobs() if item.get("status") in {"starting", "running", "cancelling"}]
+    active = [item for item in list_jobs() if item.get("status") in {"queued", "starting", "running", "cancelling"}]
     return {
         "status": "healthy",
         "service": "Local AI Hub",
-        "version": "3.0.0",
+        "version": PRODUCT_VERSION,
         "time": _now(),
         "bind": f"{config.get('bind_host', '127.0.0.1')}:{config.get('api_port', 8765)}",
         "disk": disk,
@@ -202,7 +270,13 @@ def _tool_readiness(tool: str, statuses: dict[str, dict[str, Any]]) -> dict[str,
     elif tool_status == "partial" and tool in SMOKE_ELIGIBLE_TOOLS and smoke_passed(tool):
         tool_status = "operational"
         reason = "Đã có một direct job bounded hoàn tất trên máy này; trạng thái được lưu cục bộ, không chứa đường dẫn hoặc dữ liệu input."
-    return {"component": component_id, "component_status": component_status, "tool_status": tool_status, "reason": reason}
+    return {
+        "component": component_id,
+        "component_status": component_status,
+        "tool_status": tool_status,
+        "reason": reason,
+        "action": TOOL_ACTIONS.get(tool, "Kiểm tra trạng thái backend rồi thử lại trong Jobs."),
+    }
 
 
 def tool_catalog(component_items: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
@@ -218,10 +292,11 @@ def tool_catalog(component_items: list[dict[str, Any]] | None = None) -> list[di
             "status": readiness["tool_status"],
             "description": f"Allowlisted Local AI Hub workflow backed by {component_id}.",
             "reason": readiness["reason"],
+            "action": readiness["action"],
         })
     tools.extend([
-        {"name": "get_health", "component": "local_ai_api", "component_status": "running", "tool_status": "operational", "status": "operational", "description": "Return Hub health.", "reason": "Loopback control-plane route."},
-        {"name": "list_models", "component": "local_ai_api", "component_status": "running", "tool_status": "operational", "status": "operational", "description": "Return safe model inventory.", "reason": "Loopback control-plane route."},
+        {"name": "get_health", "component": "local_ai_api", "component_status": "running", "tool_status": "operational", "status": "operational", "description": "Return Hub health.", "reason": "Loopback control-plane route.", "action": "Mở Dashboard để xem health, disk và job summary."},
+        {"name": "list_models", "component": "local_ai_api", "component_status": "running", "tool_status": "operational", "status": "operational", "description": "Return safe model inventory.", "reason": "Loopback control-plane route.", "action": "Mở Models & Storage và quét lại khi cần."},
     ])
     return tools
 
@@ -234,6 +309,7 @@ def _unavailable(tool: str, readiness: dict[str, Any], reason: str | None = None
         "component_status": readiness["component_status"],
         "tool_status": readiness["tool_status"],
         "reason": reason or readiness["reason"],
+        "action": readiness.get("action") or TOOL_ACTIONS.get(tool, "Kiểm tra backend rồi thử lại."),
     }
 
 
@@ -381,7 +457,10 @@ def submit_tool(tool: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]
     request, error = _resolve_assets(payload)
     if error:
         return 400, {"status": "error", "error": error}
-    record = job_manager.submit(tool, request, lambda item, context: _run_operation(tool, item, context), device="gpu" if tool not in {"probe_media", "run_media_operation"} else None, heavy=tool != "probe_media")
+    with _submission_gate:
+        if _submissions_quiesced:
+            return _submission_closed_payload()
+        record = job_manager.submit(tool, request, lambda item, context: _run_operation(tool, item, context), device="gpu" if tool not in {"probe_media", "run_media_operation"} else None, heavy=tool != "probe_media")
     return 202, {"status": "queued", "job": get_job(record["id"])}
 
 
@@ -399,15 +478,25 @@ def submit_graph(graph: object, *, draft: bool = False) -> tuple[int, dict[str, 
     normalized = validation["graph"]
     heavy = graph_has_heavy_nodes(normalized)
     request = {"graph": normalized, "draft": bool(draft)}
-    record = job_manager.submit(
-        "node_graph",
-        request,
-        lambda item, context: execute_graph(item["graph"], context, _run_operation, draft=bool(item.get("draft"))),
-        device="gpu" if heavy else None,
-        heavy=heavy,
-    )
-    graph_runs.begin(record["id"], normalized)
-    return 202, {"status": "queued", "job": get_job(record["id"]), "validation": {"order": validation["order"]}}
+    with _submission_gate:
+        if _submissions_quiesced:
+            return _submission_closed_payload()
+        record = job_manager.submit(
+            "node_graph",
+            request,
+            lambda item, context: execute_graph(item["graph"], context, _run_operation, draft=bool(item.get("draft"))),
+            device="gpu" if heavy else None,
+            heavy=heavy,
+        )
+        graph_runs.begin(record["id"], normalized)
+    return 202, {
+        "status": "queued",
+        "contract_version": "node-run.v2",
+        "graph_id": normalized.get("id"),
+        "heavy": heavy,
+        "job": get_job(record["id"]),
+        "validation": {"order": validation["order"]},
+    }
 
 
 def dispatch_tool(tool: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:

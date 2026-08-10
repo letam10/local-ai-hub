@@ -1,0 +1,90 @@
+{
+  "schema_version": "asset-catalog.v1",
+  "id": "portrait-asset-catalog",
+  "label": "Portrait asset metadata catalog",
+  "assets": [
+    {
+      "schema_version": "asset-record.v1",
+      "id": "portrait-source",
+      "label": "Portrait source metadata",
+      "asset": {
+        "kind": "image",
+        "media_type": "image/png",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bytes": 3072
+      },
+      "source": {
+        "kind": "managed-catalog",
+        "reference": "portrait-seed"
+      },
+      "retention": {
+        "classification": "standard",
+        "days": 180
+      },
+      "fingerprints": {
+        "perceptual": [
+          {
+            "algorithm": "phash-v1",
+            "digest": "cccccccccccccccc",
+            "status": "not_run"
+          }
+        ],
+        "embedding": [
+          {
+            "provider_id": "local-embedding",
+            "model_id": "vision-metadata",
+            "dimension": 512,
+            "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "status": "not_run"
+          }
+        ]
+      }
+    },
+    {
+      "schema_version": "asset-record.v1",
+      "id": "portrait-source-copy",
+      "label": "Portrait duplicate metadata",
+      "asset": {
+        "kind": "image",
+        "media_type": "image/png",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bytes": 3072
+      },
+      "source": {
+        "kind": "external-metadata",
+        "reference": "portrait-import"
+      },
+      "retention": {
+        "classification": "temporary",
+        "days": 30
+      },
+      "fingerprints": {
+        "perceptual": [],
+        "embedding": []
+      }
+    },
+    {
+      "schema_version": "asset-record.v1",
+      "id": "portrait-derivative",
+      "label": "Portrait derivative metadata",
+      "asset": {
+        "kind": "image",
+        "media_type": "image/png",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bytes": 4096
+      },
+      "source": {
+        "kind": "derived",
+        "reference": "portrait-lineage"
+      },
+      "retention": {
+        "classification": "preserve",
+        "days": 365
+      },
+      "fingerprints": {
+        "perceptual": [],
+        "embedding": []
+      }
+    }
+  ]
+}
