@@ -184,4 +184,3 @@ No server/API/UI/provider smoke, filesystem mutation, legacy suite, GPU/video,
 FFmpeg, SAM2 or model test belongs in this documentation change. Runtime
 execution, provider probing, writable remediation, job integration and route
 authorization are explicit future work requiring separate approval.
-
