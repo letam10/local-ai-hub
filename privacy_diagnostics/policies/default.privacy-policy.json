@@ -1,0 +1,48 @@
+{
+  "schema_version": "privacy-policy.v1",
+  "id": "default-privacy-policy",
+  "label": "Default static diagnostics policy",
+  "revision": 1,
+  "source": {
+    "kind": "managed",
+    "reference": "privacy-policy-source"
+  },
+  "ledger": {
+    "consent_ref": "diagnostic-consent-ledger",
+    "retention_ref": "diagnostic-retention-ledger",
+    "revision": 1
+  },
+  "consent": {
+    "state": "granted",
+    "scope": "diagnostics-and-support",
+    "ledger_ref": "diagnostic-consent-ledger",
+    "revision": 1
+  },
+  "retention": {
+    "classification": "support",
+    "days": 30,
+    "ledger_ref": "diagnostic-retention-ledger"
+  },
+  "redaction_profile": "strict",
+  "components": [
+    "hub-core",
+    "privacy-diagnostics",
+    "support-bundle"
+  ],
+  "config_keys": [
+    "diagnostic_consent",
+    "privacy_policy",
+    "retention"
+  ],
+  "tool_ids": [
+    "asset-catalog",
+    "caption"
+  ],
+  "contract_ids": [
+    "diagnostic-finding",
+    "diagnostic-snapshot",
+    "privacy-policy",
+    "remediation-plan",
+    "support-bundle-manifest"
+  ]
+}
