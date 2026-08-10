@@ -1,0 +1,19 @@
+{
+  "schema_version": "smart-collection.v1",
+  "id": "portrait-duplicates",
+  "label": "Exact portrait duplicate metadata",
+  "query": {
+    "all": [
+      {
+        "field": "asset.kind",
+        "operator": "eq",
+        "value": "image"
+      },
+      {
+        "field": "exact_duplicate",
+        "operator": "eq",
+        "value": true
+      }
+    ]
+  }
+}

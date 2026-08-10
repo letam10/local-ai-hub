@@ -1,0 +1,34 @@
+{
+  "schema_version": "runtime-cards.v1",
+  "cards": [
+    {
+      "schema_version": "runtime-card.v1",
+      "id": "comfyui-runtime-card",
+      "display_name": "ComfyUI Runtime Descriptor",
+      "version": "0.0.0",
+      "lineage": [
+        "ComfyUI upstream project",
+        "Local AI Hub static compatibility descriptor"
+      ],
+      "license": "Verify upstream license before use",
+      "source": "https://github.com/comfyanonymous/ComfyUI",
+      "intended_use": [
+        "Describe a separately managed image runtime for dependency preflight."
+      ],
+      "limitations": [
+        "The card never imports, starts, configures, or downloads ComfyUI."
+      ],
+      "compatibility": {
+        "platforms": [
+          "windows"
+        ],
+        "required_components": [],
+        "required_models": []
+      },
+      "runtime_kind": "engine",
+      "capabilities": [
+        "image_generation"
+      ]
+    }
+  ]
+}

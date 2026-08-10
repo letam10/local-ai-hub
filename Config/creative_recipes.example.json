@@ -1,0 +1,9 @@
+{
+  "schema_version": "creative-recipe-intelligence-config.v1",
+  "catalog_contract": "creative-recipe-catalog.v1",
+  "catalog_source": "repository-managed",
+  "max_prompt_chars": 4000,
+  "max_variants": 32,
+  "execution": "not_run",
+  "note": "Runtime model, job, path and dependency settings are intentionally not accepted here."
+}

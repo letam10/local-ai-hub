@@ -94,23 +94,97 @@ const provenanceList = (job) => {
 const formResult = (id) => `<div class="form-result" id="${escapeHtml(id)}" role="status" aria-live="polite"></div>`;
 
 function renderDashboard(state) {
-  const health = state.health || {};
-  const disk = health.disk || {};
-  const gpu = health.gpu || {};
-  const jobs = state.jobs || [];
-  const active = jobs.filter((item) => ["starting", "running", "cancelling"].includes(item.status)).length;
-  const components = state.components || [];
-  return heading("CONTROL PLANE", "Dashboard", "Một cửa sổ điều khiển workflow AI cục bộ. AIRI là ngoại lệ duy nhất mở ứng dụng riêng.") + `
-    <div class="metric-grid">
-      <div class="metric-card"><span>Hub API</span><strong>${escapeHtml(formatStatus(health.status))}</strong><small>loopback · không CDN</small></div>
-      <div class="metric-card"><span>GPU</span><strong>${escapeHtml(gpu.name || "Chưa phát hiện")}</strong><small>${gpu.memory_free_mib ? `${escapeHtml(gpu.memory_free_mib)} MiB VRAM trống` : "nạp model theo yêu cầu"}</small></div>
-      <div class="metric-card"><span>Ổ đĩa</span><strong>${formatGb(disk.free_bytes)}</strong><small>dung lượng trống</small></div>
-      <div class="metric-card"><span>Job hoạt động</span><strong>${active}</strong><small>${jobs.length} bản ghi trong hàng đợi</small></div>
-    </div>
-    <div class="workspace-grid workspace-grid--two" style="margin-top:16px">
-      ${card("Tình trạng module", `<div class="row-list">${components.slice(0, 10).map((item) => `<div class="row-item"><div class="row-main"><div class="row-name">${escapeHtml(item.name || item.id)}</div><div class="row-meta">${escapeHtml(item.kind || "component")}</div></div>${statusPill(item.component_status || item.status)}</div>`).join("") || `<div class="empty-state compact">Chưa có component.</div>`}`)}
-      ${card("Workflow trong cửa sổ Hub", `<ul class="notice-list"><li>SAM2, AnimeSR, Whisper, Voice, Vision, OCR, Image AI và FFmpeg dùng worker/API nền.</li><li>Không có console PowerShell/cmd khi khởi động từ shortcut Hub.</li><li>Trạng thái “Một phần” nghĩa là adapter đã cấu hình nhưng chưa có smoke bounded V3.</li></ul>`, "", "card--flat")}
-    </div>`;
+  const source = state && typeof state === "object" ? state : {};
+  const health = source.health && typeof source.health === "object" ? source.health : {};
+  const disk = health.disk && typeof health.disk === "object" ? health.disk : {};
+  const gpu = health.gpu && typeof health.gpu === "object" ? health.gpu : {};
+  const jobs = Array.isArray(source.jobs) ? source.jobs : [];
+  const components = Array.isArray(source.components) ? source.components : [];
+  const readiness = String(health.status || "unknown");
+  const activeJobs = jobs.filter((item) => ["queued", "starting", "running", "cancelling"].includes(String(item?.status || ""))).length;
+  const metric = (label, value, detail) => `<article class="metric-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail)}</small></article>`;
+  const statusRank = { unavailable: 0, missing: 0, partial: 1, planned: 2, starting: 3, installed: 4, operational: 5, healthy: 5 };
+  const rankOf = (status) => Object.prototype.hasOwnProperty.call(statusRank, status) ? statusRank[status] : 3;
+  const textKey = (value) => String(value ?? "").trim().toLowerCase();
+  const modules = components.map((item, index) => {
+    const record = item && typeof item === "object" ? item : {};
+    const status = String(record.component_status || record.status || "missing");
+    return {
+      id: String(record.id || `component-${index + 1}`),
+      label: String(record.name || record.id || "Module"),
+      kind: String(record.kind || "component"),
+      version: record.version ? String(record.version) : "",
+      status,
+    };
+  });
+  modules.sort((left, right) => {
+    const rankDifference = rankOf(left.status) - rankOf(right.status);
+    if (rankDifference) return rankDifference;
+    const labelDifference = textKey(left.label) < textKey(right.label) ? -1 : textKey(left.label) > textKey(right.label) ? 1 : 0;
+    if (labelDifference) return labelDifference;
+    return textKey(left.id) < textKey(right.id) ? -1 : textKey(left.id) > textKey(right.id) ? 1 : 0;
+  });
+  const attention = [];
+  if (readiness !== "healthy" && readiness !== "operational") {
+    attention.push({ id: "hub-api", title: "Hub API", detail: "Readiness snapshot needs review", status: readiness });
+  }
+  modules.filter((item) => ["unavailable", "missing", "partial"].includes(item.status)).forEach((item) => {
+    attention.push({ id: `module-${item.id}`, title: item.label, detail: item.kind, status: item.status });
+  });
+  jobs.filter((item) => ["failed", "interrupted"].includes(String(item?.status || ""))).forEach((item, index) => {
+    const jobId = String(item?.id || `job-${index + 1}`);
+    attention.push({ id: `job-${jobId}`, title: jobId, detail: String(item?.message || item?.error || "Job cần kiểm tra"), status: String(item?.status || "failed") });
+  });
+  attention.sort((left, right) => {
+    const rankDifference = rankOf(left.status) - rankOf(right.status);
+    if (rankDifference) return rankDifference;
+    return textKey(left.title) < textKey(right.title) ? -1 : textKey(left.title) > textKey(right.title) ? 1 : 0;
+  });
+  const attentionItems = attention.slice(0, 4);
+  const moduleRows = modules.length
+    ? modules.slice(0, 12).map((item) => `<div class="dashboard-module-row"><div class="row-main"><strong>${escapeHtml(item.label)}</strong><span class="row-meta">${escapeHtml(item.kind)}${item.version ? ` · ${escapeHtml(item.version)}` : ""}</span></div>${statusPill(item.status, formatStatus(item.status))}</div>`).join("")
+    : `<p class="small muted">Chưa có module trong readiness snapshot.</p>`;
+  const attentionRows = attentionItems.length
+    ? attentionItems.map((item) => `<div class="dashboard-module-row"><div class="row-main"><strong>${escapeHtml(item.title)}</strong><span class="row-meta">${escapeHtml(item.detail)}</span></div>${statusPill(item.status, formatStatus(item.status))}</div>`).join("")
+    : `<p class="small muted">Không có hạng mục cần chú ý.</p>`;
+  const quickActions = [
+    ["image", "Image AI", "Compose và chỉnh sửa ảnh"],
+    ["media", "Media", "Transform media trong Hub"],
+    ["jobs", "Jobs", "Theo dõi queue và artifact"],
+    ["models", "Models & Storage", "Kiểm tra inventory"],
+  ].map(([route, label, detail]) => `<button class="button button--compact" type="button" data-route="${escapeHtml(route)}"><strong>${escapeHtml(label)}</strong><span class="row-meta">${escapeHtml(detail)}</span></button>`).join("");
+  const workflowSteps = [
+    ["01", "Check readiness", "Review module health and attention."],
+    ["02", "Choose a route", "Open an existing Hub workspace."],
+    ["03", "Run from Jobs", "Keep progress and artifacts in Hub."],
+  ].map(([step, title, detail]) => `<li class="dashboard-module-row"><span class="tag">${escapeHtml(step)}</span><div class="row-main"><strong>${escapeHtml(title)}</strong><span class="row-meta">${escapeHtml(detail)}</span></div></li>`).join("");
+  const gpuValue = gpu.name || "Chưa phát hiện";
+  const gpuDetail = gpu.memory_free_mib != null ? `${gpu.memory_free_mib} MiB VRAM trống` : "Snapshot GPU chưa sẵn sàng";
+  const diskValue = disk.free_bytes != null ? formatGb(disk.free_bytes) : "—";
+  const readinessNote = readiness === "healthy" || readiness === "operational" ? "Hub API snapshot ổn định; readiness của từng module vẫn được hiển thị riêng." : "Kiểm tra các mục cần chú ý trước khi chạy workflow.";
+  return `<section class="dashboard-page" aria-labelledby="dashboard-title">
+    <section class="dashboard-hero">
+      <div><span class="eyebrow">CONTROL PLANE</span><h1 id="dashboard-title">Dashboard</h1><p>${escapeHtml(readinessNote)}</p></div>
+      ${statusPill(readiness, formatStatus(readiness))}
+    </section>
+    <section class="dashboard-metric-grid" aria-label="Readiness metrics">
+      ${metric("Hub API", formatStatus(readiness), "Static readiness snapshot")}
+      ${metric("GPU", gpuValue, gpuDetail)}
+      ${metric("Ổ đĩa", diskValue, "Dung lượng trống")}
+      ${metric("Jobs hoạt động", String(activeJobs), `${jobs.length} bản ghi trong queue`)}
+    </section>
+    <section class="dashboard-main-grid">
+      <section class="dashboard-primary card" aria-labelledby="dashboard-modules-title">
+        <div class="card-title-row"><div><span class="eyebrow">MODULE HEALTH</span><h2 id="dashboard-modules-title">Tình trạng module</h2></div><span class="tag">${escapeHtml(String(modules.length))} module</span></div>
+        <div class="dashboard-module-list">${moduleRows}</div>
+      </section>
+      <aside class="dashboard-aside">
+        <section class="card" aria-labelledby="dashboard-attention-title"><div class="card-title-row"><h2 id="dashboard-attention-title">Cần chú ý</h2><span class="tag">Tối đa 4</span></div><div class="dashboard-attention-list">${attentionRows}</div></section>
+        <section class="card" aria-labelledby="dashboard-quick-title"><div class="card-title-row"><h2 id="dashboard-quick-title">Điều hướng nhanh</h2></div><div class="dashboard-quick-actions">${quickActions}</div></section>
+        <section class="card" aria-labelledby="dashboard-workflow-title"><div class="card-title-row"><h2 id="dashboard-workflow-title">Workflow ngắn</h2></div><ol class="dashboard-module-list">${workflowSteps}</ol></section>
+      </aside>
+    </section>
+  </section>`;
 }
 
 function renderAiri(state) {

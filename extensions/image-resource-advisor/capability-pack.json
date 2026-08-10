@@ -1,0 +1,19 @@
+{
+  "schema_version": "capability-pack.v1",
+  "id": "image-resource-advisor-pack",
+  "display_name": "Image Resource Advisor capability pack",
+  "description": "Static image capability metadata with resource and compatibility constraints.",
+  "capabilities": [
+    "capability_pack",
+    "image_generation",
+    "model_cards",
+    "resource_planning",
+    "runtime_cards"
+  ],
+  "model_card_ids": [
+    "qwen-image-2512-card"
+  ],
+  "runtime_card_ids": [
+    "comfyui-runtime-card"
+  ]
+}

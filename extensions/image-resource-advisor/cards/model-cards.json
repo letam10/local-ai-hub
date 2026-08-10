@@ -1,0 +1,35 @@
+{
+  "schema_version": "model-cards.v1",
+  "cards": [
+    {
+      "schema_version": "model-card.v1",
+      "id": "qwen-image-2512-card",
+      "display_name": "Qwen Image 2512 Descriptor Card",
+      "version": "2512.0.0",
+      "lineage": [
+        "Qwen Image upstream model family",
+        "Local AI Hub static compatibility descriptor"
+      ],
+      "license": "Verify upstream license before use",
+      "source": "https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI",
+      "intended_use": [
+        "Describe compatibility and resource expectations for a separately managed image model."
+      ],
+      "limitations": [
+        "The card does not verify installation, license acceptance, model files, or runtime operation."
+      ],
+      "compatibility": {
+        "platforms": [
+          "windows"
+        ],
+        "required_components": [
+          {
+            "id": "comfyui",
+            "version": ">=0.0.0"
+          }
+        ],
+        "required_models": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "schema_version": "evaluation-scenario.v1",
+  "id": "image-review-human-ab",
+  "title": "Human A/B review for Image Review Blueprint",
+  "package": {
+    "id": "local-ai-hub.image-review",
+    "version": "1.1.0"
+  },
+  "candidates": [
+    {
+      "id": "A",
+      "label": "Baseline package descriptor",
+      "package_version": "1.0.0"
+    },
+    {
+      "id": "B",
+      "label": "Clarified package descriptor",
+      "package_version": "1.1.0"
+    }
+  ],
+  "rubric": [
+    {
+      "id": "clarity",
+      "label": "Descriptor clarity",
+      "guidance": "A reviewer compares whether the static package descriptions explain the typed flow clearly.",
+      "weight": 0.6
+    },
+    {
+      "id": "traceability",
+      "label": "Traceability",
+      "guidance": "A reviewer checks whether version and provenance metadata identify the proposed change.",
+      "weight": 0.4
+    }
+  ],
+  "review_protocol": {
+    "blind": true,
+    "randomize_order": true,
+    "human_review_required": true
+  },
+  "limitations": [
+    "This scenario is a human review rubric and does not run a benchmark or workflow.",
+    "No runtime-quality, latency, throughput, or resource claim is produced."
+  ]
+}

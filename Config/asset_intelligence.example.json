@@ -1,0 +1,23 @@
+{
+  "schema_version": "asset-intelligence.config.v1",
+  "managed_catalog": {
+    "enabled_catalog_ids": [
+      "portrait-asset-catalog"
+    ],
+    "allow_external_import": false,
+    "allow_asset_mutation": false,
+    "require_unique_catalog_identity": true
+  },
+  "providers": {
+    "allow_caption": false,
+    "allow_tagging": false,
+    "allow_embedding_execution": false,
+    "allow_model_download": false,
+    "allow_network_fetch": false
+  },
+  "retention": {
+    "allow_dry_run_plans": true,
+    "allow_delete": false,
+    "allow_move": false
+  }
+}

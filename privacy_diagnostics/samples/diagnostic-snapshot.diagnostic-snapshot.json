@@ -1,0 +1,114 @@
+{
+  "schema_version": "diagnostic-snapshot.v1",
+  "id": "diagnostic-snapshot-seed",
+  "label": "Static diagnostic snapshot seed",
+  "policy_id": "default-privacy-policy",
+  "source": {
+    "kind": "server-owned",
+    "reference": "diagnostic-snapshot-seed"
+  },
+  "ledger": {
+    "consent_ref": "diagnostic-consent-ledger",
+    "retention_ref": "diagnostic-retention-ledger",
+    "revision": 1
+  },
+  "consent": {
+    "state": "granted",
+    "scope": "diagnostics-and-support",
+    "ledger_ref": "diagnostic-consent-ledger",
+    "revision": 1
+  },
+  "components": [
+    {
+      "id": "hub-core",
+      "status": "operational",
+      "evidence_count": 1,
+      "metadata_digest": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "id": "privacy-diagnostics",
+      "status": "partial",
+      "evidence_count": 1,
+      "metadata_digest": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
+  "configs": [
+    {
+      "id": "diagnostic_consent",
+      "status": "in_sync",
+      "expected_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+      "observed_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+      "evidence_count": 1
+    },
+    {
+      "id": "privacy_policy",
+      "status": "drifted",
+      "expected_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+      "observed_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+      "evidence_count": 1
+    },
+    {
+      "id": "retention",
+      "status": "in_sync",
+      "expected_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+      "observed_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+      "evidence_count": 1
+    }
+  ],
+  "tools": [
+    {
+      "id": "asset-catalog",
+      "status": "partial",
+      "evidence_count": 1,
+      "metadata_digest": "7777777777777777777777777777777777777777777777777777777777777777"
+    },
+    {
+      "id": "caption",
+      "status": "unavailable",
+      "evidence_count": 0,
+      "metadata_digest": "8888888888888888888888888888888888888888888888888888888888888888"
+    }
+  ],
+  "contracts": [
+    {
+      "id": "diagnostic-finding",
+      "expected_version": "diagnostic-finding.v1",
+      "observed_version": "diagnostic-finding.v1",
+      "status": "current",
+      "evidence_count": 1,
+      "metadata_digest": "9999999999999999999999999999999999999999999999999999999999999999"
+    },
+    {
+      "id": "diagnostic-snapshot",
+      "expected_version": "diagnostic-snapshot.v1",
+      "observed_version": "diagnostic-snapshot.v1",
+      "status": "stale",
+      "evidence_count": 1,
+      "metadata_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "id": "privacy-policy",
+      "expected_version": "privacy-policy.v1",
+      "observed_version": "privacy-policy.v1",
+      "status": "current",
+      "evidence_count": 1,
+      "metadata_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "support-bundle-manifest",
+      "expected_version": "support-bundle-manifest.v1",
+      "observed_version": "support-bundle-manifest.v1",
+      "status": "current",
+      "evidence_count": 1,
+      "metadata_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  ],
+  "evidence": {
+    "status": "partial",
+    "components": 2,
+    "configs": 3,
+    "tools": 2,
+    "contracts": 4,
+    "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  }
+}

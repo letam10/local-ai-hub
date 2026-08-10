@@ -1,0 +1,34 @@
+{
+  "schema_version": "runtime-cards.v1",
+  "cards": [
+    {
+      "schema_version": "runtime-card.v1",
+      "id": "metadata-runtime",
+      "display_name": "Metadata Catalog Static Runtime",
+      "version": "1.0.0",
+      "lineage": [
+        "Local AI Hub extension-platform static descriptor"
+      ],
+      "license": "MIT",
+      "source": "https://github.com/local-ai-hub/local-ai-hub",
+      "intended_use": [
+        "Describe static metadata capabilities without launching a process."
+      ],
+      "limitations": [
+        "This card does not authorize shell access, imports, or runtime execution."
+      ],
+      "compatibility": {
+        "platforms": [
+          "windows"
+        ],
+        "required_components": [],
+        "required_models": []
+      },
+      "runtime_kind": "adapter",
+      "capabilities": [
+        "metadata_catalog",
+        "resource_planning"
+      ]
+    }
+  ]
+}
