@@ -36,6 +36,8 @@ def _canonical(value: object) -> str:
             normalized = [normalize(child) for child in item]
             if all(isinstance(child, dict) and isinstance(child.get("id"), str) for child in normalized):
                 return sorted(normalized, key=lambda child: str(child["id"]))
+            if all(child is None or isinstance(child, (bool, int, float, str)) for child in normalized):
+                return sorted(normalized, key=lambda child: json.dumps(child, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False))
             return normalized
         return item
 

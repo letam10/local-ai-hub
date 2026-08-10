@@ -327,6 +327,13 @@ class WorkflowPackageServiceTests(unittest.TestCase):
         self.assertEqual(plan_workflow_migration(prerelease, release)["status"], "planned")
         self.assertEqual(plan_workflow_migration(release, prerelease)["status"], "unavailable")
 
+        ordered = package_sample()
+        ordered["resource_hints"]["exclusive_groups"].append("review-static")
+        reordered = copy.deepcopy(ordered)
+        reordered["parameters"][0]["enum"].reverse()
+        reordered["resource_hints"]["exclusive_groups"].reverse()
+        self.assertEqual(diff_workflow_packages(ordered, reordered)["status"], "unchanged")
+
     def test_linter_reports_unreferenced_subgraph_without_running_a_graph(self) -> None:
         from src.services.workflow_packages import lint_workflow_package
 
