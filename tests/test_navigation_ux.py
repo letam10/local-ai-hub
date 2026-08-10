@@ -29,7 +29,9 @@ class NavigationUxTests(unittest.TestCase):
         self.assertIn('title="' + "$" + "{escapeHtml(label)}" + '"', self.app)
 
     def test_all_navigation_routes_remain_data_driven_and_reachable(self) -> None:
-        route_ids = re.findall(r'\["([a-z][a-z0-9_-]*)",\s*"[^"]+",\s*"[^"]+"\]', self.pages)
+        navigation_block = re.search(r"export const NAVIGATION = \[(.*?)\n\];", self.pages, re.DOTALL)
+        self.assertIsNotNone(navigation_block, "route IDs must be read from the NAVIGATION declaration")
+        route_ids = re.findall(r'\["([a-z][a-z0-9_-]*)",\s*"[^"]+",\s*"[^"]+"\]', navigation_block.group(1))
         self.assertGreaterEqual(len(route_ids), 14)
         self.assertIn("NAVIGATION.flatMap((group) => group.items)", self.app)
         self.assertIn('data-route="' + "$" + "{escapeHtml(id)}" + '"', self.app)
