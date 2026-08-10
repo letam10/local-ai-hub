@@ -155,4 +155,3 @@ def render_compatibility_markdown(report: Mapping[str, Any]) -> str:
             if isinstance(issue, Mapping):
                 lines.append(f"- {_escape_markdown(issue.get('message', 'Static discovery finding.'))}")
     return "\n".join(lines) + "\n"
-

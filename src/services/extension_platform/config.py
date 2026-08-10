@@ -123,4 +123,3 @@ def load_extension_config(root: Path | None = None) -> dict[str, Any]:
         "models": [],
         "hardware": None,
     }
-

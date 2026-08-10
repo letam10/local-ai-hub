@@ -237,4 +237,3 @@ class ResourcePlanner:
         mode: str = "parallel",
     ) -> dict[str, Any]:
         return plan_resources(requests, hardware=hardware, mode=mode)
-

@@ -97,4 +97,3 @@ It writes JSON and Markdown descriptors only, refuses to overwrite a descriptor,
 ## Integration handoff
 
 This milestone deliberately does not connect to shared UI/API/job/module surfaces. An integration owner can consume `discover_extensions`, `preflight_extensions`, `build_compatibility_report`, and `plan_resources` after deciding the appropriate bounded API/UI contract. Until that owner adds and smoke-tests a route or tool, no route/tool should be presented as operational.
-

@@ -20,4 +20,3 @@ __all__ = [
     "validate_runtime_card",
     "validate_runtime_card_collection",
 ]
-

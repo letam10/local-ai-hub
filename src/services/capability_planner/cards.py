@@ -185,4 +185,3 @@ def validate_runtime_card_collection(value: Any) -> list[dict[str, Any]]:
     """Validate a JSON runtime-card collection used by a static entrypoint."""
 
     return _validate_collection(value, collection_schema=RUNTIME_CARD_COLLECTION_SCHEMA_VERSION, validator=validate_runtime_card)
-

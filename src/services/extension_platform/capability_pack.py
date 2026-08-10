@@ -75,4 +75,3 @@ def validate_capability_pack(value: Any) -> dict[str, Any]:
     if issues:
         raise CapabilityPackValidationError(issues)
     return deepcopy(dict(value))
-

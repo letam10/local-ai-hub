@@ -504,4 +504,3 @@ EXTENSION_MANIFEST_V1_SCHEMA: dict[str, Any] = {
         "availability": {"type": "object", "required": ["status", "reason", "action"], "additionalProperties": False},
     },
 }
-

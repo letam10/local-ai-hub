@@ -128,4 +128,3 @@ python scripts/validate_extensions.py --format markdown
 ```
 
 The report is written to standard output, making it easy to save through an explicit user-owned shell redirection if desired. `--strict` returns non-zero if any extension is not operational. The standard validator returns non-zero for an unavailable report; partial and planned results are intentionally visible because they include remediation actions.
-

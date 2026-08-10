@@ -30,4 +30,3 @@ __all__ = [
     "render_compatibility_markdown",
     "validate_capability_pack",
 ]
-
