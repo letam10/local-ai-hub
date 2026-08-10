@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +46,74 @@ class WorkflowPackageSchemaTests(unittest.TestCase):
         assert_parity(evaluation_scenario_schema())
         self.assertTrue(validate_workflow_package(package_sample())["valid"])
         self.assertTrue(validate_evaluation_scenario(scenario_sample())["valid"])
+
+    @unittest.skipUnless(importlib.util.find_spec("jsonschema"), "jsonschema is optional and is not installed in this isolated runtime")
+    def test_draft202012_runtime_matches_python_node_kind_rules(self) -> None:
+        from jsonschema import Draft202012Validator
+
+        from src.shared.schemas.workflow_package import validate_workflow_package, workflow_package_schema
+
+        schema_validator = Draft202012Validator(workflow_package_schema())
+        accepted = package_sample()
+        self.assertEqual(list(schema_validator.iter_errors(accepted)), [])
+        self.assertTrue(validate_workflow_package(accepted)["valid"])
+
+        input_with_operation = package_sample()
+        input_with_operation["workflow"]["nodes"][0]["operation"] = "hub.image.inspect"
+        self.assertTrue(list(schema_validator.iter_errors(input_with_operation)))
+        python_result = validate_workflow_package(input_with_operation)
+        self.assertFalse(python_result["valid"])
+        self.assertIn("node_field", {item["code"] for item in python_result["errors"]})
+
+        operation_without_operation = package_sample()
+        operation_without_operation["workflow"]["nodes"][1].pop("operation")
+        self.assertTrue(list(schema_validator.iter_errors(operation_without_operation)))
+        self.assertIn("operation_required", {item["code"] for item in validate_workflow_package(operation_without_operation)["errors"]})
+
+    def test_closed_parameter_requirement_resource_and_preview_contracts(self) -> None:
+        from src.shared.schemas.workflow_package import validate_workflow_package
+
+        package = package_sample()
+        package["parameters"].append(
+            {
+                "id": "review_threshold",
+                "type": "NUMBER",
+                "default": 0.5,
+                "bounds": {"minimum": 0.0, "maximum": 1.0},
+                "enum": [],
+                "description": "A static host-facing threshold label.",
+            }
+        )
+        self.assertTrue(validate_workflow_package(package)["valid"])
+
+        unsafe = copy.deepcopy(package)
+        unsafe["preview"]["url"] = "https://example.invalid/preview"
+        unsafe["resource_hints"]["gpu"] = {"required": False, "vendor": "nvidia", "minimum_vram_mb": 8192}
+        unsafe["parameters"][1]["default"] = 2.0
+        result = validate_workflow_package(unsafe)
+        self.assertFalse(result["valid"])
+        codes = {item["code"] for item in result["errors"]}
+        self.assertIn("unknown_field", codes)
+        self.assertIn("forbidden_field", codes)
+        self.assertIn("gpu_hint", codes)
+        self.assertIn("parameter_default", codes)
+
+    def test_catalog_ready_public_ports_have_exactly_one_binding(self) -> None:
+        from src.shared.schemas.workflow_package import validate_workflow_package
+
+        duplicate = package_sample()
+        duplicate_node = copy.deepcopy(duplicate["workflow"]["nodes"][0])
+        duplicate_node["id"] = "duplicate_input_image"
+        duplicate["workflow"]["nodes"].append(duplicate_node)
+        duplicate_result = validate_workflow_package(duplicate)
+        self.assertFalse(duplicate_result["valid"])
+        self.assertIn("duplicate_public_input_binding", {item["code"] for item in duplicate_result["errors"]})
+
+        incomplete = package_sample()
+        incomplete["workflow"]["nodes"] = [item for item in incomplete["workflow"]["nodes"] if item["id"] != "input_image"]
+        incomplete_result = validate_workflow_package(incomplete)
+        self.assertFalse(incomplete_result["valid"])
+        self.assertIn("catalog_input_binding", {item["code"] for item in incomplete_result["errors"]})
 
     def test_rejects_paths_secrets_commands_and_untrusted_values_without_reflection(self) -> None:
         from src.shared.schemas.workflow_package import validate_workflow_package
@@ -176,6 +247,86 @@ class WorkflowPackageServiceTests(unittest.TestCase):
         self.assertEqual(missing["status"], "unavailable")
         self.assertEqual(missing["missing_node_types"], ["hub.metadata.annotate"])
 
+    def test_preflight_checks_closed_model_runtime_and_resource_snapshots(self) -> None:
+        from src.services.workflow_packages import preflight_workflow_package
+
+        package = package_sample()
+        snapshot = {
+            "models": [{"id": "hub.image-inspection-model", "version": "1.0.0"}],
+            "runtimes": [{"id": "hub.typed-runtime", "version": "1.0.0"}],
+        }
+        resources = {
+            "cpu_cores": 2,
+            "gpu": {"available": False, "vendor": "none", "vram_mb": 0},
+            "ram_mb": 1024,
+            "disk_mb": 512,
+            "exclusive_groups": [],
+        }
+        passed = preflight_workflow_package(package, ["hub.image.inspect", "hub.metadata.annotate"], host_requirements=snapshot, resource_snapshot=resources)
+        self.assertEqual(passed["status"], "partial")
+        self.assertEqual(passed["execution"], "not_run")
+        self.assertEqual(passed["missing_models"], [])
+        self.assertEqual(passed["resource_gaps"], [])
+
+        missing = copy.deepcopy(snapshot)
+        missing["models"] = []
+        blocked = preflight_workflow_package(package, ["hub.image.inspect", "hub.metadata.annotate"], host_requirements=missing, resource_snapshot=resources)
+        self.assertEqual(blocked["status"], "unavailable")
+        self.assertEqual(blocked["missing_models"], ["hub.image-inspection-model"])
+
+    def test_catalog_refuses_duplicate_identity_and_size_before_read(self) -> None:
+        from src.services.workflow_packages import discover_managed_packages, load_managed_package
+        from src.shared.schemas.workflow_package import MAX_PACKAGE_BYTES
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            duplicate_a = package_sample()
+            duplicate_b = package_sample()
+            (root / "first.workflow-package.json").write_text(json.dumps(duplicate_a), encoding="utf-8")
+            (root / "second.workflow-package.json").write_text(json.dumps(duplicate_b), encoding="utf-8")
+            (root / "scenario.evaluation-scenario.json").write_text(json.dumps(scenario_sample()), encoding="utf-8")
+            with mock.patch("src.services.workflow_packages.catalog.MANAGED_PACKAGE_ROOT", root):
+                catalog = discover_managed_packages()
+                self.assertEqual(catalog["records"], [])
+                self.assertIn("managed_package_identity_ambiguous", {item["code"] for item in catalog["errors"]})
+                self.assertIn("managed_scenario_reference_ambiguous", {item["code"] for item in catalog["errors"]})
+                loaded = load_managed_package("local-ai-hub.image-review", "1.0.0")
+                self.assertFalse(loaded["found"])
+                self.assertEqual(loaded["status"], "unavailable")
+                self.assertIn("ambiguous", loaded["reason"].casefold())
+                latest = load_managed_package("local-ai-hub.image-review")
+                self.assertFalse(latest["found"])
+                self.assertIn("ambiguous", latest["reason"].casefold())
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            oversized = root / "oversized.workflow-package.json"
+            oversized.write_bytes(b" " * (MAX_PACKAGE_BYTES + 1))
+            with mock.patch("src.services.workflow_packages.catalog.MANAGED_PACKAGE_ROOT", root), mock.patch.object(Path, "read_bytes", side_effect=AssertionError("oversized descriptor was read")):
+                catalog = discover_managed_packages()
+            self.assertIn("managed_descriptor_size", {item["code"] for item in catalog["errors"]})
+
+    def test_diff_marks_hub_contract_changes_for_manual_review_and_orders_prereleases(self) -> None:
+        from src.services.workflow_packages import diff_workflow_packages, plan_workflow_migration
+        from src.shared.schemas.workflow_package import compare_semver
+
+        before = package_sample()
+        after = copy.deepcopy(before)
+        after["version"] = "1.0.1"
+        after["compatibility"]["hub_version"] = ">=99.0.0"
+        diff = diff_workflow_packages(before, after)
+        self.assertIn("hub_compatibility_changed", {item["kind"] for item in diff["changes"]})
+        plan = plan_workflow_migration(before, after)
+        self.assertEqual(plan["status"], "manual_review")
+
+        prerelease = copy.deepcopy(before)
+        prerelease["version"] = "1.0.0-rc.1"
+        release = copy.deepcopy(before)
+        release["version"] = "1.0.0"
+        self.assertLess(compare_semver("1.0.0-rc.1", "1.0.0"), 0)
+        self.assertEqual(plan_workflow_migration(prerelease, release)["status"], "planned")
+        self.assertEqual(plan_workflow_migration(release, prerelease)["status"], "unavailable")
+
     def test_linter_reports_unreferenced_subgraph_without_running_a_graph(self) -> None:
         from src.services.workflow_packages import lint_workflow_package
 
@@ -265,6 +416,15 @@ class EvaluationAndAuditTests(unittest.TestCase):
         self.assertNotIn("untrusted title", markdown)
         self.assertNotIn("<script>", markdown)
         self.assertIn("Execution: `not_run`", markdown)
+        self.assertIn("integration_contract", audit)
+        self.assertEqual(audit["integration_contract"]["resource_hints"]["gpu"]["required"], False)
+
+        opaque_default = package_sample()
+        opaque_default["parameters"][0]["default"] = "opaque-default-not-projected"
+        opaque_default["parameters"][0]["enum"] = ["opaque-default-not-projected"]
+        projected = build_package_audit(opaque_default)
+        self.assertTrue(projected["valid"])
+        self.assertNotIn("opaque-default-not-projected", json.dumps(projected, ensure_ascii=False))
 
         unsafe = package_sample()
         unsafe["summary"] = r"C:\private\secret.png"
