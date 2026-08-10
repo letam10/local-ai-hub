@@ -1,0 +1,16 @@
+{
+  "schema_version": "workflow-packages.config.v1",
+  "managed_catalog": {
+    "enabled_package_ids": [
+      "local-ai-hub.image-review"
+    ],
+    "allow_import": false,
+    "allow_execution": false
+  },
+  "safety": {
+    "require_static_validation": true,
+    "allow_network_fetch": false,
+    "allow_model_download": false,
+    "allow_workflow_mutation": false
+  }
+}

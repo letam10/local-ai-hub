@@ -1,0 +1,234 @@
+{
+  "schema_version": "workflow-package.v1",
+  "id": "local-ai-hub.image-review",
+  "version": "1.0.0",
+  "title": "Image Review Blueprint",
+  "summary": "A static typed blueprint that turns an image input into metadata for human review.",
+  "author": {
+    "name": "LOCAL AI HUB"
+  },
+  "license": "MIT",
+  "source": {
+    "kind": "managed-repository",
+    "reference": "sample-image-review-v1"
+  },
+  "capabilities": [
+    "image",
+    "metadata"
+  ],
+  "compatibility": {
+    "hub_version": ">=4.0.0",
+    "node_contract": "subgraph-blueprint.v1",
+    "required_node_types": [
+      "hub.image.inspect",
+      "hub.metadata.annotate"
+    ]
+  },
+  "workflow": {
+    "schema_version": "subgraph-blueprint.v1",
+    "id": "image-review-flow",
+    "title": "Image review flow",
+    "description": "A typed, non-executable review blueprint.",
+    "inputs": [
+      {
+        "id": "image",
+        "type": "IMAGE",
+        "required": true,
+        "description": "An opaque image selected by the integrating host."
+      }
+    ],
+    "outputs": [
+      {
+        "id": "report",
+        "type": "METADATA",
+        "description": "Static review metadata for a human to inspect."
+      }
+    ],
+    "nodes": [
+      {
+        "id": "input_image",
+        "kind": "input",
+        "inputs": [],
+        "outputs": [
+          {
+            "id": "image",
+            "type": "IMAGE"
+          }
+        ]
+      },
+      {
+        "id": "inspect_image",
+        "kind": "operation",
+        "operation": "hub.image.inspect",
+        "inputs": [
+          {
+            "id": "image",
+            "type": "IMAGE",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "facts",
+            "type": "METADATA"
+          }
+        ]
+      },
+      {
+        "id": "annotate_facts",
+        "kind": "subgraph",
+        "ref": "metadata-annotation",
+        "inputs": [
+          {
+            "id": "facts",
+            "type": "METADATA",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "report",
+            "type": "METADATA"
+          }
+        ]
+      },
+      {
+        "id": "output_report",
+        "kind": "output",
+        "inputs": [
+          {
+            "id": "report",
+            "type": "METADATA",
+            "required": true
+          }
+        ],
+        "outputs": []
+      }
+    ],
+    "edges": [
+      {
+        "id": "image-to-inspect",
+        "from": {
+          "node": "input_image",
+          "port": "image"
+        },
+        "to": {
+          "node": "inspect_image",
+          "port": "image"
+        }
+      },
+      {
+        "id": "facts-to-annotation",
+        "from": {
+          "node": "inspect_image",
+          "port": "facts"
+        },
+        "to": {
+          "node": "annotate_facts",
+          "port": "facts"
+        }
+      },
+      {
+        "id": "annotation-to-output",
+        "from": {
+          "node": "annotate_facts",
+          "port": "report"
+        },
+        "to": {
+          "node": "output_report",
+          "port": "report"
+        }
+      }
+    ]
+  },
+  "subgraphs": [
+    {
+      "schema_version": "subgraph-blueprint.v1",
+      "id": "metadata-annotation",
+      "title": "Metadata annotation",
+      "description": "A reusable typed metadata annotation blueprint.",
+      "inputs": [
+        {
+          "id": "facts",
+          "type": "METADATA",
+          "required": true,
+          "description": "Static facts from a preceding node."
+        }
+      ],
+      "outputs": [
+        {
+          "id": "report",
+          "type": "METADATA",
+          "description": "A typed annotation result."
+        }
+      ],
+      "nodes": [
+        {
+          "id": "input_facts",
+          "kind": "input",
+          "inputs": [],
+          "outputs": [
+            {
+              "id": "facts",
+              "type": "METADATA"
+            }
+          ]
+        },
+        {
+          "id": "annotate",
+          "kind": "operation",
+          "operation": "hub.metadata.annotate",
+          "inputs": [
+            {
+              "id": "facts",
+              "type": "METADATA",
+              "required": true
+            }
+          ],
+          "outputs": [
+            {
+              "id": "report",
+              "type": "METADATA"
+            }
+          ]
+        },
+        {
+          "id": "output_report",
+          "kind": "output",
+          "inputs": [
+            {
+              "id": "report",
+              "type": "METADATA",
+              "required": true
+            }
+          ],
+          "outputs": []
+        }
+      ],
+      "edges": [
+        {
+          "id": "facts-to-annotate",
+          "from": {
+            "node": "input_facts",
+            "port": "facts"
+          },
+          "to": {
+            "node": "annotate",
+            "port": "facts"
+          }
+        },
+        {
+          "id": "annotate-to-output",
+          "from": {
+            "node": "annotate",
+            "port": "report"
+          },
+          "to": {
+            "node": "output_report",
+            "port": "report"
+          }
+        }
+      ]
+    }
+  ]
+}
