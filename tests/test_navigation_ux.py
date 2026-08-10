@@ -54,7 +54,7 @@ class NavigationUxTests(unittest.TestCase):
         self.assertIn('sidebar.classList.remove("is-collapsed")', self.app)
         self.assertIn('sidebar.classList.remove("is-open")', self.app)
         self.assertIn("persistSidebarPreference()", self.app)
-        self.assertIn("const MOBILE_NAV_MAX_WIDTH = 900", self.app)
+        self.assertIn("const MOBILE_NAV_MAX_WIDTH = 980", self.app)
 
     def test_aria_state_and_resize_are_synchronized_without_focus_trap(self) -> None:
         self.assertIn("const syncSidebarState = () =>", self.app)

@@ -82,7 +82,7 @@ let disposeImageMaskCanvases = () => {};
 
 const SIDEBAR_PREFERENCE_KEY = "local-ai-hub-sidebar-v1";
 const SIDEBAR_PREFERENCE_VERSION = 1;
-const MOBILE_NAV_MAX_WIDTH = 900;
+const MOBILE_NAV_MAX_WIDTH = 980;
 
 const safeStorageGet = (key) => {
   try { return window.localStorage?.getItem(key) ?? null; } catch { return null; }
