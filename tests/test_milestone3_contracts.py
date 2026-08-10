@@ -38,7 +38,7 @@ class Milestone3ContractTests(unittest.TestCase):
             "data-graph-save-state",
         ):
             self.assertIn(token, node)
-        for token in ("workspace-state", "artifact-preview-dialog", "@media (max-width: 900px)", "prefers-reduced-motion"):
+        for token in ("workspace-state", "artifact-preview-dialog", "@media (max-width: 980px)", "prefers-reduced-motion"):
             self.assertIn(token, css)
         self.assertNotIn('target="_blank"', pages + node)
 
