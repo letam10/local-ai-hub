@@ -14,23 +14,15 @@ from typing import Any
 
 from src.shared.schemas.privacy_diagnostics import (
     canonical_support_bundle_manifest_json,
-    validate_diagnostic_finding,
-    validate_diagnostic_snapshot,
-    validate_privacy_policy,
     validate_support_bundle_manifest,
 )
+
+from .diagnostics import diagnose_snapshot
+from .provenance import _owned_payload
 
 
 _STATIC_REASON = "Support projection uses server-owned diagnostic metadata only. No file, log, attachment, or runtime payload was collected."
 _STATIC_ACTION = "Review the detached manifest and authorize any separate bounded support export if required."
-
-
-def _unwrap(value: object, key: str) -> object:
-    if isinstance(value, dict) and value.get("valid") is True and isinstance(value.get(key), dict):
-        return value[key]
-    if isinstance(value, dict) and value.get("accepted") is True and isinstance(value.get(key), dict):
-        return value[key]
-    return value
 
 
 def _failure(code: str, reason: str, action: str) -> dict[str, Any]:
@@ -60,43 +52,41 @@ def _entry(record: dict[str, Any]) -> dict[str, Any]:
     return {"id": record["id"], "status": record["status"], "digest": _digest(record)}
 
 
-def _validated_inputs(policy_value: object, snapshot_value: object) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[dict[str, str]]]:
-    policy_result = validate_privacy_policy(_unwrap(policy_value, "policy"))
-    snapshot_result = validate_diagnostic_snapshot(_unwrap(snapshot_value, "snapshot"))
-    errors = list(policy_result.get("errors", [])) + list(snapshot_result.get("errors", []))
-    if errors:
-        return None, None, errors
-    policy = policy_result["policy"]
-    snapshot = snapshot_result["snapshot"]
-    assert isinstance(policy, dict) and isinstance(snapshot, dict)
+def _canonical_findings(value: object) -> str | None:
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        return None
+    try:
+        normalized = sorted((copy.deepcopy(item) for item in value), key=lambda item: str(item.get("id", "")))
+        return json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError, RecursionError):
+        return None
+
+
+def _trusted_inputs(policy_value: object, snapshot_value: object) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, str | None]:
+    policy_owned = _owned_payload(policy_value, "privacy-policy")
+    snapshot_owned = _owned_payload(snapshot_value, "diagnostic-snapshot")
+    if policy_owned is None or snapshot_owned is None:
+        return None, None, None, "provenance_required"
+    policy, _policy_fingerprint = policy_owned
+    snapshot, _snapshot_fingerprint = snapshot_owned
+    diagnosis = diagnose_snapshot(policy_value, snapshot_value)
+    if not diagnosis.get("valid"):
+        return None, None, None, "diagnostics_invalid"
     if snapshot.get("policy_id") != policy.get("id"):
-        errors.append({"code": "policy_snapshot_mismatch", "location": "snapshot.policy_id"})
-        return None, None, errors
-    return copy.deepcopy(policy), copy.deepcopy(snapshot), []
+        return None, None, None, "policy_snapshot_mismatch"
+    return copy.deepcopy(policy), copy.deepcopy(snapshot), diagnosis, None
 
 
-def build_support_bundle_manifest(policy_value: object, snapshot_value: object, findings_value: object) -> dict[str, Any]:
-    """Build a detached manifest from validated server-owned findings."""
+def build_support_bundle_manifest(policy_value: object, snapshot_value: object, findings_value: object | None = None) -> dict[str, Any]:
+    """Build a detached manifest from trusted inputs and freshly derived findings."""
 
-    policy, snapshot, errors = _validated_inputs(policy_value, snapshot_value)
-    if errors:
-        return _failure("input_invalid", "Policy or snapshot failed closed static validation.", "Supply server-owned validated metadata and retry.")
-    if not isinstance(findings_value, list):
-        return _failure("findings_type", "Support projection accepts only a bounded finding array.", "Pass the findings returned by deterministic diagnostics. Do not construct a report mapping.")
-    if len(findings_value) > 256:
-        return _failure("findings_limit", "Finding count exceeds the static support bound.", "Reduce the server-owned finding set before projection.")
-    findings: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in findings_value:
-        validation = validate_diagnostic_finding(item)
-        if not validation["valid"]:
-            return _failure("finding_invalid", "A finding failed its closed contract validation.", "Use only normalized findings produced by deterministic diagnostics.")
-        finding = validation["finding"]
-        assert isinstance(finding, dict)
-        if finding["id"] in seen:
-            return _failure("finding_duplicate", "Finding IDs must be unique in a support projection.", "Deduplicate the server-owned finding set and retry.")
-        seen.add(finding["id"])
-        findings.append({"id": finding["id"], "severity": finding["severity"], "availability": finding["availability"], "digest": finding["evidence_digest"]})
+    policy, snapshot, diagnosis, error_code = _trusted_inputs(policy_value, snapshot_value)
+    if error_code is not None or policy is None or snapshot is None or diagnosis is None:
+        return _failure(error_code or "input_invalid", "Support projection requires trusted server-owned policy and snapshot carriers.", "Load both descriptors through the fixed-root trusted loaders and retry.")
+    derived_findings = diagnosis["findings"]
+    if findings_value is not None and _canonical_findings(findings_value) != _canonical_findings(derived_findings):
+        return _failure("finding_provenance_mismatch", "Supplied findings do not exactly match freshly derived server-owned diagnostics.", "Omit the findings argument or use the unchanged result from deterministic diagnostics.")
+    findings = [{"id": item["id"], "severity": item["severity"], "availability": item["availability"], "digest": item["evidence_digest"]} for item in derived_findings]
 
     assert policy is not None and snapshot is not None
     consent = snapshot["consent"]

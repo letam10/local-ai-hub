@@ -10,11 +10,11 @@ from typing import Any
 from src.shared.schemas.privacy_diagnostics import (
     ACTION_CODES,
     canonical_remediation_plan_json,
-    validate_diagnostic_finding,
-    validate_diagnostic_snapshot,
-    validate_privacy_policy,
     validate_remediation_plan,
 )
+
+from .diagnostics import diagnose_snapshot
+from .provenance import _owned_payload
 
 
 _STATIC_REASON = "Remediation is a detached dry-run plan. No configuration, file, process, provider, or runtime action was performed."
@@ -29,14 +29,6 @@ _ACTION_META: dict[str, dict[str, Any]] = {
 }
 
 
-def _unwrap(value: object, key: str) -> object:
-    if isinstance(value, dict) and value.get("valid") is True and isinstance(value.get(key), dict):
-        return value[key]
-    if isinstance(value, dict) and value.get("accepted") is True and isinstance(value.get(key), dict):
-        return value[key]
-    return value
-
-
 def _digest(value: object) -> str:
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -47,39 +39,35 @@ def _derived_id(prefix: str, value: str) -> str:
     return candidate if len(candidate) <= 120 else f"{prefix}-{_digest(value)[:32]}"
 
 
+def _canonical_findings(value: object) -> str | None:
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        return None
+    try:
+        normalized = sorted((copy.deepcopy(item) for item in value), key=lambda item: str(item.get("id", "")))
+        return json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError, RecursionError):
+        return None
+
+
 def _failure(code: str, reason: str, action: str) -> dict[str, Any]:
     return {"valid": False, "ready": False, "status": "unavailable", "reason": reason, "action": action, "errors": [{"code": code}], "plan": None, "execution": "not_run"}
 
 
-def plan_remediation(policy_value: object, snapshot_value: object, findings_value: object) -> dict[str, Any]:
-    """Create a deterministic dry-run plan from normalized finding objects."""
+def plan_remediation(policy_value: object, snapshot_value: object, findings_value: object | None = None) -> dict[str, Any]:
+    """Create a deterministic dry-run plan from freshly derived findings."""
 
-    policy_result = validate_privacy_policy(_unwrap(policy_value, "policy"))
-    snapshot_result = validate_diagnostic_snapshot(_unwrap(snapshot_value, "snapshot"))
-    if not policy_result["valid"] or not snapshot_result["valid"]:
-        return _failure("input_invalid", "Policy or snapshot failed closed static validation.", "Supply server-owned validated metadata and retry.")
-    policy = policy_result["policy"]
-    snapshot = snapshot_result["snapshot"]
-    assert isinstance(policy, dict) and isinstance(snapshot, dict)
-    if snapshot["policy_id"] != policy["id"]:
-        return _failure("policy_snapshot_mismatch", "Policy and snapshot identities do not match.", "Use one server-owned policy and its matching snapshot.")
-    if not isinstance(findings_value, list):
-        return _failure("findings_type", "Remediation planning accepts only a bounded finding array.", "Pass deterministic server-owned findings, not a client-built report mapping.")
-    if len(findings_value) > 256:
-        return _failure("findings_limit", "Finding count exceeds the static remediation bound.", "Reduce the finding set before planning.")
-
-    normalized: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in findings_value:
-        validation = validate_diagnostic_finding(item)
-        if not validation["valid"]:
-            return _failure("finding_invalid", "A finding failed closed validation.", "Use only normalized findings from deterministic diagnostics.")
-        finding = validation["finding"]
-        assert isinstance(finding, dict)
-        if finding["id"] in seen:
-            return _failure("finding_duplicate", "Finding IDs must be unique in a remediation plan.", "Deduplicate the server-owned findings and retry.")
-        seen.add(finding["id"])
-        normalized.append(finding)
+    policy_owned = _owned_payload(policy_value, "privacy-policy")
+    snapshot_owned = _owned_payload(snapshot_value, "diagnostic-snapshot")
+    if policy_owned is None or snapshot_owned is None:
+        return _failure("provenance_required", "Remediation planning requires trusted server-owned policy and snapshot carriers.", "Load both descriptors through the fixed-root trusted loaders and retry.")
+    policy = policy_owned[0]
+    snapshot = snapshot_owned[0]
+    diagnosis = diagnose_snapshot(policy_value, snapshot_value)
+    if not diagnosis.get("valid"):
+        return _failure("diagnostics_invalid", "Remediation planning requires a valid freshly derived diagnostic set.", "Use matching trusted policy and snapshot carriers.")
+    if findings_value is not None and _canonical_findings(findings_value) != _canonical_findings(diagnosis["findings"]):
+        return _failure("finding_provenance_mismatch", "Supplied findings do not exactly match freshly derived server-owned diagnostics.", "Omit the findings argument or use the unchanged result from deterministic diagnostics.")
+    normalized = copy.deepcopy(diagnosis["findings"])
 
     actions: list[dict[str, Any]] = []
     for finding in sorted(normalized, key=lambda item: item["id"]):

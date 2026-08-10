@@ -33,19 +33,27 @@ from src.shared.schemas.privacy_diagnostics import (
     validate_privacy_policy,
 )
 
+from .provenance import _owned_payload
+
 
 _STATIC_REASON = "Diagnostics are derived from server-owned metadata only. No OS, process, device, or runtime probe was performed."
 _STATIC_ACTION = "Use the detached findings for static review or a separately authorized bounded smoke."
 
 
-def _unwrap(value: object, key: str) -> object:
-    """Accept a validator result without accepting arbitrary report mappings."""
-
-    if isinstance(value, dict) and value.get("valid") is True and isinstance(value.get(key), dict):
-        return value[key]
-    if isinstance(value, dict) and value.get("accepted") is True and isinstance(value.get(key), dict):
-        return value[key]
-    return value
+def _owned_inputs(policy_value: object, snapshot_value: object) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
+    policy_owned = _owned_payload(policy_value, "privacy-policy")
+    snapshot_owned = _owned_payload(snapshot_value, "diagnostic-snapshot")
+    if policy_owned is None or snapshot_owned is None:
+        return None, None, {"code": "provenance_required", "location": "policy" if policy_owned is None else "snapshot"}, {}
+    policy, policy_fingerprint = policy_owned
+    snapshot, snapshot_fingerprint = snapshot_owned
+    policy_result = validate_privacy_policy(policy)
+    snapshot_result = validate_diagnostic_snapshot(snapshot)
+    if not policy_result["valid"] or policy_result.get("fingerprint") != policy_fingerprint:
+        return None, None, {"code": "provenance_invalid", "location": "policy"}, {}
+    if not snapshot_result["valid"] or snapshot_result.get("fingerprint") != snapshot_fingerprint:
+        return None, None, {"code": "provenance_invalid", "location": "snapshot"}, {}
+    return policy_result, snapshot_result, {}, {"policy_fingerprint": policy_fingerprint, "snapshot_fingerprint": snapshot_fingerprint}
 
 
 def _invalid_result(errors: list[dict[str, str]], *, reason: str = "Static diagnostics inputs failed validation.") -> dict[str, Any]:
@@ -167,8 +175,10 @@ def _append_expected(
 def diagnose_snapshot(policy_value: object, snapshot_value: object) -> dict[str, Any]:
     """Return deterministic findings for one validated policy/snapshot pair."""
 
-    policy_result = validate_privacy_policy(_unwrap(policy_value, "policy"))
-    snapshot_result = validate_diagnostic_snapshot(_unwrap(snapshot_value, "snapshot"))
+    policy_result, snapshot_result, provenance_error, _fingerprints = _owned_inputs(policy_value, snapshot_value)
+    if provenance_error:
+        return _invalid_result([provenance_error], reason="Diagnostics require trusted fixed-root server-owned policy and snapshot carriers.")
+    assert policy_result is not None and snapshot_result is not None
     errors = list(policy_result.get("errors", [])) + list(snapshot_result.get("errors", []))
     if errors:
         return _invalid_result(errors)

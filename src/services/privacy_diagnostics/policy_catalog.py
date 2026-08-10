@@ -12,6 +12,7 @@ from typing import Any
 from src.shared.schemas.privacy_diagnostics import MAX_DESCRIPTOR_BYTES, OPAQUE_ID_RE, validate_privacy_policy
 
 from .io import _DuplicateJsonKey, _duplicate_key_guard, _non_finite_number, safe_import_privacy_policy
+from .provenance import _issue_server_owned
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -26,8 +27,8 @@ def _contained(path: Path, root: Path) -> bool:
         return False
 
 
-def _managed_path_safe(path: Path) -> bool:
-    root = MANAGED_PRIVACY_POLICY_ROOT
+def _managed_path_safe(path: Path, root: Path | None = None) -> bool:
+    root = MANAGED_PRIVACY_POLICY_ROOT if root is None else root
     if root.is_symlink() or path.is_symlink() or not _contained(path, root):
         return False
     parent = path.parent
@@ -42,10 +43,11 @@ def _stat_snapshot(value: os.stat_result) -> tuple[int, int, int, int, int]:
     return (value.st_dev, value.st_ino, value.st_mode, value.st_size, value.st_mtime_ns)
 
 
-def _read_managed_json(path: Path) -> tuple[bytes | None, str | None]:
+def _read_managed_json(path: Path, *, root: Path | None = None) -> tuple[bytes | None, str | None]:
     """Open once and read at most MAX_DESCRIPTOR_BYTES + 1 bytes."""
 
-    if not _managed_path_safe(path):
+    managed_root = MANAGED_PRIVACY_POLICY_ROOT if root is None else root
+    if not _managed_path_safe(path, managed_root):
         return None, "managed_policy_refused"
     try:
         before = path.lstat()
@@ -69,7 +71,7 @@ def _read_managed_json(path: Path) -> tuple[bytes | None, str | None]:
             error = "managed_policy_refused"
         elif opened.st_size <= 0 or opened.st_size > MAX_DESCRIPTOR_BYTES:
             error = "managed_policy_size"
-        elif _stat_snapshot(before) != _stat_snapshot(opened) or not _managed_path_safe(path):
+        elif _stat_snapshot(before) != _stat_snapshot(opened) or not _managed_path_safe(path, managed_root):
             error = "managed_policy_refused"
         else:
             current = path.lstat()
@@ -95,7 +97,7 @@ def _read_managed_json(path: Path) -> tuple[bytes | None, str | None]:
         return None, "managed_policy_size"
     if len(payload) != opened.st_size or _stat_snapshot(opened) != _stat_snapshot(after_descriptor):
         return None, "managed_policy_refused"
-    if not _managed_path_safe(path):
+    if not _managed_path_safe(path, managed_root):
         return None, "managed_policy_refused"
     try:
         after_path = path.lstat()
@@ -183,6 +185,18 @@ def load_managed_privacy_policy(policy_id: object) -> dict[str, Any]:
     if imported is None:
         return {"found": False, "status": "unavailable", "reason": "No unique managed privacy policy passed static validation.", "action": "Check the policy ID and remove any duplicate or invalid descriptor.", "execution": "not_run"}
     return {"found": True, "status": "partial", "reason": "Policy is detached server-owned metadata. No machine or runtime state was accessed.", "action": "Use this policy only for static diagnostics planning.", "policy": copy.deepcopy(imported["policy"]), "fingerprint": imported["fingerprint"], "execution": "not_run"}
+
+
+def load_server_owned_policy(policy_id: object) -> dict[str, Any]:
+    """Load a policy carrier exclusively from the fixed managed policy root."""
+
+    loaded = load_managed_privacy_policy(policy_id)
+    if not loaded.get("found"):
+        return {"found": False, "status": "unavailable", "reason": "No unique managed privacy policy can establish server provenance.", "action": "Use a fixed-root managed policy ID.", "execution": "not_run"}
+    policy = loaded.get("policy")
+    if not isinstance(policy, dict) or not isinstance(loaded.get("fingerprint"), str):
+        return {"found": False, "status": "unavailable", "reason": "Managed policy provenance could not be established.", "action": "Reload the managed policy through the trusted loader.", "execution": "not_run"}
+    return {"found": True, "status": "partial", "reason": "Policy provenance was established by the fixed-root loader. No machine or runtime state was accessed.", "action": "Use the opaque server-owned policy carrier for static diagnostics.", "policy": _issue_server_owned("privacy-policy", policy, loaded["fingerprint"]), "fingerprint": loaded["fingerprint"], "execution": "not_run"}
 
 
 # Explicit aliases keep the service discoverable without introducing a second

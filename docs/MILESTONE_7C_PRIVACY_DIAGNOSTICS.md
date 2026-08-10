@@ -30,9 +30,12 @@ Validation returns stable issue codes and never echoes an unsafe value.
 ## Data ownership and status truth
 
 Policy descriptors are discovered only below the repository-managed policy
-root.  Snapshot inputs must be server-owned records and must match the
-managed policy identity.  Diagnostics consume normalized validation results;
-they do not accept client-built report dictionaries.  The fixed status model
+root.  Snapshot descriptors are discovered only below the fixed
+`privacy_diagnostics/samples` root.  `load_server_owned_policy` and
+`load_server_owned_snapshot` create private provenance carriers after static
+validation; raw JSON, importer result mappings and caller-built wrappers are
+never accepted by diagnostics, support or remediation.  Snapshot inputs must
+match the managed policy identity.  The fixed status model
 is:
 
 - `operational` means only that the supplied status says operational.  It is
@@ -56,9 +59,12 @@ retention job is started.
 
 ## Support projection and remediation
 
-`build_support_bundle_manifest` accepts only a list of validated findings and
-returns a detached manifest containing opaque IDs, fixed statuses, counts and
-digests.  `build_support_bundle_markdown` renders the same safe projection.
+`build_support_bundle_manifest` and `plan_remediation` derive findings
+internally from the trusted policy/snapshot carriers.  An optional findings
+argument is accepted only when it is an exact canonical match to that fresh
+finding set; altered, missing, extra or cross-snapshot findings are rejected.
+The support manifest contains opaque IDs, fixed statuses, counts and digests.
+`build_support_bundle_markdown` renders the same safe projection.
 `plan_remediation` is always `dry_run: true`; high-risk consent and drift
 actions are `manual_review`, while lower-risk review actions are `planned`.
 No function writes, replaces, moves, deletes or restarts anything.
@@ -83,6 +89,8 @@ python scripts/validate_privacy_diagnostics.py --format markdown
 ```
 
 The tracked example policy is under the managed policy root.  The snapshot
-example is under `privacy_diagnostics/samples` and is input for bounded tests,
-not an auto-discovered policy.  No download, dependency installation, model
-resolution or runtime provider call is part of this milestone.
+example is under the fixed `privacy_diagnostics/samples` root and is eligible
+for static discovery only when its descriptor passes validation.  Raw import
+helpers remain offline utilities and cannot establish server provenance.  No
+download, dependency installation, model resolution or runtime provider call
+is part of this milestone.

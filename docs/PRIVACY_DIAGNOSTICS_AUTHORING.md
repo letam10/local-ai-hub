@@ -28,7 +28,10 @@ record has an allowlisted ID, an allowlisted status, an evidence count and a
 lowercase SHA-256 metadata digest.  Config records additionally carry expected
 and observed digests.  Contract records carry expected and observed version
 tokens.  Never place the config value, path, command output, host name, secret,
-log or attachment in a record.
+log or attachment in a record.  The fixed-root snapshot loader creates the
+private provenance carrier consumed by diagnostics; `safe_import_*` output is
+for offline validation/export only and cannot be passed through as proof of
+server ownership.
 
 The evidence summary is also bounded and carries only counts and a digest.
 Stale, partial, missing and not-run evidence should be declared honestly;
@@ -36,9 +39,12 @@ the validator and diagnostic engine will not infer a successful runtime.
 
 ## Findings, support manifests and plans
 
-Do not hand-author a finding list for a public report.  Use the normalized
-findings returned by deterministic diagnostics.  Each finding has a fixed
-rule/action code, fixed text, an opaque subject, a bounded count and a digest.
+Do not hand-author a finding list for a public report.  Support and remediation
+derive the normalized findings from a trusted policy/snapshot pair.  Each
+finding has a fixed rule/action code, fixed text, an opaque subject, a bounded
+count and a digest.  If a caller supplies findings for convenience, the
+service compares them canonically with the freshly derived set and rejects
+any alteration, omission, duplicate, extra item or cross-snapshot result.
 
 A support manifest is a scrubbed index.  It may contain only opaque IDs, fixed
 statuses, counts and digests.  It must have granted support consent and always

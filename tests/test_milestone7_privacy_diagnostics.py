@@ -18,9 +18,11 @@ from src.services.privacy_diagnostics import (
     diff_privacy_policies,
     plan_privacy_policy_migration,
     plan_remediation,
+    load_server_owned_policy,
+    load_server_owned_snapshot,
 )
-from src.services.privacy_diagnostics import policy_catalog
-from src.services.privacy_diagnostics.io import export_privacy_policy, safe_import_privacy_policy
+from src.services.privacy_diagnostics import policy_catalog, snapshot_catalog
+from src.services.privacy_diagnostics.io import export_privacy_policy, safe_import_diagnostic_snapshot, safe_import_privacy_policy
 from src.shared.schemas.privacy_diagnostics import (
     MAX_DESCRIPTOR_BYTES,
     diagnostic_finding_schema,
@@ -44,6 +46,8 @@ class Milestone7PrivacyDiagnosticsTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.policy = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
         cls.snapshot = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        cls.owned_policy = load_server_owned_policy(cls.policy["id"])["policy"]
+        cls.owned_snapshot = load_server_owned_snapshot(cls.snapshot["id"])["snapshot"]
         try:
             from jsonschema import Draft202012Validator
         except ImportError:
@@ -70,9 +74,9 @@ class Milestone7PrivacyDiagnosticsTests(unittest.TestCase):
             self.skipTest("jsonschema is provided by the bounded hub test environment")
         policy = copy.deepcopy(self.policy)
         snapshot = copy.deepcopy(self.snapshot)
-        diagnosis = diagnose_snapshot(policy, snapshot)
-        bundle = build_support_bundle_manifest(policy, snapshot, diagnosis["findings"])
-        plan = plan_remediation(policy, snapshot, diagnosis["findings"])
+        diagnosis = diagnose_snapshot(self.owned_policy, self.owned_snapshot)
+        bundle = build_support_bundle_manifest(self.owned_policy, self.owned_snapshot, diagnosis["findings"])
+        plan = plan_remediation(self.owned_policy, self.owned_snapshot, diagnosis["findings"])
         values = [
             (privacy_policy_schema(), policy),
             (diagnostic_snapshot_schema(), snapshot),
@@ -115,31 +119,78 @@ class Milestone7PrivacyDiagnosticsTests(unittest.TestCase):
         self.assertFalse(safe_import_privacy_policy('{"value":NaN}')["accepted"])
         self.assertFalse(safe_import_privacy_policy(b"{" + b"a" * (MAX_DESCRIPTOR_BYTES + 1))["accepted"])
 
+    def test_raw_or_imported_snapshot_cannot_cross_trusted_diagnostic_boundary(self) -> None:
+        imported = safe_import_diagnostic_snapshot(json.dumps(self.snapshot))
+        self.assertTrue(imported["accepted"])
+        raw_result = diagnose_snapshot(self.policy, self.snapshot)
+        imported_result = diagnose_snapshot(self.owned_policy, imported)
+        self.assertFalse(raw_result["valid"])
+        self.assertFalse(imported_result["valid"])
+        self.assertEqual(raw_result["errors"][0]["code"], "provenance_required")
+        self.assertEqual(imported_result["errors"][0]["code"], "provenance_required")
+        self.assertNotIn(self.snapshot["label"], json.dumps(imported_result))
+        raw_bundle = build_support_bundle_manifest(self.policy, self.snapshot)
+        raw_plan = plan_remediation(self.policy, self.snapshot)
+        self.assertEqual(raw_bundle["errors"][0]["code"], "provenance_required")
+        self.assertEqual(raw_plan["errors"][0]["code"], "provenance_required")
+
+    def test_policy_snapshot_provenance_mismatch_is_rejected_without_echo(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_root = snapshot_catalog.MANAGED_DIAGNOSTIC_SNAPSHOT_ROOT
+            snapshot_catalog.MANAGED_DIAGNOSTIC_SNAPSHOT_ROOT = root
+            try:
+                mismatched = copy.deepcopy(self.snapshot)
+                mismatched["policy_id"] = "another-policy"
+                path = root / "mismatch.diagnostic-snapshot.json"
+                path.write_text(json.dumps(mismatched), encoding="utf-8")
+                loaded = load_server_owned_snapshot(mismatched["id"])
+                self.assertTrue(loaded["found"])
+                result = diagnose_snapshot(self.owned_policy, loaded["snapshot"])
+                self.assertFalse(result["valid"])
+                self.assertEqual(result["errors"][0]["code"], "policy_snapshot_mismatch")
+                self.assertNotIn(mismatched["label"], json.dumps(result))
+            finally:
+                snapshot_catalog.MANAGED_DIAGNOSTIC_SNAPSHOT_ROOT = old_root
+
+    def test_forged_schema_valid_finding_cannot_be_sealed_or_planned(self) -> None:
+        diagnosis = diagnose_snapshot(self.owned_policy, self.owned_snapshot)
+        forged = copy.deepcopy(diagnosis["findings"])
+        forged[0]["evidence_digest"] = "0" * 64
+        bundle = build_support_bundle_manifest(self.owned_policy, self.owned_snapshot, forged)
+        plan = plan_remediation(self.owned_policy, self.owned_snapshot, forged)
+        self.assertFalse(bundle["valid"])
+        self.assertFalse(plan["valid"])
+        self.assertEqual(bundle["errors"][0]["code"], "finding_provenance_mismatch")
+        self.assertEqual(plan["errors"][0]["code"], "finding_provenance_mismatch")
+        self.assertNotIn("0" * 64, json.dumps(bundle))
+        self.assertNotIn("0" * 64, json.dumps(plan))
+
     def test_diagnostics_are_deterministic_and_scrubbed(self) -> None:
         before_policy = copy.deepcopy(self.policy)
         before_snapshot = copy.deepcopy(self.snapshot)
-        first = diagnose_snapshot(self.policy, self.snapshot)
-        second = diagnose_snapshot(self.policy, self.snapshot)
+        first = diagnose_snapshot(self.owned_policy, self.owned_snapshot)
+        second = diagnose_snapshot(self.owned_policy, self.owned_snapshot)
         self.assertEqual(first, second)
         self.assertEqual(first["execution"], "not_run")
         self.assertTrue(any(item["rule_id"] == "config_drift" for item in first["findings"]))
         self.assertTrue(any(item["rule_id"] == "contract_stale" for item in first["findings"]))
         self.assertTrue(any(item["rule_id"] == "missing_evidence" for item in first["findings"]))
-        self.assertTrue(build_diagnostic_markdown(self.policy, self.snapshot)["ready"])
+        self.assertTrue(build_diagnostic_markdown(self.owned_policy, self.owned_snapshot)["ready"])
         text = json.dumps(first, sort_keys=True)
         self.assertNotIn(self.policy["label"], text)
         self.assertEqual(self.policy, before_policy)
         self.assertEqual(self.snapshot, before_snapshot)
 
     def test_support_and_remediation_are_dry_run_and_require_consent(self) -> None:
-        diagnosis = diagnose_snapshot(self.policy, self.snapshot)
-        bundle = build_support_bundle_manifest(self.policy, self.snapshot, diagnosis["findings"])
+        diagnosis = diagnose_snapshot(self.owned_policy, self.owned_snapshot)
+        bundle = build_support_bundle_manifest(self.owned_policy, self.owned_snapshot, diagnosis["findings"])
         self.assertTrue(bundle["valid"])
         self.assertEqual(bundle["manifest"]["execution"], "not_run")
         rendered = build_support_bundle_markdown(bundle)
         self.assertTrue(rendered["ready"])
         self.assertNotIn(self.policy["label"], rendered["content"])
-        plan = plan_remediation(self.policy, self.snapshot, diagnosis["findings"])
+        plan = plan_remediation(self.owned_policy, self.owned_snapshot, diagnosis["findings"])
         self.assertTrue(plan["valid"])
         self.assertTrue(plan["plan"]["dry_run"])
         self.assertEqual(plan["plan"]["execution"], "not_run")
@@ -148,7 +199,7 @@ class Milestone7PrivacyDiagnosticsTests(unittest.TestCase):
         revoked["consent"]["state"] = "revoked"
         denied = build_support_bundle_manifest(self.policy, revoked, diagnosis["findings"])
         self.assertFalse(denied["valid"])
-        self.assertEqual(denied["errors"][0]["code"], "consent_required")
+        self.assertEqual(denied["errors"][0]["code"], "provenance_required")
 
     def test_policy_diff_detects_metadata_and_restrictive_changes(self) -> None:
         unchanged = diff_privacy_policies(self.policy, copy.deepcopy(self.policy))
@@ -174,10 +225,10 @@ class Milestone7PrivacyDiagnosticsTests(unittest.TestCase):
         self.assertTrue(build_policy_diff_markdown(diff)["ready"])
 
     def test_projection_rejects_client_built_report_and_markdown_is_safe(self) -> None:
-        diagnosis = diagnose_snapshot(self.policy, self.snapshot)
-        rejected = build_support_bundle_manifest(self.policy, self.snapshot, {"findings": diagnosis["findings"]})
+        diagnosis = diagnose_snapshot(self.owned_policy, self.owned_snapshot)
+        rejected = build_support_bundle_manifest(self.owned_policy, self.owned_snapshot, {"findings": diagnosis["findings"]})
         self.assertFalse(rejected["valid"])
-        self.assertEqual(rejected["errors"][0]["code"], "findings_type")
+        self.assertEqual(rejected["errors"][0]["code"], "finding_provenance_mismatch")
         self.assertFalse(build_support_bundle_markdown({"manifest": {"label": "unsafe"}})["ready"])
         self.assertFalse(build_policy_diff_markdown({"valid": True, "status": "changed", "from": {"id": "evil", "fingerprint": "x"}, "to": {"id": "evil", "fingerprint": "y"}, "changes": [{"kind": "<script>"}]} )["ready"])
 
