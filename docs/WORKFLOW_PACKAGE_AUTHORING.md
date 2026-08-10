@@ -8,6 +8,7 @@ This guide describes how to author a safe `workflow-package.v1` descriptor for t
 - Keep the complete descriptor below the documented static size limit.
 - Use only fields defined by the versioned contract; unknown fields are rejected.
 - Use logical identifiers, never workstation locations, URLs, credentials, shells, modules, runners, media blobs, model weights, or checkpoints.
+- Declare parameters, model/runtime requirements, resource hints, and an opaque preview only through the closed fields below. These are compatibility metadata, never runtime configuration or a preview payload.
 - Describe a graph with interfaces, declarative nodes, and typed edges. Do not embed a host workflow, generated output, model payload, or executable configuration.
 - Treat `operation` values as compatibility declarations. They do not permit a package to execute a node.
 - Keep the graph acyclic and package-local subgraph references bounded.
@@ -32,6 +33,22 @@ Every top-level field below is required:
     "node_contract": "subgraph-blueprint.v1",
     "required_node_types": ["hub.image.inspect"]
   },
+  "catalog_ready": true,
+  "parameters": [
+    {"id": "mode", "type": "ENUM", "default": "standard", "bounds": null, "enum": ["standard", "strict"], "description": "A bounded host-facing policy label."}
+  ],
+  "requirements": {
+    "models": [{"id": "hub.review-model", "version": "1.0.0"}],
+    "runtimes": [{"id": "hub.typed-runtime", "version": ">=1.0.0"}]
+  },
+  "resource_hints": {
+    "cpu": {"minimum_cores": 1, "recommended_cores": 2},
+    "gpu": {"required": false, "vendor": "none", "minimum_vram_mb": 0},
+    "ram": {"minimum_mb": 512, "recommended_mb": 1024},
+    "disk": {"minimum_mb": 256, "recommended_mb": 512},
+    "exclusive_groups": ["review"]
+  },
+  "preview": {"kind": "opaque-preview.v1", "id": "review-preview", "content_type": "metadata"},
   "workflow": {"schema_version": "subgraph-blueprint.v1", "id": "entry", "title": "Entry", "description": "Typed entry blueprint.", "inputs": [], "outputs": [], "nodes": [], "edges": []},
   "subgraphs": []
 }
@@ -52,6 +69,11 @@ The empty blueprint above demonstrates field shape only; useful packages normall
 | `source.reference` | Opaque logical source ID; it is not a path, URL, or filename |
 | `capabilities` | Unique members of `audio`, `image`, `metadata`, `text`, `utility`, `video` |
 | `compatibility` | Hub version constraint, fixed typed node contract, and unique operation IDs |
+| `catalog_ready` | `true` only when every declared public blueprint port has exactly one matching boundary-node binding |
+| `parameters` | Closed bounded parameter contracts: `BOOLEAN`, `NUMBER`, `TEXT`, or `ENUM`; defaults, bounds, and enum members are validated statically |
+| `requirements` | Unique opaque model IDs at exact SemVer plus runtime IDs with a bounded SemVer constraint; never a path, download source, or runtime config |
+| `resource_hints` | CPU, GPU/VRAM, RAM, disk, and unique exclusive-group estimates; these only support static preflight and never reserve or launch work |
+| `preview` | `opaque-preview.v1` identity plus one of `diagram`, `metadata`, or `summary`; no media, data, URL, or embedded preview payload is accepted |
 | `workflow` | One `subgraph-blueprint.v1` entry descriptor |
 | `subgraphs` | Zero or more package-local reusable blueprints |
 
@@ -92,6 +114,8 @@ A port has an ID, a typed value, and optional `required`, `multi`, and `descript
 Allowed port types are `AUDIO`, `BOOLEAN`, `IMAGE`, `MASK`, `METADATA`, `MODEL`, `NUMBER`, `TEXT`, and `VIDEO`.
 
 The source and destination port types of every edge must match exactly. A non-`multi` destination port receives no more than one edge.
+
+For any `catalog_ready: true` package, each declared blueprint input must be represented by exactly one `input` node output, and each declared blueprint output by exactly one `output` node input. Duplicate public bindings are invalid even when a package is not catalog-ready; incomplete bindings can be used only in non-catalog draft descriptors.
 
 ### Declarative nodes
 
@@ -138,6 +162,14 @@ Use a subgraph node only for a blueprint listed in the package `subgraphs` array
 
 This design intentionally keeps reuse static and local. It does not serialize a host graph runtime, a LiteGraph subgraph, a general workflow document, or an arbitrary JSON entrypoint.
 
+## Integration contracts and static preflight
+
+Parameter values are data contracts, not a generic settings object. `NUMBER` requires a finite numeric default inside closed `minimum`/`maximum` bounds. `TEXT` requires a string default within `min_length`/`max_length`. `ENUM` requires a string default contained in its bounded unique enum. `BOOLEAN` has no bounds or enum. Unknown parameter fields, URL-like values, paths, commands, secrets, media, weights, and arbitrary runtime configuration are rejected.
+
+`requirements.models` contains only `id` plus exact SemVer; `requirements.runtimes` contains only `id` plus a single exact, `>`, or `>=` SemVer constraint. `resource_hints` is likewise closed: CPU cores; GPU `required`, vendor (`none`, `any`, or `nvidia`), and VRAM; RAM/disk minimum/recommended MB; and opaque exclusive group IDs. It is an estimate for planning only.
+
+`preflight_workflow_package()` can additionally receive a server-owned typed requirement snapshot (`models`/`runtimes`) and resource snapshot. Matching static snapshots remain `partial` with `execution: not_run`; absent model/runtime/node requirements or capacity return `unavailable` with fixed safe identifiers. Preflight never probes a host, downloads a model, reserves capacity, or runs a graph.
+
 ## Safe validation and export
 
 Run one of the repository-managed static reports:
@@ -162,13 +194,13 @@ An accepted import is a detached `planned` descriptor. It is not installed, regi
 
 `lint_workflow_package()` reports advisory static findings such as unreachable nodes, a missing output node, an unused declared operation, or an unreferenced subgraph. It never changes the package.
 
-`diff_workflow_packages(before, after)` returns stable change kinds and identifiers. It does not reveal the prior or new free-text content.
+`diff_workflow_packages(before, after)` returns stable change kinds and identifiers for typed blueprints plus every integration contract: hub/node compatibility, catalog readiness, parameters, model/runtime requirements, resource hints, and opaque preview metadata. It does not reveal the prior or new free-text/default content.
 
 `plan_workflow_migration(before, after)` is always a dry run. It may return:
 
 - `not_required` for canonical equality;
 - `planned` for additive descriptor changes;
-- `manual_review` for removed or changed typed contracts;
+- `manual_review` for restrictive or changed typed/compatibility/parameter/requirement/resource contracts;
 - `unavailable` for mismatched package IDs, invalid descriptors, and downgrade inference.
 
 No migration plan writes or replaces a workflow. A consumer must apply any approved reference change separately.
@@ -195,12 +227,12 @@ An evaluation scenario is a static review rubric, not a benchmark definition:
 }
 ```
 
-There must be exactly one `A` and one `B`, rubric IDs must be unique, and all rubric weights must total `1.0`. Do not add results, votes, score data, a runner, warmup/iteration counts, latency/throughput fields, execution settings, media, model data, or commands.
+There must be exactly one `A` and one `B`, the two candidate package-version references must differ, rubric IDs must be unique, and all rubric weights must total `1.0`. Managed discovery retains a scenario only when its parent and both candidate references resolve to unique catalog-ready package identities. Do not add results, votes, score data, a runner, warmup/iteration counts, latency/throughput fields, execution settings, media, model data, or commands.
 
 `build_human_ab_plan()` creates a `not_run` plan and can verify the referenced package ID/version using a server-owned validated package result. A human must perform the review and record any result in an approved system outside this static contract.
 
 ## Audit and provenance
 
-Use `build_package_audit()` or `build_package_audit_markdown()` only with a descriptor or a prior service validation result. Both revalidate first, then include only safe contract IDs, fingerprints, counts, types, and static/dry-run status. They do not echo author text, imported JSON, locations, host values, secrets, commands, or runtime output.
+Use `build_package_audit()` or `build_package_audit_markdown()` only with a descriptor or a prior service validation result. Both revalidate first, then include only safe contract IDs, fingerprints, counts, types, resource estimates, opaque preview identity, and static/dry-run status. They do not echo author text, parameter defaults, imported JSON, locations, host values, secrets, commands, or runtime output.
 
 For an API/UI integration, resolve an opaque package ID server-side and pass only a server-owned validated package result into reporting. Never accept a client-provided package/audit/discovery mapping and directly return it to another client.
