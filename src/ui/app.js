@@ -55,6 +55,7 @@ import {
   captureImageMaskPreset,
   linkImageMaskProject,
   uploadFile,
+  escapeHtml,
 } from "./api.js";
 import { disposeNodeStudios, mountNodeStudios } from "./node_studio.js";
 import { mountImageMaskCanvases } from "./image_mask_studio.js";
@@ -78,6 +79,76 @@ const artifactPreviewLayer = document.querySelector("#artifact-preview-layer");
 let routeLoad = null;
 let desktopCloseLayer = null;
 let disposeImageMaskCanvases = () => {};
+
+const SIDEBAR_PREFERENCE_KEY = "local-ai-hub-sidebar-v1";
+const SIDEBAR_PREFERENCE_VERSION = 1;
+const MOBILE_NAV_MAX_WIDTH = 900;
+
+const safeStorageGet = (key) => {
+  try { return window.localStorage?.getItem(key) ?? null; } catch { return null; }
+};
+
+const safeStorageSet = (key, value) => {
+  try { window.localStorage?.setItem(key, value); } catch { /* Storage can be disabled or unavailable. */ }
+};
+
+const readSidebarPreference = () => {
+  const raw = safeStorageGet(SIDEBAR_PREFERENCE_KEY);
+  if (!raw) return false;
+  try {
+    const preference = JSON.parse(raw);
+    return preference?.version === SIDEBAR_PREFERENCE_VERSION && preference.collapsed === true;
+  } catch {
+    return false;
+  }
+};
+
+const sidebarState = { desktopCollapsed: readSidebarPreference(), mobileOpen: false };
+
+const isMobileNavigation = () => {
+  try {
+    if (typeof window.matchMedia === "function") return window.matchMedia(`(max-width: ${MOBILE_NAV_MAX_WIDTH}px)`).matches;
+  } catch { /* Use the width fallback when media-query access is unavailable. */ }
+  return Number(window.innerWidth || 0) <= MOBILE_NAV_MAX_WIDTH;
+};
+
+const syncSidebarState = () => {
+  if (!sidebar || !sidebarToggle) return;
+  const mobile = isMobileNavigation();
+  sidebarToggle.setAttribute("aria-controls", "sidebar-nav");
+  if (mobile) {
+    sidebar.classList.remove("is-collapsed");
+    sidebar.classList.toggle("is-open", sidebarState.mobileOpen);
+    sidebarToggle.setAttribute("aria-expanded", String(sidebarState.mobileOpen));
+    sidebarToggle.setAttribute("aria-label", sidebarState.mobileOpen ? "Close navigation" : "Open navigation");
+    return;
+  }
+  sidebarState.mobileOpen = false;
+  sidebar.classList.remove("is-open");
+  sidebar.classList.toggle("is-collapsed", sidebarState.desktopCollapsed);
+  sidebarToggle.setAttribute("aria-expanded", String(!sidebarState.desktopCollapsed));
+  sidebarToggle.setAttribute("aria-label", sidebarState.desktopCollapsed ? "Expand navigation" : "Collapse navigation");
+};
+
+const persistSidebarPreference = () => {
+  safeStorageSet(SIDEBAR_PREFERENCE_KEY, JSON.stringify({ version: SIDEBAR_PREFERENCE_VERSION, collapsed: sidebarState.desktopCollapsed }));
+};
+
+const toggleSidebar = () => {
+  if (isMobileNavigation()) {
+    sidebarState.mobileOpen = !sidebarState.mobileOpen;
+  } else {
+    sidebarState.desktopCollapsed = !sidebarState.desktopCollapsed;
+    persistSidebarPreference();
+  }
+  syncSidebarState();
+};
+
+const closeMobileSidebar = () => {
+  if (!isMobileNavigation()) return;
+  sidebarState.mobileOpen = false;
+  syncSidebarState();
+};
 
 const dismissDesktopClosePrompt = () => {
   desktopCloseLayer?.remove();
@@ -213,10 +284,21 @@ const showArtifactPreview = (button) => {
 
 const renderNavigation = () => {
   const active = routeId();
-  nav.innerHTML = NAVIGATION.map((group) => `
-    <div class="nav-group">${group.group}</div>
-    ${group.items.map(([id, label, icon]) => `<button class="nav-item ${id === active ? "is-active" : ""}" type="button" data-route="${id}" aria-current="${id === active ? "page" : "false"}"><span class="nav-icon">${icon}</span><span>${label}</span></button>`).join("")}
-  `).join("");
+  if (!nav) return;
+  nav.setAttribute("aria-label", "Module navigation");
+  nav.innerHTML = NAVIGATION.map((group, index) => {
+    const groupId = `nav-group-${index}`;
+    return `
+      <section class="nav-group-section" role="group" aria-labelledby="${groupId}">
+        <h2 class="nav-group" id="${groupId}">${escapeHtml(group.group)}</h2>
+        <div class="nav-group-items">
+          ${group.items.map(([id, label, icon]) => {
+            const current = id === active ? ' aria-current="page"' : "";
+            return `<button class="nav-item ${id === active ? "is-active" : ""}" type="button" data-route="${escapeHtml(id)}" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}"${current}><span class="nav-icon" aria-hidden="true">${escapeHtml(icon)}</span><span class="nav-label">${escapeHtml(label)}</span></button>`;
+          }).join("")}
+        </div>
+      </section>`;
+  }).join("");
 };
 
 const renderApiState = () => {
@@ -240,6 +322,7 @@ const render = () => {
   disposeNodeStudios();
   disposeImageMaskCanvases();
   renderNavigation();
+  syncSidebarState();
   view.innerHTML = `${renderApiState()}${renderPage(routeId(), state)}`;
   view.focus({ preventScroll: true });
   updateTopbar();
@@ -397,11 +480,11 @@ const initialize = async () => {
   await loadRouteData();
 };
 
-const currentTheme = () => localStorage.getItem("local-ai-hub-theme") || "system";
+const currentTheme = () => safeStorageGet("local-ai-hub-theme") || "system";
 const applyTheme = (theme) => {
   if (theme === "system") document.documentElement.removeAttribute("data-theme");
   else document.documentElement.dataset.theme = theme;
-  localStorage.setItem("local-ai-hub-theme", theme);
+  safeStorageSet("local-ai-hub-theme", theme);
 };
 const cycleTheme = () => {
   const next = { system: "dark", dark: "light", light: "system" }[currentTheme()];
@@ -694,9 +777,7 @@ document.addEventListener("submit", async (event) => {
 
 document.addEventListener("click", async (event) => {
   if (event.target.closest("#sidebar-toggle")) {
-    const open = !sidebar?.classList.contains("is-open");
-    sidebar?.classList.toggle("is-open", open);
-    sidebarToggle?.setAttribute("aria-expanded", String(open));
+    toggleSidebar();
     return;
   }
   if (event.target.closest("[data-close-artifact-preview]")) { closeArtifactPreview(); return; }
@@ -704,7 +785,7 @@ document.addEventListener("click", async (event) => {
   if (preview) { showArtifactPreview(preview); return; }
   if (event.target.closest("[data-refresh-api]")) { await initialize(); return; }
   const route = event.target.closest("[data-route]");
-  if (route) { sidebar?.classList.remove("is-open"); sidebarToggle?.setAttribute("aria-expanded", "false"); window.location.hash = `#/${route.dataset.route}`; return; }
+  if (route) { closeMobileSidebar(); window.location.hash = `#/${route.dataset.route}`; return; }
   if (event.target.closest("[data-refresh-creative]")) {
     try { await refreshCreative(); showToast("Đã làm mới Creative Workspace."); }
     catch (error) { showToast(error.message, "error"); }
@@ -1003,7 +1084,9 @@ document.addEventListener("keydown", async (event) => {
   }
 });
 
+window.addEventListener("resize", syncSidebarState);
 window.addEventListener("hashchange", async () => { render(); await loadRouteData(); });
+syncSidebarState();
 applyTheme(currentTheme());
 initialize();
 window.setInterval(() => refreshFast({ quiet: true }), 2500);
