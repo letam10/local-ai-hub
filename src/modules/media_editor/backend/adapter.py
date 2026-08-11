@@ -15,7 +15,7 @@ from typing import Any
 
 from src.services.process_manager.managed import ProcessOwner, run_command
 from src.services.process_manager.windows import run_hidden
-from src.services.artifact_store import resolve
+from src.services.artifact_store import describe, resolve
 from src.shared.paths.registry import OUTPUT_ROOT, TEMP_ROOT
 from src.shared.utils.adapter_common import configured_path, unavailable
 
@@ -26,6 +26,14 @@ VIDEO_OPS = {
 IMAGE_OPS = {"image_resize", "image_upscale", "image_crop", "image_rotate", "image_flip", "image_convert", "image_compress", "image_levels"}
 _CLOSED_MEDIA_OPERATIONS = {"video_grade", "logo_overlay", "audio_loudness"}
 _UNSAFE_MEDIA_FIELDS = {"command", "commands", "executable", "executable_path", "filter", "filter_complex", "font", "font_path", "overlay_path", "path_override", "secret", "token"}
+_CLOSED_MEDIA_ALLOWED_FIELDS = {
+    "video_grade": {"operation", "source_artifact_id", "brightness", "contrast", "saturation", "gamma", "denoise", "sharpen"},
+    "logo_overlay": {"operation", "source_artifact_id", "overlay_artifact_id", "position", "opacity"},
+    "audio_loudness": {"operation", "source_artifact_id", "target_lufs", "true_peak", "gain_db"},
+}
+_CLOSED_MEDIA_EXPECTED_TYPES = {"video_grade": "video", "logo_overlay": "video", "audio_loudness": "audio"}
+_CLOSED_MEDIA_PAYLOAD_ERROR = "Closed media operation payload is invalid."
+_CLOSED_MEDIA_ARTIFACT_ERROR = "Closed media operation artifact is unavailable or has an unsupported type."
 _ENCODER_CACHE_LOCK = threading.RLock()
 _ENCODER_CACHE: dict[str, Any] | None = None
 
@@ -106,8 +114,38 @@ def _reject_unsafe_closed_fields(payload: dict[str, Any], operation: str) -> Non
         return
     for name in payload:
         lowered = str(name).casefold()
-        if lowered in _UNSAFE_MEDIA_FIELDS or any(token in lowered for token in ("command", "executable", "filter", "font_path", "path_override", "secret")):
-            raise ValueError("Closed media operation accepts only its documented allowlisted controls.")
+        if lowered in _UNSAFE_MEDIA_FIELDS or "path" in lowered or any(token in lowered for token in ("command", "executable", "filter", "font", "manifest", "callable", "secret")):
+            raise ValueError(_CLOSED_MEDIA_PAYLOAD_ERROR)
+
+
+def _resolve_closed_media_artifact(artifact_id: object, expected_type: str) -> Path:
+    """Resolve a typed Hub artifact without accepting a client filesystem path."""
+
+    if not isinstance(artifact_id, str) or not re.fullmatch(r"artifact_[a-f0-9]{32}", artifact_id):
+        raise ValueError(_CLOSED_MEDIA_ARTIFACT_ERROR)
+    try:
+        path = resolve(artifact_id)
+        metadata = describe(artifact_id)
+    except Exception:
+        raise ValueError(_CLOSED_MEDIA_ARTIFACT_ERROR) from None
+    media_type = str(metadata.get("media_type") or "").casefold() if isinstance(metadata, dict) else ""
+    if not isinstance(path, Path) or not path.is_file() or not media_type.startswith(f"{expected_type}/"):
+        raise ValueError(_CLOSED_MEDIA_ARTIFACT_ERROR)
+    return path
+
+
+def _resolve_closed_media_sources(payload: dict[str, Any], operation: str) -> tuple[Path, Path | None]:
+    """Validate a closed operation and resolve all media inputs server-side."""
+
+    _reject_unsafe_closed_fields(payload, operation)
+    allowed = _CLOSED_MEDIA_ALLOWED_FIELDS[operation]
+    if payload.get("operation") != operation or any(str(name) not in allowed for name in payload):
+        raise ValueError(_CLOSED_MEDIA_PAYLOAD_ERROR)
+    source = _resolve_closed_media_artifact(payload.get("source_artifact_id"), _CLOSED_MEDIA_EXPECTED_TYPES[operation])
+    overlay = None
+    if operation == "logo_overlay":
+        overlay = _resolve_closed_media_artifact(payload.get("overlay_artifact_id"), "image")
+    return source, overlay
 
 
 def _encoder_names(output: str) -> set[str]:
@@ -447,7 +485,7 @@ def _encode_commands(payload: dict[str, Any], source: Path, target: Path) -> tup
     return [first, second], [stem]
 
 
-def _command(payload: dict[str, Any], source: Path, target: Path) -> list[str] | None:
+def _command(payload: dict[str, Any], source: Path, target: Path, *, resolved_overlay: Path | None = None) -> list[str] | None:
     operation = str(payload.get("operation") or "")
     _reject_unsafe_closed_fields(payload, operation)
     ffmpeg, _ffprobe = _paths()
@@ -495,7 +533,7 @@ def _command(payload: dict[str, Any], source: Path, target: Path) -> list[str] |
         return [*prefix, "-vf", ",".join(filters), "-c:a", "copy", str(target)]
     if operation == "logo_overlay":
         overlay_id = payload.get("overlay_artifact_id")
-        overlay_path = resolve(overlay_id) if isinstance(overlay_id, str) else None
+        overlay_path = resolved_overlay or (resolve(overlay_id) if isinstance(overlay_id, str) else None)
         if overlay_path is None:
             raise ValueError("Logo overlay requires an opaque Hub-resolved IMAGE artifact.")
         overlay_value = str(overlay_path)
@@ -574,7 +612,14 @@ def _command(payload: dict[str, Any], source: Path, target: Path) -> list[str] |
 
 def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[str, Any]:
     operation = str(payload.get("operation") or "probe")
-    source = _source(payload)
+    resolved_overlay: Path | None = None
+    if operation in _CLOSED_MEDIA_OPERATIONS:
+        try:
+            source, resolved_overlay = _resolve_closed_media_sources(payload, operation)
+        except ValueError as exc:
+            return {"status": "error", "error": str(exc)}
+    else:
+        source = _source(payload)
     if source is None:
         return {"status": "error", "error": "Chọn tệp đầu vào trước khi chạy media operation."}
     if operation == "probe":
@@ -651,7 +696,7 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
     else:
         target = _output(source, operation, extension)
     try:
-        command = _command(payload, source, target)
+        command = _command(payload, source, target, resolved_overlay=resolved_overlay)
     except (TypeError, ValueError) as exc:
         return {"status": "error", "error": str(exc)}
     if command is None:

@@ -305,7 +305,7 @@ def _run_video_grade(data: dict[str, Any], inputs: dict[str, Any], context: Any,
     source = _input_artifact(inputs, "video")
     payload = {
         "operation": "video_grade",
-        "path": str(source.path),
+        "source_artifact_id": source.artifact_id,
         "brightness": data.get("brightness", 0),
         "contrast": data.get("contrast", 1),
         "saturation": data.get("saturation", 1),
@@ -323,7 +323,7 @@ def _run_logo_overlay(data: dict[str, Any], inputs: dict[str, Any], context: Any
     image = _input_artifact(inputs, "image")
     payload = {
         "operation": "logo_overlay",
-        "path": str(video.path),
+        "source_artifact_id": video.artifact_id,
         "overlay_artifact_id": image.artifact_id,
         "position": data.get("position", "top_right"),
         "opacity": data.get("opacity", 0.85),
@@ -337,7 +337,7 @@ def _run_audio_loudness(data: dict[str, Any], inputs: dict[str, Any], context: A
     source = _input_artifact(inputs, "audio")
     payload = {
         "operation": "audio_loudness",
-        "path": str(source.path),
+        "source_artifact_id": source.artifact_id,
         "target_lufs": data.get("target_lufs", -16),
         "true_peak": data.get("true_peak", -1.5),
         "gain_db": data.get("gain_db", 0),
