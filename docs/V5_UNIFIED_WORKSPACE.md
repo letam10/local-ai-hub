@@ -67,7 +67,10 @@ reorder or a save revision does not masquerade as a content change.
 src/services/workflow_library/ is a thread-safe metadata store. Its default
 state is under the ignored local configuration root; tests inject a temporary
 root. Writes use a same-directory temporary file, flush/fsync, and atomic
-replace. A failed write leaves the previous state intact.
+replace. A failed write leaves the previous state intact. Mutations targeting
+the same file share a path lock and compare the bytes read before replacement;
+an interleaved writer therefore returns a conflict and the newer bytes remain
+untouched.
 
 Every save/delete/import can carry expected_revision. A mismatch returns a
 fixed conflict code and a reload/review action; it never silently overwrites a

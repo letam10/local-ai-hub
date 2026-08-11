@@ -7,6 +7,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,6 +119,89 @@ class WorkflowLibrarySchemaTests(unittest.TestCase):
 
 
 class WorkflowLibraryStoreTests(unittest.TestCase):
+    def test_two_store_save_interleaving_conflicts_without_lost_update(self) -> None:
+        from src.services.workflow_library import WorkflowLibraryStore
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "workflow_library.json"
+            first = WorkflowLibraryStore(path)
+            second = WorkflowLibraryStore(path)
+            concurrent_result: dict[str, object] = {}
+            interleaved = False
+            original_atomic = first._atomic_write
+
+            def interleave(value: dict[str, object], *, expected_bytes: bytes | None = None) -> str:
+                nonlocal interleaved
+                if not interleaved:
+                    interleaved = True
+                    concurrent_result["result"] = second.save_workflow(entry("concurrent"), expected_revision=0)
+                return original_atomic(value, expected_bytes=expected_bytes)
+
+            with patch.object(first, "_atomic_write", side_effect=interleave):
+                stale = first.save_workflow(entry("stale"), expected_revision=0)
+
+            self.assertTrue(concurrent_result["result"]["accepted"])
+            self.assertFalse(stale["accepted"])
+            self.assertEqual(stale["status"], "conflict")
+            self.assertNotIn("stale", json.dumps(first.list_workflows(), ensure_ascii=False))
+            self.assertEqual(first.list_workflows()["workflows"][0]["id"], "concurrent")
+            self.assertNotIn(temporary, json.dumps(stale, ensure_ascii=False))
+
+    def test_two_store_delete_and_import_interleavings_preserve_newer_bytes(self) -> None:
+        from src.services.workflow_library import WorkflowLibraryStore
+
+        for operation in ("delete", "import"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "workflow_library.json"
+                first = WorkflowLibraryStore(path)
+                second = WorkflowLibraryStore(path)
+                self.assertTrue(first.save_workflow(entry(), expected_revision=0)["accepted"])
+                original_atomic = first._atomic_write
+                interleaved = False
+
+                def interleave(value: dict[str, object], *, expected_bytes: bytes | None = None) -> str:
+                    nonlocal interleaved
+                    if not interleaved:
+                        interleaved = True
+                        self.assertTrue(second.save_workflow(entry("concurrent"), expected_revision=1)["accepted"])
+                    return original_atomic(value, expected_bytes=expected_bytes)
+
+                with patch.object(first, "_atomic_write", side_effect=interleave):
+                    if operation == "delete":
+                        result = first.delete_workflow("image-review", expected_revision=1)
+                    else:
+                        imported = library(entry("imported"))
+                        result = first.import_json(json.dumps(imported), expected_revision=1)
+
+                self.assertFalse(result["accepted"])
+                self.assertEqual(result["status"], "conflict")
+                self.assertEqual(first.list_workflows()["workflows"][0]["id"], "concurrent")
+
+    def test_confirmed_migration_uses_the_same_conflict_guard(self) -> None:
+        from src.services.workflow_library import WorkflowLibraryStore
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "workflow_library.json"
+            first = WorkflowLibraryStore(path)
+            second = WorkflowLibraryStore(path)
+            self.assertTrue(first.save_workflow(entry(), expected_revision=0)["accepted"])
+            original_atomic = first._atomic_write
+            interleaved = False
+
+            def interleave(value: dict[str, object], *, expected_bytes: bytes | None = None) -> str:
+                nonlocal interleaved
+                if not interleaved:
+                    interleaved = True
+                    self.assertTrue(second.save_workflow(entry("concurrent"), expected_revision=1)["accepted"])
+                return original_atomic(value, expected_bytes=expected_bytes)
+
+            with patch.object(first, "_atomic_write", side_effect=interleave):
+                result = first.confirm_migration([entry("migrated")], expected_revision=1)
+
+            self.assertFalse(result["accepted"])
+            self.assertEqual(result["status"], "conflict")
+            self.assertEqual(first.list_workflows()["workflows"][0]["id"], "concurrent")
+
     def test_atomic_revision_conflict_and_detached_export(self) -> None:
         from src.services.workflow_library import WorkflowLibraryStore
 

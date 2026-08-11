@@ -31,6 +31,18 @@ from src.shared.schemas.workflow_library import (
 
 
 DEFAULT_LIBRARY_PATH = CONFIG_ROOT / "workflow_library.json"
+_PATH_LOCKS: dict[str, threading.RLock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _shared_path_lock(path: Path) -> threading.RLock:
+    key = str(path.resolve(strict=False))
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _PATH_LOCKS[key] = lock
+        return lock
 
 
 def _now() -> str:
@@ -67,6 +79,32 @@ class WorkflowLibraryStore:
     def __init__(self, path: Path = DEFAULT_LIBRARY_PATH) -> None:
         self.path = Path(path)
         self._lock = threading.RLock()
+        self._shared_lock = _shared_path_lock(self.path)
+
+    def _read_with_bytes(self) -> tuple[dict[str, Any], dict[str, Any], bytes | None]:
+        source_bytes: bytes | None = None
+        try:
+            source_bytes = self.path.read_bytes()
+            result = safe_import_workflow_library(source_bytes)
+        except FileNotFoundError:
+            return _default_library(), {
+                "status": "clean",
+                "reason": "Workflow Library file is absent.",
+                "action": "Create or import a validated workflow.",
+            }, None
+        except (OSError, UnicodeError):
+            result = {"accepted": False}
+        if not result.get("accepted"):
+            return _default_library(), {
+                "status": "recovery_required",
+                "reason": "Workflow Library cannot be read or validated; it will not be overwritten.",
+                "action": "Use a user-mediated validated export/import recovery.",
+            }, source_bytes
+        return result["library"], {
+            "status": "clean",
+            "reason": "Workflow Library is valid.",
+            "action": "Continue edits with the expected revision.",
+        }, source_bytes
 
     def _read(self) -> tuple[dict[str, Any], dict[str, Any]]:
         if not self.path.exists():
@@ -85,7 +123,7 @@ class WorkflowLibraryStore:
         return result["library"], {"status": "clean", "reason": "Workflow Library local hợp lệ.", "action": "Có thể tiếp tục chỉnh sửa với expected revision."}
 
     def snapshot(self) -> dict[str, Any]:
-        with self._lock:
+        with self._shared_lock, self._lock:
             library, recovery = self._read()
             return {"library": _copy(library), "recovery": _copy(recovery)}
 
@@ -109,7 +147,7 @@ class WorkflowLibraryStore:
             return {"status": "not_found", "workflow": None, "errors": [_error("not_found", "Chọn workflow khác hoặc import record đã validate.")]}
         return {"status": "ready", "workflow": _copy(workflow), "library_revision": snapshot["library"]["library_revision"]}
 
-    def _atomic_write(self, library: dict[str, Any]) -> bool:
+    def _atomic_write(self, library: dict[str, Any], *, expected_bytes: bytes | None = None) -> str:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary: Path | None = None
         try:
@@ -126,11 +164,19 @@ class WorkflowLibraryStore:
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
+            try:
+                current_bytes = self.path.read_bytes()
+            except FileNotFoundError:
+                current_bytes = None
+            except OSError:
+                return "recovery"
+            if current_bytes != expected_bytes:
+                return "conflict"
             os.replace(temporary, self.path)
             temporary = None
-            return True
+            return "written"
         except (OSError, ValueError, TypeError):
-            return False
+            return "error"
         finally:
             if temporary is not None:
                 try:
@@ -155,8 +201,8 @@ class WorkflowLibraryStore:
         return result["workflow"] if result["valid"] else None
 
     def save_workflow(self, workflow: object, *, expected_revision: int | None = None) -> dict[str, Any]:
-        with self._lock:
-            library, recovery = self._read()
+        with self._shared_lock, self._lock:
+            library, recovery, source_bytes = self._read_with_bytes()
             if recovery["status"] != "clean":
                 return {"accepted": False, "status": "recovery_required", "errors": [_error("recovery_required", recovery["action"])]}
             current_revision = library["library_revision"]
@@ -173,15 +219,20 @@ class WorkflowLibraryStore:
             workflows = [item for item in library["workflows"] if item["id"] != prepared["id"]]
             workflows.append(prepared)
             next_library = {"schema_version": WORKFLOW_LIBRARY_SCHEMA_VERSION, "library_revision": next_revision, "workflows": workflows}
-            if not self._atomic_write(next_library):
+            write_status = self._atomic_write(next_library, expected_bytes=source_bytes)
+            if write_status == "conflict":
+                return {"accepted": False, "status": "conflict", "library_revision": current_revision, "errors": [_error("revision_conflict", "Reload the Library and confirm the newer revision.")]}
+            if write_status == "recovery":
+                return {"accepted": False, "status": "recovery_required", "errors": [_error("recovery_required", "Keep newer data and verify local recovery before retrying.")]}
+            if write_status != "written":
                 return {"accepted": False, "status": "error", "errors": [_error("write_failed", "Kiểm tra local recovery rồi thử lại; dữ liệu cũ vẫn được giữ.")]}
             return {"accepted": True, "status": "ready", "library_revision": next_revision, "workflow": _copy(prepared)}
 
     upsert = save_workflow
 
     def delete_workflow(self, workflow_id: str, *, expected_revision: int | None = None) -> dict[str, Any]:
-        with self._lock:
-            library, recovery = self._read()
+        with self._shared_lock, self._lock:
+            library, recovery, source_bytes = self._read_with_bytes()
             if recovery["status"] != "clean":
                 return {"accepted": False, "status": "recovery_required", "errors": [_error("recovery_required", recovery["action"])]}
             if expected_revision is not None and expected_revision != library["library_revision"]:
@@ -193,7 +244,12 @@ class WorkflowLibraryStore:
                 "library_revision": library["library_revision"] + 1,
                 "workflows": [item for item in library["workflows"] if item["id"] != workflow_id],
             }
-            if not self._atomic_write(next_library):
+            write_status = self._atomic_write(next_library, expected_bytes=source_bytes)
+            if write_status == "conflict":
+                return {"accepted": False, "status": "conflict", "library_revision": library["library_revision"], "errors": [_error("revision_conflict", "Reload the Library before deleting.")]}
+            if write_status == "recovery":
+                return {"accepted": False, "status": "recovery_required", "errors": [_error("recovery_required", "Keep newer data and verify local recovery before retrying.")]}
+            if write_status != "written":
                 return {"accepted": False, "status": "error", "errors": [_error("write_failed", "Dữ liệu cũ vẫn được giữ; thử lại sau.")]}
             return {"accepted": True, "status": "ready", "library_revision": next_library["library_revision"]}
 
@@ -201,15 +257,20 @@ class WorkflowLibraryStore:
         imported = safe_import_workflow_library(payload)
         if not imported.get("accepted"):
             return {"accepted": False, "status": "invalid", "errors": imported.get("errors", [_error("invalid", "Sửa JSON theo schema rồi thử lại.")])}
-        with self._lock:
-            library, recovery = self._read()
+        with self._shared_lock, self._lock:
+            library, recovery, source_bytes = self._read_with_bytes()
             if recovery["status"] != "clean":
                 return {"accepted": False, "status": "recovery_required", "errors": [_error("recovery_required", recovery["action"])]}
             if expected_revision is not None and expected_revision != library["library_revision"]:
                 return {"accepted": False, "status": "conflict", "errors": [_error("revision_conflict", "Tải lại Library trước khi import.")]}
             next_library = imported["library"]
             next_library["library_revision"] = library["library_revision"] + 1
-            if not self._atomic_write(next_library):
+            write_status = self._atomic_write(next_library, expected_bytes=source_bytes)
+            if write_status == "conflict":
+                return {"accepted": False, "status": "conflict", "library_revision": library["library_revision"], "errors": [_error("revision_conflict", "Reload the Library before importing.")]}
+            if write_status == "recovery":
+                return {"accepted": False, "status": "recovery_required", "errors": [_error("recovery_required", "Keep newer data and verify local recovery before retrying.")]}
+            if write_status != "written":
                 return {"accepted": False, "status": "error", "errors": [_error("write_failed", "Dữ liệu cũ vẫn được giữ; thử lại sau.")]}
             return {"accepted": True, "status": "ready", "library_revision": next_library["library_revision"], "workflows": _copy(next_library["workflows"])}
 
