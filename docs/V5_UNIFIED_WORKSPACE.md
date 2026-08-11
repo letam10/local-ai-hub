@@ -191,3 +191,20 @@ Deferred by design: GPU/video/FFmpeg/SAM2/model/provider/server/UI runtime
 smokes, filesystem mutation, downloads, dependency installation, benchmarks,
 and any automatic GitHub or main-branch operation. Static UI and projection
 tests therefore retain `execution: not_run` / `dry_run: true` where applicable.
+
+## UXNW-V5-ACCEPT-UI-001 acceptance evidence
+
+The task-owned `tests/v5_acceptance_ui_fixture.py` serves only deterministic
+loopback data; `tests/test_v5_acceptance_ui.py` covers truthful C:/D: payloads,
+opaque artifact HEAD/GET/range responses, and the native non-buffering preview
+contract. The authorized browser smoke exercised the Dashboard and one real
+LiteGraph canvas at 1280x720, 1920x1080, and 2560x1440: storage values and
+low-space/unavailable actions remained reachable, horizontal overflow stayed
+absent, and the dark perimeter remained border-free. It also exercised node
+selection, marquee/multi-move, middle-pan, keyboard movement/deletion/clear,
+typed connection auto-connect/picker/rejection/cancel, panel state, Node Guide,
+template preview, local save, and export controls. Image, video, audio, mask,
+and unknown artifact previews retained opaque URLs; video/audio used metadata
+preload and the fixture observed bounded Range requests. This is fixture-only
+acceptance evidence; no Hub backend, provider, model, GPU, FFmpeg, or media
+execution is claimed operational.

@@ -252,7 +252,7 @@ function renderDashboard(state) {
     const label = volumeId === "c" ? "C:" : volumeId === "d" ? "D:" : "Volume";
     const status = String(volume?.status || "unavailable");
     const available = status === "available" && Number.isInteger(volume?.total_bytes) && Number.isInteger(volume?.free_bytes) && Number.isInteger(volume?.used_bytes);
-    const value = (key) => available ? formatGb(volume[key]) : "â€”";
+    const value = (key) => available ? formatGb(volume[key]) : "\u2014";
     const low = volume?.low_space === true;
     const reason = String(volume?.reason || "Volume statistics are unavailable; no figures are shown.");
     const action = String(volume?.next_action || "Verify the volume is mounted and readable, then refresh storage.");
@@ -260,7 +260,7 @@ function renderDashboard(state) {
   };
   const storageHtml = volumes.length ? volumes.map(storageVolumeCard).join("") : `<div class="empty-state compact"><strong>Storage projection unavailable</strong><span>C:/ and D:/ figures are not available in this snapshot.</span></div>`;
   const lowSpaceVolumes = volumes.filter((volume) => volume?.low_space === true);
-  const storageWarning = lowSpaceVolumes.length ? `<div class="callout callout--warning dashboard-storage-warning" role="alert"><strong>Low-space warning</strong><span>${escapeHtml(lowSpaceVolumes.map((volume) => String(volume?.id || "").toLowerCase() === "c" ? "C:" : String(volume?.id || "").toLowerCase() === "d" ? "D:" : "volume").join(", "))}: review storage before new writes.</span></div>` : "";
+  const storageWarning = lowSpaceVolumes.length ? `<div class="callout callout--warning dashboard-storage-warning" role="alert"><strong>Low-space warning</strong><span>${escapeHtml(lowSpaceVolumes.map((volume) => String(volume?.id || "").toLowerCase() === "c" ? "C:" : String(volume?.id || "").toLowerCase() === "d" ? "D:" : "volume").join(", "))} review storage before new writes.</span></div>` : "";
   const workflowLibraryHtml = workflowLibraryState(source.workflowLibrary);
   return `<section class="dashboard-page" aria-labelledby="dashboard-title">
     <section class="dashboard-hero">
