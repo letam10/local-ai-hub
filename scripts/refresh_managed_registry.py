@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +27,8 @@ from src.shared.version import PRODUCT_VERSION
 CONFIG = ROOT / "Config"
 RUNTIME = ROOT / "runtime"
 MODELS = ROOT / "Models"
+OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
+OLLAMA_TIMEOUT_SECONDS = 0.5
 
 
 def system_application_paths(application: str) -> tuple[Path, Path]:
@@ -35,20 +41,9 @@ def system_application_paths(application: str) -> tuple[Path, Path]:
 
 
 def environment_path(component: str) -> Path:
-    """Use the canonical V3 environment after import verification, else retain a safe fallback.
+    """Return the one canonical environment location for a managed component."""
 
-    V3 migration is intentionally staged: the legacy environment remains selected
-    until a replacement interpreter exists.  This avoids publishing a registry
-    that points at an environment that has not been created or smoke-tested.
-    """
-
-    canonical = ROOT / "Environments" / component
-    migration = load(CONFIG / "environment_migration_v3.local.json", {})
-    state = migration.get(component) if isinstance(migration, dict) else None
-    verified = isinstance(state, dict) and state.get("status") in {"verified", "functional_smoke_passed"}
-    if verified and (canonical / "Scripts" / "python.exe").is_file():
-        return canonical
-    return Path(r"D:\AI_4K_TEMP") / f"{component}_venv"
+    return ROOT / "Environments" / component
 
 
 def load(path: Path, default: dict[str, Any]) -> dict[str, Any]:
@@ -76,6 +71,64 @@ def replace_by_id(items: list[dict[str, Any]], item_id: str, updates: dict[str, 
     if not matched:
         result.append(updates)
     return result
+
+
+def _ollama_record_id(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-") or "model"
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
+    return f"ollama-{slug[:48]}-{digest}"
+
+
+def ollama_model_records() -> list[dict[str, Any]] | None:
+    """Discover Ollama tags from its fixed local API without inspecting blobs.
+
+    Returning ``None`` means the service was unavailable, so callers retain
+    previously known records instead of discarding useful local registry data.
+    """
+
+    request = Request(OLLAMA_TAGS_URL, method="GET")
+    try:
+        with urlopen(request, timeout=OLLAMA_TIMEOUT_SECONDS) as response:  # noqa: S310 - fixed loopback endpoint
+            payload = json.load(response)
+    except (OSError, URLError, ValueError, json.JSONDecodeError):
+        return None
+    models = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(models, list):
+        return None
+    now = datetime.now(UTC).isoformat()
+    records: list[dict[str, Any]] = []
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        name = str(model.get("name") or model.get("model") or "").strip()
+        digest = str(model.get("digest") or "").strip()
+        size = model.get("size")
+        if not name or isinstance(size, bool):
+            continue
+        try:
+            size_bytes = int(size)
+        except (TypeError, ValueError):
+            continue
+        if size_bytes < 0:
+            continue
+        records.append({
+            "id": _ollama_record_id(name), "engine": "ollama", "model_name": name,
+            "version": digest[:12] or "unknown", "source": "Ollama loopback metadata",
+            "local_path": None, "file_size": None, "metadata_size_bytes": size_bytes,
+            "size_source": "ollama_api_tags", "precision": "managed by Ollama",
+            "vram_profile": "load on demand", "license": "Model-specific; review Ollama/model license",
+            "installed_at": None, "last_verified": now,
+        })
+    return sorted(records, key=lambda record: str(record["model_name"]).casefold())
+
+
+def reconcile_ollama_model_records(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Replace only Ollama rows when its local metadata endpoint responds."""
+
+    discovered = ollama_model_records()
+    if discovered is None:
+        return items
+    return [item for item in items if str(item.get("engine") or "").casefold() != "ollama"] + discovered
 
 
 def component_records() -> list[dict[str, Any]]:
@@ -181,13 +234,13 @@ def application_records() -> list[dict[str, Any]]:
             "id": "anime-upscale-studio", "display_name": "Anime Upscale Studio", "category": "video", "classification": "PORTABLE_APP", "status": "managed",
             "path": str(applications / "Anime-Upscale-Studio"), "executable": str(applications / "Anime-Upscale-Studio" / "Anime Upscale Studio.exe"),
             "working_directory": str(applications / "Anime-Upscale-Studio"), "arguments": [], "launch": True, "advanced_only": True,
-            "notes": "Portable application is managed under LocalAIHub; the legacy path is retained as a verified junction.",
+            "notes": "Portable application is managed under LocalAIHub with no legacy compatibility path.",
         },
         {
             "id": "sam2-mask-studio", "display_name": "SAM2 Mask Studio", "category": "vision", "classification": "PORTABLE_APP", "status": "managed",
             "path": str(applications / "SAM2-Mask-Studio"), "executable": str(applications / "SAM2-Mask-Studio" / "SAM2 Mask Studio.exe"),
             "working_directory": str(applications / "SAM2-Mask-Studio"), "arguments": [], "launch": True, "advanced_only": True,
-            "notes": "Portable GUI relocated under LocalAIHub; user projects remain outside the application folder.",
+            "notes": "Portable GUI and imported legacy projects are managed under LocalAIHub.",
         },
         {
             "id": "local-image-studio", "display_name": "Local Image Studio (FLUX)", "category": "image", "classification": "PORTABLE_APP", "status": "managed",
@@ -211,7 +264,7 @@ def application_records() -> list[dict[str, Any]]:
             "id": "ollama", "display_name": "Ollama", "category": "model-service", "classification": "SYSTEM_INSTALLED_APP", "status": "external_system_app",
             "path": str(ollama_home), "executable": str(ollama_executable),
             "working_directory": str(ollama_home), "arguments": [], "launch": True,
-            "notes": "System-installed external service; model location is unchanged.",
+            "notes": "System-installed external service; model-store relocation requires separately verified service configuration.",
         },
     ]
 
@@ -263,6 +316,7 @@ def main() -> int:
     model_items = [item for item in models.get("models", []) if isinstance(item, dict)]
     for model in model_records():
         model_items = replace_by_id(model_items, model["id"], model)
+    model_items = reconcile_ollama_model_records(model_items)
     write(models_path, {**models, "schema_version": 3, "models": model_items})
 
     write(CONFIG / "application_registry.local.json", {"schema_version": 2, "applications": application_records()})
