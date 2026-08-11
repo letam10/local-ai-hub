@@ -506,9 +506,14 @@ function renderJobs(state) {
   const filter = state.jobFilter || "all";
   const filtered = jobs.filter((job) => filter === "all" || (filter === "active" && ["queued", "starting", "running", "cancelling"].includes(job.status)) || (filter === "attention" && ["failed", "unavailable", "cancelled", "interrupted"].includes(job.status)) || (filter === "completed" && job.status === "completed"));
   const rows = filtered.map((job) => {
+    const durable = job.source === "durable";
     const actions = ["queued", "starting", "running", "cancelling"].includes(job.status)
       ? `<button class="button button--compact button--danger" type="button" data-cancel-job="${escapeHtml(job.id)}">Hủy</button>`
-      : job.resumable ? `<button class="button button--compact" type="button" data-resume-job="${escapeHtml(job.id)}">${job.status === "cancelled" ? "Tiếp tục" : "Thử lại"}</button>` : "";
+      : job.resumable
+        ? durable
+          ? `<button class="button button--compact" type="button" data-resume-durable-job="${escapeHtml(job.id)}">${job.status === "cancelled" ? "Tiếp tục" : "Thử lại"}</button>`
+          : `<button class="button button--compact" type="button" data-resume-job="${escapeHtml(job.id)}">${job.status === "cancelled" ? "Tiếp tục" : "Thử lại"}</button>`
+        : "";
     return `<article class="job-card" data-job-status="${escapeHtml(job.status)}"><div class="split"><div><strong>${escapeHtml(job.tool)}</strong><div class="row-meta">${escapeHtml(job.id)} · ${escapeHtml(job.created_at || "")}${job.contract_version ? ` · ${escapeHtml(job.contract_version)}` : ""}</div></div>${statusPill(job.status)}</div><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.max(0, Math.min(100, Number(job.progress || 0)))}"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, Number(job.progress || 0)))}%"></div></div><p class="job-message">${escapeHtml(job.message || job.error || "")}</p>${job.next_action ? `<div class="job-next-action"><strong>Bước tiếp theo</strong><span>${escapeHtml(job.next_action)}</span></div>` : ""}${provenanceList(job)}${artifactList(job.result)}<div class="form-actions">${actions}</div></article>`;
   }).join("");
   const filters = [ ["all", "Tất cả"], ["active", "Đang chạy"], ["attention", "Cần chú ý"], ["completed", "Hoàn tất"] ].map(([id, label]) => `<button class="tab ${filter === id ? "is-selected" : ""}" type="button" data-job-filter="${id}" aria-pressed="${filter === id}">${label}</button>`).join("");

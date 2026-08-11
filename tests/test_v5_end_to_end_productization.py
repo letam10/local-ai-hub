@@ -129,6 +129,17 @@ class V5EndToEndProductizationTests(unittest.TestCase):
         self.assertNotIn("subprocess", adapter)
         self.assertNotIn("fetch(", adapter)
 
+    def test_job_recovery_actions_keep_durable_endpoint_separate(self) -> None:
+        pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
+        app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('const durable = job.source === "durable";', pages)
+        self.assertIn('data-resume-durable-job="${escapeHtml(job.id)}"', pages)
+        self.assertIn('data-resume-job="${escapeHtml(job.id)}"', pages)
+        self.assertIn("[data-resume-durable-job]", app)
+        self.assertIn("resumeDurableJob", app)
+        durable_branch = pages[pages.index('data-resume-durable-job='):pages.index('data-resume-job=')]
+        self.assertNotIn("data-resume-job", durable_branch)
+
 
 if __name__ == "__main__":
     unittest.main()
