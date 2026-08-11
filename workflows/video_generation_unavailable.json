@@ -6,6 +6,15 @@
   "scope": "media",
   "stage": "video-creative",
   "requires": ["local video-generation adapter", "model/backend smoke"],
+  "metadata": {
+    "title": "Video — Prompt Generate (backend unavailable) → Export",
+    "purpose": "Show the prompt-to-video graph contract without implying that video generation or downstream runtime is available.",
+    "category": "video",
+    "node_count": 8,
+    "capability": "unavailable",
+    "status": "unavailable",
+    "output_intent": "preview then save then export after an explicit backend becomes available"
+  },
   "nodes": [
     {"id": "prompt", "type": "prompt_text", "position": {"x": 70, "y": 250}, "data": {"text": "Một cảnh fly-through thành phố ban đêm, chuyển động mượt"}},
     {"id": "generate", "type": "video_generate", "position": {"x": 380, "y": 250}, "data": {"width": 768, "height": 432, "duration": 4, "fps": 24, "seed": 42}},

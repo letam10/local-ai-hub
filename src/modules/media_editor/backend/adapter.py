@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -14,16 +15,49 @@ from typing import Any
 
 from src.services.process_manager.managed import ProcessOwner, run_command
 from src.services.process_manager.windows import run_hidden
+from src.services.artifact_store import describe, resolve
 from src.shared.paths.registry import OUTPUT_ROOT, TEMP_ROOT
 from src.shared.utils.adapter_common import configured_path, unavailable
 
 
 VIDEO_OPS = {
-    "trim", "cut", "concat", "resize", "crop", "rotate", "fps", "transcode", "video_upscale", "extract_audio", "replace_audio", "mux", "burn_subtitle", "extract_frames", "image_sequence_video", "frame_interpolate", "encode",
+    "trim", "cut", "concat", "resize", "crop", "rotate", "fps", "transcode", "video_upscale", "video_grade", "logo_overlay", "audio_loudness", "extract_audio", "replace_audio", "mux", "burn_subtitle", "extract_frames", "image_sequence_video", "frame_interpolate", "encode",
 }
 IMAGE_OPS = {"image_resize", "image_upscale", "image_crop", "image_rotate", "image_flip", "image_convert", "image_compress", "image_levels"}
+_CLOSED_MEDIA_OPERATIONS = {"video_grade", "logo_overlay", "audio_loudness"}
+_UNSAFE_MEDIA_FIELDS = {"command", "commands", "executable", "executable_path", "filter", "filter_complex", "font", "font_path", "overlay_path", "path_override", "secret", "token"}
+_CLOSED_MEDIA_ALLOWED_FIELDS = {
+    "video_grade": {"operation", "source_artifact_id", "brightness", "contrast", "saturation", "gamma", "denoise", "sharpen"},
+    "logo_overlay": {"operation", "source_artifact_id", "overlay_artifact_id", "position", "opacity"},
+    "audio_loudness": {"operation", "source_artifact_id", "target_lufs", "true_peak", "gain_db"},
+}
+_CLOSED_MEDIA_EXPECTED_TYPES = {"video_grade": "video", "logo_overlay": "video", "audio_loudness": "audio"}
+_CLOSED_MEDIA_PAYLOAD_ERROR = "Closed media operation payload is invalid."
+_CLOSED_MEDIA_ARTIFACT_ERROR = "Closed media operation artifact is unavailable or has an unsupported type."
 _ENCODER_CACHE_LOCK = threading.RLock()
 _ENCODER_CACHE: dict[str, Any] | None = None
+
+
+def cached_encoder_capabilities() -> dict[str, Any]:
+    """Return a server-owned snapshot without discovering executables.
+
+    ``encoder_capabilities`` remains an explicit probe for a separately
+    authorized runtime action.  Registry/palette reads must use this function
+    so opening Node Studio cannot invoke FFmpeg or any executable.
+    """
+
+    with _ENCODER_CACHE_LOCK:
+        if _ENCODER_CACHE is not None:
+            return dict(_ENCODER_CACHE)
+    return {
+        "status": "not_run",
+        "execution": "not_run",
+        "available": False,
+        "reason": "Encoder discovery is not run when the Node Studio registry opens.",
+        "encoders": [],
+        "containers": ["mp4", "mkv", "webm"],
+        "audio_encoders": [],
+    }
 
 
 def _paths() -> tuple[Path | None, Path | None]:
@@ -61,6 +95,57 @@ def _dimension(value: Any, default: int, *, preserve_aspect_sentinel: bool = Fal
     if preserve_aspect_sentinel and parsed in {-1, -2}:
         return parsed
     return max(2, parsed)
+
+
+def _bounded_float(value: Any, default: float, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool):
+        raise ValueError("Media numeric control must be finite.")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Media numeric control must be finite.") from exc
+    if not math.isfinite(parsed):
+        raise ValueError("Media numeric control must be finite.")
+    return max(minimum, min(maximum, parsed))
+
+
+def _reject_unsafe_closed_fields(payload: dict[str, Any], operation: str) -> None:
+    if operation not in _CLOSED_MEDIA_OPERATIONS:
+        return
+    for name in payload:
+        lowered = str(name).casefold()
+        if lowered in _UNSAFE_MEDIA_FIELDS or "path" in lowered or any(token in lowered for token in ("command", "executable", "filter", "font", "manifest", "callable", "secret")):
+            raise ValueError(_CLOSED_MEDIA_PAYLOAD_ERROR)
+
+
+def _resolve_closed_media_artifact(artifact_id: object, expected_type: str) -> Path:
+    """Resolve a typed Hub artifact without accepting a client filesystem path."""
+
+    if not isinstance(artifact_id, str) or not re.fullmatch(r"artifact_[a-f0-9]{32}", artifact_id):
+        raise ValueError(_CLOSED_MEDIA_ARTIFACT_ERROR)
+    try:
+        path = resolve(artifact_id)
+        metadata = describe(artifact_id)
+    except Exception:
+        raise ValueError(_CLOSED_MEDIA_ARTIFACT_ERROR) from None
+    media_type = str(metadata.get("media_type") or "").casefold() if isinstance(metadata, dict) else ""
+    if not isinstance(path, Path) or not path.is_file() or not media_type.startswith(f"{expected_type}/"):
+        raise ValueError(_CLOSED_MEDIA_ARTIFACT_ERROR)
+    return path
+
+
+def _resolve_closed_media_sources(payload: dict[str, Any], operation: str) -> tuple[Path, Path | None]:
+    """Validate a closed operation and resolve all media inputs server-side."""
+
+    _reject_unsafe_closed_fields(payload, operation)
+    allowed = _CLOSED_MEDIA_ALLOWED_FIELDS[operation]
+    if payload.get("operation") != operation or any(str(name) not in allowed for name in payload):
+        raise ValueError(_CLOSED_MEDIA_PAYLOAD_ERROR)
+    source = _resolve_closed_media_artifact(payload.get("source_artifact_id"), _CLOSED_MEDIA_EXPECTED_TYPES[operation])
+    overlay = None
+    if operation == "logo_overlay":
+        overlay = _resolve_closed_media_artifact(payload.get("overlay_artifact_id"), "image")
+    return source, overlay
 
 
 def _encoder_names(output: str) -> set[str]:
@@ -400,8 +485,9 @@ def _encode_commands(payload: dict[str, Any], source: Path, target: Path) -> tup
     return [first, second], [stem]
 
 
-def _command(payload: dict[str, Any], source: Path, target: Path) -> list[str] | None:
+def _command(payload: dict[str, Any], source: Path, target: Path, *, resolved_overlay: Path | None = None) -> list[str] | None:
     operation = str(payload.get("operation") or "")
+    _reject_unsafe_closed_fields(payload, operation)
     ffmpeg, _ffprobe = _paths()
     if ffmpeg is None or not ffmpeg.is_file():
         return None
@@ -430,6 +516,51 @@ def _command(payload: dict[str, Any], source: Path, target: Path) -> list[str] |
     if operation == "video_upscale":
         scale = max(1.0, min(4.0, float(payload.get("scale", 2))))
         return [*prefix, "-vf", f"scale=trunc(iw*{scale}/2)*2:trunc(ih*{scale}/2)*2", "-c:a", "copy", str(target)]
+    if operation == "video_grade":
+        brightness = _bounded_float(payload.get("brightness", 0), 0, -1, 1)
+        contrast = _bounded_float(payload.get("contrast", 1), 1, 0, 3)
+        saturation = _bounded_float(payload.get("saturation", 1), 1, 0, 3)
+        gamma = _bounded_float(payload.get("gamma", 1), 1, 0.1, 4)
+        denoise = {"off": "", "light": "hqdn3d=1.5:1.5:6:6", "medium": "hqdn3d=3:3:8:8"}.get(str(payload.get("denoise") or "off"))
+        sharpen = {"off": "", "light": "unsharp=5:5:0.35:5:5:0", "medium": "unsharp=5:5:0.7:5:5:0"}.get(str(payload.get("sharpen") or "off"))
+        if denoise is None or sharpen is None:
+            raise ValueError("Video grade denoise/sharpen is not in the allowlist.")
+        filters = [f"eq=brightness={brightness:.6g}:contrast={contrast:.6g}:saturation={saturation:.6g}:gamma={gamma:.6g}"]
+        if denoise:
+            filters.append(denoise)
+        if sharpen:
+            filters.append(sharpen)
+        return [*prefix, "-vf", ",".join(filters), "-c:a", "copy", str(target)]
+    if operation == "logo_overlay":
+        overlay_id = payload.get("overlay_artifact_id")
+        overlay_path = resolved_overlay or (resolve(overlay_id) if isinstance(overlay_id, str) else None)
+        if overlay_path is None:
+            raise ValueError("Logo overlay requires an opaque Hub-resolved IMAGE artifact.")
+        overlay_value = str(overlay_path)
+        opacity = _bounded_float(payload.get("opacity", 0.85), 0.85, 0, 1)
+        positions = {
+            "top_left": ("20", "20"),
+            "top_right": ("W-w-20", "20"),
+            "bottom_left": ("20", "H-h-20"),
+            "bottom_right": ("W-w-20", "H-h-20"),
+            "center": ("(W-w)/2", "(H-h)/2"),
+        }
+        position = positions.get(str(payload.get("position") or "top_right"))
+        if position is None:
+            raise ValueError("Logo overlay position is not in the allowlist.")
+        filter_complex = f"[1:v]format=rgba,colorchannelmixer=aa={opacity:.6g}[logo];[0:v][logo]overlay=x={position[0]}:y={position[1]}:eval=init[v]"
+        return [
+            str(ffmpeg), "-hide_banner", "-y", "-i", str(source), "-loop", "1", "-i", overlay_value,
+            "-filter_complex", filter_complex, "-map", "[v]", "-map", "0:a?", "-c:v", "libx264", "-c:a", "copy", "-shortest", str(target),
+        ]
+    if operation == "audio_loudness":
+        target_lufs = _bounded_float(payload.get("target_lufs", -16), -16, -40, -5)
+        true_peak = _bounded_float(payload.get("true_peak", -1.5), -1.5, -9, 0)
+        gain_db = _bounded_float(payload.get("gain_db", 0), 0, -24, 24)
+        filters = [f"loudnorm=I={target_lufs:.6g}:TP={true_peak:.6g}:LRA=11"]
+        if abs(gain_db) > 0.0001:
+            filters.append(f"volume={gain_db:.6g}dB")
+        return [*prefix, "-vn", "-af", ",".join(filters), "-c:a", "aac", str(target)]
     if operation == "frame_interpolate":
         if str(payload.get("backend") or "ffmpeg_minterpolate") == "practical_rife":
             return []
@@ -481,7 +612,14 @@ def _command(payload: dict[str, Any], source: Path, target: Path) -> list[str] |
 
 def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[str, Any]:
     operation = str(payload.get("operation") or "probe")
-    source = _source(payload)
+    resolved_overlay: Path | None = None
+    if operation in _CLOSED_MEDIA_OPERATIONS:
+        try:
+            source, resolved_overlay = _resolve_closed_media_sources(payload, operation)
+        except ValueError as exc:
+            return {"status": "error", "error": str(exc)}
+    else:
+        source = _source(payload)
     if source is None:
         return {"status": "error", "error": "Chọn tệp đầu vào trước khi chạy media operation."}
     if operation == "probe":
@@ -557,7 +695,10 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
         target = output_dir / "frame_%06d.png"
     else:
         target = _output(source, operation, extension)
-    command = _command(payload, source, target)
+    try:
+        command = _command(payload, source, target, resolved_overlay=resolved_overlay)
+    except (TypeError, ValueError) as exc:
+        return {"status": "error", "error": str(exc)}
     if command is None:
         return unavailable("ffmpeg", "Không tìm thấy FFmpeg canonical của Hub.")
     if not command:
