@@ -10,6 +10,8 @@ from src.services.module_manager import build_capability_registry, build_module_
 from src.shared.schemas.module_manager import (
     CAPABILITY_REGISTRY_SCHEMA_VERSION,
     canonical_module_manager_json,
+    capability_registry_schema,
+    module_manager_schema,
     validate_capability_registry,
     validate_module_plan,
 )
@@ -140,6 +142,22 @@ class V5CapabilityControlPlaneTests(unittest.TestCase):
     def test_module_plan_schema_validation(self) -> None:
         plan = build_module_plan([_record("schema-check")])
         self.assertTrue(validate_module_plan(plan)["valid"])
+
+    def test_closed_schemas_cover_emitted_projection_keys(self) -> None:
+        projections = (
+            (build_capability_registry(sources=_sources()), capability_registry_schema()),
+            (build_capability_registry(records=[{"id": "rejected"}]), capability_registry_schema()),
+            (build_module_plan([_record("schema-check")]), module_manager_schema()),
+            (
+                build_module_plan([_record("missing", dependencies=[{"id": "absent", "version": "1.0.0", "optional": False}])]),
+                module_manager_schema(),
+            ),
+        )
+        for projection, schema in projections:
+            self.assertFalse(schema["additionalProperties"])
+            declared = set(schema["properties"])
+            self.assertEqual(set(projection) - declared, set())
+            self.assertTrue(set(schema["required"]).issubset(projection))
 
 
 if __name__ == "__main__":

@@ -205,6 +205,9 @@ def validate_capability_registry(value: object) -> dict[str, Any]:
         return {"valid": False, "errors": [_issue("registry_object_required")], "registry": None}
     if set(value) - {"schema_version", "status", "records", "counts", "execution", "dry_run", "fingerprint", "reason", "next_action", "errors"}:
         return {"valid": False, "errors": [_issue("registry_unknown_field")], "registry": None}
+    required = {"schema_version", "status", "records", "counts", "execution", "dry_run", "reason", "next_action", "fingerprint"}
+    if not required.issubset(value):
+        return {"valid": False, "errors": [_issue("registry_shape")], "registry": None}
     records = value.get("records")
     if value.get("schema_version") != CAPABILITY_REGISTRY_SCHEMA_VERSION or not isinstance(records, list) or len(records) > MAX_RECORDS:
         return {"valid": False, "errors": [_issue("registry_shape")], "registry": None}
@@ -215,12 +218,33 @@ def validate_capability_registry(value: object) -> dict[str, Any]:
     identities = [(item["id"], item.get("version")) for item in normalized]
     if len(identities) != len(set(identities)):
         return {"valid": False, "errors": [_issue("registry_duplicate_identity")], "registry": None}
-    if value.get("status") not in STATUS_ALLOWLIST or value.get("execution") != EXECUTION_NOT_RUN or type(value.get("dry_run")) is not bool:
+    counts = value.get("counts")
+    if (
+        not isinstance(counts, Mapping)
+        or set(counts) != set(STATUS_ALLOWLIST)
+        or any(type(counts[key]) is not int or counts[key] < 0 or counts[key] > MAX_RECORDS for key in counts)
+        or sum(counts.values()) != len(records)
+    ):
+        return {"valid": False, "errors": [_issue("registry_counts")], "registry": None}
+    if value.get("status") not in STATUS_ALLOWLIST or value.get("execution") != EXECUTION_NOT_RUN or value.get("dry_run") is not True:
         return {"valid": False, "errors": [_issue("registry_execution_invariant")], "registry": None}
     if not _safe_text(value.get("reason")) or not _safe_text(value.get("next_action")):
         return {"valid": False, "errors": [_issue("registry_guidance")], "registry": None}
+    if "errors" in value:
+        errors = value["errors"]
+        if not isinstance(errors, list) or len(errors) > MAX_DEPENDENCIES or any(
+            not isinstance(item, Mapping) or set(item) != {"code"} or not _safe_id(item.get("code"))
+            for item in errors
+        ):
+            return {"valid": False, "errors": [_issue("registry_errors")], "registry": None}
     fingerprint = value.get("fingerprint")
-    if not isinstance(fingerprint, Mapping) or fingerprint.get("algorithm") != "sha256" or not isinstance(fingerprint.get("value"), str) or not SHA256_RE.fullmatch(fingerprint["value"]):
+    if (
+        not isinstance(fingerprint, Mapping)
+        or set(fingerprint) != {"algorithm", "value"}
+        or fingerprint.get("algorithm") != "sha256"
+        or not isinstance(fingerprint.get("value"), str)
+        or not SHA256_RE.fullmatch(fingerprint["value"])
+    ):
         return {"valid": False, "errors": [_issue("registry_fingerprint")], "registry": None}
     expected = capability_registry_fingerprint({key: value[key] for key in value if key != "fingerprint"})
     if fingerprint["value"] != expected:
@@ -231,18 +255,36 @@ def validate_capability_registry(value: object) -> dict[str, Any]:
 def validate_module_plan(value: object) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {"valid": False, "errors": [_issue("plan_object_required")], "plan": None}
-    required = {"schema_version", "status", "execution", "dry_run", "actions", "modules", "resource_plan", "fingerprint"}
-    if set(value) - required - {"reason", "next_action", "errors"} or not required.issubset(value):
+    required = {"schema_version", "status", "execution", "dry_run", "actions", "modules", "resource_plan", "reason", "next_action", "errors", "fingerprint"}
+    if set(value) - required or not required.issubset(value):
         return {"valid": False, "errors": [_issue("plan_shape")], "plan": None}
     if value.get("schema_version") != MODULE_MANAGER_SCHEMA_VERSION or value.get("execution") != EXECUTION_NOT_RUN or value.get("dry_run") is not True:
         return {"valid": False, "errors": [_issue("plan_execution_invariant")], "plan": None}
     if value.get("status") not in STATUS_ALLOWLIST or not isinstance(value.get("actions"), list) or not all(_safe_text(item) for item in value["actions"]):
         return {"valid": False, "errors": [_issue("plan_status_actions")], "plan": None}
+    if not _safe_text(value.get("reason")) or not _safe_text(value.get("next_action")):
+        return {"valid": False, "errors": [_issue("plan_guidance")], "plan": None}
+    errors = value.get("errors")
+    if not isinstance(errors, list) or len(errors) > MAX_DEPENDENCIES or any(
+        not isinstance(item, Mapping)
+        or set(item) - {"code", "module"}
+        or "code" not in item
+        or not _safe_id(item.get("code"))
+        or ("module" in item and not _safe_id(item.get("module")))
+        for item in errors
+    ):
+        return {"valid": False, "errors": [_issue("plan_errors")], "plan": None}
     resource_plan = value.get("resource_plan")
     if not isinstance(value.get("modules"), list) or len(value["modules"]) > MAX_RECORDS or not isinstance(resource_plan, Mapping) or resource_plan.get("execution") != EXECUTION_NOT_RUN or resource_plan.get("dry_run") is not True:
         return {"valid": False, "errors": [_issue("plan_modules_resources")], "plan": None}
     fingerprint = value.get("fingerprint")
-    if not isinstance(fingerprint, Mapping) or fingerprint.get("algorithm") != "sha256" or not isinstance(fingerprint.get("value"), str) or not SHA256_RE.fullmatch(fingerprint["value"]):
+    if (
+        not isinstance(fingerprint, Mapping)
+        or set(fingerprint) != {"algorithm", "value"}
+        or fingerprint.get("algorithm") != "sha256"
+        or not isinstance(fingerprint.get("value"), str)
+        or not SHA256_RE.fullmatch(fingerprint["value"])
+    ):
         return {"valid": False, "errors": [_issue("plan_fingerprint")], "plan": None}
     candidate = deepcopy(dict(value))
     candidate.pop("fingerprint", None)
@@ -253,39 +295,89 @@ def validate_module_plan(value: object) -> dict[str, Any]:
 
 
 def capability_registry_schema() -> dict[str, Any]:
+    fingerprint = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["algorithm", "value"],
+        "properties": {
+            "algorithm": {"const": "sha256"},
+            "value": {"type": "string", "pattern": SHA256_RE.pattern},
+        },
+    }
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": CAPABILITY_REGISTRY_SCHEMA_VERSION,
         "type": "object",
         "additionalProperties": False,
-        "required": ["schema_version", "status", "records", "execution", "dry_run", "fingerprint"],
+        "required": ["schema_version", "status", "records", "counts", "execution", "dry_run", "reason", "next_action", "fingerprint"],
         "properties": {
             "schema_version": {"const": CAPABILITY_REGISTRY_SCHEMA_VERSION},
             "status": {"enum": sorted(STATUS_ALLOWLIST)},
-            "records": {"type": "array", "maxItems": MAX_RECORDS},
+            "records": {"type": "array", "maxItems": MAX_RECORDS, "items": {"type": "object"}},
+            "counts": {
+                "type": "object",
+                "additionalProperties": {"type": "integer", "minimum": 0, "maximum": MAX_RECORDS},
+                "propertyNames": {"enum": sorted(STATUS_ALLOWLIST)},
+            },
             "execution": {"const": EXECUTION_NOT_RUN},
-            "dry_run": {"type": "boolean"},
-            "fingerprint": {"type": "object"},
+            "dry_run": {"const": True},
+            "reason": {"type": "string", "minLength": 1, "maxLength": MAX_TEXT},
+            "next_action": {"type": "string", "minLength": 1, "maxLength": MAX_TEXT},
+            "errors": {
+                "type": "array",
+                "maxItems": MAX_DEPENDENCIES,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["code"],
+                    "properties": {"code": {"type": "string", "pattern": SAFE_ID_RE.pattern}},
+                },
+            },
+            "fingerprint": fingerprint,
         },
     }
 
 
 def module_manager_schema() -> dict[str, Any]:
+    fingerprint = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["algorithm", "value"],
+        "properties": {
+            "algorithm": {"const": "sha256"},
+            "value": {"type": "string", "pattern": SHA256_RE.pattern},
+        },
+    }
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": MODULE_MANAGER_SCHEMA_VERSION,
         "type": "object",
         "additionalProperties": False,
-        "required": ["schema_version", "status", "execution", "dry_run", "actions", "modules", "resource_plan", "fingerprint"],
+        "required": ["schema_version", "status", "execution", "dry_run", "actions", "modules", "resource_plan", "reason", "next_action", "errors", "fingerprint"],
         "properties": {
             "schema_version": {"const": MODULE_MANAGER_SCHEMA_VERSION},
             "status": {"enum": sorted(STATUS_ALLOWLIST)},
             "execution": {"const": EXECUTION_NOT_RUN},
             "dry_run": {"const": True},
-            "actions": {"type": "array"},
-            "modules": {"type": "array", "maxItems": MAX_RECORDS},
+            "actions": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": MAX_TEXT}},
+            "modules": {"type": "array", "maxItems": MAX_RECORDS, "items": {"type": "object"}},
             "resource_plan": {"type": "object"},
-            "fingerprint": {"type": "object"},
+            "reason": {"type": "string", "minLength": 1, "maxLength": MAX_TEXT},
+            "next_action": {"type": "string", "minLength": 1, "maxLength": MAX_TEXT},
+            "errors": {
+                "type": "array",
+                "maxItems": MAX_DEPENDENCIES,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["code"],
+                    "properties": {
+                        "code": {"type": "string", "pattern": SAFE_ID_RE.pattern},
+                        "module": {"type": "string", "pattern": SAFE_ID_RE.pattern},
+                    },
+                },
+            },
+            "fingerprint": fingerprint,
         },
     }
 
