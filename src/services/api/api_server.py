@@ -585,7 +585,8 @@ class HubHandler(BaseHTTPRequestHandler):
         elif normalized == "/models":
             from src.services.storage_manager.overview import model_summary
 
-            self._write(200, {"status": "completed", "models": model_summary()})
+            refresh = parse_qs(parsed.query).get("refresh", [""])[0].casefold() in {"1", "true"}
+            self._write(200, {"status": "completed", "models": model_summary(force=refresh)})
         elif normalized == "/components":
             self._write(200, {"status": "completed", "components": component_statuses()})
         elif normalized in {"/jobs", "/api/jobs"}:
@@ -605,7 +606,8 @@ class HubHandler(BaseHTTPRequestHandler):
         elif normalized == "/api/models":
             from src.services.storage_manager.overview import model_summary
 
-            self._write(200, {"status": "completed", "models": model_summary()})
+            refresh = parse_qs(parsed.query).get("refresh", [""])[0].casefold() in {"1", "true"}
+            self._write(200, {"status": "completed", "models": model_summary(force=refresh)})
         elif normalized == "/api/applications":
             self._write(200, {"status": "completed", "applications": applications()})
         elif normalized == "/api/lifecycle":

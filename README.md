@@ -90,35 +90,26 @@ D:\LocalAIHub\
 Không sao chép model để hợp nhất. Không sửa driver NVIDIA, CUDA hoặc phần mềm
 hệ thống. Không ghi đè media nguồn; output chỉ vào vùng Output/Archive của Hub.
 
-## Cleanup legacy V3 và rollback
+## Historical V2/V3 migration record
 
-Inventory trước, không xoá theo tên thư mục:
+V2/V3 migration scripts and their reports are retained only as a historical
+record for a host that had not yet completed consolidation. A completed host
+marks its local V2/V3 state as `historical_snapshot`; the scripts then refuse
+to recreate a legacy migration plan or delete anything. Do not run them as a
+normal startup, maintenance, or runtime workflow.
 
-```powershell
-python .\scripts\inventory_legacy_v3.py
-pwsh -File .\scripts\cleanup_legacy_v3.ps1 -RemoveVerifiedEmptyFolders
-pwsh -File .\scripts\cleanup_legacy_v3.ps1 -RemoveObsoleteJunctions
-```
-
-Hai lệnh cleanup mặc định là dry-run. Chỉ thêm `-Apply` sau khi report local
-xác nhận đúng một `REAL_DIRECTORY` rỗng hoặc junction không còn tham chiếu.
-Mỗi junction cần thêm chính xác `-ApprovedJunctionPath <path>`; điều này ngăn
-một lần apply xóa hàng loạt junction được inventory tìm thấy.
-Report bỏ qua Git gồm:
+Historical local reports include:
 
 - `Reports\LEGACY_CLEANUP_V3.local.md`
 - `Reports\V3_INTEGRATION_AND_CLEANUP.local.md`
 - `Config\legacy_cleanup_v3.local.json`
 
-Sau cleanup và kiểm thử, `scripts\write_v3_final_report.py` ghi báo cáo bàn giao
-local cuối cùng từ các state trên. Script chỉ đọc state, yêu cầu ghi rõ tối đa ba
-vòng validation và chỉ liệt kê path đã xóa khi path đó đã được xác nhận vắng mặt.
-
-Environment Python ngoài Hub cần rebuild có kiểm soát, không kéo-thả/move
-venv. Xem [migration và rollback](docs/MIGRATION_AND_ROLLBACK.md) để export
-package state, tạo replacement, kiểm tra import, smoke một lần, cập nhật
-adapter rồi mới đủ điều kiện xóa legacy environment. Tiến trình đang hoạt động,
-user data, system-managed app và dữ liệu chưa xác minh luôn được giữ lại.
+Sau một migration được review riêng, `scripts\write_v3_final_report.py` có thể
+đọc state lịch sử và ghi báo cáo bàn giao local. Nó không thực hiện cleanup.
+Environment Python ngoài Hub luôn cần rebuild có kiểm soát, không kéo-thả/move
+venv. Xem [migration và rollback](docs/MIGRATION_AND_ROLLBACK.md) để biết ranh
+giới historical này; tiến trình đang hoạt động, user data, system-managed app
+và dữ liệu chưa xác minh luôn được giữ lại.
 
 ## Kiểm tra có giới hạn
 
@@ -451,12 +442,13 @@ bất kỳ inference/GPU/video runtime nào hoạt động.
 Chi tiết về contract, API, recovery, security boundary và extension point nằm ở
 [MILESTONE_6A_IMAGE_MASK_STUDIO.md](docs/MILESTONE_6A_IMAGE_MASK_STUDIO.md).
 
-## M4A Reliability & Large Media Hardening
+## Historical M4A Reliability & Large Media Hardening (V4)
 
-Batch hardening M4A bổ sung close gate an toàn cho job đang chạy, persistence
-bounded, streaming artifact/upload và cache state có giới hạn. Product version
-Hub công khai là **4.0.0**; các contract `job.v2`, `node-run.v2` và Creative
-`*.v1` vẫn giữ version độc lập.
+Batch hardening M4A đã bổ sung close gate an toàn cho job đang chạy, persistence
+bounded, streaming artifact/upload và cache state có giới hạn. Đây là ghi chép
+V4 lịch sử, khi product version Hub công khai là **4.0.0**; product hiện hành
+được định nghĩa duy nhất tại `src/shared/version.py`. Các contract `job.v2`,
+`node-run.v2` và Creative `*.v1` vẫn giữ version độc lập.
 
 - Khi đóng desktop có active job (`queued`, `starting`, `running`,
   `cancelling`), Hub đưa đúng ba lựa chọn: **Quay lại Hub**, **Hủy jobs và
