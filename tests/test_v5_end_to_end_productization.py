@@ -10,6 +10,7 @@ from src.services.api.v5_productization import (
     durable_jobs_snapshot,
     project_job_recovery,
     project_product_surface,
+    project_storage_projection,
     project_workflow_library,
 )
 
@@ -45,6 +46,23 @@ def control_plane() -> dict[str, object]:
 
 
 class V5EndToEndProductizationTests(unittest.TestCase):
+    def test_storage_projection_is_fixed_bounded_and_truthful(self) -> None:
+        marker = "C:/private/secret"
+        projection = project_storage_projection({
+            "volumes": [
+                {"id": "c", "label": marker, "status": "available", "total_bytes": 1000, "free_bytes": 10, "used_bytes": 990, "reason": marker},
+                {"id": "d", "status": "unavailable", "total_bytes": 999, "free_bytes": 1, "used_bytes": 998, "reason": marker},
+            ],
+        })
+
+        self.assertEqual([item["id"] for item in projection["volumes"]], ["c", "d"])
+        self.assertEqual([item["label"] for item in projection["volumes"]], ["C:", "D:"])
+        self.assertEqual(projection["volumes"][0]["total_bytes"], 1000)
+        self.assertTrue(projection["volumes"][0]["low_space"])
+        self.assertEqual(projection["volumes"][1]["status"], "unavailable")
+        self.assertIsNone(projection["volumes"][1]["total_bytes"])
+        self.assertNotIn(marker, json.dumps(projection))
+
     def test_dashboard_projection_is_server_owned_and_deterministic(self) -> None:
         marker = "client-private-marker"
         first = project_product_surface(
@@ -52,12 +70,14 @@ class V5EndToEndProductizationTests(unittest.TestCase):
             health={"status": "healthy", "gpu": {"status": "unavailable"}, "disk": {}},
             jobs=[{"id": "job_1", "tool": "image", "status": "interrupted", "next_action": "Create a new task."}],
             workflow_library={"status": "ready", "library_revision": 2, "workflows": []},
+            storage={"volumes": [{"id": "c", "status": "available", "total_bytes": 100, "free_bytes": 80, "used_bytes": 20}]},
         )
         second = project_product_surface(
             control_plane=control_plane(),
             health={"status": "healthy", "gpu": {"status": "unavailable"}, "disk": {}},
             jobs=[{"id": "job_1", "tool": "image", "status": "interrupted", "next_action": "Create a new task."}],
             workflow_library={"status": "ready", "library_revision": 2, "workflows": []},
+            storage={"volumes": [{"id": "c", "status": "available", "total_bytes": 100, "free_bytes": 80, "used_bytes": 20}]},
         )
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], PRODUCT_SURFACE_SCHEMA_VERSION)
@@ -118,9 +138,9 @@ class V5EndToEndProductizationTests(unittest.TestCase):
         adapter = (ROOT / "src" / "services" / "api" / "v5_productization.py").read_text(encoding="utf-8")
         ui = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
         pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
-        for marker in ("/api/workflow-library", "/api/durable-jobs", "capability_control_plane", "project_product_surface"):
+        for marker in ("/api/workflow-library", "/api/durable-jobs", "capability_control_plane", "project_product_surface", "storage_summary", '"storage": product_surface["storage"]'):
             self.assertIn(marker, api)
-        for marker in ("project_job_recovery", "project_workflow_library", "execution", "not_run", "dry_run"):
+        for marker in ("project_job_recovery", "project_storage_projection", "project_workflow_library", "execution", "not_run", "dry_run"):
             self.assertIn(marker, adapter)
         for marker in ("getCapabilities", "getWorkflowLibrary", "state.capabilities", "workflowLibraryAdapter"):
             self.assertIn(marker, ui)

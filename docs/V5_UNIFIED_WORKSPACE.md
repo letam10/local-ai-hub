@@ -6,14 +6,19 @@ workflow:
 Dashboard -> Project/Workspace -> Capability -> Workflow/Nodes -> Job -> Artifact/Preview
 
 This document describes the current product contract. It does not claim that a
-provider, filesystem scan, model, image/video backend, or server-owned bridge
-is operational without a separately authorized bounded smoke.
+provider, model, image/video backend, or server-owned bridge is operational
+without a separately authorized bounded smoke. The Dashboard may display a
+server-owned, read-only storage projection; that projection is evidence, not a
+write or runtime operation.
 
 ## Product contract
 
 The shell has one navigation model and one workspace context. Dashboard shows
-readiness, reason, and next action before a user enters a capability. Projects
-and recipes keep the user-facing context; Hub Nodes edits a declarative graph;
+readiness, reason, and next action before a user enters a capability. It also
+shows fixed C: and D: volume cards with total/free/used figures when readable.
+Missing or unreadable volumes remain unavailable/unknown and show no fabricated
+figures. A low-space card includes the server-owned next action. Projects and
+recipes keep the user-facing context; Hub Nodes edits a declarative graph;
 Jobs owns progress and cancellation; artifact preview displays only
 server-owned opaque artifact metadata.
 
@@ -30,10 +35,12 @@ Static green tests never elevate one of these states to operational.
 ## Unified UI state
 
 src/ui/app.js owns a detached view state containing health, components, jobs,
-storage, projects, active workspace tabs, and workflowLibrary. The latter is
-initialized to partial with a reason and next action. A server-owned bootstrap
-may replace it with a validated projection; the UI never accepts a client
-mapping or invents an endpoint.
+storage, projects, active workspace tabs, and workflowLibrary. Bootstrap carries
+only the sanitized C:/D: storage projection; the browser never chooses a volume
+or performs a filesystem scan. The latter is initialized to partial with a
+reason and next action. A server-owned bootstrap may replace it with a
+validated projection; the UI never accepts a client mapping or invents an
+endpoint.
 
 Navigation keeps every existing route and exposes named controls and active
 route semantics. The sidebar has separate desktop collapse and mobile drawer
@@ -106,6 +113,15 @@ Changing a node, dragging a node, applying a preset, or saving a draft never
 starts a graph, worker, GPU, model, FFmpeg, or video operation. Run Graph
 remains the explicit execution action and retains existing backend guards.
 
+The stable Node layout CSS contract is intentionally data-attribute driven for
+the later LAH 2 lane. On `.graph-editor`, LAH 2 may set
+`data-node-palette="collapsed"`, `data-node-inspector="collapsed"`,
+`data-node-canvas-focus="true"`, `data-node-preview="expanded"`, or the
+`data-node-palette-width` / `data-node-inspector-width` values `narrow` or
+`wide`. It may also set the documented `--node-palette-width`,
+`--node-inspector-width`, and preview-height variables. With attributes absent,
+the current responsive fallback remains active.
+
 Image AI Quick, Hub Nodes, and ComfyUI Advanced remain distinct modes. No
 second ComfyUI frontend is introduced. The UI adapter in
 src/ui/workflow_library.js uses only an explicitly supplied typed
@@ -133,6 +149,14 @@ The public product version is V5 (5.0.0). Historical milestone documents
 remain unchanged. workflow-library.v1 is independent from product version and
 requires an explicit migration plan for future breaking changes.
 
+Global artifact preview accepts only the existing opaque `/api/artifacts/...`
+URL and lets native image/video/audio elements use the existing Range transport.
+Video and audio use `preload="metadata"`; the browser does not fetch or buffer
+the whole server artifact. Mask raster artifacts render as images; non-raster
+mask artifacts show a truthful fallback. Metadata and provenance are limited to
+allowlisted fields and rendered as escaped text.
+
 Deferred by design: GPU/video/FFmpeg/SAM2/model/provider/server/UI runtime
 smokes, filesystem mutation, downloads, dependency installation, benchmarks,
-and any automatic GitHub or main-branch operation.
+and any automatic GitHub or main-branch operation. Static UI and projection
+tests therefore retain `execution: not_run` / `dry_run: true` where applicable.

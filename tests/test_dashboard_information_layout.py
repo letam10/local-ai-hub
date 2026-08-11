@@ -54,6 +54,11 @@ class DashboardInformationLayoutTests(unittest.TestCase):
             "dashboard-module-row",
             "dashboard-attention-list",
             "dashboard-quick-actions",
+            "dashboard-storage",
+            "dashboard-storage-grid",
+            "dashboard-storage-volume",
+            "dashboard-storage-values",
+            "dashboard-storage-warning",
         ):
             self.assertIn(class_name, source)
         self.assertNotRegex(source, r"\bstyle\s*=")
@@ -106,6 +111,28 @@ class DashboardInformationLayoutTests(unittest.TestCase):
         self.assertIn("Không có hạng mục cần chú ý", empty)
         self.assertNotIn("undefined", empty)
         self.assertNotIn("[object Object]", empty)
+
+    def test_dashboard_renders_server_owned_c_and_d_storage_with_low_space_action(self):
+        html = render_dashboard({
+            "health": {"status": "healthy"},
+            "storage": {
+                "status": "partial",
+                "execution": "not_run",
+                "volumes": [
+                    {"id": "c", "label": "C:", "status": "available", "total_bytes": 100 * 1024**3, "free_bytes": 10 * 1024**3, "used_bytes": 90 * 1024**3, "low_space": True, "reason": "Low space", "next_action": "Review cache."},
+                    {"id": "d", "label": "D:", "status": "unavailable", "total_bytes": None, "free_bytes": None, "used_bytes": None, "low_space": None, "reason": "Unavailable", "next_action": "Mount volume."},
+                ],
+            },
+        })
+        self.assertIn("C:", html)
+        self.assertIn("D:", html)
+        self.assertIn("Total", html)
+        self.assertIn("Free", html)
+        self.assertIn("Used", html)
+        self.assertIn("Low-space warning", html)
+        self.assertIn("Review cache.", html)
+        self.assertNotIn("undefined", html)
+        self.assertNotIn("[object Object]", html)
 
     def test_dashboard_routes_are_existing_and_no_new_api(self):
         source = dashboard_source()
