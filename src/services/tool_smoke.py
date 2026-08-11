@@ -8,8 +8,14 @@ metadata—only the tool name and when a completed direct job was recorded.
 from __future__ import annotations
 
 import json
+import hashlib
+import os
+import shutil
+import subprocess
 import threading
+import time
 from datetime import datetime, timezone
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +24,414 @@ from src.shared.paths.registry import CONFIG_ROOT
 
 STATE_PATH = CONFIG_ROOT / "tool_smoke_v3.local.json"
 _LOCK = threading.RLock()
+
+ACCEPTANCE_OPT_IN_ENV = "LOCALAIHUB_RUN_ACCEPTANCE_RUNTIME"
+ACCEPTANCE_APPROVAL_ENV = "LOCALAIHUB_ACCEPTANCE_APPROVAL_PATH"
+ACCEPTANCE_TEMP_ENV = "LOCALAIHUB_ACCEPTANCE_TEMP_ROOT"
+ACCEPTANCE_APPROVAL_ID = "UXNW-V5-ACCEPT-RUNTIME-002-cpu-1"
+ACCEPTANCE_RELEASE_HEAD = "c3ba39d3219778217c56f448ed69cdde3bd3bd70"
+ACCEPTANCE_BRANCH = "feature/local-ai-hub-v5-lah2-accept-runtime"
+ACCEPTANCE_MAX_WALL_SECONDS = 60.0
+ACCEPTANCE_INPUT_MAX_BYTES = 1 * 1024 * 1024
+ACCEPTANCE_OVERLAY_MAX_BYTES = 128 * 1024
+ACCEPTANCE_OUTPUT_MAX_BYTES = 4 * 1024 * 1024
+
+
+class AcceptanceFailure(RuntimeError):
+    """Internal bounded acceptance failure; never expose its detail publicly."""
+
+    def __init__(self, code: str, *, unavailable: bool = False) -> None:
+        super().__init__(code)
+        self.code = code
+        self.unavailable = unavailable
+
+
+class _AcceptanceOwner:
+    """Own only child processes started by one acceptance invocation."""
+
+    def __init__(self, deadline: float) -> None:
+        self.job_id = "acceptance_cpu_media"
+        self._deadline = deadline
+        self._active: dict[int, Any] = {}
+        self._pending_commands: dict[str, dict[str, Any]] = {}
+        self._records: list[dict[str, Any]] = []
+
+    @property
+    def cancelled(self) -> bool:
+        return time.monotonic() >= self._deadline
+
+    def remaining(self) -> float:
+        return max(0.0, self._deadline - time.monotonic())
+
+    def note_command(self, label: str, command: Any) -> None:
+        values = [str(item) for item in command]
+        digest = hashlib.sha256("\0".join(values).encode("utf-8")).hexdigest()
+        self._pending_commands[label] = {
+            "command_digest": digest,
+            "command_class": Path(values[0]).name if values else "unknown",
+        }
+
+    def attach_process(self, process: Any, label: str) -> None:
+        pid = int(getattr(process, "pid", 0) or 0)
+        details = self._pending_commands.pop(label, {"command_digest": None, "command_class": label})
+        record = {
+            "pid": pid,
+            "parent_pid": os.getpid(),
+            "label": label,
+            **details,
+            "detached": False,
+            "returncode": None,
+            "process": process,
+        }
+        self._records.append(record)
+        self._active[id(process)] = process
+
+    def detach_process(self, process: Any) -> None:
+        self._active.pop(id(process), None)
+        for record in self._records:
+            if record.get("process") is process:
+                record["detached"] = True
+                record["returncode"] = process.poll()
+                break
+
+    def stop_all(self) -> None:
+        from src.services.process_manager.managed import terminate_owned_process
+
+        for process in list(self._active.values()):
+            terminate_owned_process(process)
+            self.detach_process(process)
+
+    def lifecycle(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "pid": record["pid"],
+                "parent_pid": record["parent_pid"],
+                "label": record["label"],
+                "command_class": record["command_class"],
+                "command_digest": record["command_digest"],
+                "detached": bool(record["detached"]),
+                "returncode": record["returncode"],
+            }
+            for record in self._records
+        ]
+
+    def clean(self) -> bool:
+        return not self._active and all(bool(record["detached"]) for record in self._records)
+
+
+@contextmanager
+def _temporary_attribute(target: Any, name: str, value: Any):
+    original = getattr(target, name)
+    setattr(target, name, value)
+    try:
+        yield
+    finally:
+        setattr(target, name, original)
+
+
+def _approval_guard(approval_path: Path, repo_root: Path) -> tuple[bool, str]:
+    try:
+        approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False, "approval_unavailable"
+    if not isinstance(approval, dict):
+        return False, "approval_invalid"
+    release = approval.get("release") if isinstance(approval.get("release"), dict) else {}
+    limits = approval.get("limits") if isinstance(approval.get("limits"), dict) else {}
+    allowed_output = approval.get("allowed_output") if isinstance(approval.get("allowed_output"), dict) else {}
+    if (
+        approval.get("approval_id") != ACCEPTANCE_APPROVAL_ID
+        or approval.get("status") != "approved"
+        or approval.get("owner") != "LAH 2"
+        or release.get("branch") != "feature/local-ai-hub-v5"
+        or release.get("head") != ACCEPTANCE_RELEASE_HEAD
+        or limits.get("wall_seconds") != 60
+        or limits.get("no_retry") is not True
+        or allowed_output.get("maximum_pipeline_jobs") != 1
+        or allowed_output.get("operations") != ["video_grade", "logo_overlay", "encode"]
+    ):
+        return False, "approval_scope_mismatch"
+    try:
+        branch = subprocess.run(["git", "branch", "--show-current"], cwd=repo_root, capture_output=True, text=True, check=False, timeout=5).stdout.strip()
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True, text=True, check=False, timeout=5).stdout.strip()
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=repo_root, capture_output=True, text=True, check=False, timeout=5).stdout.strip()
+        ancestry = subprocess.run(["git", "merge-base", "--is-ancestor", ACCEPTANCE_RELEASE_HEAD, "HEAD"], cwd=repo_root, capture_output=True, text=True, check=False, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False, "git_guard_unavailable"
+    if branch != ACCEPTANCE_BRANCH or not head or status or ancestry.returncode != 0:
+        return False, "git_guard_mismatch"
+    return True, "ok"
+
+
+def _artifact_evidence(artifact: dict[str, Any], *, maximum_bytes: int) -> dict[str, Any]:
+    artifact_id = artifact.get("id")
+    size = artifact.get("size_bytes")
+    if not isinstance(artifact_id, str) or not artifact_id.startswith("artifact_") or not isinstance(size, int) or size < 0 or size > maximum_bytes:
+        raise AcceptanceFailure("artifact_bound_exceeded")
+    return {
+        "id": artifact_id,
+        "media_type": str(artifact.get("media_type") or "application/octet-stream"),
+        "size_bytes": size,
+        "sha256": artifact.get("sha256"),
+    }
+
+
+def _tracked_run_hidden(owner: _AcceptanceOwner):
+    from src.services.process_manager.managed import terminate_owned_process
+    from src.services.process_manager.windows import popen_hidden
+
+    def run_hidden(command: Any, *, cwd: Any = None, env: dict[str, str] | None = None, timeout: float | None = None, check: bool = False, capture_output: bool = False, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        label = "ffmpeg_capability"
+        owner.note_command(label, command)
+        if owner.remaining() <= 0:
+            raise subprocess.TimeoutExpired(command, 0)
+        if capture_output:
+            kwargs["stdout"] = subprocess.PIPE
+            kwargs["stderr"] = subprocess.PIPE
+        process = popen_hidden(command, cwd=cwd, env=env, **kwargs)
+        owner.attach_process(process, label)
+        try:
+            effective_timeout = owner.remaining() if timeout is None else min(float(timeout), owner.remaining())
+            try:
+                stdout, stderr = process.communicate(timeout=max(0.01, effective_timeout))
+            except subprocess.TimeoutExpired:
+                terminate_owned_process(process)
+                raise
+            result = subprocess.CompletedProcess([str(item) for item in command], process.returncode or 0, stdout, stderr)
+        finally:
+            owner.detach_process(process)
+        if check and result.returncode:
+            raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
+        return result
+
+    return run_hidden
+
+
+def _register_output(path: Path, *, media_type: str, maximum_bytes: int, artifact_store: Any) -> dict[str, Any]:
+    try:
+        resolved = path.resolve()
+        size = resolved.stat().st_size
+        digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+    except OSError:
+        raise AcceptanceFailure("output_unreadable") from None
+    if size > maximum_bytes:
+        raise AcceptanceFailure("output_bound_exceeded")
+    artifact = artifact_store.register_path(resolved, media_type=media_type, sha256=digest)
+    if not isinstance(artifact, dict):
+        raise AcceptanceFailure("output_registration_failed")
+    return _artifact_evidence(artifact, maximum_bytes=maximum_bytes)
+
+
+def _run_cpu_pipeline(task_root: Path, ffmpeg: Path, owner: _AcceptanceOwner) -> dict[str, Any]:
+    from PIL import Image
+
+    from src.modules.media_editor.backend import adapter
+    from src.services import artifact_store
+    from src.services.process_manager import managed
+
+    upload_root = task_root / "uploads"
+    output_root = task_root / "outputs"
+    log_root = task_root / "logs"
+    index_path = task_root / "artifacts.json"
+    for directory in (upload_root, output_root, log_root):
+        directory.mkdir(parents=True, exist_ok=True)
+    seed_path = task_root / "seed.mp4"
+    overlay_path = task_root / "overlay.png"
+    seed_command = [
+        str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "color=c=blue:s=16x16:r=4", "-t", "1",
+        "-pix_fmt", "yuv420p", "-an", "-c:v", "libx264", str(seed_path),
+    ]
+    owner.note_command("acceptance_seed", seed_command)
+    code, _output = managed.run_command(seed_command, label="acceptance_seed", owner=owner, timeout_seconds=min(15.0, owner.remaining()))
+    if code != 0 or not seed_path.is_file():
+        raise AcceptanceFailure("synthetic_seed_failed", unavailable=code == -1)
+    if seed_path.stat().st_size > ACCEPTANCE_INPUT_MAX_BYTES:
+        raise AcceptanceFailure("input_bound_exceeded")
+    Image.new("RGBA", (4, 4), (255, 32, 32, 220)).save(overlay_path, format="PNG")
+    if overlay_path.stat().st_size > ACCEPTANCE_OVERLAY_MAX_BYTES:
+        raise AcceptanceFailure("overlay_bound_exceeded")
+    source_before = hashlib.sha256(seed_path.read_bytes()).hexdigest()
+
+    original_run_command = adapter.run_command
+
+    def tracked_run_command(command: Any, *, label: str, **kwargs: Any):
+        owner.note_command(label, command)
+        return original_run_command(command, label=label, **kwargs)
+
+    with (
+        _temporary_attribute(artifact_store, "UPLOAD_ROOT", upload_root),
+        _temporary_attribute(artifact_store, "OUTPUT_ROOT", output_root),
+        _temporary_attribute(artifact_store, "INDEX_PATH", index_path),
+        _temporary_attribute(adapter, "OUTPUT_ROOT", output_root),
+        _temporary_attribute(adapter, "TEMP_ROOT", task_root / "temp"),
+        _temporary_attribute(managed, "LOG_ROOT", log_root),
+        _temporary_attribute(adapter, "run_hidden", _tracked_run_hidden(owner)),
+        _temporary_attribute(adapter, "run_command", tracked_run_command),
+    ):
+        uploaded = artifact_store.stage_upload("seed.mp4", seed_path.read_bytes(), "video/mp4")
+        overlay = artifact_store.stage_upload("overlay.png", overlay_path.read_bytes(), "image/png")
+        source_evidence = _artifact_evidence(uploaded, maximum_bytes=ACCEPTANCE_INPUT_MAX_BYTES)
+        overlay_evidence = _artifact_evidence(overlay, maximum_bytes=ACCEPTANCE_OVERLAY_MAX_BYTES)
+        source_artifact_path = artifact_store.resolve(source_evidence["id"])
+        if source_artifact_path is None:
+            raise AcceptanceFailure("source_artifact_unavailable")
+        source_artifact_before = hashlib.sha256(source_artifact_path.read_bytes()).hexdigest()
+
+        def run_closed(operation: str, payload: dict[str, Any], media_type: str) -> dict[str, Any]:
+            result = adapter.run_operation(payload, owner)
+            if result.get("status") != "completed":
+                raise AcceptanceFailure(f"{operation}_failed", unavailable=result.get("status") == "unavailable")
+            output_value = result.get("output")
+            if not isinstance(output_value, str):
+                raise AcceptanceFailure(f"{operation}_missing_output")
+            output_path = Path(output_value)
+            try:
+                output_path.resolve().relative_to(output_root.resolve())
+            except (OSError, ValueError):
+                raise AcceptanceFailure(f"{operation}_output_scope") from None
+            return _register_output(output_path, media_type=media_type, maximum_bytes=ACCEPTANCE_OUTPUT_MAX_BYTES, artifact_store=artifact_store)
+
+        graded = run_closed(
+            "video_grade",
+            {
+                "operation": "video_grade",
+                "source_artifact_id": source_evidence["id"],
+                "brightness": 0.1,
+                "contrast": 1.05,
+                "saturation": 1.0,
+                "gamma": 1.0,
+                "denoise": "off",
+                "sharpen": "off",
+            },
+            "video/mp4",
+        )
+        overlaid = run_closed(
+            "logo_overlay",
+            {
+                "operation": "logo_overlay",
+                "source_artifact_id": graded["id"],
+                "overlay_artifact_id": overlay_evidence["id"],
+                "position": "bottom_right",
+                "opacity": 0.5,
+            },
+            "video/mp4",
+        )
+        encoded_source = artifact_store.resolve(overlaid["id"])
+        if encoded_source is None:
+            raise AcceptanceFailure("encode_source_unavailable")
+        encode_result = adapter.run_operation(
+            {
+                "operation": "encode",
+                "path": str(encoded_source),
+                "container": "mp4",
+                "codec": "libx264",
+                "prefer_gpu": False,
+                "preset": "ultrafast",
+                "rate_control": "quality",
+                "quality": 23,
+                "timeout_seconds": min(20.0, owner.remaining()),
+            },
+            owner,
+        )
+        if encode_result.get("status") != "completed":
+            raise AcceptanceFailure("encode_unavailable" if encode_result.get("status") == "unavailable" else "encode_failed", unavailable=encode_result.get("status") == "unavailable")
+        encoded_value = encode_result.get("output")
+        if not isinstance(encoded_value, str):
+            raise AcceptanceFailure("encode_missing_output")
+        encoded_path = Path(encoded_value)
+        try:
+            encoded_path.resolve().relative_to(output_root.resolve())
+        except (OSError, ValueError):
+            raise AcceptanceFailure("encode_output_scope") from None
+        encoded = _register_output(encoded_path, media_type="video/mp4", maximum_bytes=ACCEPTANCE_OUTPUT_MAX_BYTES, artifact_store=artifact_store)
+        if hashlib.sha256(seed_path.read_bytes()).hexdigest() != source_before or hashlib.sha256(source_artifact_path.read_bytes()).hexdigest() != source_artifact_before:
+            raise AcceptanceFailure("source_overwritten")
+        return {
+            "pipeline": ["video_grade", "logo_overlay", "encode"],
+            "artifacts": {"source": source_evidence, "overlay": overlay_evidence, "graded": graded, "overlaid": overlaid, "encoded": encoded},
+            "source_overwritten": False,
+        }
+
+
+def run_cpu_media_acceptance(*, opt_in: bool | None = None, approval_path: Path | None = None, task_root: Path | None = None, repo_root: Path | None = None) -> dict[str, Any]:
+    """Run exactly one approved CPU media pipeline when explicitly opted in."""
+
+    enabled = os.environ.get(ACCEPTANCE_OPT_IN_ENV) == "1" if opt_in is None else bool(opt_in)
+    if not enabled:
+        return {"status": "not_run", "execution": "not_run", "reason": "CPU acceptance opt-in is not enabled."}
+    repo = repo_root or Path(__file__).resolve().parents[2]
+    approval = approval_path or (Path(os.environ[ACCEPTANCE_APPROVAL_ENV]) if os.environ.get(ACCEPTANCE_APPROVAL_ENV) else None)
+    root = task_root or (Path(os.environ[ACCEPTANCE_TEMP_ENV]) if os.environ.get(ACCEPTANCE_TEMP_ENV) else None)
+    if approval is None or root is None:
+        return {"status": "blocked", "execution": "not_run", "reason": "Acceptance approval and task-owned temp root are required."}
+    if not root.is_absolute():
+        return {"status": "blocked", "execution": "not_run", "failure_code": "task_root_not_absolute", "reason": "Task-owned temp root must be absolute."}
+    ok, guard_code = _approval_guard(approval, repo)
+    if not ok:
+        return {"status": "blocked", "execution": "not_run", "failure_code": guard_code, "reason": "Acceptance approval or exact branch guard did not pass."}
+    if root.exists():
+        return {"status": "blocked", "execution": "not_run", "failure_code": "task_root_exists", "reason": "Task-owned temp root must not pre-exist."}
+    try:
+        from src.modules.media_editor.backend import adapter
+
+        ffmpeg, ffprobe = adapter._paths()
+    except (OSError, TypeError, ValueError):
+        ffmpeg, ffprobe = None, None
+    if ffmpeg is None or not ffmpeg.is_file() or ffprobe is None or not ffprobe.is_file():
+        return {"status": "unavailable", "execution": "not_run", "failure_code": "canonical_ffmpeg_unavailable", "reason": "Canonical FFmpeg and FFprobe are not both configured and present."}
+    try:
+        free_bytes = shutil.disk_usage(root.parent).free
+    except OSError:
+        return {"status": "blocked", "execution": "not_run", "failure_code": "disk_check_failed", "reason": "Free-space preflight could not be completed."}
+    if free_bytes <= ACCEPTANCE_OUTPUT_MAX_BYTES + ACCEPTANCE_INPUT_MAX_BYTES + ACCEPTANCE_OVERLAY_MAX_BYTES:
+        return {"status": "blocked", "execution": "not_run", "failure_code": "disk_space_low", "reason": "Free-space preflight did not leave the bounded safety margin."}
+    started = time.monotonic()
+    owner: _AcceptanceOwner | None = None
+    lifecycle: list[dict[str, Any]] = []
+    cleaned = False
+    created = False
+    try:
+        root.mkdir(parents=True, exist_ok=False)
+        created = True
+        owner = _AcceptanceOwner(started + ACCEPTANCE_MAX_WALL_SECONDS)
+        evidence = _run_cpu_pipeline(root, ffmpeg, owner)
+        lifecycle = owner.lifecycle()
+        owner.stop_all()
+        cleaned = True
+        shutil.rmtree(root)
+        return {"status": "completed", "execution": "completed", "approval_id": ACCEPTANCE_APPROVAL_ID, "release_head": ACCEPTANCE_RELEASE_HEAD, "wall_seconds": round(time.monotonic() - started, 3), "process_lifecycle": lifecycle, "processes_remaining": 0 if owner.clean() else len(lifecycle), "temp_cleaned": cleaned, **evidence}
+    except AcceptanceFailure as exc:
+        if owner is not None:
+            owner.stop_all()
+            lifecycle = owner.lifecycle()
+        if created and root.exists():
+            try:
+                shutil.rmtree(root)
+            except OSError:
+                pass
+        cleaned = created and not root.exists()
+        return {"status": "unavailable" if exc.unavailable else "error", "execution": "attempted", "failure_code": exc.code, "reason": "CPU acceptance pipeline did not complete.", "process_lifecycle": lifecycle, "processes_remaining": 0 if owner is None or owner.clean() else 1, "temp_cleaned": cleaned}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        if owner is not None:
+            owner.stop_all()
+            lifecycle = owner.lifecycle()
+        if created and root.exists():
+            try:
+                shutil.rmtree(root)
+            except OSError:
+                pass
+        cleaned = created and not root.exists()
+        return {"status": "error", "execution": "attempted", "failure_code": "acceptance_internal_error", "reason": "CPU acceptance pipeline did not complete.", "process_lifecycle": lifecycle, "processes_remaining": 0 if owner is None or owner.clean() else 1, "temp_cleaned": cleaned}
+    finally:
+        if owner is not None:
+            owner.stop_all()
+        if created and root.exists():
+            try:
+                shutil.rmtree(root)
+                cleaned = not root.exists()
+            except OSError:
+                cleaned = False
 
 
 def _load() -> dict[str, dict[str, Any]]:
