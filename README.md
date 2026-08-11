@@ -150,6 +150,9 @@ frontend ComfyUI gốc vào chính WebView Local AI Hub qua loopback, không m�
 Chrome hoặc Edge ngoài cho luồng bình thường. Bridge workflow nối artifact Hub
 với ComfyUI nhưng không chấp nhận đường dẫn máy thô.
 
+V5-D now wires the typed server-owned bridge described below; the historical
+V5-C paragraph remains as a record of the pre-integration partial state.
+
 V5-C bổ sung Unified Workspace và Workflow Library local-first: Dashboard dẫn
 người dùng qua Project/Workspace → Capability → Workflow/Nodes → Job →
 Artifact/Preview. User workflow state ở local ignored config, schema
@@ -491,3 +494,19 @@ zero-active, background/restore, cancel cooperative và cleanup. Nó không gọ
 
 Xem flow, API ranges/upload, ownership, checklist ComfyUI và Windows lifecycle
 evidence tại [MILESTONE_4A_RELIABILITY_HARDENING.md](docs/MILESTONE_4A_RELIABILITY_HARDENING.md).
+## V5-D End-to-End product surface
+
+The V5-D integration composes the server-owned capability control plane, the
+durable job/recovery projection, the local Workflow Library, and opaque
+Artifact Store records into the Dashboard and Workspace journey.  The
+Dashboard receives a deterministic `v5-product-surface.v1` snapshot with
+readiness reason/next action, module preflight status, job recovery counts, and
+GPU/storage warnings.  Workflow Library API routes use the existing
+`workflow-library.v1` validator and optimistic revisions for list/save,
+import/export, conflict recovery, and user-confirmed migration.
+
+All integration projections remain `execution: not_run` and `dry_run: true`;
+the product does not accept client manifests, raw paths, secrets, commands, or
+callables, and it does not imply runtime/provider/model/video readiness without
+separate bounded evidence.  See
+[`docs/V5_END_TO_END_PRODUCTIZATION.md`](docs/V5_END_TO_END_PRODUCTIZATION.md).

@@ -28,6 +28,7 @@ from .core import capability_control_plane, component_statuses, get_job_or_error
 from .jobs import flush as flush_jobs
 from .jobs import reconcile_startup
 from .jobs import get_job, list_jobs
+from .v5_productization import durable_jobs_snapshot, project_product_surface, reconcile_durable_jobs, resume_durable_job
 
 
 LOG = logging.getLogger("local-ai-hub")
@@ -38,6 +39,35 @@ _bootstrap_cache: tuple[float, dict] | None = None
 _bootstrap_lock = threading.RLock()
 _PRESET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 ARTIFACT_CHUNK_BYTES = 1024 * 1024
+
+
+def _workflow_library_store():
+    """Return the existing server-owned Workflow Library store lazily."""
+
+    from src.services.workflow_library import WorkflowLibraryStore
+
+    return WorkflowLibraryStore()
+
+
+def _workflow_http_status(payload: object) -> int:
+    value = payload if isinstance(payload, dict) else {}
+    status = str(value.get("status") or "")
+    return {
+        "conflict": 409,
+        "invalid": 400,
+        "not_found": 404,
+        "recovery_required": 503,
+        "error": 500,
+    }.get(status, 200)
+
+
+def _workflow_library_payload() -> dict:
+    value = _workflow_library_store().list_workflows()
+    result = dict(value) if isinstance(value, dict) else {"status": "partial", "workflows": []}
+    recovery = result.get("recovery") if isinstance(result.get("recovery"), dict) else {}
+    result["reason"] = str(recovery.get("reason") or "Workflow Library is server-owned local metadata.")[:240]
+    result["action"] = str(recovery.get("action") or "Review the validated revision before saving.")[:240]
+    return result
 
 
 def _reject_json_constant(value: str) -> None:
@@ -122,15 +152,30 @@ def _bootstrap_payload(*, force: bool = False) -> dict:
         if not force and _bootstrap_cache and now - _bootstrap_cache[0] < _BOOTSTRAP_CACHE_SECONDS:
             return _bootstrap_cache[1]
     components = component_statuses()
+    health_snapshot = health(probe_gpu=True)
+    capabilities = capability_control_plane()
+    workflow_library = _workflow_library_payload()
+    jobs = list_jobs()
+    durable_jobs = durable_jobs_snapshot()
+    product_surface = project_product_surface(
+        control_plane=capabilities,
+        health=health_snapshot,
+        jobs=[*jobs, *durable_jobs.get("records", [])],
+        workflow_library=workflow_library,
+    )
     payload = {
         "status": "completed",
-        "health": health(probe_gpu=True),
+        "health": health_snapshot,
         "components": components,
         "applications": applications(),
-        "jobs": list_jobs(),
+        "jobs": jobs,
+        "durable_jobs": durable_jobs,
         "tools": tool_catalog(components),
         "settings": _settings_payload()["settings"],
         "lifecycle": _lifecycle_payload(),
+        "capabilities": capabilities,
+        "productization": product_surface,
+        "workflow_library": workflow_library,
     }
     with _bootstrap_lock:
         _bootstrap_cache = (now, payload)
@@ -529,6 +574,12 @@ class HubHandler(BaseHTTPRequestHandler):
             self._write(200, _bootstrap_payload())
         elif normalized == "/api/capabilities":
             self._write(200, capability_control_plane())
+        elif normalized == "/api/workflow-library":
+            self._write(200, _workflow_library_payload())
+        elif normalized.startswith("/api/workflow-library/"):
+            workflow_id = normalized[len("/api/workflow-library/") :].strip("/")
+            result = _workflow_library_store().get_workflow(workflow_id)
+            self._write(_workflow_http_status(result), result)
         elif normalized == "/tools":
             self._write(200, {"status": "completed", "tools": tool_catalog()})
         elif normalized == "/models":
@@ -541,6 +592,8 @@ class HubHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             limit = _bounded_int(query.get("limit", [None])[0], 200, minimum=1, maximum=500)
             self._write(200, {"status": "completed", "jobs": list_jobs(limit=limit)})
+        elif normalized == "/api/durable-jobs":
+            self._write(200, durable_jobs_snapshot())
         elif normalized.startswith("/jobs/"):
             self._write(*get_job_or_error(normalized.split("/", 2)[2]))
         elif normalized == "/api/dashboard":
@@ -747,6 +800,47 @@ class HubHandler(BaseHTTPRequestHandler):
 
             self._write(200, storage_summary(force=True))
             return
+        if path.startswith("/api/workflow-library"):
+            try:
+                request = self._read_json(strict=True)
+            except ValueError as exc:
+                self._write(400, {"status": "invalid", "error": str(exc)})
+                return
+            store = _workflow_library_store()
+            if path == "/api/workflow-library":
+                expected_revision = request.get("expected_revision")
+                if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
+                    self._write(400, {"status": "invalid", "error": "expected_revision must be a non-negative integer."})
+                    return
+                result = store.save_workflow(request.get("workflow"), expected_revision=expected_revision)
+            elif path == "/api/workflow-library/import":
+                expected_revision = request.get("expected_revision")
+                if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
+                    self._write(400, {"status": "invalid", "error": "expected_revision must be a non-negative integer."})
+                    return
+                content = request.get("content", "")
+                if not isinstance(content, str) or len(content.encode("utf-8")) > 2 * 1024 * 1024:
+                    self._write(400, {"status": "invalid", "error": "Workflow Library import content is bounded UTF-8 text."})
+                    return
+                result = store.import_json(content, expected_revision=expected_revision)
+            elif path == "/api/workflow-library/migration/plan":
+                result = store.plan_migration(request.get("entries", []))
+            elif path == "/api/workflow-library/migration/confirm":
+                expected_revision = request.get("expected_revision")
+                if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
+                    self._write(400, {"status": "invalid", "error": "expected_revision must be a non-negative integer."})
+                    return
+                result = store.confirm_migration(request.get("entries", []), expected_revision=expected_revision)
+            else:
+                self._write(404, {"status": "error", "error": "Workflow Library route not found."})
+                return
+            self._write(_workflow_http_status(result), result)
+            return
+        if path.startswith("/api/durable-jobs/") and path.endswith("/resume"):
+            job_id = path[len("/api/durable-jobs/") : -len("/resume")].strip("/")
+            result = resume_durable_job(job_id)
+            self._write(_workflow_http_status(result), result)
+            return
         if path == "/api/projects":
             self._creative(lambda: project_manager.create_project(self._read_json()))
             return
@@ -875,6 +969,25 @@ class HubHandler(BaseHTTPRequestHandler):
         status, payload = submit_tool(tool, self._read_json())
         self._write(status, payload)
 
+    def do_DELETE(self) -> None:  # noqa: N802
+        path = unquote(urlparse(self.path).path.rstrip("/") or "/")
+        prefix = "/api/workflow-library/"
+        if not path.startswith(prefix) or not path[len(prefix) :].strip("/"):
+            self._write(404, {"status": "error", "error": "Workflow Library route not found."})
+            return
+        workflow_id = path[len(prefix) :].strip("/")
+        try:
+            request = self._read_json(strict=True)
+        except ValueError as exc:
+            self._write(400, {"status": "invalid", "error": str(exc)})
+            return
+        expected_revision = request.get("expected_revision")
+        if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
+            self._write(400, {"status": "invalid", "error": "expected_revision must be a non-negative integer."})
+            return
+        result = _workflow_library_store().delete_workflow(workflow_id, expected_revision=expected_revision)
+        self._write(_workflow_http_status(result), result)
+
     def do_PUT(self) -> None:  # noqa: N802
         path = unquote(urlparse(self.path).path.rstrip("/") or "/")
         if path.startswith("/api/image-mask-studio/sessions/"):
@@ -918,6 +1031,10 @@ def main() -> int:
     except OSError as exc:
         LOG.error("Local AI Hub could not bind %s:%s: %s", host, port, exc)
         return 1
+    try:
+        reconcile_durable_jobs()
+    except Exception:
+        LOG.warning("V5 durable recovery is unavailable; preserving the existing state.")
     reconcile_startup()
     LOG.info("Local AI Hub listening on %s:%s", host, port)
     try:

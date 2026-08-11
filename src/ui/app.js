@@ -16,6 +16,7 @@ import {
   formatGb,
   formatStatus,
   getBootstrap,
+  getCapabilities,
   getComfyAdvanced,
   getComfyBridgeWorkflow,
   getComfyBridgeWorkflows,
@@ -25,6 +26,13 @@ import {
   getImageMaskStudioOverview,
   getHealth,
   getJobs,
+  getDurableJobs,
+  resumeDurableJob,
+  getWorkflowLibrary,
+  saveWorkflowLibrary,
+  deleteWorkflowLibrary,
+  planWorkflowLibraryMigration,
+  confirmWorkflowLibraryMigration,
   getLifecycle,
   getModels,
   getStorage,
@@ -63,7 +71,7 @@ import { createWorkflowLibraryAdapter } from "./workflow_library.js";
 import { NAVIGATION, renderPage } from "./pages.js";
 
 const state = {
-  health: {}, components: [], tools: [], applications: [], jobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", apiStatus: "loading", apiError: "",
+  health: {}, capabilities: {}, productization: {}, components: [], tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", apiStatus: "loading", apiError: "",
   creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
   workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trong V5-D trước khi đồng bộ." },
@@ -78,7 +86,13 @@ const toastRegion = document.querySelector("#toast-region");
 const sidebar = document.querySelector(".sidebar");
 const sidebarToggle = document.querySelector("#sidebar-toggle");
 const artifactPreviewLayer = document.querySelector("#artifact-preview-layer");
-const workflowLibraryAdapter = createWorkflowLibraryAdapter();
+const workflowLibraryAdapter = createWorkflowLibraryAdapter(null, {
+  list: getWorkflowLibrary,
+  save: ({ entry, expected_revision }) => saveWorkflowLibrary(entry, expected_revision),
+  remove: ({ id, expected_revision }) => deleteWorkflowLibrary(id, expected_revision),
+  plan_migration: ({ entries }) => planWorkflowLibraryMigration(entries),
+  confirm_migration: ({ entries, expected_revision }) => confirmWorkflowLibraryMigration(entries, expected_revision),
+});
 let routeLoad = null;
 let desktopCloseLayer = null;
 let disposeImageMaskCanvases = () => {};
@@ -317,8 +331,9 @@ const updateTopbar = () => {
   topStatus.textContent = health.status ? `${formatStatus(health.status)} · Workflow trực tiếp` : "Đang khởi động API…";
   diskMetric.textContent = disk.free_bytes ? `Ổ đĩa ${formatGb(disk.free_bytes)} trống` : "Ổ đĩa —";
   gpuMetric.textContent = gpu.name ? `GPU ${gpu.name}` : "GPU chưa phát hiện";
-  const active = state.jobs.filter((job) => ["queued", "starting", "running", "cancelling"].includes(job.status)).length;
-  jobSummary.textContent = `Jobs: ${active} đang chạy · ${state.jobs.length} bản ghi`;
+  const allJobs = [...state.jobs, ...state.durableJobs];
+  const active = allJobs.filter((job) => ["queued", "starting", "running", "cancelling"].includes(job.status)).length;
+  jobSummary.textContent = `Jobs: ${active} đang chạy · ${allJobs.length} bản ghi`;
 };
 
 const render = () => {
@@ -361,9 +376,12 @@ const applyBootstrap = (payload) => {
   state.apiStatus = "ready";
   state.apiError = "";
   state.health = payload.health || {};
+  state.capabilities = payload.capabilities || {};
+  state.productization = payload.productization || {};
   state.components = payload.components || [];
   state.applications = payload.applications || [];
   state.jobs = payload.jobs || [];
+  state.durableJobs = payload.durable_jobs?.records || [];
   state.tools = payload.tools || [];
   state.settings = payload.settings || {};
   state.lifecycle = payload.lifecycle || {};
@@ -371,11 +389,15 @@ const applyBootstrap = (payload) => {
 };
 
 const refreshFast = async ({ quiet = false } = {}) => {
-  const [health, jobs] = await Promise.allSettled([getHealth(), getJobs()]);
+  const [health, jobs, capabilities, durableJobs] = await Promise.allSettled([getHealth(), getJobs(), getCapabilities(), getDurableJobs()]);
   let failed = false;
   if (health.status === "fulfilled") state.health = health.value || {};
   else failed = true;
   if (jobs.status === "fulfilled") state.jobs = jobs.value.jobs || [];
+  else failed = true;
+  if (capabilities.status === "fulfilled") state.capabilities = capabilities.value || {};
+  else failed = true;
+  if (durableJobs.status === "fulfilled") state.durableJobs = durableJobs.value?.records || [];
   else failed = true;
   if (["dashboard", "jobs"].includes(routeId())) render(); else updateTopbar();
   if (failed && state.apiStatus === "ready") state.apiStatus = "degraded";
@@ -463,7 +485,10 @@ const loadRouteData = async ({ scan = false } = {}) => {
     if (routeLoad) return routeLoad;
     state.creativeLoading = true;
     render();
-    routeLoad = refreshCreative({ renderView: true }).catch((error) => {
+    routeLoad = workflowLibraryAdapter.list().then((library) => {
+      if (library?.status) state.workflowLibrary = library;
+      return refreshCreative({ renderView: true });
+    }).catch((error) => {
       state.creative = { ...state.creative, recovery: { status: "recovery_required", reason: error.message || "Không thể tải Creative Workspace.", action: "Kiểm tra API Hub rồi thử lại." } };
       showToast(error.message || "Không thể tải Creative Workspace.", "error");
       if (routeId() === "projects") render();
@@ -1024,6 +1049,8 @@ document.addEventListener("click", async (event) => {
   if (cancel) { cancel.disabled = true; try { showToast((await cancelJob(cancel.dataset.cancelJob)).message || "Đang hủy job."); await refreshFast({ quiet: true }); } catch (error) { showToast(error.message, "error"); } return; }
   const resume = event.target.closest("[data-resume-job]");
   if (resume) { resume.disabled = true; try { showToast(`Đã tạo ${((await resumeJob(resume.dataset.resumeJob)).job || {}).id || "job tiếp tục"}.`); await refreshFast({ quiet: true }); } catch (error) { showToast(error.message, "error"); } return; }
+  const durableResume = event.target.closest("[data-resume-durable-job]");
+  if (durableResume) { durableResume.disabled = true; try { const result = await resumeDurableJob(durableResume.dataset.resumeDurableJob); showToast(result.next_action || "V5 durable recovery remains server-owned.", "warning"); await refreshFast({ quiet: true }); } catch (error) { showToast(error.message, "error"); } return; }
   const open = event.target.closest("[data-open-artifact]");
   if (open) { try { showToast((await openArtifact(open.dataset.openArtifact)).message || "Đã yêu cầu mở artifact."); } catch (error) { showToast(error.message, "error"); } return; }
   const comfyAction = event.target.closest("[data-comfy-action]")?.dataset.comfyAction;

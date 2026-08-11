@@ -104,23 +104,33 @@ function renderDashboard(state) {
   const health = source.health && typeof source.health === "object" ? source.health : {};
   const disk = health.disk && typeof health.disk === "object" ? health.disk : {};
   const gpu = health.gpu && typeof health.gpu === "object" ? health.gpu : {};
-  const jobs = Array.isArray(source.jobs) ? source.jobs : [];
+  const jobs = [
+    ...(Array.isArray(source.jobs) ? source.jobs : []),
+    ...(Array.isArray(source.durableJobs) ? source.durableJobs : []),
+  ];
   const components = Array.isArray(source.components) ? source.components : [];
-  const readiness = String(health.status || "unknown");
+  const control = source.capabilities && typeof source.capabilities === "object" ? source.capabilities : {};
+  const registry = control.registry && typeof control.registry === "object" ? control.registry : {};
+  const modulePlan = control.module_manager && typeof control.module_manager === "object" ? control.module_manager : {};
+  const capabilityRecords = Array.isArray(registry.records) ? registry.records : [];
+  const readiness = String(control.status || health.status || "unknown");
   const activeJobs = jobs.filter((item) => ["queued", "starting", "running", "cancelling"].includes(String(item?.status || ""))).length;
   const metric = (label, value, detail) => `<article class="metric-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail)}</small></article>`;
   const statusRank = { unavailable: 0, missing: 0, partial: 1, planned: 2, starting: 3, installed: 4, operational: 5, healthy: 5 };
   const rankOf = (status) => Object.prototype.hasOwnProperty.call(statusRank, status) ? statusRank[status] : 3;
   const textKey = (value) => String(value ?? "").trim().toLowerCase();
-  const modules = components.map((item, index) => {
+  const componentFallback = components.map((item) => item);
+  const modules = (capabilityRecords.length ? capabilityRecords : componentFallback).map((item, index) => {
     const record = item && typeof item === "object" ? item : {};
-    const status = String(record.component_status || record.status || "missing");
+    const status = String(record.status || record.component_status || "missing");
     return {
       id: String(record.id || `component-${index + 1}`),
-      label: String(record.name || record.id || "Module"),
-      kind: String(record.kind || "component"),
+      label: String(record.component || record.name || record.id || "Module"),
+      kind: String(record.provider || record.kind || "component"),
       version: record.version ? String(record.version) : "",
       status,
+      reason: String(record.reason || "Static readiness evidence is bounded."),
+      nextAction: String(record.next_action || record.action || "Review the server-owned evidence before runtime work."),
     };
   });
   modules.sort((left, right) => {
@@ -137,7 +147,7 @@ function renderDashboard(state) {
   modules.filter((item) => ["unavailable", "missing", "partial"].includes(item.status)).forEach((item) => {
     attention.push({ id: `module-${item.id}`, title: item.label, detail: item.kind, status: item.status });
   });
-  jobs.filter((item) => ["failed", "interrupted"].includes(String(item?.status || ""))).forEach((item, index) => {
+  jobs.filter((item) => ["failed", "unavailable", "cancelled", "interrupted"].includes(String(item?.status || ""))).forEach((item, index) => {
     const jobId = String(item?.id || `job-${index + 1}`);
     attention.push({ id: `job-${jobId}`, title: jobId, detail: String(item?.message || item?.error || "Job cần kiểm tra"), status: String(item?.status || "failed") });
   });
@@ -153,6 +163,9 @@ function renderDashboard(state) {
   const attentionRows = attentionItems.length
     ? attentionItems.map((item) => `<div class="dashboard-module-row"><div class="row-main"><strong>${escapeHtml(item.title)}</strong><span class="row-meta">${escapeHtml(item.detail)}</span></div>${statusPill(item.status, formatStatus(item.status))}</div>`).join("")
     : `<p class="small muted">Không có hạng mục cần chú ý.</p>`;
+  const moduleEvidenceRows = modules.length
+    ? modules.slice(0, 12).map((item) => `<div class="dashboard-module-row"><div class="row-main"><strong>${escapeHtml(item.label)}</strong><span class="row-meta">${escapeHtml(item.reason)}</span><span class="row-meta">${escapeHtml(item.nextAction)}</span></div>${statusPill(item.status, formatStatus(item.status))}</div>`).join("")
+    : `<p class="small muted">No server-owned module evidence.</p>`;
   const quickActions = [
     ["image", "Image AI", "Compose và chỉnh sửa ảnh"],
     ["media", "Media", "Transform media trong Hub"],
@@ -168,6 +181,9 @@ function renderDashboard(state) {
   const gpuDetail = gpu.memory_free_mib != null ? `${gpu.memory_free_mib} MiB VRAM trống` : "Snapshot GPU chưa sẵn sàng";
   const diskValue = disk.free_bytes != null ? formatGb(disk.free_bytes) : "—";
   const readinessNote = readiness === "healthy" || readiness === "operational" ? "Hub API snapshot ổn định; readiness của từng module vẫn được hiển thị riêng." : "Kiểm tra các mục cần chú ý trước khi chạy workflow.";
+  const planStatus = String(modulePlan.status || registry.status || readiness);
+  const planReason = String(modulePlan.reason || "Module preflight is server-owned static metadata.");
+  const planAction = String(modulePlan.next_action || "Review the plan before any separately authorized operation.");
   const workflowLibraryHtml = workflowLibraryState(source.workflowLibrary);
   return `<section class="dashboard-page" aria-labelledby="dashboard-title">
     <section class="dashboard-hero">
@@ -177,6 +193,7 @@ function renderDashboard(state) {
     ${workflowLibraryHtml}
     <section class="dashboard-metric-grid" aria-label="Readiness metrics">
       ${metric("Hub API", formatStatus(readiness), "Static readiness snapshot")}
+      ${metric("Module plan", formatStatus(planStatus), "Preflight is read-only; install/download is not_run")}
       ${metric("GPU", gpuValue, gpuDetail)}
       ${metric("Ổ đĩa", diskValue, "Dung lượng trống")}
       ${metric("Jobs hoạt động", String(activeJobs), `${jobs.length} bản ghi trong queue`)}
@@ -185,6 +202,8 @@ function renderDashboard(state) {
       <section class="dashboard-primary card" aria-labelledby="dashboard-modules-title">
         <div class="card-title-row"><div><span class="eyebrow">MODULE HEALTH</span><h2 id="dashboard-modules-title">Tình trạng module</h2></div><span class="tag">${escapeHtml(String(modules.length))} module</span></div>
         <div class="dashboard-module-list">${moduleRows}</div>
+        <details><summary>Reason & next action</summary><div class="dashboard-module-list">${moduleEvidenceRows}</div></details>
+        <div class="callout" data-module-plan-status="${escapeHtml(planStatus)}"><strong>Module preflight</strong><p>${escapeHtml(planReason)}</p><p>${escapeHtml(planAction)}</p></div>
       </section>
       <aside class="dashboard-aside">
         <section class="card" aria-labelledby="dashboard-attention-title"><div class="card-title-row"><h2 id="dashboard-attention-title">Cần chú ý</h2><span class="tag">Tối đa 4</span></div><div class="dashboard-attention-list">${attentionRows}</div></section>
@@ -483,7 +502,7 @@ function renderCreativeWorkspace(state) {
 }
 
 function renderJobs(state) {
-  const jobs = state.jobs || [];
+  const jobs = [...(state.jobs || []), ...(state.durableJobs || [])];
   const filter = state.jobFilter || "all";
   const filtered = jobs.filter((job) => filter === "all" || (filter === "active" && ["queued", "starting", "running", "cancelling"].includes(job.status)) || (filter === "attention" && ["failed", "unavailable", "cancelled", "interrupted"].includes(job.status)) || (filter === "completed" && job.status === "completed"));
   const rows = filtered.map((job) => {
