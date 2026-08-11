@@ -13,6 +13,47 @@ const component = (state, id) => (state.components || []).find((item) => item.id
 const tool = (state, id) => (state.tools || []).find((item) => item.name === id) || {};
 const app = (state, id) => (state.applications || []).find((item) => item.id === id) || {};
 
+const opaqueArtifactId = (value) => {
+  const candidate = String(value || "");
+  return /^artifact_[a-f0-9]{32}$/.test(candidate) ? candidate : "";
+};
+const opaqueArtifactUrl = (value) => {
+  const candidate = String(value || "");
+  return /^\/api\/artifacts\/artifact_[a-f0-9]{32}$/.test(candidate) ? candidate : "";
+};
+const safeArtifactName = (value) => {
+  const candidate = String(value || "Artifact").replace(/[\r\n]+/g, " ").split(/[\\/]/).pop().trim().slice(0, 180);
+  return /(?:api[_-]?key|password|secret|token)\s*[:=]/i.test(candidate) ? "Artifact" : candidate || "Artifact";
+};
+const artifactMetadata = (item) => {
+  const mediaType = String(item?.media_type || "application/octet-stream").split(";", 1)[0].trim().toLowerCase();
+  const size = Number(item?.size_bytes);
+  const created = String(item?.created_at || "").trim();
+  const hash = String(item?.sha256 || "").trim().toLowerCase();
+  return JSON.stringify({
+    media_type: /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(mediaType) ? mediaType : "application/octet-stream",
+    size_bytes: Number.isInteger(size) && size >= 0 ? size : null,
+    created_at: /^[0-9T:.+Z-]{8,80}$/.test(created) ? created : null,
+    sha256: /^[a-f0-9]{64}$/.test(hash) ? hash : null,
+  });
+};
+const artifactProvenance = (item) => {
+  const source = item?.provenance && typeof item.provenance === "object" ? item.provenance : {};
+  const jobId = String(source.job_id || "");
+  const fingerprint = String(source.job_spec_fingerprint || "");
+  const adapter = String(source.adapter_id || "");
+  const attempt = Number(source.attempt);
+  const status = String(source.status || "");
+  return JSON.stringify({
+    job_id: /^jobv5_[a-f0-9]{32}$/.test(jobId) ? jobId : null,
+    job_spec_fingerprint: /^[a-f0-9]{64}$/.test(fingerprint) ? fingerprint : null,
+    adapter_id: /^[a-z][a-z0-9_.-]{0,63}$/.test(adapter) ? adapter : null,
+    attempt: Number.isInteger(attempt) && attempt >= 1 && attempt <= 10000 ? attempt : null,
+    status: ["queued", "starting", "running", "cancelling", "completed", "failed", "unavailable", "interrupted"].includes(status) ? status : null,
+  });
+};
+const isMaskArtifact = (item, name) => item?.mask === true || item?.is_mask === true || item?.artifact_kind === "mask" || /(?:^|[._ -])mask(?:[._ -]|$)/i.test(name);
+
 const statusPill = (status, label = formatStatus(status)) => `<span class="status-pill" data-status="${escapeHtml(status || "unknown")}">${escapeHtml(label)}</span>`;
 const heading = (eyebrow, title, description, actions = "") => `
   <header class="page-heading"><div class="heading-copy"><div class="eyebrow">${escapeHtml(eyebrow)}</div><h1>${escapeHtml(title)}</h1><p>${escapeHtml(description)}</p></div><div class="heading-actions">${actions}</div></header>`;
@@ -81,13 +122,30 @@ function artifacts(value, found = []) {
   return found;
 }
 
-const artifactList = (value) => {
+const legacyArtifactList = (value) => {
   const items = artifacts(value);
   if (!items.length) return "";
   return `<div class="artifact-list">${items.map((item) => {
     const isImage = String(item.media_type || "").startsWith("image/");
     const isMedia = /^(image|audio|video)\//.test(String(item.media_type || ""));
     return `<div class="artifact-item">${isImage ? `<img class="artifact-preview" src="${escapeHtml(item.url)}" alt="${escapeHtml(item.name)}" />` : ""}<div class="row-main"><div class="row-name">${escapeHtml(item.name)}</div><div class="row-meta">${escapeHtml(item.media_type || "artifact")} · ${formatGb(item.size_bytes)}</div></div>${isMedia ? `<button class="button button--compact" type="button" data-preview-artifact="${escapeHtml(item.id)}" data-artifact-url="${escapeHtml(item.url)}" data-artifact-name="${escapeHtml(item.name)}" data-artifact-type="${escapeHtml(item.media_type || "application/octet-stream")}">Xem</button>` : ""}<a class="button button--compact" href="${escapeHtml(item.url)}" download="${escapeHtml(item.name || "artifact")}">Lưu/Xuất</a><button class="button button--compact" type="button" data-open-artifact="${escapeHtml(item.id)}">Mở</button></div>`;
+  }).join("")}</div>`;
+};
+
+const artifactList = (value) => {
+  const items = artifacts(value);
+  if (!items.length) return "";
+  return `<div class="artifact-list">${items.map((item) => {
+    const name = safeArtifactName(item.name);
+    const url = opaqueArtifactUrl(item.url);
+    const id = opaqueArtifactId(item.id) || url.split("/").pop();
+    const mediaType = String(item.media_type || "application/octet-stream").split(";", 1)[0].trim().toLowerCase();
+    const isImage = mediaType.startsWith("image/");
+    const mask = isMaskArtifact(item, name);
+    const previewButton = url ? `<button class="button button--compact" type="button" data-preview-artifact="${escapeHtml(id)}" data-artifact-url="${escapeHtml(url)}" data-artifact-name="${escapeHtml(name)}" data-artifact-type="${escapeHtml(mediaType)}" data-artifact-mask="${mask}" data-artifact-meta="${escapeHtml(artifactMetadata(item))}" data-artifact-provenance="${escapeHtml(artifactProvenance(item))}">Xem</button>` : `<span class="artifact-unavailable">Preview unavailable</span>`;
+    const saveLink = url ? `<a class="button button--compact" href="${escapeHtml(url)}" download="${escapeHtml(name)}">LÆ°u/Xuáº¥t</a>` : "";
+    const openButton = id ? `<button class="button button--compact" type="button" data-open-artifact="${escapeHtml(id)}">Má»Ÿ</button>` : "";
+    return `<div class="artifact-item">${isImage && url ? `<img class="artifact-preview${mask ? " artifact-preview--mask" : ""}" src="${escapeHtml(url)}" alt="${escapeHtml(mask ? `Mask raster: ${name}` : name)}" />` : ""}<div class="row-main"><div class="row-name">${escapeHtml(name)}</div><div class="row-meta">${escapeHtml(mediaType)} Â· ${formatGb(item.size_bytes)}${mask ? " Â· mask" : ""}</div></div>${previewButton}${saveLink}${openButton}</div>`;
   }).join("")}</div>`;
 };
 
@@ -104,6 +162,9 @@ function renderDashboard(state) {
   const health = source.health && typeof source.health === "object" ? source.health : {};
   const disk = health.disk && typeof health.disk === "object" ? health.disk : {};
   const gpu = health.gpu && typeof health.gpu === "object" ? health.gpu : {};
+  const productization = source.productization && typeof source.productization === "object" ? source.productization : {};
+  const storage = source.storage && typeof source.storage === "object" ? source.storage : (productization.storage && typeof productization.storage === "object" ? productization.storage : {});
+  const volumes = Array.isArray(storage.volumes) ? storage.volumes.slice(0, 2) : [];
   const jobs = [
     ...(Array.isArray(source.jobs) ? source.jobs : []),
     ...(Array.isArray(source.durableJobs) ? source.durableJobs : []),
@@ -184,6 +245,22 @@ function renderDashboard(state) {
   const planStatus = String(modulePlan.status || registry.status || readiness);
   const planReason = String(modulePlan.reason || "Module preflight is server-owned static metadata.");
   const planAction = String(modulePlan.next_action || "Review the plan before any separately authorized operation.");
+  const storageStatus = String(storage.status || "unavailable");
+  const storageExecution = String(storage.execution || productization.execution || "not_run");
+  const storageVolumeCard = (volume) => {
+    const volumeId = String(volume?.id || "").toLowerCase();
+    const label = volumeId === "c" ? "C:" : volumeId === "d" ? "D:" : "Volume";
+    const status = String(volume?.status || "unavailable");
+    const available = status === "available" && Number.isInteger(volume?.total_bytes) && Number.isInteger(volume?.free_bytes) && Number.isInteger(volume?.used_bytes);
+    const value = (key) => available ? formatGb(volume[key]) : "â€”";
+    const low = volume?.low_space === true;
+    const reason = String(volume?.reason || "Volume statistics are unavailable; no figures are shown.");
+    const action = String(volume?.next_action || "Verify the volume is mounted and readable, then refresh storage.");
+    return `<article class="dashboard-storage-volume" data-volume-id="${escapeHtml(volumeId || "unknown")}" data-status="${escapeHtml(status)}" data-low-space="${low}"><div class="card-title-row"><div><span class="eyebrow">SERVER-OWNED VOLUME</span><h3>${escapeHtml(label)}</h3></div>${statusPill(status, status === "available" ? "Available" : "Unavailable")}</div><div class="dashboard-storage-values"><div><span>Total</span><strong>${escapeHtml(value("total_bytes"))}</strong></div><div><span>Free</span><strong>${escapeHtml(value("free_bytes"))}</strong></div><div><span>Used</span><strong>${escapeHtml(value("used_bytes"))}</strong></div></div><p class="dashboard-storage-reason">${escapeHtml(reason)}</p>${low ? `<div class="callout callout--warning dashboard-storage-warning" role="alert"><strong>Low space</strong><span>${escapeHtml(action)}</span></div>` : `<div class="dashboard-storage-action"><strong>Next action</strong><span>${escapeHtml(action)}</span></div>`}</article>`;
+  };
+  const storageHtml = volumes.length ? volumes.map(storageVolumeCard).join("") : `<div class="empty-state compact"><strong>Storage projection unavailable</strong><span>C:/ and D:/ figures are not available in this snapshot.</span></div>`;
+  const lowSpaceVolumes = volumes.filter((volume) => volume?.low_space === true);
+  const storageWarning = lowSpaceVolumes.length ? `<div class="callout callout--warning dashboard-storage-warning" role="alert"><strong>Low-space warning</strong><span>${escapeHtml(lowSpaceVolumes.map((volume) => String(volume?.id || "").toLowerCase() === "c" ? "C:" : String(volume?.id || "").toLowerCase() === "d" ? "D:" : "volume").join(", "))}: review storage before new writes.</span></div>` : "";
   const workflowLibraryHtml = workflowLibraryState(source.workflowLibrary);
   return `<section class="dashboard-page" aria-labelledby="dashboard-title">
     <section class="dashboard-hero">
@@ -197,6 +274,11 @@ function renderDashboard(state) {
       ${metric("GPU", gpuValue, gpuDetail)}
       ${metric("Ổ đĩa", diskValue, "Dung lượng trống")}
       ${metric("Jobs hoạt động", String(activeJobs), `${jobs.length} bản ghi trong queue`)}
+    </section>
+    <section class="dashboard-storage card" aria-labelledby="dashboard-storage-title" data-storage-status="${escapeHtml(storageStatus)}" data-execution="${escapeHtml(storageExecution)}">
+      <div class="card-title-row"><div><span class="eyebrow">STORAGE PROJECTION</span><h2 id="dashboard-storage-title">C:/ & D:/ dung lượng</h2><p class="small">Server-owned, allowlisted volume snapshot · execution: ${escapeHtml(storageExecution)}</p></div>${statusPill(storageStatus, formatStatus(storageStatus))}</div>
+      <div class="dashboard-storage-grid">${storageHtml}</div>
+      ${storageWarning}
     </section>
     <section class="dashboard-main-grid">
       <section class="dashboard-primary card" aria-labelledby="dashboard-modules-title">

@@ -261,7 +261,7 @@ const showToast = (message, kind = "") => {
 
 const closeArtifactPreview = () => artifactPreviewLayer?.replaceChildren();
 
-const showArtifactPreview = (button) => {
+const legacyShowArtifactPreview = (button) => {
   if (!artifactPreviewLayer) return;
   artifactPreviewLayer.replaceChildren();
   const dialog = document.createElement("section");
@@ -287,13 +287,126 @@ const showArtifactPreview = (button) => {
   } else if (mediaType.startsWith("video/")) {
     const video = document.createElement("video"); video.src = url; video.controls = true; video.preload = "metadata"; body.append(video);
   } else if (mediaType.startsWith("audio/")) {
-    const audio = document.createElement("audio"); audio.src = url; audio.controls = true; body.append(audio);
+    const audio = document.createElement("audio"); audio.src = url; audio.controls = true; audio.preload = "metadata"; body.append(audio);
   } else {
     const note = document.createElement("p"); note.textContent = "Artifact này không có trình phát inline."; body.append(note);
   }
   const save = document.createElement("a");
   save.className = "button button--primary"; save.href = url; save.download = button.dataset.artifactName || "artifact"; save.textContent = "Lưu/Xuất artifact";
   body.append(save);
+  dialog.append(header, body);
+  artifactPreviewLayer.append(dialog);
+  close.focus();
+};
+
+const ARTIFACT_URL_PATTERN = /^\/api\/artifacts\/artifact_[a-f0-9]{32}$/;
+const safeArtifactPreviewUrl = (value) => {
+  const candidate = String(value || "");
+  return ARTIFACT_URL_PATTERN.test(candidate) ? candidate : "";
+};
+const readArtifactDatasetRecord = (value) => {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+const safeArtifactRecordValue = (key, value) => {
+  if (value === null || value === undefined || value === "") return null;
+  if (key === "media_type") return /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(String(value)) ? String(value) : null;
+  if (key === "size_bytes") return Number.isInteger(value) && value >= 0 ? value : null;
+  if (key === "attempt") return Number.isInteger(value) && value >= 1 && value <= 10000 ? value : null;
+  if (key === "created_at") return /^[0-9T:.+Z-]{8,80}$/.test(String(value)) ? String(value) : null;
+  if (key === "sha256" || key === "job_spec_fingerprint") return /^[a-f0-9]{64}$/.test(String(value)) ? String(value) : null;
+  if (key === "job_id") return /^jobv5_[a-f0-9]{32}$/.test(String(value)) ? String(value) : null;
+  if (key === "adapter_id") return /^[a-z][a-z0-9_.-]{0,63}$/.test(String(value)) ? String(value) : null;
+  if (key === "status") return ["queued", "starting", "running", "cancelling", "completed", "failed", "unavailable", "interrupted"].includes(String(value)) ? String(value) : null;
+  return null;
+};
+const appendArtifactRecord = (body, title, record, keys) => {
+  const entries = keys.map((key) => [key, safeArtifactRecordValue(key, record[key])]).filter(([, value]) => value !== null);
+  if (!entries.length) return;
+  const details = document.createElement("details");
+  details.className = "artifact-preview-dialog__details";
+  const summary = document.createElement("summary");
+  summary.textContent = title;
+  details.append(summary);
+  const list = document.createElement("dl");
+  entries.forEach(([key, value]) => {
+    const term = document.createElement("dt"); term.textContent = key;
+    const description = document.createElement("dd"); description.textContent = String(value);
+    list.append(term, description);
+  });
+  details.append(list);
+  body.append(details);
+};
+const showArtifactPreview = (button) => {
+  if (!artifactPreviewLayer) return;
+  artifactPreviewLayer.replaceChildren();
+  const dialog = document.createElement("section");
+  dialog.className = "artifact-preview-dialog";
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  const header = document.createElement("header");
+  header.className = "artifact-preview-dialog__header";
+  const title = document.createElement("strong");
+  const rawName = String(button.dataset.artifactName || "Artifact preview").replace(/[\r\n]+/g, " ").split(/[\\/]/).pop().trim();
+  title.textContent = rawName || "Artifact preview";
+  const close = document.createElement("button");
+  close.className = "button button--compact";
+  close.type = "button";
+  close.dataset.closeArtifactPreview = "true";
+  close.textContent = "Đóng";
+  header.append(title, close);
+  const body = document.createElement("div");
+  body.className = "artifact-preview-dialog__body";
+  const url = safeArtifactPreviewUrl(button.dataset.artifactUrl);
+  const mediaTypeCandidate = String(button.dataset.artifactType || "").split(";", 1)[0].trim().toLowerCase();
+  const mediaType = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(mediaTypeCandidate) ? mediaTypeCandidate : "application/octet-stream";
+  const isMask = button.dataset.artifactMask === "true";
+  if (!url) {
+    const note = document.createElement("p");
+    note.textContent = "Artifact reference is unavailable; no local path is shown.";
+    body.append(note);
+  } else if (mediaType.startsWith("image/")) {
+    const image = document.createElement("img");
+    image.src = url;
+    image.alt = isMask ? `Mask raster: ${title.textContent}` : title.textContent;
+    if (isMask) image.className = "artifact-preview-image artifact-preview-image--mask";
+    body.append(image);
+  } else if (mediaType.startsWith("video/")) {
+    const video = document.createElement("video");
+    video.src = url;
+    video.controls = true;
+    video.preload = "metadata";
+    body.append(video);
+  } else if (mediaType.startsWith("audio/")) {
+    const audio = document.createElement("audio");
+    audio.src = url;
+    audio.controls = true;
+    audio.preload = "metadata";
+    body.append(audio);
+  } else {
+    const note = document.createElement("p");
+    note.textContent = isMask
+      ? "Mask raster preview is unavailable for this artifact type; Hub keeps the mask as truthful metadata without browser rasterization."
+      : "Artifact này không có trình phát inline; metadata server-owned vẫn được hiển thị bên dưới.";
+    body.append(note);
+  }
+  const metadata = readArtifactDatasetRecord(button.dataset.artifactMeta);
+  appendArtifactRecord(body, "Metadata", metadata, ["media_type", "size_bytes", "created_at", "sha256"]);
+  const provenance = readArtifactDatasetRecord(button.dataset.artifactProvenance);
+  appendArtifactRecord(body, "Provenance", provenance, ["job_id", "job_spec_fingerprint", "adapter_id", "attempt", "status"]);
+  if (url) {
+    const save = document.createElement("a");
+    save.className = "button button--primary";
+    save.href = url;
+    save.download = title.textContent || "artifact";
+    save.textContent = "Lưu/Xuất artifact";
+    body.append(save);
+  }
   dialog.append(header, body);
   artifactPreviewLayer.append(dialog);
   close.focus();
@@ -378,6 +491,7 @@ const applyBootstrap = (payload) => {
   state.health = payload.health || {};
   state.capabilities = payload.capabilities || {};
   state.productization = payload.productization || {};
+  state.storage = payload.storage || state.productization.storage || {};
   state.components = payload.components || [];
   state.applications = payload.applications || [];
   state.jobs = payload.jobs || [];

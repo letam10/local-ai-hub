@@ -28,7 +28,10 @@ _ACTIVE_JOB_STATES = frozenset({"queued", "starting", "running", "cancelling"})
 _ATTENTION_JOB_STATES = frozenset({"failed", "unavailable", "cancelled", "interrupted"})
 _MAX_MODULES = 256
 _MAX_JOBS = 500
+_MAX_VOLUMES = 2
 _MAX_TEXT = 240
+_LOW_SPACE_BYTES = 20 * 1024**3
+_VOLUME_LABELS = {"c": "C:", "d": "D:"}
 DURABLE_JOBS_PATH = CONFIG_ROOT / "durable_jobs.v5.json"
 
 
@@ -46,6 +49,87 @@ def _text(value: object, fallback: str = "") -> str:
 def _safe_id(value: object, fallback: str = "unknown") -> str:
     candidate = _text(value, fallback)
     return candidate if candidate and "\\" not in candidate and "/" not in candidate and ".." not in candidate else fallback
+
+
+def _volume_numbers(value: Mapping[str, Any]) -> tuple[int, int, int] | None:
+    values = (value.get("total_bytes"), value.get("free_bytes"), value.get("used_bytes"))
+    if any(type(item) is not int or item < 0 for item in values):
+        return None
+    total, free, used = values
+    if free > total or used > total:
+        return None
+    return total, free, used
+
+
+def _unavailable_volume_projection(volume_id: str) -> dict[str, Any]:
+    return {
+        "id": volume_id,
+        "label": _VOLUME_LABELS[volume_id],
+        "total_bytes": None,
+        "free_bytes": None,
+        "used_bytes": None,
+        "total_gb": None,
+        "free_gb": None,
+        "used_gb": None,
+        "low_space": None,
+        "status": "unavailable",
+        "availability": "unknown",
+        "reason": "Volume statistics are unavailable; no figures are shown.",
+        "next_action": "Verify that the volume is mounted and readable, then refresh storage.",
+    }
+
+
+def project_storage_projection(value: object) -> dict[str, Any]:
+    """Project only the server-owned C:/D: storage summary for the Dashboard."""
+
+    source = value if isinstance(value, Mapping) else {}
+    raw_values = source.get("volumes")
+    if not isinstance(raw_values, list):
+        nested = source.get("volume_projection")
+        raw_values = nested.get("volumes") if isinstance(nested, Mapping) else []
+    by_id: dict[str, Mapping[str, Any]] = {}
+    for item in raw_values[:_MAX_VOLUMES] if isinstance(raw_values, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        volume_id = str(item.get("id") or "").casefold()
+        if volume_id in _VOLUME_LABELS and volume_id not in by_id:
+            by_id[volume_id] = item
+
+    projected: list[dict[str, Any]] = []
+    for volume_id in ("c", "d"):
+        item = by_id.get(volume_id)
+        numbers = _volume_numbers(item) if item is not None else None
+        status = str(item.get("status") or "") if item is not None else ""
+        if numbers is None or status != "available":
+            projected.append(_unavailable_volume_projection(volume_id))
+            continue
+        total, free, used = numbers
+        low_space = free < _LOW_SPACE_BYTES
+        projected.append({
+            "id": volume_id,
+            "label": _VOLUME_LABELS[volume_id],
+            "total_bytes": total,
+            "free_bytes": free,
+            "used_bytes": used,
+            "total_gb": round(total / (1024**3), 3),
+            "free_gb": round(free / (1024**3), 3),
+            "used_gb": round(used / (1024**3), 3),
+            "low_space": low_space,
+            "status": "available",
+            "availability": "available",
+            "reason": "Free space is below the 20 GiB low-space threshold." if low_space else "Volume statistics are available from the server-owned allowlist.",
+            "next_action": "Review output, cache, and temporary data before new writes." if low_space else "No action is required; refresh after external storage changes.",
+        })
+    available = sum(1 for item in projected if item["status"] == "available")
+    status = "ready" if available == len(projected) else "partial" if available else "unavailable"
+    return {
+        "status": status,
+        "execution": "not_run",
+        "dry_run": True,
+        "allowlist": ["c", "d"],
+        "volumes": projected,
+        "low_space_volumes": [item["id"] for item in projected if item["low_space"] is True],
+    }
 
 
 def project_capability_modules(control_plane: object) -> list[dict[str, Any]]:
@@ -231,6 +315,7 @@ def project_product_surface(
     health: object,
     jobs: object,
     workflow_library: object,
+    storage: object = None,
 ) -> dict[str, Any]:
     """Compose the deterministic Dashboard/API product surface."""
 
@@ -241,6 +326,7 @@ def project_product_surface(
     readiness = _status(control.get("status") or health_value.get("status"), "partial")
     recovery = project_job_recovery(jobs)
     library = project_workflow_library(workflow_library)
+    storage_projection = project_storage_projection(storage)
     disk = health_value.get("disk") if isinstance(health_value.get("disk"), Mapping) else {}
     gpu = health_value.get("gpu") if isinstance(health_value.get("gpu"), Mapping) else {}
     warnings: list[dict[str, str]] = []
@@ -249,6 +335,19 @@ def project_product_surface(
         warnings.append({"id": "gpu", "status": gpu_status, "reason": "GPU snapshot is unavailable or has no runtime proof."})
     if not isinstance(disk.get("free_bytes"), int) or disk.get("free_bytes", 0) < 0:
         warnings.append({"id": "disk", "status": "unavailable", "reason": "Storage snapshot is unavailable; no write operation was attempted."})
+    for volume in storage_projection["volumes"]:
+        if volume["low_space"] is True:
+            warnings.append({
+                "id": f"volume-{volume['id']}",
+                "status": "partial",
+                "reason": f"{volume['label']} is below the low-space threshold; review storage before new writes.",
+            })
+        elif volume["status"] != "available":
+            warnings.append({
+                "id": f"volume-{volume['id']}",
+                "status": "unavailable",
+                "reason": f"{volume['label']} statistics are unavailable; no figures were fabricated.",
+            })
     return {
         "schema_version": PRODUCT_SURFACE_SCHEMA_VERSION,
         "status": readiness,
@@ -269,6 +368,7 @@ def project_product_surface(
         },
         "jobs": recovery,
         "workflow_library": library,
+        "storage": storage_projection,
         "warnings": warnings,
     }
 
@@ -281,6 +381,7 @@ __all__ = [
     "project_capability_modules",
     "project_job_recovery",
     "project_product_surface",
+    "project_storage_projection",
     "project_workflow_library",
     "resume_durable_job",
 ]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -24,10 +25,16 @@ from src.shared.paths.registry import (
 
 
 _CACHE_SECONDS = 120.0
+_LOW_SPACE_BYTES = 20 * 1024**3
 _OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
 _OLLAMA_TIMEOUT_SECONDS = 0.5
+_VOLUME_ALLOWLIST = (
+    ("c", "C:", Path("C:/")),
+    ("d", "D:", Path("D:/")),
+)
 _cache_lock = threading.Lock()
 _size_cache: tuple[float, dict[str, Any]] | None = None
+_volume_snapshot_cache: tuple[float, dict[str, Any]] | None = None
 _model_cache: tuple[float, list[dict[str, Any]]] | None = None
 
 
@@ -74,6 +81,123 @@ def _directory_size(path: Path) -> int:
 
 def _bytes_record(value: int) -> dict[str, Any]:
     return {"bytes": value, "gb": round(value / (1024**3), 3)}
+
+
+def _unavailable_volume(*, volume_id: str, label: str, reason: str, next_action: str) -> dict[str, Any]:
+    """Return a truthful volume record without exposing a workstation path."""
+
+    return {
+        "id": volume_id,
+        "label": label,
+        "total_bytes": None,
+        "free_bytes": None,
+        "used_bytes": None,
+        "total_gb": None,
+        "free_gb": None,
+        "used_gb": None,
+        "low_space": None,
+        "status": "unavailable",
+        "availability": "unknown",
+        "reason": reason,
+        "next_action": next_action,
+    }
+
+
+def _volume_record(volume_id: str, label: str, root: Path) -> dict[str, Any]:
+    """Project one fixed allowlisted volume using server-owned disk usage."""
+
+    try:
+        usage = shutil.disk_usage(root)
+    except FileNotFoundError:
+        return _unavailable_volume(
+            volume_id=volume_id,
+            label=label,
+            reason="Volume is not mounted or is unavailable.",
+            next_action="Connect or mount the volume, then refresh storage.",
+        )
+    except PermissionError:
+        return _unavailable_volume(
+            volume_id=volume_id,
+            label=label,
+            reason="Volume is present but its statistics cannot be read.",
+            next_action="Check volume permissions, then refresh storage.",
+        )
+    except OSError:
+        return _unavailable_volume(
+            volume_id=volume_id,
+            label=label,
+            reason="Volume statistics are unavailable.",
+            next_action="Verify the volume is readable, then refresh storage.",
+        )
+
+    total, used, free = usage
+    if any(type(value) is not int or value < 0 for value in (total, used, free)):
+        return _unavailable_volume(
+            volume_id=volume_id,
+            label=label,
+            reason="Volume statistics are invalid and were not displayed.",
+            next_action="Refresh storage after the volume reports valid statistics.",
+        )
+    if free > total or used > total:
+        return _unavailable_volume(
+            volume_id=volume_id,
+            label=label,
+            reason="Volume statistics are inconsistent and were not displayed.",
+            next_action="Refresh storage after the volume reports consistent statistics.",
+        )
+
+    low_space = free < _LOW_SPACE_BYTES
+    reason = "Free space is below the 20 GiB low-space threshold." if low_space else "Volume statistics are available from the server-owned allowlist."
+    next_action = "Review output, cache, and temporary data before new writes." if low_space else "No action is required; refresh after external storage changes."
+    return {
+        "id": volume_id,
+        "label": label,
+        "total_bytes": total,
+        "free_bytes": free,
+        "used_bytes": used,
+        "total_gb": round(total / (1024**3), 3),
+        "free_gb": round(free / (1024**3), 3),
+        "used_gb": round(used / (1024**3), 3),
+        "low_space": low_space,
+        "status": "available",
+        "availability": "available",
+        "reason": reason,
+        "next_action": next_action,
+    }
+
+
+def _volume_projection() -> list[dict[str, Any]]:
+    """Inspect only the fixed C:/D: volume allowlist; never accept client input."""
+
+    return [_volume_record(volume_id, label, root) for volume_id, label, root in _VOLUME_ALLOWLIST]
+
+
+def _volume_projection_payload(volumes: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "status": "completed" if all(item["status"] == "available" for item in volumes) else "partial",
+        "execution": "not_run",
+        "allowlist": [item["id"] for item in volumes],
+        "volumes": volumes,
+    }
+
+
+def dashboard_volume_snapshot(*, force: bool = False) -> dict[str, Any]:
+    """Return a cached, metadata-only C:/D: snapshot for Dashboard bootstrap.
+
+    This path deliberately does not read managed directories, legacy metadata, or
+    model/provider endpoints.  Full areas/legacy storage remains owned by
+    ``storage_summary`` and its existing route.
+    """
+
+    global _volume_snapshot_cache
+    now = time.monotonic()
+    with _cache_lock:
+        if not force and _volume_snapshot_cache and now - _volume_snapshot_cache[0] < _CACHE_SECONDS:
+            return _volume_snapshot_cache[1]
+    result = _volume_projection_payload(_volume_projection())
+    with _cache_lock:
+        _volume_snapshot_cache = (now, result)
+    return result
 
 
 def _is_ollama_model(item: dict[str, Any]) -> bool:
@@ -157,8 +281,6 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
         total = usage.f_blocks * usage.f_frsize
         free = usage.f_bavail * usage.f_frsize
     else:
-        import shutil
-
         total, _used, free = shutil.disk_usage(ROOT)
     roots = {
         "Models": MODEL_ROOT,
@@ -171,6 +293,7 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
     }
     areas = {name: _bytes_record(_directory_size(path)) for name, path in roots.items()}
     legacy = _legacy_records()
+    volumes = _volume_projection()
     result = {
         "status": "completed",
         "disk": {
@@ -178,8 +301,10 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
             "free_bytes": free,
             "used_bytes": max(0, total - free),
             "free_gb": round(free / (1024**3), 3),
-            "low_space": free < 20 * 1024**3,
+            "low_space": free < _LOW_SPACE_BYTES,
         },
+        "volumes": volumes,
+        "volume_projection": _volume_projection_payload(volumes),
         "areas": areas,
         "legacy": legacy,
         "legacy_counts": {

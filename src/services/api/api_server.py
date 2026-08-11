@@ -20,6 +20,7 @@ from src.services.image_mask_studio import StudioConflictError, image_mask_studi
 from src.services.job_manager.manager import job_manager
 from src.services.project_manager import project_manager
 from src.services.runtime_registry import applications, launch
+from src.services.storage_manager.overview import dashboard_volume_snapshot
 from src.shared.paths.registry import ROOT
 from src.shared.version import PRODUCT_VERSION
 
@@ -144,7 +145,7 @@ def _lifecycle_payload() -> dict:
 
 
 def _bootstrap_payload(*, force: bool = False) -> dict:
-    """One cached startup snapshot; intentionally excludes models and storage scans."""
+    """One cached startup snapshot with a lightweight server-owned volume projection."""
 
     global _bootstrap_cache
     now = time.monotonic()
@@ -155,6 +156,7 @@ def _bootstrap_payload(*, force: bool = False) -> dict:
     health_snapshot = health(probe_gpu=True)
     capabilities = capability_control_plane()
     workflow_library = _workflow_library_payload()
+    storage_snapshot = dashboard_volume_snapshot()
     jobs = list_jobs()
     durable_jobs = durable_jobs_snapshot()
     product_surface = project_product_surface(
@@ -162,6 +164,7 @@ def _bootstrap_payload(*, force: bool = False) -> dict:
         health=health_snapshot,
         jobs=[*jobs, *durable_jobs.get("records", [])],
         workflow_library=workflow_library,
+        storage=storage_snapshot,
     )
     payload = {
         "status": "completed",
@@ -175,6 +178,7 @@ def _bootstrap_payload(*, force: bool = False) -> dict:
         "lifecycle": _lifecycle_payload(),
         "capabilities": capabilities,
         "productization": product_surface,
+        "storage": product_surface["storage"],
         "workflow_library": workflow_library,
     }
     with _bootstrap_lock:

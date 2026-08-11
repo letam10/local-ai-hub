@@ -51,6 +51,13 @@ class UiRefreshIntegrationTests(unittest.TestCase):
             "dashboard-module-row",
             "dashboard-attention-list",
             "dashboard-quick-actions",
+            "dashboard-storage",
+            "dashboard-storage-grid",
+            "dashboard-storage-volume",
+            "dashboard-storage-values",
+            "dashboard-storage-reason",
+            "dashboard-storage-action",
+            "dashboard-storage-warning",
         }
         emitted = set()
         for value in re.findall(r'class="([^"]+)"', self.dashboard):
@@ -79,6 +86,16 @@ class UiRefreshIntegrationTests(unittest.TestCase):
         self.assertIn("margin: 0;", module_rule.group(1))
         self.assertNotRegex(module_rule.group(1), r"margin\s*:\s*0\s+auto")
         self.assertNotIn("sidebar-nav", re.findall(r'class="[^"]+"', self.html)[0:])
+
+    def test_bootstrap_storage_and_artifact_preview_contract_is_composed(self) -> None:
+        self.assertIn("state.storage = payload.storage", self.app)
+        self.assertIn("preload = \"metadata\"", self.app)
+        self.assertIn("safeArtifactPreviewUrl", self.app)
+        self.assertIn("data-artifact-meta", self.pages)
+        self.assertIn("data-artifact-provenance", self.pages)
+        self.assertIn("data-artifact-mask", self.pages)
+        self.assertNotIn("arrayBuffer()", self.app)
+        self.assertNotIn("FileReader", self.app)
 
 
 if __name__ == "__main__":
