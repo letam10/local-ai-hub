@@ -36,11 +36,12 @@ Static green tests never elevate one of these states to operational.
 
 src/ui/app.js owns a detached view state containing health, components, jobs,
 storage, projects, active workspace tabs, and workflowLibrary. Bootstrap carries
-only the sanitized C:/D: storage projection; the browser never chooses a volume
-or performs a filesystem scan. The latter is initialized to partial with a
-reason and next action. A server-owned bootstrap may replace it with a
-validated projection; the UI never accepts a client mapping or invents an
-endpoint.
+only the sanitized C:/D: storage projection from a separate cached metadata-only
+snapshot; it never scans managed trees. The browser never chooses a volume or
+performs a filesystem scan. The latter is initialized to partial with a reason
+and next action. The full legacy/areas summary remains behind /api/storage; a
+server-owned bootstrap may replace its projection with validated volume metadata,
+and the UI never accepts a client mapping or invents an endpoint.
 
 Navigation keeps every existing route and exposes named controls and active
 route semantics. The sidebar has separate desktop collapse and mobile drawer

@@ -34,6 +34,7 @@ _VOLUME_ALLOWLIST = (
 )
 _cache_lock = threading.Lock()
 _size_cache: tuple[float, dict[str, Any]] | None = None
+_volume_snapshot_cache: tuple[float, dict[str, Any]] | None = None
 _model_cache: tuple[float, list[dict[str, Any]]] | None = None
 
 
@@ -171,6 +172,34 @@ def _volume_projection() -> list[dict[str, Any]]:
     return [_volume_record(volume_id, label, root) for volume_id, label, root in _VOLUME_ALLOWLIST]
 
 
+def _volume_projection_payload(volumes: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "status": "completed" if all(item["status"] == "available" for item in volumes) else "partial",
+        "execution": "not_run",
+        "allowlist": [item["id"] for item in volumes],
+        "volumes": volumes,
+    }
+
+
+def dashboard_volume_snapshot(*, force: bool = False) -> dict[str, Any]:
+    """Return a cached, metadata-only C:/D: snapshot for Dashboard bootstrap.
+
+    This path deliberately does not read managed directories, legacy metadata, or
+    model/provider endpoints.  Full areas/legacy storage remains owned by
+    ``storage_summary`` and its existing route.
+    """
+
+    global _volume_snapshot_cache
+    now = time.monotonic()
+    with _cache_lock:
+        if not force and _volume_snapshot_cache and now - _volume_snapshot_cache[0] < _CACHE_SECONDS:
+            return _volume_snapshot_cache[1]
+    result = _volume_projection_payload(_volume_projection())
+    with _cache_lock:
+        _volume_snapshot_cache = (now, result)
+    return result
+
+
 def _is_ollama_model(item: dict[str, Any]) -> bool:
     return str(item.get("engine") or "").casefold() == "ollama"
 
@@ -275,12 +304,7 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
             "low_space": free < _LOW_SPACE_BYTES,
         },
         "volumes": volumes,
-        "volume_projection": {
-            "status": "completed" if all(item["status"] == "available" for item in volumes) else "partial",
-            "execution": "not_run",
-            "allowlist": [item["id"] for item in volumes],
-            "volumes": volumes,
-        },
+        "volume_projection": _volume_projection_payload(volumes),
         "areas": areas,
         "legacy": legacy,
         "legacy_counts": {

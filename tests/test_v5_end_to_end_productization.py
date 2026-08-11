@@ -140,6 +140,9 @@ class V5EndToEndProductizationTests(unittest.TestCase):
         pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
         for marker in ("/api/workflow-library", "/api/durable-jobs", "capability_control_plane", "project_product_surface", "storage_summary", '"storage": product_surface["storage"]'):
             self.assertIn(marker, api)
+        bootstrap = api[api.index("def _bootstrap_payload"):api.index("\ndef _preset_summaries", api.index("def _bootstrap_payload"))]
+        self.assertIn("dashboard_volume_snapshot()", bootstrap)
+        self.assertNotIn("storage_summary", bootstrap)
         for marker in ("project_job_recovery", "project_storage_projection", "project_workflow_library", "execution", "not_run", "dry_run"):
             self.assertIn(marker, adapter)
         for marker in ("getCapabilities", "getWorkflowLibrary", "state.capabilities", "workflowLibraryAdapter"):
