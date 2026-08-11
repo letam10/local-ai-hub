@@ -377,3 +377,120 @@ def active_heavy_jobs() -> list[dict[str, Any]]:
 
 
 _load()
+
+
+class DurableJobStore:
+    """Small atomic JSON store used by the V5 declarative work engine.
+
+    It is intentionally separate from the legacy ``job.v2`` module state so
+    the V5 engine can be constructed with a test-root path and cannot persist
+    process-local runners or arbitrary Python values.  All callers receive
+    detached JSON copies.  Progress-only updates share the existing
+    coalescing writer; state transitions and shutdown flush immediately.
+    """
+
+    MAX_RECORD_BYTES = 128 * 1024
+
+    def __init__(self, path: Path, *, history_limit: int = 256) -> None:
+        self.path = Path(path)
+        self.history_limit = max(1, min(1000, int(history_limit)))
+        self._records: dict[str, dict[str, Any]] = {}
+        self._lock = threading.RLock()
+        self._writer = CoalescingWriter(self._write)
+        self._load_records()
+
+    @staticmethod
+    def _copy(value: Any) -> Any:
+        try:
+            encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Durable job data must be JSON serializable.") from exc
+        if len(encoded.encode("utf-8")) > DurableJobStore.MAX_RECORD_BYTES:
+            raise ValueError("Durable job record exceeds the bounded storage limit.")
+        return json.loads(encoded)
+
+    @staticmethod
+    def _sort_key(record: dict[str, Any]) -> str:
+        return str(record.get("finished_at") or record.get("updated_at") or record.get("created_at") or "")
+
+    def _load_records(self) -> None:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if type(raw) is not dict:
+            return
+        with self._lock:
+            for job_id, record in raw.items():
+                if not isinstance(job_id, str) or type(record) is not dict:
+                    continue
+                try:
+                    copied = self._copy(record)
+                except ValueError:
+                    continue
+                if copied.get("id") == job_id:
+                    self._records[job_id] = copied
+            self._trim_locked()
+
+    def _trim_locked(self) -> None:
+        terminal = [
+            record
+            for record in self._records.values()
+            if str(record.get("status")) in {"completed", "failed", "unavailable", "interrupted"}
+        ]
+        terminal.sort(key=self._sort_key, reverse=True)
+        for record in terminal[self.history_limit :]:
+            job_id = record.get("id")
+            if isinstance(job_id, str):
+                self._records.pop(job_id, None)
+
+    def _write(self) -> None:
+        with self._lock:
+            self._trim_locked()
+            payload = self._copy({job_id: self._records[job_id] for job_id in sorted(self._records)})
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_name(f".{self.path.name}.tmp")
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+        temporary.replace(self.path)
+
+    def put(self, record: dict[str, Any]) -> dict[str, Any]:
+        copied = self._copy(record)
+        job_id = copied.get("id")
+        if not isinstance(job_id, str) or not job_id:
+            raise ValueError("Durable job record requires an opaque ID.")
+        with self._lock:
+            if job_id in self._records:
+                raise ValueError("Durable job ID already exists.")
+            self._records[job_id] = copied
+        self._writer.request(immediate=True)
+        return self._copy(copied)
+
+    def get(self, job_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            record = self._records.get(job_id)
+            return self._copy(record) if record is not None else None
+
+    def records(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [self._copy(self._records[job_id]) for job_id in sorted(self._records)]
+
+    def update(self, job_id: str, changes: dict[str, Any], *, progress_only: bool = False) -> dict[str, Any] | None:
+        copied = self._copy(changes)
+        with self._lock:
+            record = self._records.get(job_id)
+            if record is None:
+                return None
+            record.update(copied)
+            result = self._copy(record)
+        self._writer.request(immediate=not progress_only)
+        return result
+
+    def flush(self) -> None:
+        self._writer.flush()
+
+    def close(self) -> None:
+        """Flush without starting or stopping any external process."""
+
+        self.flush()
