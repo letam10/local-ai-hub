@@ -29,12 +29,28 @@ ACCEPTANCE_OPT_IN_ENV = "LOCALAIHUB_RUN_ACCEPTANCE_RUNTIME"
 ACCEPTANCE_APPROVAL_ENV = "LOCALAIHUB_ACCEPTANCE_APPROVAL_PATH"
 ACCEPTANCE_TEMP_ENV = "LOCALAIHUB_ACCEPTANCE_TEMP_ROOT"
 ACCEPTANCE_APPROVAL_ID = "UXNW-V5-ACCEPT-RUNTIME-002-cpu-1"
+ACCEPTANCE_APPROVAL_VERSION = 2
+ACCEPTANCE_AUTHORIZED_BY = "Active UX, Node Workflow & Functional Smoke user goal"
+ACCEPTANCE_RELEASE_BRANCH = "feature/local-ai-hub-v5"
 ACCEPTANCE_RELEASE_HEAD = "c3ba39d3219778217c56f448ed69cdde3bd3bd70"
 ACCEPTANCE_BRANCH = "feature/local-ai-hub-v5-lah2-accept-runtime"
+ACCEPTANCE_OBJECTIVE = "One task-owned CPU FFmpeg media acceptance pipeline proving the closed opaque-artifact boundary and output lifecycle."
 ACCEPTANCE_MAX_WALL_SECONDS = 60.0
 ACCEPTANCE_INPUT_MAX_BYTES = 1 * 1024 * 1024
 ACCEPTANCE_OVERLAY_MAX_BYTES = 128 * 1024
 ACCEPTANCE_OUTPUT_MAX_BYTES = 4 * 1024 * 1024
+ACCEPTANCE_OPERATIONS = ["video_grade", "logo_overlay", "encode"]
+ACCEPTANCE_PROHIBITED = [
+    "GPU launch",
+    "model/provider/SAM2/AnimeSR/RIFE execution",
+    "benchmark or stress test",
+    "source overwrite",
+    "raw client filesystem paths",
+    "external network",
+    "dependency or model installation",
+    "driver/CUDA/config changes",
+    "broad process termination",
+]
 
 
 class AcceptanceFailure(RuntimeError):
@@ -129,6 +145,22 @@ def _temporary_attribute(target: Any, name: str, value: Any):
         setattr(target, name, original)
 
 
+def _exact_json_value(value: Any, expected: Any) -> bool:
+    """Compare approval JSON with type-sensitive, deterministic semantics."""
+
+    if type(value) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return set(value) == set(expected) and all(_exact_json_value(value[key], expected[key]) for key in expected)
+    if isinstance(expected, list):
+        return len(value) == len(expected) and all(_exact_json_value(item, wanted) for item, wanted in zip(value, expected))
+    return value == expected
+
+
+def _is_git_identity(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 40 and all(character in "0123456789abcdef" for character in value)
+
+
 def _approval_guard(approval_path: Path, repo_root: Path) -> tuple[bool, str]:
     try:
         approval = json.loads(approval_path.read_text(encoding="utf-8"))
@@ -137,28 +169,78 @@ def _approval_guard(approval_path: Path, repo_root: Path) -> tuple[bool, str]:
     if not isinstance(approval, dict):
         return False, "approval_invalid"
     release = approval.get("release") if isinstance(approval.get("release"), dict) else {}
-    limits = approval.get("limits") if isinstance(approval.get("limits"), dict) else {}
-    allowed_output = approval.get("allowed_output") if isinstance(approval.get("allowed_output"), dict) else {}
+    source = approval.get("source") if isinstance(approval.get("source"), dict) else {}
+    fixed_scopes = (
+        ("release", release, {"branch": ACCEPTANCE_RELEASE_BRANCH, "head": ACCEPTANCE_RELEASE_HEAD}),
+        ("allowed_input", approval.get("allowed_input"), {
+            "kind": "synthetic task-owned video",
+            "maximum_dimensions": "16x16",
+            "maximum_duration_seconds": 1,
+            "maximum_fps": 8,
+            "maximum_bytes": ACCEPTANCE_INPUT_MAX_BYTES,
+        }),
+        ("allowed_output", approval.get("allowed_output"), {
+            "maximum_bytes": ACCEPTANCE_OUTPUT_MAX_BYTES,
+            "operations": ACCEPTANCE_OPERATIONS,
+            "maximum_pipeline_jobs": 1,
+        }),
+        ("limits", approval.get("limits"), {
+            "wall_seconds": 60,
+            "no_retry": True,
+            "temporary_root": "task-owned only",
+            "stop_authority": "manager or user",
+            "cleanup_owner": "LAH 2",
+        }),
+        ("preflight", approval.get("preflight"), {
+            "require_existing_canonical_ffmpeg": True,
+            "require_no_download_or_install": True,
+            "require_free_space_check": True,
+            "require_no_interference_with_user_owned_processes": True,
+            "require_opaque_artifact_ids": True,
+        }),
+        ("gpu", approval.get("gpu"), {
+            "status": "not_authorized_by_this_approval",
+            "next_action": "Read-only RTX 4060/runtime/checkpoint preflight may be reported for a separately bound approval.",
+        }),
+    )
     if (
-        approval.get("approval_id") != ACCEPTANCE_APPROVAL_ID
+        not _exact_json_value(approval.get("approval_id"), ACCEPTANCE_APPROVAL_ID)
+        or not _exact_json_value(approval.get("approval_version"), ACCEPTANCE_APPROVAL_VERSION)
         or approval.get("status") != "approved"
-        or approval.get("owner") != "LAH 2"
-        or release.get("branch") != "feature/local-ai-hub-v5"
-        or release.get("head") != ACCEPTANCE_RELEASE_HEAD
-        or limits.get("wall_seconds") != 60
-        or limits.get("no_retry") is not True
-        or allowed_output.get("maximum_pipeline_jobs") != 1
-        or allowed_output.get("operations") != ["video_grade", "logo_overlay", "encode"]
+        or not _exact_json_value(approval.get("authorized_by"), ACCEPTANCE_AUTHORIZED_BY)
+        or not _exact_json_value(approval.get("owner"), "LAH 2")
+        or not _exact_json_value(approval.get("objective"), ACCEPTANCE_OBJECTIVE)
+        or any(not _exact_json_value(value, expected) for _name, value, expected in fixed_scopes)
+        or not _exact_json_value(approval.get("prohibited"), ACCEPTANCE_PROHIBITED)
+        or set(source) != {"branch", "base", "head", "tree"}
+        or source.get("branch") != ACCEPTANCE_BRANCH
+        or source.get("base") != ACCEPTANCE_RELEASE_HEAD
+        or not _is_git_identity(source.get("head"))
+        or not _is_git_identity(source.get("tree"))
     ):
-        return False, "approval_scope_mismatch"
+        return False, "approval_contract_mismatch"
     try:
-        branch = subprocess.run(["git", "branch", "--show-current"], cwd=repo_root, capture_output=True, text=True, check=False, timeout=5).stdout.strip()
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True, text=True, check=False, timeout=5).stdout.strip()
-        status = subprocess.run(["git", "status", "--porcelain"], cwd=repo_root, capture_output=True, text=True, check=False, timeout=5).stdout.strip()
+        branch_result = subprocess.run(["git", "branch", "--show-current"], cwd=repo_root, capture_output=True, text=True, check=False, timeout=5)
+        head_result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True, text=True, check=False, timeout=5)
+        tree_result = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=repo_root, capture_output=True, text=True, check=False, timeout=5)
+        status_result = subprocess.run(["git", "status", "--porcelain"], cwd=repo_root, capture_output=True, text=True, check=False, timeout=5)
+        merge_base = subprocess.run(["git", "merge-base", source["base"], "HEAD"], cwd=repo_root, capture_output=True, text=True, check=False, timeout=5)
         ancestry = subprocess.run(["git", "merge-base", "--is-ancestor", ACCEPTANCE_RELEASE_HEAD, "HEAD"], cwd=repo_root, capture_output=True, text=True, check=False, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return False, "git_guard_unavailable"
-    if branch != ACCEPTANCE_BRANCH or not head or status or ancestry.returncode != 0:
+    if (
+        branch_result.returncode != 0
+        or head_result.returncode != 0
+        or tree_result.returncode != 0
+        or status_result.returncode != 0
+        or branch_result.stdout.strip() != source["branch"]
+        or head_result.stdout.strip() != source["head"]
+        or tree_result.stdout.strip() != source["tree"]
+        or status_result.stdout.strip()
+        or merge_base.returncode != 0
+        or merge_base.stdout.strip() != source["base"]
+        or ancestry.returncode != 0
+    ):
         return False, "git_guard_mismatch"
     return True, "ok"
 

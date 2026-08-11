@@ -1,16 +1,77 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Callable
 from unittest.mock import patch
 
 
 class AcceptanceRuntimeTests(unittest.TestCase):
+    @staticmethod
+    def _approval(tool_smoke, *, source_head: str = "d" * 40, source_tree: str = "e" * 40) -> dict:
+        return {
+            "approval_id": tool_smoke.ACCEPTANCE_APPROVAL_ID,
+            "approval_version": tool_smoke.ACCEPTANCE_APPROVAL_VERSION,
+            "status": "approved",
+            "authorized_by": tool_smoke.ACCEPTANCE_AUTHORIZED_BY,
+            "release": {"branch": tool_smoke.ACCEPTANCE_RELEASE_BRANCH, "head": tool_smoke.ACCEPTANCE_RELEASE_HEAD},
+            "source": {
+                "branch": tool_smoke.ACCEPTANCE_BRANCH,
+                "base": tool_smoke.ACCEPTANCE_RELEASE_HEAD,
+                "head": source_head,
+                "tree": source_tree,
+            },
+            "owner": "LAH 2",
+            "objective": tool_smoke.ACCEPTANCE_OBJECTIVE,
+            "allowed_input": {
+                "kind": "synthetic task-owned video",
+                "maximum_dimensions": "16x16",
+                "maximum_duration_seconds": 1,
+                "maximum_fps": 8,
+                "maximum_bytes": tool_smoke.ACCEPTANCE_INPUT_MAX_BYTES,
+            },
+            "allowed_output": {
+                "maximum_bytes": tool_smoke.ACCEPTANCE_OUTPUT_MAX_BYTES,
+                "operations": list(tool_smoke.ACCEPTANCE_OPERATIONS),
+                "maximum_pipeline_jobs": 1,
+            },
+            "limits": {
+                "wall_seconds": 60,
+                "no_retry": True,
+                "temporary_root": "task-owned only",
+                "stop_authority": "manager or user",
+                "cleanup_owner": "LAH 2",
+            },
+            "preflight": {
+                "require_existing_canonical_ffmpeg": True,
+                "require_no_download_or_install": True,
+                "require_free_space_check": True,
+                "require_no_interference_with_user_owned_processes": True,
+                "require_opaque_artifact_ids": True,
+            },
+            "prohibited": list(tool_smoke.ACCEPTANCE_PROHIBITED),
+            "gpu": {
+                "status": "not_authorized_by_this_approval",
+                "next_action": "Read-only RTX 4060/runtime/checkpoint preflight may be reported for a separately bound approval.",
+            },
+        }
+
+    @staticmethod
+    def _git_results(tool_smoke, *, source_head: str = "d" * 40, source_tree: str = "e" * 40, branch: str | None = None, merge_base: str | None = None) -> list[subprocess.CompletedProcess[str]]:
+        completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        return [
+            subprocess.CompletedProcess([], 0, stdout=(branch or tool_smoke.ACCEPTANCE_BRANCH) + "\n", stderr=""),
+            subprocess.CompletedProcess([], 0, stdout=source_head + "\n", stderr=""),
+            subprocess.CompletedProcess([], 0, stdout=source_tree + "\n", stderr=""),
+            completed,
+            subprocess.CompletedProcess([], 0, stdout=(merge_base or tool_smoke.ACCEPTANCE_RELEASE_HEAD) + "\n", stderr=""),
+            completed,
+        ]
+
     def test_cpu_acceptance_requires_explicit_opt_in(self) -> None:
         from src.services import tool_smoke
 
@@ -21,31 +82,111 @@ class AcceptanceRuntimeTests(unittest.TestCase):
         self.assertEqual(result["execution"], "not_run")
         self.assertFalse(root.exists())
 
-    def test_approval_guard_requires_exact_scope_and_base_ancestry(self) -> None:
+    def test_approval_guard_requires_exact_scope_and_source_identity(self) -> None:
         from src.services import tool_smoke
 
-        approval = {
-            "approval_id": tool_smoke.ACCEPTANCE_APPROVAL_ID,
-            "status": "approved",
-            "owner": "LAH 2",
-            "release": {"branch": "feature/local-ai-hub-v5", "head": tool_smoke.ACCEPTANCE_RELEASE_HEAD},
-            "limits": {"wall_seconds": 60, "no_retry": True},
-            "allowed_output": {"maximum_pipeline_jobs": 1, "operations": ["video_grade", "logo_overlay", "encode"]},
-        }
+        source_head = "d" * 40
+        source_tree = "e" * 40
+        approval = self._approval(tool_smoke, source_head=source_head, source_tree=source_tree)
         with TemporaryDirectory() as directory:
             root = Path(directory)
             approval_path = root / "approval.json"
             approval_path.write_text(json.dumps(approval), encoding="utf-8")
-            completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
             with patch.object(tool_smoke.subprocess, "run", side_effect=[
-                subprocess.CompletedProcess([], 0, stdout=tool_smoke.ACCEPTANCE_BRANCH + "\n", stderr=""),
-                subprocess.CompletedProcess([], 0, stdout=tool_smoke.ACCEPTANCE_RELEASE_HEAD + "\n", stderr=""),
-                completed,
-                completed,
+                *self._git_results(tool_smoke, source_head=source_head, source_tree=source_tree),
             ]):
                 ok, code = tool_smoke._approval_guard(approval_path, root)
         self.assertTrue(ok)
         self.assertEqual(code, "ok")
+
+    def test_old_approval_without_source_binding_is_blocked_before_git(self) -> None:
+        from src.services import tool_smoke
+
+        approval = self._approval(tool_smoke)
+        approval.pop("source")
+        approval["approval_version"] = 1
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            approval_path = root / "approval.json"
+            approval_path.write_text(json.dumps(approval), encoding="utf-8")
+            with patch.object(tool_smoke.subprocess, "run") as git_run:
+                ok, code = tool_smoke._approval_guard(approval_path, root)
+        self.assertFalse(ok)
+        self.assertEqual(code, "approval_contract_mismatch")
+        git_run.assert_not_called()
+
+    def test_approval_identity_and_scope_drift_blocks_before_runtime(self) -> None:
+        from src.services import tool_smoke
+
+        source_head = "d" * 40
+        source_tree = "e" * 40
+        cases: list[tuple[str, Callable[[dict], object], str, list[subprocess.CompletedProcess[str]] | None]] = []
+
+        def contract_case(label: str, mutate: Callable[[dict], object]) -> None:
+            cases.append((label, mutate, "approval_contract_mismatch", None))
+
+        contract_case("approval version", lambda value: value.update(approval_version=1))
+        contract_case("release branch", lambda value: value["release"].update(branch="feature/other"))
+        contract_case("release head", lambda value: value["release"].update(head="a" * 40))
+        contract_case("source branch", lambda value: value["source"].update(branch="feature/other"))
+        contract_case("source base", lambda value: value["source"].update(base="a" * 40))
+        contract_case("objective", lambda value: value.update(objective="different objective"))
+        contract_case("scope", lambda value: value["allowed_output"].update(operations=["video_grade"]))
+        contract_case("missing source", lambda value: value.pop("source"))
+        contract_case("missing limits", lambda value: value.pop("limits"))
+        contract_case("missing prohibition", lambda value: value.pop("prohibited"))
+        cases.extend([
+            (
+                "current HEAD",
+                lambda value: value,
+                "git_guard_mismatch",
+                self._git_results(tool_smoke, source_head="f" * 40, source_tree=source_tree),
+            ),
+            (
+                "current tree",
+                lambda value: value,
+                "git_guard_mismatch",
+                self._git_results(tool_smoke, source_head=source_head, source_tree="f" * 40),
+            ),
+            (
+                "current branch",
+                lambda value: value,
+                "git_guard_mismatch",
+                self._git_results(tool_smoke, source_head=source_head, source_tree=source_tree, branch="feature/other"),
+            ),
+            (
+                "current base",
+                lambda value: value,
+                "git_guard_mismatch",
+                self._git_results(tool_smoke, source_head=source_head, source_tree=source_tree, merge_base="a" * 40),
+            ),
+        ])
+
+        for label, mutate, expected_code, git_results in cases:
+            with self.subTest(label=label):
+                approval = self._approval(tool_smoke, source_head=source_head, source_tree=source_tree)
+                mutate(approval)
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    approval_path = root / "approval.json"
+                    task_root = root / "task-root"
+                    approval_path.write_text(json.dumps(approval), encoding="utf-8")
+                    with (
+                        patch.object(tool_smoke.subprocess, "run", side_effect=git_results) as git_run,
+                        patch("src.modules.media_editor.backend.adapter._paths", side_effect=AssertionError("FFmpeg lookup must not run")) as paths,
+                        patch.object(tool_smoke, "_run_cpu_pipeline", side_effect=AssertionError("pipeline must not run")),
+                    ):
+                        result = tool_smoke.run_cpu_media_acceptance(
+                            opt_in=True,
+                            approval_path=approval_path,
+                            task_root=task_root,
+                            repo_root=root,
+                        )
+                self.assertEqual(result["status"], "blocked")
+                self.assertEqual(result["failure_code"], expected_code)
+                paths.assert_not_called()
+                if git_results is None:
+                    git_run.assert_not_called()
 
     def test_closed_public_payload_rejects_path_before_resolution(self) -> None:
         from src.modules.media_editor.backend import adapter
