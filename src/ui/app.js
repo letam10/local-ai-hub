@@ -59,12 +59,14 @@ import {
 } from "./api.js";
 import { disposeNodeStudios, mountNodeStudios } from "./node_studio.js";
 import { mountImageMaskCanvases } from "./image_mask_studio.js";
+import { createWorkflowLibraryAdapter } from "./workflow_library.js";
 import { NAVIGATION, renderPage } from "./pages.js";
 
 const state = {
   health: {}, components: [], tools: [], applications: [], jobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", apiStatus: "loading", apiError: "",
   creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
+  workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trong V5-D trước khi đồng bộ." },
 };
 const view = document.querySelector("#module-view");
 const nav = document.querySelector("#sidebar-nav");
@@ -76,6 +78,7 @@ const toastRegion = document.querySelector("#toast-region");
 const sidebar = document.querySelector(".sidebar");
 const sidebarToggle = document.querySelector("#sidebar-toggle");
 const artifactPreviewLayer = document.querySelector("#artifact-preview-layer");
+const workflowLibraryAdapter = createWorkflowLibraryAdapter();
 let routeLoad = null;
 let desktopCloseLayer = null;
 let disposeImageMaskCanvases = () => {};
@@ -333,6 +336,7 @@ const render = () => {
       initialPresetId: state.pendingGalleryPreset,
       onRecipeApplied: () => { state.pendingNodeRecipe = null; },
       onPresetApplied: () => { state.pendingGalleryPreset = null; },
+      workflowLibrary: workflowLibraryAdapter,
     });
   }
   if (view.querySelector("[data-mask-canvas]")) {
@@ -363,6 +367,7 @@ const applyBootstrap = (payload) => {
   state.tools = payload.tools || [];
   state.settings = payload.settings || {};
   state.lifecycle = payload.lifecycle || {};
+  if (payload.workflow_library && typeof payload.workflow_library === "object") state.workflowLibrary = payload.workflow_library;
 };
 
 const refreshFast = async ({ quiet = false } = {}) => {
@@ -476,6 +481,10 @@ const initialize = async () => {
     state.apiError = error.message;
     showToast(`API chưa sẵn sàng: ${error.message}`, "warning");
   }
+  try {
+    const library = await workflowLibraryAdapter.list();
+    if (library?.status) state.workflowLibrary = library;
+  } catch { /* Keep the explicit partial adapter state. */ }
   render();
   await loadRouteData();
 };

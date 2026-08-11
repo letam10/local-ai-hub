@@ -28,6 +28,12 @@ const workspaceState = (label, item = {}, fallbackAction = "Kiểm tra backend r
   const action = item.action || fallbackAction;
   return `<section class="workspace-state" data-status="${escapeHtml(status)}" aria-live="polite"><div class="workspace-state__head"><div><span class="eyebrow">BACKEND CONTRACT</span><h2>${escapeHtml(label)}</h2></div>${statusPill(status)}</div><p>${escapeHtml(reason)}</p><div class="workspace-state__action"><strong>Bước tiếp theo</strong><span>${escapeHtml(action)}</span></div></section>`;
 };
+const workflowLibraryState = (item = {}) => {
+  const status = String(item.status || "partial");
+  const reason = String(item.reason || "Workflow Library server-owned adapter chưa được V5-D wire.");
+  const action = String(item.action || "Tiếp tục local draft; xác nhận endpoint typed trước khi đồng bộ.");
+  return '<section class="workflow-library-state card card--flat" data-status="' + escapeHtml(status) + '" aria-labelledby="workflow-library-title"><div class="card-title-row"><div><span class="eyebrow">WORKFLOW LIBRARY</span><h2 id="workflow-library-title">Workflow bền vững, local-first</h2></div>' + statusPill(status) + '</div><p>' + escapeHtml(reason) + '</p><div class="workspace-state__action"><strong>Bước tiếp theo</strong><span>' + escapeHtml(action) + '</span></div><small class="small">Graph chỉ là declarative metadata; không tự chạy node hoặc GPU khi chỉnh sửa.</small></section>';
+};
 const activeTab = (state, module) => state.workspaceTabs?.[module] || "quick";
 const moduleTabs = (state, module) => {
   const selected = activeTab(state, module);
@@ -162,11 +168,13 @@ function renderDashboard(state) {
   const gpuDetail = gpu.memory_free_mib != null ? `${gpu.memory_free_mib} MiB VRAM trống` : "Snapshot GPU chưa sẵn sàng";
   const diskValue = disk.free_bytes != null ? formatGb(disk.free_bytes) : "—";
   const readinessNote = readiness === "healthy" || readiness === "operational" ? "Hub API snapshot ổn định; readiness của từng module vẫn được hiển thị riêng." : "Kiểm tra các mục cần chú ý trước khi chạy workflow.";
+  const workflowLibraryHtml = workflowLibraryState(source.workflowLibrary);
   return `<section class="dashboard-page" aria-labelledby="dashboard-title">
     <section class="dashboard-hero">
       <div><span class="eyebrow">CONTROL PLANE</span><h1 id="dashboard-title">Dashboard</h1><p>${escapeHtml(readinessNote)}</p></div>
       ${statusPill(readiness, formatStatus(readiness))}
     </section>
+    ${workflowLibraryHtml}
     <section class="dashboard-metric-grid" aria-label="Readiness metrics">
       ${metric("Hub API", formatStatus(readiness), "Static readiness snapshot")}
       ${metric("GPU", gpuValue, gpuDetail)}
@@ -470,7 +478,7 @@ function renderCreativeWorkspace(state) {
   const creative = state.creative || {};
   if (state.creativeLoading && !creative.contract_version) return heading("CREATIVE WORKSPACE", "Projects & Recipes", "Đang tải metadata local an toàn từ Hub.") + `<div class="empty-state" role="status"><strong>Đang tải Creative Workspace…</strong><span>Không đọc hoặc hiển thị raw filesystem path.</span></div>`;
   const active = state.creativeTab || "projects";
-  const content = active === "assets" ? renderCreativeAssets(state) : active === "recipes" ? renderCreativeRecipes(state) : active === "compare" ? renderCreativeCompare(state) : active === "gallery" ? renderCreativeGallery(state) : renderCreativeProjects(state);
+  const content = workflowLibraryState(state.workflowLibrary) + (active === "assets" ? renderCreativeAssets(state) : active === "recipes" ? renderCreativeRecipes(state) : active === "compare" ? renderCreativeCompare(state) : active === "gallery" ? renderCreativeGallery(state) : renderCreativeProjects(state));
   return heading("CREATIVE WORKSPACE", "Projects, Assets & Recipes", "Tổ chức creative work theo project → artifact → recipe → workflow → compare. Local metadata được version hóa, an toàn và không đóng gói output/model/secrets.", `<button class="button" type="button" data-refresh-creative>Làm mới workspace</button>`) + creativeTabs(state) + creativeRecovery(creative.recovery) + content;
 }
 

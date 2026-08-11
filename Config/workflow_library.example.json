@@ -1,0 +1,23 @@
+{
+  "schema_version": "workflow-library.v1",
+  "storage": {
+    "mode": "local-first",
+    "user_state": "ignored-config/workflow_library.json",
+    "tracked_presets": "workflow_packages/samples"
+  },
+  "limits": {
+    "max_workflows": 256,
+    "max_graph_nodes": 192,
+    "max_graph_edges": 384,
+    "max_library_bytes": 2097152
+  },
+  "migration": {
+    "source": "localStorage",
+    "mode": "user-mediated-dry-run",
+    "auto_overwrite": false
+  },
+  "runtime": {
+    "execution": "separately-authorized",
+    "status_without_smoke": "partial"
+  }
+}

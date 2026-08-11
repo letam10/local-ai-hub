@@ -339,9 +339,16 @@ Chi tiết UX và hướng dẫn vận hành nằm ở
 
 ## M4A Reliability & Large Media ownership
 
-Product release version nằm duy nhất ở `src/shared/version.py` (`4.0.0`). Nó
+Product release version nằm duy nhất ở `src/shared/version.py` (`5.0.0`). Nó
 được projection vào `/health`, HTTP server header và tracked component example;
 không đổi schema/contract version riêng của job, graph hoặc creative records.
+
+V5-C bổ sung Workflow Library local-first trong services/workflow_library/.
+Library chỉ lưu declarative graph metadata, dùng workflow-library.v1, atomic
+replace và optimistic library revision. Import/export đóng, canonical và
+redacted; migration từ localStorage luôn dry-run/user-mediated. UI không gọi
+route đoán trước: bridge server-owned chỉ được wire trong V5-D, còn thiếu
+bridge thì hiển thị partial/reason/next action.
 
 | Module | Sở hữu hardening | Không sở hữu |
 | --- | --- | --- |
