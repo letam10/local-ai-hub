@@ -30,7 +30,16 @@ export const getModels = () => request("/api/models");
 export const getApplications = () => request("/api/applications");
 export const getSettings = () => request("/api/settings");
 export const getJobs = () => request("/api/jobs");
+export const getDurableJobs = () => request("/api/durable-jobs");
+export const resumeDurableJob = (id) => request(`/api/durable-jobs/${encodeURIComponent(id)}/resume`, { method: "POST" });
 export const getLifecycle = () => request("/api/lifecycle");
+export const getCapabilities = () => request("/api/capabilities");
+export const getWorkflowLibrary = () => request("/api/workflow-library");
+export const getWorkflowLibraryEntry = (id) => request(`/api/workflow-library/${encodeURIComponent(id)}`);
+export const saveWorkflowLibrary = (workflow, expectedRevision) => request("/api/workflow-library", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workflow, expected_revision: expectedRevision }) });
+export const deleteWorkflowLibrary = (id, expectedRevision) => request(`/api/workflow-library/${encodeURIComponent(id)}`, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expected_revision: expectedRevision }) });
+export const planWorkflowLibraryMigration = (entries) => request("/api/workflow-library/migration/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ entries }) });
+export const confirmWorkflowLibraryMigration = (entries, expectedRevision) => request("/api/workflow-library/migration/confirm", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ entries, expected_revision: expectedRevision }) });
 
 export const uploadFile = async (file) => {
   if (!file) throw new Error("Chọn tệp trước khi tải lên Hub.");

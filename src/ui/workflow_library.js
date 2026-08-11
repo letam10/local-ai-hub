@@ -23,11 +23,12 @@ const resultOrPartial = (value) => {
   return detached(value) || { ...PARTIAL };
 };
 
-export function createWorkflowLibraryAdapter(bridge = globalThis.pywebview?.api?.workflow_library) {
+export function createWorkflowLibraryAdapter(bridge = globalThis.pywebview?.api?.workflow_library, http = null) {
   const invoke = async (method, payload) => {
-    if (!bridge || typeof bridge[method] !== "function") return { ...PARTIAL };
+    const target = bridge && typeof bridge[method] === "function" ? bridge : http;
+    if (!target || typeof target[method] !== "function") return { ...PARTIAL };
     try {
-      return resultOrPartial(await bridge[method](detached(payload)));
+      return resultOrPartial(await target[method](detached(payload)));
     } catch {
       return {
         status: "partial",

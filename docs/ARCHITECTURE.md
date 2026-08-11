@@ -402,3 +402,22 @@ dummy processes to prove cold start, a second external-API desktop instance,
 zero-active cleanup, background/restore, cooperative cancellation and native
 tray re-registration. It never starts the production API, probes GPU hardware
 or executes media/model work.
+## V5-D End-to-End productization boundary
+
+V5-D is a composition layer, not a replacement engine.  The API bootstrap
+snapshot joins the existing capability registry/Module Manager preflight,
+durable public job records, Workflow Library revision state, and Artifact Store
+health through `src/services/api/v5_productization.py`.  Its output is
+`v5-product-surface.v1`, always `execution: not_run` and `dry_run: true`.
+
+The Dashboard consumes that server-owned snapshot for readiness, module
+reason/next-action, recovery counts, and GPU/storage warnings.  Workflow
+Library routes use the existing validator and atomic optimistic-revision store:
+list/read are read-only, save/import/delete require typed revisions, migration
+has separate dry-run and user-confirmed endpoints, and conflict/recovery
+responses remain visible instead of overwriting local state.
+
+No client callable, command, manifest, raw path, secret, model/media blob, or
+execution descriptor is reflected into these public projections.  Runtime,
+provider, GPU, video, download, and install claims remain deferred unless a
+separate bounded evidence gate exists.
