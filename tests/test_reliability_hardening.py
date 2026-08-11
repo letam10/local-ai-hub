@@ -584,7 +584,7 @@ class ProductVersionTests(unittest.TestCase):
         from src.services.api.core import health
         from src.shared.version import PRODUCT_VERSION
 
-        self.assertEqual(PRODUCT_VERSION, "4.0.0")
+        self.assertEqual(PRODUCT_VERSION, "5.0.0")
         with patch("src.services.api.core.query_gpu", return_value={"available": False}):
             self.assertEqual(health(probe_gpu=False)["version"], PRODUCT_VERSION)
         self.assertEqual(HubHandler.server_version, f"LocalAIHub/{PRODUCT_VERSION}")
@@ -592,6 +592,8 @@ class ProductVersionTests(unittest.TestCase):
         versions = {item["id"]: item["version"] for item in examples["components"]}
         self.assertEqual(versions["local_ai_api"], PRODUCT_VERSION)
         self.assertEqual(versions["local_ai_mcp"], PRODUCT_VERSION)
+        extension_examples = json.loads((Path(__file__).resolve().parents[1] / "Config" / "extensions.example.json").read_text(encoding="utf-8"))
+        self.assertEqual(extension_examples["hub_version"], PRODUCT_VERSION)
 
 
 if __name__ == "__main__":

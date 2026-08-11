@@ -24,6 +24,14 @@ $destination = [IO.Path]::GetFullPath($map.destination)
 $sourcePython = Join-Path $source 'Scripts\python.exe'
 $destinationPython = Join-Path $destination 'Scripts\python.exe'
 
+if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+    try { $completedState = Get-Content -LiteralPath $statePath -Raw -Encoding utf8 | ConvertFrom-Json } catch { $completedState = $null }
+    if ($completedState -and $completedState.$Component -and $completedState.$Component.status -eq 'legacy_removed') {
+        Write-Output "V3 environment migration is historical for $Component; the canonical replacement is already recorded and the legacy environment remains absent."
+        exit 0
+    }
+}
+
 function Get-ProcessReference([string]$path) {
     $needle = [IO.Path]::GetFullPath($path).TrimEnd('\')
     try {

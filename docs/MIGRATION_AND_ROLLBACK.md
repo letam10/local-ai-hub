@@ -1,4 +1,12 @@
-# Migration và rollback an toàn
+# Historical V2/V3 migration and rollback record
+
+> **Historical only.** This document describes the controlled V2/V3 path for
+> a host that had not completed consolidation. It is not a current runtime or
+> maintenance workflow. A host with local `historical_snapshot: true` has
+> completed its storage consolidation, and the historical scripts refuse to
+> recreate a plan, fallback, junction, or deletion action. Current runtime,
+> configuration, launchers, and shortcuts use canonical paths under
+> `D:\LocalAIHub`.
 
 ## Điều kiện trước khi di chuyển
 

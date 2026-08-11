@@ -1,8 +1,11 @@
-"""Create the ignored V3 legacy-cleanup inventory without changing data.
+"""Historical V3 legacy-cleanup inventory for a not-yet-consolidated host.
 
 Only reviewed AI paths are inspected.  The scanner deliberately does not walk
 ordinary personal media roots beyond the known application candidates, and it
 never follows junctions when calculating bytes.
+
+It is not invoked by the Hub.  On a host that records a completed historical
+snapshot, it refuses to overwrite that final evidence with a stale plan.
 """
 
 from __future__ import annotations
@@ -341,6 +344,13 @@ def write_summary(records: list[dict[str, Any]], disk_before: int) -> None:
 
 
 def main() -> int:
+    try:
+        existing = json.loads(STATE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        existing = {}
+    if isinstance(existing, dict) and (existing.get("historical_snapshot") or existing.get("not_runtime_configuration")):
+        print("V3 inventory is historical on this completed host; no state or report was rewritten.")
+        return 0
     disk = shutil.disk_usage(ROOT)
     records = [record(candidate) for candidate in CANDIDATES]
     STATE.write_text(json.dumps({"schema_version": 1, "generated_at": datetime.now(UTC).isoformat(), "records": records}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
