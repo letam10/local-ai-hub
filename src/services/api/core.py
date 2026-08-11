@@ -15,7 +15,7 @@ from src.shared.version import PRODUCT_VERSION
 from src.services.job_manager.manager import JobContext, job_manager
 from src.services.tool_smoke import passed as smoke_passed
 
-from .config import BASE_DIR, component, components, hub_config
+from .config import BASE_DIR, component, components, hub_config, module_manager_config
 from .gpu import gpu_policy, query_gpu
 from .jobs import active_jobs, get_job, list_jobs
 
@@ -256,6 +256,33 @@ def health(*, probe_gpu: bool = False) -> dict[str, Any]:
         "gpu_policy": gpu_policy(config),
         "active_jobs": len(active),
         "loaded_models": [],
+    }
+
+
+def capability_control_plane(*, hardware: dict[str, Any] | None = None, sources: dict[str, dict[str, Any]] | None = None, mode: str | None = None) -> dict[str, Any]:
+    """Return a server-owned V5 capability registry and Module Manager preflight.
+
+    This is a read-only composition boundary.  It does not accept a client
+    manifest, execute a provider, download anything, or mutate a filesystem.
+    """
+
+    from src.services.module_manager import ModuleManager, build_capability_registry
+
+    configuration = module_manager_config()
+    registry = build_capability_registry(sources=sources)
+    manager = ModuleManager(registry)
+    configured_hardware = hardware if hardware is not None else configuration.get("hardware_snapshot")
+    configured_mode = mode if mode in {"parallel", "serial"} else str(configuration.get("resource_mode", "parallel"))
+    if configured_mode not in {"parallel", "serial"}:
+        configured_mode = "parallel"
+    plan = manager.preflight(hardware=configured_hardware, mode=configured_mode)
+    return {
+        "status": plan.get("status", registry.get("status", "unavailable")),
+        "schema_version": "capability-control-plane.v1",
+        "execution": "not_run",
+        "dry_run": True,
+        "registry": registry,
+        "module_manager": plan,
     }
 
 

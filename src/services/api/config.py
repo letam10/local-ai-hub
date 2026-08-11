@@ -28,6 +28,13 @@ def hub_config() -> dict[str, Any]:
     return load_json("hub_config.json", {})
 
 
+def module_manager_config() -> dict[str, Any]:
+    """Load the bounded server-owned Module Manager example/config contract."""
+
+    value = load_json("module_manager.json", {})
+    return value if isinstance(value, dict) else {}
+
+
 def components() -> list[dict[str, Any]]:
     value = load_json("components.json", {})
     return list(value.get("components", []))
