@@ -14,6 +14,7 @@ from .projection import (
     project_section,
     reason_text,
 )
+from .defaults import build_server_owned_gateway_snapshot
 
 __all__ = [
     "CapabilityGateway",
@@ -26,4 +27,5 @@ __all__ = [
     "project_invalid_response",
     "project_section",
     "reason_text",
+    "build_server_owned_gateway_snapshot",
 ]

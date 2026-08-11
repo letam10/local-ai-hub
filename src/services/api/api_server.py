@@ -24,7 +24,7 @@ from src.shared.paths.registry import ROOT
 from src.shared.version import PRODUCT_VERSION
 
 from .config import hub_config
-from .core import component_statuses, get_job_or_error, health, prepare_owned_shutdown, submit_graph, submit_tool, tool_catalog
+from .core import capability_control_plane, component_statuses, get_job_or_error, health, prepare_owned_shutdown, submit_graph, submit_tool, tool_catalog
 from .jobs import flush as flush_jobs
 from .jobs import reconcile_startup
 from .jobs import get_job, list_jobs
@@ -527,6 +527,8 @@ class HubHandler(BaseHTTPRequestHandler):
             self._write(200, health(probe_gpu=False))
         elif normalized == "/api/bootstrap":
             self._write(200, _bootstrap_payload())
+        elif normalized == "/api/capabilities":
+            self._write(200, capability_control_plane())
         elif normalized == "/tools":
             self._write(200, {"status": "completed", "tools": tool_catalog()})
         elif normalized == "/models":

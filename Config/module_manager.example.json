@@ -1,0 +1,18 @@
+{
+  "schema_version": "module-manager-config.v1",
+  "resource_mode": "parallel",
+  "hardware_snapshot": null,
+  "target_gpu": {
+    "vendor": "nvidia",
+    "device_class": "discrete",
+    "model": "RTX 4060",
+    "vram_mb": 8192
+  },
+  "managed_manifest_policy": {
+    "https_only": true,
+    "sha256_required": true,
+    "allow_shell": false,
+    "allow_local_paths": false
+  },
+  "modules": []
+}

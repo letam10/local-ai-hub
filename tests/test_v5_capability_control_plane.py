@@ -1,0 +1,164 @@
+"""Bounded V5-B capability registry and Module Manager contract tests."""
+
+from __future__ import annotations
+
+import copy
+import unittest
+
+from src.services.api.core import capability_control_plane
+from src.services.module_manager import build_capability_registry, build_module_plan, plan_module_resources
+from src.shared.schemas.module_manager import (
+    CAPABILITY_REGISTRY_SCHEMA_VERSION,
+    canonical_module_manager_json,
+    capability_registry_schema,
+    module_manager_schema,
+    validate_capability_registry,
+    validate_module_plan,
+)
+
+
+def _sources() -> dict[str, dict[str, object]]:
+    return {
+        key: {
+            "status": "partial",
+            "reason": "Static metadata only.",
+            "action": "Review separately authorized evidence.",
+            "records": [{"id": f"{key}-one", "version": "1.0.0", "status": "partial"}],
+        }
+        for key in ("extensions", "workflow_packages", "assets", "privacy", "capability_gateway")
+    } | {
+        "release_evidence": {
+            "status": "not_published",
+            "reason": "No packet was published for this snapshot.",
+            "action": "Publish a manager-admitted packet before release claims.",
+        }
+    }
+
+
+def _record(identifier: str, *, status: str = "available", dependencies: list[dict[str, object]] | None = None, observed: str = "observed", evidence: str = "static") -> dict[str, object]:
+    return {
+        "id": identifier,
+        "provider": "fixture-provider",
+        "component": identifier,
+        "tool": None,
+        "workflow": "fixture-workflow",
+        "version": "1.0.0",
+        "dependencies": dependencies or [],
+        "observed": {"state": observed, "fingerprint": "a" * 64, "source": "fixture-provider"},
+        "evidence": {"state": evidence, "fingerprint": "a" * 64},
+        "resource_hints": {"gpu": {"required": True, "vendor": "nvidia", "device_class": "discrete", "vram_mb": 6000, "target": "RTX 4060"}},
+        "status": status,
+        "reason": "Static fixture evidence is bounded.",
+        "next_action": "Review the static fixture before runtime work.",
+        "source": "server_owned",
+        "license": "fixture-license",
+        "model_requirements": [],
+    }
+
+
+class V5CapabilityControlPlaneTests(unittest.TestCase):
+    def test_registry_schema_parity_is_deterministic_and_redacted(self) -> None:
+        first = build_capability_registry(sources=_sources())
+        second = build_capability_registry(sources=_sources())
+        self.assertEqual(first, second)
+        self.assertEqual(first["schema_version"], CAPABILITY_REGISTRY_SCHEMA_VERSION)
+        self.assertEqual(first["execution"], "not_run")
+        self.assertTrue(first["dry_run"])
+        self.assertTrue(validate_capability_registry(first)["valid"])
+        encoded = canonical_module_manager_json(first)
+        for forbidden in ("C:\\private", "file:", "data:", "Bearer ", "sk-live", "command.exe"):
+            self.assertNotIn(forbidden.lower(), encoded.lower())
+
+    def test_untrusted_input_is_rejected_without_echo(self) -> None:
+        marker = "sec" + "ret-marker"
+        unsafe = _record("unsafe")
+        unsafe["command"] = "powershell -enc never-run"
+        unsafe["reason"] = f"C:\\private\\{marker}"
+        registry = build_capability_registry(records=[unsafe])
+        self.assertEqual(registry["records"], [])
+        encoded = canonical_module_manager_json(registry)
+        self.assertNotIn(marker, encoded)
+        self.assertNotIn("powershell", encoded.lower())
+
+    def test_stale_evidence_never_remains_operational(self) -> None:
+        stale = _record("stale", status="operational", observed="stale", evidence="stale")
+        changed = _record("changed", status="operational")
+        changed["evidence"] = {"state": "static", "fingerprint": "b" * 64}
+        registry = build_capability_registry(records=[stale, changed])
+        statuses = {item["id"]: item["status"] for item in registry["records"]}
+        self.assertEqual(statuses["stale"], "partial")
+        self.assertEqual(statuses["changed"], "partial")
+
+    def test_dependency_missing_and_cycle_are_reported(self) -> None:
+        missing = _record("missing-root", dependencies=[{"id": "absent", "version": "1.0.0", "optional": False}])
+        cycle_a = _record("cycle-a", dependencies=[{"id": "cycle-b", "version": "1.0.0", "optional": False}])
+        cycle_b = _record("cycle-b", dependencies=[{"id": "cycle-a", "version": "1.0.0", "optional": False}])
+        plan = build_module_plan([missing, cycle_a, cycle_b])
+        self.assertEqual(plan["execution"], "not_run")
+        self.assertTrue(plan["dry_run"])
+        self.assertEqual(plan["status"], "error")
+        codes = {item["code"] for item in plan["errors"]}
+        self.assertEqual(codes, {"missing_dependency", "dependency_cycle"})
+
+    def test_physical_gpu_fit_is_distinct_from_concurrent_allocation(self) -> None:
+        requests = [
+            {"id": "one", "resource_hints": {"gpu": {"required": True, "vendor": "nvidia", "device_class": "discrete", "vram_mb": 6000}}},
+            {"id": "two", "resource_hints": {"gpu": {"required": True, "vendor": "nvidia", "device_class": "discrete", "vram_mb": 6000}}},
+        ]
+        hardware = {"gpus": [{"id": "gpu-1", "vendor": "nvidia", "device_class": "discrete", "model": "RTX 4060", "vram_mb": 8192}]}
+        parallel = plan_module_resources(requests, hardware=hardware, mode="parallel")
+        serial = plan_module_resources(requests, hardware=hardware, mode="serial")
+        self.assertEqual([item["status"] for item in parallel["physical"]], ["available", "available"])
+        self.assertEqual(parallel["concurrent"][1]["status"], "partial")
+        self.assertEqual([item["status"] for item in serial["concurrent"]], ["available", "available"])
+        oversize = plan_module_resources([{"id": "huge", "resource_hints": {"gpu": {"required": True, "vendor": "nvidia", "device_class": "discrete", "vram_mb": 9000}}}], hardware=hardware)
+        self.assertEqual(oversize["status"], "unavailable")
+
+    def test_not_published_and_manifest_policy_remain_truthful(self) -> None:
+        plan = build_module_plan([_record("unpublished")])
+        self.assertEqual(plan["modules"][0]["status"], "not_published")
+        unsafe_manifest = plan_module_resources(
+            [{"id": "unsafe", "source_manifest": {"url": "http://example.invalid/pkg", "sha256": "a" * 64}}],
+            hardware=None,
+        )
+        self.assertEqual(unsafe_manifest["status"], "unavailable")
+        self.assertEqual(unsafe_manifest["errors"][0]["code"], "source_url_policy")
+        missing_hash = plan_module_resources(
+            [{"id": "missing-hash", "source_manifest": {"url": "https://example.invalid/pkg"}}],
+            hardware=None,
+        )
+        self.assertEqual(missing_hash["errors"][0]["code"], "source_sha256_required")
+
+    def test_control_plane_is_server_owned_dry_run_projection(self) -> None:
+        snapshot = capability_control_plane(sources=_sources(), hardware=None, mode="serial")
+        self.assertEqual(snapshot["schema_version"], "capability-control-plane.v1")
+        self.assertEqual(snapshot["execution"], "not_run")
+        self.assertTrue(snapshot["dry_run"])
+        self.assertEqual(snapshot["module_manager"]["execution"], "not_run")
+        detached = copy.deepcopy(snapshot)
+        detached["registry"]["records"].clear()
+        self.assertTrue(snapshot["registry"]["records"])
+
+    def test_module_plan_schema_validation(self) -> None:
+        plan = build_module_plan([_record("schema-check")])
+        self.assertTrue(validate_module_plan(plan)["valid"])
+
+    def test_closed_schemas_cover_emitted_projection_keys(self) -> None:
+        projections = (
+            (build_capability_registry(sources=_sources()), capability_registry_schema()),
+            (build_capability_registry(records=[{"id": "rejected"}]), capability_registry_schema()),
+            (build_module_plan([_record("schema-check")]), module_manager_schema()),
+            (
+                build_module_plan([_record("missing", dependencies=[{"id": "absent", "version": "1.0.0", "optional": False}])]),
+                module_manager_schema(),
+            ),
+        )
+        for projection, schema in projections:
+            self.assertFalse(schema["additionalProperties"])
+            declared = set(schema["properties"])
+            self.assertEqual(set(projection) - declared, set())
+            self.assertTrue(set(schema["required"]).issubset(projection))
+
+
+if __name__ == "__main__":
+    unittest.main()
