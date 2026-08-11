@@ -583,6 +583,8 @@ class DurableJobStore:
                 committed = self._write_snapshot_locked(self._pending_records)
             except DurableStoreHealthError as exc:
                 raise self._fail_locked(exc) from None
+            except Exception as exc:
+                raise self._fail_locked(exc) from None
             self._records = committed
             self._pending_records = None
 
