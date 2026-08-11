@@ -44,6 +44,12 @@ descriptor still validates, is marked reconstructable, and names a currently
 registered server adapter. Otherwise the public next action is to create a new
 allowlisted descriptor.
 
+An unreadable, non-object, invalid, or externally changed durable state fails
+closed. Its original bytes are left untouched; pending coalesced changes are
+discarded rather than projected as durable, and later callers receive only a
+bounded unavailable recovery code/action. The engine does not rename, archive,
+replace, or auto-repair that state.
+
 ## Capacity and artifacts
 
 Concurrency, GPU-slot and exclusive-group controls are Python policy semaphores

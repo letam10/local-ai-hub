@@ -37,6 +37,23 @@ class ShortStream:
         return result
 
 
+class ManualTimer:
+    """Controllable coalescing timer that never creates a background thread."""
+
+    def __init__(self, delay: float, callback: object) -> None:
+        self.delay = delay
+        self.callback = callback
+        self.daemon = False
+        self.started = False
+        self.cancelled = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
 class DurableWorkEngineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = TemporaryDirectory()
@@ -189,6 +206,67 @@ class DurableWorkEngineTests(unittest.TestCase):
                 mutation()
             self.assertEqual(caught.exception.code, "DURABLE_STORE_UNREADABLE")
             self.assertEqual(path.read_bytes(), corrupt_bytes)
+
+    def test_coalesced_progress_failure_discards_pending_state_without_timer_exception(self) -> None:
+        path = self.root / "coalesced" / "durable-jobs.json"
+        clock = [0.0]
+        timers: list[ManualTimer] = []
+
+        def timer_factory(delay: float, callback: object) -> ManualTimer:
+            timer = ManualTimer(delay, callback)
+            timers.append(timer)
+            return timer
+
+        store = DurableJobStore(
+            path,
+            clock=lambda: clock[0],
+            debounce_seconds=0.5,
+            timer_factory=timer_factory,  # type: ignore[arg-type]
+        )
+        store.put({"id": "healthy", "status": "queued", "progress": 0})
+        clock[0] = 0.1
+        staged = store.update("healthy", {"progress": 50}, progress_only=True)
+        self.assertEqual(staged["progress"], 0)
+        self.assertEqual(store.get("healthy")["progress"], 0)
+        self.assertEqual(store._pending_records["healthy"]["progress"], 50)
+        self.assertEqual(len(timers), 1)
+        self.assertTrue(timers[0].started)
+
+        corrupt_bytes = b'{"jobv5_bad":'
+        path.write_bytes(corrupt_bytes)
+        try:
+            timers[0].callback()  # type: ignore[operator]
+        except Exception as exc:  # pragma: no cover - regression guards daemon path
+            self.fail(f"coalesced timer leaked {type(exc).__name__}")
+
+        self.assertEqual(path.read_bytes(), corrupt_bytes)
+        self.assertEqual(store._records["healthy"]["progress"], 0)
+        self.assertIsNone(store._pending_records)
+        health = store.health()
+        self.assertEqual(health["status"], "unavailable")
+        self.assertEqual(health["code"], "DURABLE_STORE_UNREADABLE")
+        self.assertNotIn(str(path), str(health))
+        with self.assertRaises(DurableStoreHealthError):
+            store.get("healthy")
+        projected = DurableWorkEngine(store, self.registry).get("healthy")
+        self.assertEqual(projected["status"], "unavailable")
+        self.assertEqual(projected["execution"], "not_run")
+        self.assertEqual(projected["reason_code"], "DURABLE_STORE_UNREADABLE")
+
+    def test_immediate_persistence_failure_discards_uncommitted_record(self) -> None:
+        path = self.root / "immediate" / "durable-jobs.json"
+        store = DurableJobStore(path)
+        store.put({"id": "healthy", "status": "queued", "progress": 0})
+        before = path.read_bytes()
+        with patch.object(Path, "replace", side_effect=OSError("blocked")):
+            with self.assertRaises(DurableStoreHealthError) as caught:
+                store.put({"id": "new-record", "status": "queued", "progress": 0})
+        self.assertEqual(caught.exception.code, "DURABLE_STORE_PERSISTENCE_FAILED")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertNotIn("new-record", store._records)
+        self.assertIsNone(store._pending_records)
+        self.assertEqual(store.health()["status"], "unavailable")
+        self.assertEqual(list(path.parent.glob(f".{path.name}.*.tmp")), [])
 
     def test_invalid_persisted_descriptor_becomes_unavailable(self) -> None:
         record = self.engine.submit(self.spec())

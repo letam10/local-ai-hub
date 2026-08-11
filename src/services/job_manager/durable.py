@@ -16,7 +16,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
-from src.services.api.jobs import DurableJobStore
+from src.services.api.jobs import DurableJobStore, DurableStoreHealthError
 from src.services.artifact_store import atomic_write_job_output
 
 from .contracts import (
@@ -171,6 +171,22 @@ class DurableWorkEngine:
     def _public_status(record: dict[str, Any]) -> str:
         return "unavailable" if record.get("status") == "unavailable" else "partial"
 
+    def _store_unavailable(self, job_id: str | None = None) -> dict[str, Any]:
+        """Project an unhealthy durable store without exposing file details."""
+
+        health = self.store.health()
+        result: dict[str, Any] = {
+            "status": "unavailable",
+            "execution": "not_run",
+            "dry_run": True,
+            "capability_status": "unavailable",
+            "reason_code": health.get("code", "DURABLE_STORE_UNAVAILABLE"),
+            "action_code": "RESTORE_DURABLE_STATE",
+        }
+        if isinstance(job_id, str) and re.fullmatch(r"jobv5_[a-f0-9]{32}", job_id):
+            result["id"] = job_id
+        return result
+
     def _make_record(self, spec: JobSpec, *, retry_of: str | None = None, attempt: int = 1) -> dict[str, Any]:
         timestamp = _now()
         return {
@@ -226,10 +242,16 @@ class DurableWorkEngine:
 
     def _progress(self, job_id: str, value: int) -> None:
         with self._lock:
-            record = self.store.get(job_id)
+            try:
+                record = self.store.get(job_id)
+            except DurableStoreHealthError:
+                return
             if record is None or str(record.get("status")) not in {"starting", "running"}:
                 return
-            self._update_locked(job_id, {"progress": value}, progress_only=True)
+            try:
+                self._update_locked(job_id, {"progress": value}, progress_only=True)
+            except DurableStoreHealthError:
+                return
 
     def _can_retry(self, record: dict[str, Any]) -> bool:
         try:
@@ -264,15 +286,18 @@ class DurableWorkEngine:
     def start(self, job_id: str) -> dict[str, Any] | None:
         """Start a daemon coordinator thread only for a trusted, queued job."""
 
-        with self._lock:
-            record = self.store.get(job_id)
-            if record is None or record.get("status") != "queued" or job_id in self._threads:
-                return self.public_job(record) if record is not None else None
-            if len(self._threads) >= self.max_runner_states:
-                self._update_locked(job_id, {"reason_code": "RUNNER_STATE_LIMIT", "action_code": "RETRY_LATER"})
-                return self.public_job(self.store.get(job_id) or record)
-            thread = threading.Thread(target=self.run, args=(job_id,), name=f"LocalAIHub-V5-{job_id[-8:]}", daemon=True)
-            self._threads[job_id] = thread
+        try:
+            with self._lock:
+                record = self.store.get(job_id)
+                if record is None or record.get("status") != "queued" or job_id in self._threads:
+                    return self.public_job(record) if record is not None else None
+                if len(self._threads) >= self.max_runner_states:
+                    self._update_locked(job_id, {"reason_code": "RUNNER_STATE_LIMIT", "action_code": "RETRY_LATER"})
+                    return self.public_job(self.store.get(job_id) or record)
+                thread = threading.Thread(target=self.run, args=(job_id,), name=f"LocalAIHub-V5-{job_id[-8:]}", daemon=True)
+                self._threads[job_id] = thread
+        except DurableStoreHealthError:
+            return self._store_unavailable(job_id)
         thread.start()
         return self.get(job_id)
 
@@ -346,6 +371,18 @@ class DurableWorkEngine:
         return status, detached_json(summary) if summary is not None else None, reason_code, action_code
 
     def run(self, job_id: str) -> dict[str, Any] | None:
+        """Run work while projecting durable-store failure as static unavailable."""
+
+        try:
+            return self._run(job_id)
+        except DurableStoreHealthError:
+            with self._lock:
+                self._contexts.pop(job_id, None)
+                self._threads.pop(job_id, None)
+                self._release_resources_locked(job_id)
+            return self._store_unavailable(job_id)
+
+    def _run(self, job_id: str) -> dict[str, Any] | None:
         """Run one queued job synchronously through a server-registered adapter."""
 
         context: DurableJobContext | None = None
@@ -420,6 +457,8 @@ class DurableWorkEngine:
                         action_code=action_code or "RETRY_IF_RECONSTRUCTABLE",
                         retry_available=spec.descriptor.reconstructable and self.registry.contains(spec.descriptor.adapter_id),
                     )
+        except DurableStoreHealthError:
+            raise
         except Exception:  # Never serialize an adapter exception or local path.
             with self._lock:
                 live = self.store.get(job_id)
@@ -451,25 +490,28 @@ class DurableWorkEngine:
     def cancel(self, job_id: str) -> tuple[bool, dict[str, Any] | None]:
         """Request cooperative cancellation without regressing terminal state."""
 
-        with self._lock:
-            record = self.store.get(job_id)
-            if record is None or str(record.get("status")) in TERMINAL_JOB_STATES:
-                return False, self.public_job(record) if record is not None else None
-            context = self._contexts.get(job_id)
-            if context is not None:
-                context.cancel()
-            transitioned = self._transition_locked(job_id, "cancelling", reason_code="CANCEL_REQUESTED", action_code="WAIT_FOR_STOP")
-            if transitioned is None:
-                return False, self.get(job_id)
-            if context is None:
-                self._transition_locked(
-                    job_id,
-                    "interrupted",
-                    reason_code="CANCELLED",
-                    action_code="RETRY_IF_RECONSTRUCTABLE" if self._can_retry(record) else "CREATE_NEW_JOB",
-                    retry_available=self._can_retry(record),
-                )
-            return True, self.get(job_id)
+        try:
+            with self._lock:
+                record = self.store.get(job_id)
+                if record is None or str(record.get("status")) in TERMINAL_JOB_STATES:
+                    return False, self.public_job(record) if record is not None else None
+                context = self._contexts.get(job_id)
+                if context is not None:
+                    context.cancel()
+                transitioned = self._transition_locked(job_id, "cancelling", reason_code="CANCEL_REQUESTED", action_code="WAIT_FOR_STOP")
+                if transitioned is None:
+                    return False, self.get(job_id)
+                if context is None:
+                    self._transition_locked(
+                        job_id,
+                        "interrupted",
+                        reason_code="CANCELLED",
+                        action_code="RETRY_IF_RECONSTRUCTABLE" if self._can_retry(record) else "CREATE_NEW_JOB",
+                        retry_available=self._can_retry(record),
+                    )
+                return True, self.get(job_id)
+        except DurableStoreHealthError:
+            return False, self._store_unavailable(job_id)
 
     def retry(self, job_id: str, *, start: bool = False) -> dict[str, Any]:
         """Create a new attempt only when a persisted descriptor is reconstructable."""
@@ -571,7 +613,10 @@ class DurableWorkEngine:
         return detached_json(artifact)
 
     def get(self, job_id: str) -> dict[str, Any] | None:
-        record = self.store.get(job_id)
+        try:
+            record = self.store.get(job_id)
+        except DurableStoreHealthError:
+            return self._store_unavailable(job_id)
         return self.public_job(record) if record is not None else None
 
     @classmethod
