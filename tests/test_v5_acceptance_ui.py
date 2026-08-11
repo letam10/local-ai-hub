@@ -95,6 +95,8 @@ class V5AcceptanceUiTests(unittest.TestCase):
         self.assertIn("data-artifact-meta", pages)
         self.assertIn("data-artifact-provenance", pages)
         self.assertIn("data-artifact-mask", pages)
+        self.assertIn('available ? formatGb(volume[key]) : "\\u2014"', pages)
+        self.assertNotIn("}: review storage before new writes.", pages)
 
 
 if __name__ == "__main__":
