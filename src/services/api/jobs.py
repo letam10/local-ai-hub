@@ -7,6 +7,7 @@ history; older terminal entries move to an ignored cold archive.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -56,11 +57,13 @@ class CoalescingWriter:
         clock: Callable[[], float] = time.monotonic,
         debounce_seconds: float = PROGRESS_DEBOUNCE_SECONDS,
         timer_factory: Callable[[float, Callable[[], None]], threading.Timer] = threading.Timer,
+        on_error: Callable[[Exception], None] | None = None,
     ) -> None:
         self._write = write
         self._clock = clock
         self._debounce = max(0.0, float(debounce_seconds))
         self._timer_factory = timer_factory
+        self._on_error = on_error
         self._last_write = float("-inf")
         self._dirty = False
         self._timer: threading.Timer | None = None
@@ -76,7 +79,14 @@ class CoalescingWriter:
                 return
             self._dirty = False
             self._last_write = self._clock()
-        self._invoke_write()
+        try:
+            self._invoke_write()
+        except Exception as exc:
+            if self._on_error is None:
+                raise
+            # V5 stores opt into a bounded error sink so their timer does not
+            # leak an unhandled daemon-thread traceback.
+            self._on_error(exc)
 
     def request(self, *, immediate: bool = False) -> None:
         invoke = False
@@ -377,3 +387,273 @@ def active_heavy_jobs() -> list[dict[str, Any]]:
 
 
 _load()
+
+
+class DurableStoreHealthError(RuntimeError):
+    """Fail-closed durable-store health error without filesystem reflection."""
+
+    def __init__(self, code: str, action: str = "Restore or repair durable job state through an administrator-controlled recovery procedure.") -> None:
+        super().__init__(code)
+        self.code = code
+        self.action = action
+
+    def public(self) -> dict[str, str]:
+        return {"status": "unavailable", "code": self.code, "action": self.action}
+
+
+class DurableJobStore:
+    """Small atomic JSON store used by the V5 declarative work engine.
+
+    It is intentionally separate from the legacy ``job.v2`` module state so
+    the V5 engine can be constructed with a test-root path and cannot persist
+    process-local runners or arbitrary Python values.  All callers receive
+    detached JSON copies.  Progress-only updates share the existing
+    coalescing writer; state transitions and shutdown flush immediately.
+    """
+
+    MAX_RECORD_BYTES = 128 * 1024
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        history_limit: int = 256,
+        clock: Callable[[], float] = time.monotonic,
+        debounce_seconds: float = PROGRESS_DEBOUNCE_SECONDS,
+        timer_factory: Callable[[float, Callable[[], None]], threading.Timer] = threading.Timer,
+    ) -> None:
+        self.path = Path(path)
+        self.history_limit = max(1, min(1000, int(history_limit)))
+        self._records: dict[str, dict[str, Any]] = {}
+        self._pending_records: dict[str, dict[str, Any]] | None = None
+        self._lock = threading.RLock()
+        self._disk_fingerprint: str | None = None
+        self._health_error: DurableStoreHealthError | None = None
+        self._writer = CoalescingWriter(
+            self._flush_pending,
+            clock=clock,
+            debounce_seconds=debounce_seconds,
+            timer_factory=timer_factory,
+            on_error=self._record_background_error,
+        )
+        self._load_records()
+
+    @staticmethod
+    def _copy(value: Any) -> Any:
+        try:
+            encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Durable job data must be JSON serializable.") from exc
+        if len(encoded.encode("utf-8")) > DurableJobStore.MAX_RECORD_BYTES:
+            raise ValueError("Durable job record exceeds the bounded storage limit.")
+        return json.loads(encoded)
+
+    @staticmethod
+    def _sort_key(record: dict[str, Any]) -> str:
+        return str(record.get("finished_at") or record.get("updated_at") or record.get("created_at") or "")
+
+    @staticmethod
+    def _fingerprint(value: bytes) -> str:
+        return hashlib.sha256(value).hexdigest()
+
+    def _read_existing_bytes(self) -> bytes | None:
+        try:
+            return self.path.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise DurableStoreHealthError("DURABLE_STORE_UNREADABLE") from exc
+
+    @staticmethod
+    def _validate_root(raw: bytes) -> dict[str, Any]:
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DurableStoreHealthError("DURABLE_STORE_UNREADABLE") from exc
+        if type(value) is not dict:
+            raise DurableStoreHealthError("DURABLE_STORE_INVALID_ROOT")
+        return value
+
+    def _verify_disk_locked(self) -> None:
+        """Refuse an overwrite if the original file changed or became unreadable."""
+
+        current = self._read_existing_bytes()
+        current_fingerprint = self._fingerprint(current) if current is not None else None
+        if current_fingerprint == self._disk_fingerprint:
+            return
+        if current is None and self._disk_fingerprint is None:
+            return
+        if current is not None:
+            # Different but valid bytes still require a human-controlled
+            # resolution; malformed/non-object content gets a more specific
+            # fail-closed code and is never replaced.
+            self._validate_root(current)
+        raise DurableStoreHealthError("DURABLE_STORE_CHANGED")
+
+    @staticmethod
+    def _copy_health_error(error: DurableStoreHealthError) -> DurableStoreHealthError:
+        return DurableStoreHealthError(error.code, error.action)
+
+    def _fail_locked(self, error: Exception) -> DurableStoreHealthError:
+        safe = error if isinstance(error, DurableStoreHealthError) else DurableStoreHealthError("DURABLE_STORE_PERSISTENCE_FAILED")
+        self._health_error = self._copy_health_error(safe)
+        # Pending changes were never committed.  Discarding them makes the
+        # committed in-memory view match the preserved on-disk state.
+        self._pending_records = None
+        return self._copy_health_error(safe)
+
+    def _check_health_locked(self) -> None:
+        if self._health_error is not None:
+            raise self._copy_health_error(self._health_error)
+        try:
+            self._verify_disk_locked()
+        except DurableStoreHealthError as exc:
+            raise self._fail_locked(exc) from None
+
+    def _record_background_error(self, error: Exception) -> None:
+        """Record timer failures instead of leaking an unhandled traceback."""
+
+        with self._lock:
+            self._fail_locked(error)
+
+    def _load_records(self) -> None:
+        raw_bytes = self._read_existing_bytes()
+        if raw_bytes is None:
+            return
+        raw = self._validate_root(raw_bytes)
+        with self._lock:
+            for job_id, record in raw.items():
+                if not isinstance(job_id, str) or type(record) is not dict:
+                    raise DurableStoreHealthError("DURABLE_STORE_INVALID_RECORD")
+                try:
+                    copied = self._copy(record)
+                except ValueError as exc:
+                    raise DurableStoreHealthError("DURABLE_STORE_INVALID_RECORD") from exc
+                if copied.get("id") != job_id:
+                    raise DurableStoreHealthError("DURABLE_STORE_INVALID_RECORD")
+                self._records[job_id] = copied
+            self._disk_fingerprint = self._fingerprint(raw_bytes)
+            self._trim_records_locked(self._records)
+
+    def _trim_records_locked(self, records: dict[str, dict[str, Any]]) -> None:
+        terminal = [
+            record
+            for record in records.values()
+            if str(record.get("status")) in {"completed", "failed", "unavailable", "interrupted"}
+        ]
+        terminal.sort(key=self._sort_key, reverse=True)
+        for record in terminal[self.history_limit :]:
+            job_id = record.get("id")
+            if isinstance(job_id, str):
+                records.pop(job_id, None)
+
+    def _write_snapshot_locked(self, records: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """Atomically persist a candidate without changing committed memory first."""
+
+        self._check_health_locked()
+        payload = self._copy({job_id: records[job_id] for job_id in sorted(records)})
+        self._trim_records_locked(payload)
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        temporary = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+                handle.write(encoded)
+            # Re-check immediately before replacement so a later corrupt write
+            # cannot be silently overwritten by this store.
+            self._check_health_locked()
+            temporary.replace(self.path)
+            self._disk_fingerprint = self._fingerprint(encoded.encode("utf-8"))
+            return payload
+        except DurableStoreHealthError:
+            temporary.unlink(missing_ok=True)
+            raise
+        except OSError as exc:
+            temporary.unlink(missing_ok=True)
+            raise DurableStoreHealthError("DURABLE_STORE_PERSISTENCE_FAILED") from exc
+
+    def _flush_pending(self) -> None:
+        """Commit one pending snapshot or fail it closed without divergence."""
+
+        with self._lock:
+            if self._pending_records is None:
+                self._check_health_locked()
+                return
+            try:
+                committed = self._write_snapshot_locked(self._pending_records)
+            except DurableStoreHealthError as exc:
+                raise self._fail_locked(exc) from None
+            except Exception as exc:
+                raise self._fail_locked(exc) from None
+            self._records = committed
+            self._pending_records = None
+
+    def put(self, record: dict[str, Any]) -> dict[str, Any]:
+        copied = self._copy(record)
+        job_id = copied.get("id")
+        if not isinstance(job_id, str) or not job_id:
+            raise ValueError("Durable job record requires an opaque ID.")
+        with self._lock:
+            self._check_health_locked()
+            candidate = self._copy(self._pending_records if self._pending_records is not None else self._records)
+            if job_id in candidate:
+                raise ValueError("Durable job ID already exists.")
+            candidate[job_id] = copied
+            self._pending_records = candidate
+        self._writer.request(immediate=True)
+        with self._lock:
+            self._check_health_locked()
+            committed = self._records.get(job_id)
+            return self._copy(committed) if committed is not None else self._copy(copied)
+
+    def get(self, job_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            self._check_health_locked()
+            record = self._records.get(job_id)
+            return self._copy(record) if record is not None else None
+
+    def records(self) -> list[dict[str, Any]]:
+        with self._lock:
+            self._check_health_locked()
+            return [self._copy(self._records[job_id]) for job_id in sorted(self._records)]
+
+    def update(self, job_id: str, changes: dict[str, Any], *, progress_only: bool = False) -> dict[str, Any] | None:
+        copied = self._copy(changes)
+        with self._lock:
+            self._check_health_locked()
+            candidate = self._copy(self._pending_records if self._pending_records is not None else self._records)
+            record = candidate.get(job_id)
+            if record is None:
+                return None
+            record.update(copied)
+            result = self._copy(record)
+            self._pending_records = candidate
+        self._writer.request(immediate=not progress_only)
+        with self._lock:
+            self._check_health_locked()
+            committed = self._records.get(job_id)
+            # A delayed progress update remains private staging data until the
+            # atomic write succeeds; callers never receive it as durable.
+            return self._copy(committed) if committed is not None else result
+
+    def flush(self) -> None:
+        with self._lock:
+            self._check_health_locked()
+        self._writer.flush()
+        with self._lock:
+            self._check_health_locked()
+
+    def health(self) -> dict[str, str]:
+        """Return a bounded store-health projection without a local path."""
+
+        with self._lock:
+            try:
+                self._check_health_locked()
+            except DurableStoreHealthError as exc:
+                return exc.public()
+        return {"status": "available"}
+
+    def close(self) -> None:
+        """Flush without starting or stopping any external process."""
+
+        self.flush()

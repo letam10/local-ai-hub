@@ -29,6 +29,10 @@ ARCHIVE_ROOT = ROOT / "Archive"
 DEFAULT_MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024
 DEFAULT_UPLOAD_DISK_SAFETY_BYTES = 512 * 1024 * 1024
 UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024
+OWNED_UPLOAD_PREFIX = "hub-upload-"
+OWNED_OUTPUT_PREFIX = "hub-job-"
+DEFAULT_ORPHAN_EXPIRY_SECONDS = 24 * 60 * 60
+MAX_JOB_OUTPUT_BYTES = 8 * 1024 * 1024 * 1024
 # Compatibility name for private callers; public v1 upload limits are read
 # from Hub configuration and default to this value.
 MAX_UPLOAD_BYTES = DEFAULT_MAX_UPLOAD_BYTES
@@ -59,6 +63,10 @@ class UploadError(ValueError):
     exposing a local path.  The stream is always consumed only in bounded
     chunks by :func:`stage_upload_stream`.
     """
+
+
+class ArtifactWriteError(ValueError):
+    """Safe failure while atomically producing a Hub-owned job artifact."""
 
 
 def _now() -> str:
@@ -110,7 +118,7 @@ def _allowed(path: Path) -> bool:
 
 
 def _public(record: dict[str, Any]) -> dict[str, Any]:
-    return {
+    public = {
         "id": record["id"],
         "name": record["name"],
         "size_bytes": record.get("size_bytes", 0),
@@ -118,6 +126,42 @@ def _public(record: dict[str, Any]) -> dict[str, Any]:
         "url": f"/api/artifacts/{record['id']}",
         "created_at": record.get("created_at"),
         "sha256": record.get("sha256"),
+    }
+    provenance = record.get("provenance")
+    if isinstance(provenance, dict):
+        public["provenance"] = dict(provenance)
+    return public
+
+
+def _safe_provenance(value: Any) -> dict[str, Any]:
+    """Allow only opaque, server-derived V5 artifact lineage fields."""
+
+    if type(value) is not dict:
+        raise ArtifactWriteError("Artifact provenance is invalid.")
+    allowed = {"job_id", "job_spec_fingerprint", "adapter_id", "attempt", "status"}
+    if set(value) != allowed:
+        raise ArtifactWriteError("Artifact provenance is invalid.")
+    job_id = value.get("job_id")
+    fingerprint = value.get("job_spec_fingerprint")
+    adapter_id = value.get("adapter_id")
+    attempt = value.get("attempt")
+    status = value.get("status")
+    if not isinstance(job_id, str) or not re.fullmatch(r"jobv5_[a-f0-9]{32}", job_id):
+        raise ArtifactWriteError("Artifact provenance is invalid.")
+    if not isinstance(fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", fingerprint):
+        raise ArtifactWriteError("Artifact provenance is invalid.")
+    if not isinstance(adapter_id, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,63}", adapter_id):
+        raise ArtifactWriteError("Artifact provenance is invalid.")
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or not 1 <= attempt <= 10_000:
+        raise ArtifactWriteError("Artifact provenance is invalid.")
+    if status not in {"queued", "starting", "running", "cancelling", "completed", "failed", "unavailable", "interrupted"}:
+        raise ArtifactWriteError("Artifact provenance is invalid.")
+    return {
+        "job_id": job_id,
+        "job_spec_fingerprint": fingerprint,
+        "adapter_id": adapter_id,
+        "attempt": attempt,
+        "status": status,
     }
 
 
@@ -127,6 +171,7 @@ def register_path(
     name: str | None = None,
     media_type: str | None = None,
     sha256: str | None = None,
+    provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Register a Hub-owned file and return its safe public reference."""
 
@@ -137,6 +182,7 @@ def register_path(
         return None
     if not candidate.is_file() or not _allowed(candidate):
         return None
+    safe_provenance = _safe_provenance(provenance) if provenance is not None else None
     with _LOCK:
         index = _load()
         for record in index.values():
@@ -154,6 +200,8 @@ def register_path(
         }
         if sha256:
             record["sha256"] = sha256
+        if safe_provenance is not None:
+            record["provenance"] = safe_provenance
         index[artifact_id] = record
         _save(index)
         return _public(record)
@@ -163,6 +211,8 @@ def _remove_owned_upload(path: Path | None) -> None:
     if path is None:
         return
     try:
+        if not path.name.startswith(OWNED_UPLOAD_PREFIX):
+            return
         path.resolve().relative_to(UPLOAD_ROOT.resolve())
         path.unlink(missing_ok=True)
     except (OSError, ValueError):
@@ -204,8 +254,8 @@ def stage_upload_stream(
         raise UploadError("Không đủ dung lượng trống an toàn để nhận upload này.")
 
     token = uuid.uuid4().hex
-    part_path = UPLOAD_ROOT / f"{token}.part"
-    final_path = UPLOAD_ROOT / f"{token}_{safe_name}"
+    part_path = UPLOAD_ROOT / f"{OWNED_UPLOAD_PREFIX}{token}.part"
+    final_path = UPLOAD_ROOT / f"{OWNED_UPLOAD_PREFIX}{token}_{safe_name}"
     received = 0
     digest = hashlib.sha256()
     try:
@@ -237,6 +287,126 @@ def stage_upload_stream(
         # upload or artifact on a failed/disconnected request.
         _remove_owned_upload(part_path)
         _remove_owned_upload(final_path)
+        raise
+
+
+def cleanup_owned_upload_orphans(*, expiry_seconds: int = DEFAULT_ORPHAN_EXPIRY_SECONDS, now: float | None = None) -> dict[str, int]:
+    """Remove only expired Hub-owned upload remnants from the managed root.
+
+    The prefix is an ownership marker created by :func:`stage_upload_stream`.
+    Registered final files are retained.  The return value contains counts,
+    never filesystem paths or filenames.
+    """
+
+    if isinstance(expiry_seconds, bool) or not isinstance(expiry_seconds, int) or expiry_seconds < 0:
+        raise ValueError("Upload orphan expiry must be a non-negative integer.")
+    current = datetime.now(timezone.utc).timestamp() if now is None else float(now)
+    cutoff = current - expiry_seconds
+    try:
+        root = UPLOAD_ROOT.resolve()
+        records = _load()
+        registered = {
+            str(Path(record["path"]).resolve())
+            for record in records.values()
+            if isinstance(record, dict) and isinstance(record.get("path"), str)
+        }
+    except (OSError, ValueError):
+        return {"removed": 0, "retained": 0}
+    removed = 0
+    retained = 0
+    try:
+        candidates = list(root.iterdir()) if root.is_dir() else []
+    except OSError:
+        candidates = []
+    for candidate in candidates:
+        if not candidate.name.startswith(OWNED_UPLOAD_PREFIX):
+            continue
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(root)
+            stale = candidate.stat().st_mtime <= cutoff
+            is_partial_or_unregistered = candidate.suffix == ".part" or str(resolved) not in registered
+            if stale and is_partial_or_unregistered:
+                candidate.unlink(missing_ok=True)
+                removed += 1
+            else:
+                retained += 1
+        except (OSError, ValueError):
+            retained += 1
+    return {"removed": removed, "retained": retained}
+
+
+def _ensure_disk_capacity(root: Path, expected_bytes: int, disk_safety_bytes: int) -> None:
+    if isinstance(expected_bytes, bool) or not isinstance(expected_bytes, int) or expected_bytes < 0:
+        raise ArtifactWriteError("Artifact output size is invalid.")
+    if isinstance(disk_safety_bytes, bool) or not isinstance(disk_safety_bytes, int) or disk_safety_bytes < 0:
+        raise ArtifactWriteError("Artifact disk safety threshold is invalid.")
+    try:
+        free_bytes = shutil.disk_usage(root).free
+    except OSError as exc:
+        raise ArtifactWriteError("Hub cannot verify free disk capacity for this output.") from exc
+    if free_bytes < expected_bytes + disk_safety_bytes:
+        raise ArtifactWriteError("Hub does not have enough free disk capacity for this output.")
+
+
+def _remove_owned_output(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        if not path.name.startswith(OWNED_OUTPUT_PREFIX):
+            return
+        path.resolve().relative_to(OUTPUT_ROOT.resolve())
+        path.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        return
+
+
+def atomic_write_job_output(
+    job_id: str,
+    content: bytes,
+    *,
+    name: str = "result.bin",
+    media_type: str | None = None,
+    provenance: dict[str, Any],
+    disk_safety_bytes: int = 0,
+) -> dict[str, Any]:
+    """Write one bounded Hub job output atomically and register safe provenance."""
+
+    if not isinstance(job_id, str) or not re.fullmatch(r"jobv5_[a-f0-9]{32}", job_id):
+        raise ArtifactWriteError("Hub job ID is invalid.")
+    if not isinstance(content, bytes):
+        raise ArtifactWriteError("Artifact output must be bytes.")
+    if len(content) > MAX_JOB_OUTPUT_BYTES:
+        raise ArtifactWriteError("Artifact output exceeds the Hub safety limit.")
+    safe_provenance = _safe_provenance(provenance)
+    if safe_provenance["job_id"] != job_id:
+        raise ArtifactWriteError("Artifact provenance does not match the Hub job.")
+    safe_name = _safe_name(name)
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    _ensure_disk_capacity(OUTPUT_ROOT, len(content), disk_safety_bytes)
+    token = uuid.uuid4().hex
+    prefix = f"{OWNED_OUTPUT_PREFIX}{job_id[-8:]}-{token}"
+    part_path = OUTPUT_ROOT / f"{prefix}.part"
+    final_path = OUTPUT_ROOT / f"{prefix}-{safe_name}"
+    digest = hashlib.sha256(content).hexdigest()
+    try:
+        with part_path.open("xb") as handle:
+            handle.write(content)
+            handle.flush()
+        part_path.replace(final_path)
+        artifact = register_path(
+            final_path,
+            name=safe_name,
+            media_type=media_type,
+            sha256=digest,
+            provenance=safe_provenance,
+        )
+        if artifact is None:  # pragma: no cover - final path is managed output
+            raise ArtifactWriteError("Hub cannot register the completed artifact output.")
+        return artifact
+    except Exception:
+        _remove_owned_output(part_path)
+        _remove_owned_output(final_path)
         raise
 
 
