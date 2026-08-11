@@ -181,6 +181,11 @@ td { color: var(--text); }
 .workspace-state p { font-size: 11px; line-height: 1.5; }
 .workspace-state__action, .global-state { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--muted); font-size: 11px; }
 .workspace-state__action strong, .global-state strong { color: var(--text); }
+.workflow-library-state { display: grid; gap: 9px; margin: 0 0 16px; padding: 13px 15px; border-left: 3px solid var(--warning); }
+.workflow-library-state[data-status="ready"], .workflow-library-state[data-status="operational"] { border-left-color: var(--success); }
+.workflow-library-state[data-status="unavailable"], .workflow-library-state[data-status="recovery_required"] { border-left-color: var(--danger); }
+.workflow-library-state h2 { margin: 3px 0 0; font-size: 14px; }
+.workflow-library-state p { color: var(--muted); font-size: 11px; line-height: 1.5; }
 .global-state { margin: 0 0 16px; padding: 11px 13px; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 9px; background: var(--panel-raised); }
 .global-state--error { border-left-color: var(--danger); }
 .global-state--loading { border-left-color: var(--warning); }
@@ -346,7 +351,7 @@ td { color: var(--text); }
 .graph-workflow-title, .graph-workflow-recent { display: grid; gap: 4px; color: var(--muted); font-size: 10px; }
 .graph-workflow-title { min-width: min(280px, 100%); flex: 1 1 240px; }.graph-workflow-recent { min-width: 190px; flex: 0 1 240px; }
 .graph-workflow-title input, .graph-workflow-recent select { width: 100%; padding: 7px; border: 1px solid var(--border); border-radius: 7px; color: var(--text); background: var(--panel); font: inherit; font-size: 11px; }
-.graph-save-state { align-self: center; color: var(--muted); font-size: 10px; }.graph-save-state[data-state="unsaved"] { color: var(--warning); }
+.graph-save-state, .graph-library-state { align-self: center; color: var(--muted); font-size: 10px; }.graph-save-state[data-state="unsaved"] { color: var(--warning); }.graph-library-state[data-workflow-library-status="ready"] { color: var(--success); }.graph-library-state[data-workflow-library-status="unavailable"] { color: var(--danger); }
 .graph-editor__statusbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 30px; padding: 7px 11px; border-bottom: 1px solid var(--border); color: var(--muted); background: var(--panel-soft); font-size: 10px; }.graph-editor__validation { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.graph-editor__validation--error { color: var(--danger); }.graph-editor__availability { flex: 0 0 auto; color: var(--muted); }
 .graph-editor__toolbar, .graph-editor__toolbar-group, .graph-editor__options { display: flex; align-items: center; gap: 8px; }
 .graph-editor__toolbar { justify-content: space-between; flex-wrap: wrap; padding: 10px; border-bottom: 1px solid var(--border); background: var(--panel-raised); }

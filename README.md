@@ -1,4 +1,4 @@
-# Local AI Hub — Ứng dụng một cửa sổ V3
+# Local AI Hub — Unified Workspace V5
 
 Local AI Hub là ứng dụng Windows điều phối các workflow AI chạy cục bộ trong
 một cửa sổ. Kho Git chỉ chứa mã nguồn, cấu hình mẫu, launcher, adapter, script
@@ -149,6 +149,12 @@ Image AI có ba workspace: Quick, Hub Nodes và ComfyUI Advanced. Advanced nhún
 frontend ComfyUI gốc vào chính WebView Local AI Hub qua loopback, không mở
 Chrome hoặc Edge ngoài cho luồng bình thường. Bridge workflow nối artifact Hub
 với ComfyUI nhưng không chấp nhận đường dẫn máy thô.
+
+V5-C bổ sung Unified Workspace và Workflow Library local-first: Dashboard dẫn
+người dùng qua Project/Workspace → Capability → Workflow/Nodes → Job →
+Artifact/Preview. User workflow state ở local ignored config, schema
+workflow-library.v1 đóng và revision-safe; nếu V5-D chưa wire bridge thì UI
+hiển thị partial/reason/next action thay vì giả nhận operational.
 
 Phân phối V5 giữ Git nhỏ: Core release chỉ dành cho launcher, frontend, API,
 runtime bootstrap nhỏ và wheelhouse nhỏ; model, CUDA, Torch, Paddle,

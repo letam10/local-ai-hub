@@ -12,6 +12,7 @@ import {
   uploadFile,
   validateNodeGraph,
 } from "./api.js";
+import { workflowLibraryEntry } from "./workflow_library.js";
 
 // LiteGraph.js is intentionally pinned and served from /ui/vendor.  This file
 // is the Hub adapter: it maps mature canvas-editor state to the Hub DAG API.
@@ -134,7 +135,7 @@ function propertyControl(node, property) {
 }
 
 class HubGraphEditor {
-  constructor(root, { showToast, recipeApplication = null, initialPresetId = null, onRecipeApplied = () => {}, onPresetApplied = () => {} }) {
+  constructor(root, { showToast, recipeApplication = null, initialPresetId = null, onRecipeApplied = () => {}, onPresetApplied = () => {}, workflowLibrary = null }) {
     this.root = root;
     this.scope = root.dataset.scope || "image";
     this.showToast = showToast;
@@ -142,6 +143,9 @@ class HubGraphEditor {
     this.initialPresetId = initialPresetId;
     this.onRecipeApplied = onRecipeApplied;
     this.onPresetApplied = onPresetApplied;
+    this.workflowLibrary = workflowLibrary;
+    this.workflowLibraryState = { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trước khi đồng bộ." };
+    this.workflowLibraryRevision = null;
     this.registry = new Map();
     this.availability = { counts: {}, nodes: [] };
     this.presets = [];
@@ -191,6 +195,7 @@ class HubGraphEditor {
         this.onPresetApplied(this.initialPresetId);
       } else if (saved) { this.graphData = saved; this.recovered = true; }
       else await this.loadPreset(PRESET_BY_SCOPE[this.scope], { quiet: true, render: false });
+      await this.refreshWorkflowLibrary();
       if (this.recipeApplication && this.scope === "image") {
         this.graphData = applyRecipeToGraph(this.graphData, this.recipeApplication);
         this.recovered = false;
@@ -208,6 +213,20 @@ class HubGraphEditor {
     } catch (error) {
       this.root.innerHTML = `<div class="callout callout--warning">Không thể nạp graph editor: ${escapeHtml(error.message)}</div>`;
     }
+  }
+
+  async refreshWorkflowLibrary() {
+    if (!this.workflowLibrary?.list) return this.workflowLibraryState;
+    try {
+      const result = await this.workflowLibrary.list();
+      if (result && typeof result === "object") {
+        this.workflowLibraryState = result;
+        this.workflowLibraryRevision = Number.isInteger(result.library_revision) ? result.library_revision : null;
+      }
+    } catch {
+      this.workflowLibraryState = { status: "partial", reason: "Workflow Library bridge không phản hồi; local draft vẫn được giữ.", action: "Kiểm tra bridge server-owned rồi thử lại bằng thao tác user-mediated." };
+    }
+    return this.workflowLibraryState;
   }
 
   destroy() {
@@ -268,6 +287,19 @@ class HubGraphEditor {
     this.showToast("Workflow đã lưu local và có thể khôi phục trong Recent.");
   }
 
+  async saveToLibrary() {
+    const entry = workflowLibraryEntry(this.toHubGraph(), this.scope);
+    const result = this.workflowLibrary?.save
+      ? await this.workflowLibrary.save(entry, this.workflowLibraryRevision)
+      : { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trước khi đồng bộ." };
+    this.workflowLibraryState = result || this.workflowLibraryState;
+    if (Number.isInteger(result?.library_revision)) this.workflowLibraryRevision = result.library_revision;
+    this.renderWorkflowStatus();
+    if (result?.status === "ready" || result?.accepted) this.showToast("Đã ghi workflow vào Workflow Library.");
+    else this.showToast(result?.action || result?.reason || "Workflow Library vẫn partial; local draft không bị mất.", "warning");
+    return result;
+  }
+
   renameWorkflow(value) {
     const title = String(value || "").trim().slice(0, 160);
     if (!title || title === this.graphData.title) return;
@@ -297,6 +329,12 @@ class HubGraphEditor {
     const unsaved = this.isUnsaved();
     target.dataset.state = unsaved ? "unsaved" : "saved";
     target.textContent = unsaved ? "Có thay đổi chưa lưu" : this.recovered ? "Đã khôi phục autosave" : "Đã lưu local";
+    const libraryStatus = this.root.querySelector("[data-workflow-library-status]");
+    if (libraryStatus) {
+      libraryStatus.dataset.workflowLibraryStatus = this.workflowLibraryState.status || "partial";
+      libraryStatus.textContent = "Library: " + (this.workflowLibraryState.status || "partial");
+      libraryStatus.title = this.workflowLibraryState.reason || "";
+    }
     this.refreshRecentControls();
   }
 
@@ -404,6 +442,28 @@ class HubGraphEditor {
           <aside class="graph-inspector" data-graph-inspector></aside>
         </div>
       </section>`;
+    const libraryBar = this.root.querySelector(".graph-editor__workflow-bar");
+    if (libraryBar) {
+      const libraryStatus = document.createElement("span");
+      libraryStatus.className = "graph-library-state";
+      libraryStatus.dataset.workflowLibraryStatus = this.workflowLibraryState.status || "partial";
+      libraryStatus.setAttribute("role", "status");
+      libraryStatus.textContent = "Library: " + (this.workflowLibraryState.status || "partial");
+      libraryBar.append(libraryStatus);
+    }
+    const toolbarGroups = this.root.querySelectorAll(".graph-editor__toolbar-group");
+    const libraryTools = toolbarGroups[toolbarGroups.length - 1];
+    if (libraryTools) {
+      const libraryButton = document.createElement("button");
+      libraryButton.className = "button";
+      libraryButton.type = "button";
+      libraryButton.dataset.graphAction = "save-library";
+      libraryButton.textContent = "Lưu Workflow Library";
+      libraryButton.title = "Ghi record server-owned sau khi V5-D bridge được xác nhận";
+      libraryTools.append(libraryButton);
+    }
+    const autoPreviewLabel = this.root.querySelector('[data-graph-option="auto"]')?.parentElement;
+    if (autoPreviewLabel?.lastChild) autoPreviewLabel.lastChild.textContent = " Preview indicator (manual; no auto-run)";
     this.canvasElement = this.root.querySelector("[data-graph-canvas]");
     this.minimap = this.root.querySelector("[data-graph-minimap]");
     this.paletteElement = this.root.querySelector("[data-graph-palette]");
@@ -772,12 +832,10 @@ class HubGraphEditor {
   }
 
   scheduleAutoPreview() {
-    if (!this.autoPreview) return;
-    const graph = this.toHubGraph();
-    const hasHeavy = graph.nodes.some((node) => this.registry.get(node.type)?.heavy);
-    if (hasHeavy && !this.draft) return;
-    if (this.autoTimer) clearTimeout(this.autoTimer);
-    this.autoTimer = setTimeout(() => this.run({ auto: true }), 450);
+    // V5-C keeps graph edits and drags declarative. Preview/run is always an
+    // explicit user action; this method remains as a compatibility hook for
+    // older saved preferences but never schedules a workload.
+    return;
   }
 
   async run({ auto = false } = {}) {
@@ -962,6 +1020,7 @@ class HubGraphEditor {
     if (action === "duplicate") this.duplicateWorkflow();
     if (action === "fit") this.fitView();
     if (action === "export") this.exportGraph();
+    if (action === "save-library") { this.saveToLibrary(); return; }
     if (action === "save-local") { this.persist(); this.showToast("Workflow đã lưu local trong WebView."); }
   }
 }
