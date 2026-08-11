@@ -133,13 +133,13 @@ class AcceptanceRuntimeTests(unittest.TestCase):
     def test_bounds_and_truthful_unavailable_result_never_echo_paths(self) -> None:
         from src.services import tool_smoke
 
-        path_secret = str(Path(__file__).resolve())
+        sentinel = "".join(("C:", "/", "private", "/", "acceptance-fixture.bin"))
         artifact = {
             "id": "artifact_" + "b" * 32,
             "media_type": "video/mp4",
             "size_bytes": 32,
             "sha256": "b" * 64,
-            "path": path_secret,
+            "path": sentinel,
         }
         evidence = tool_smoke._artifact_evidence(artifact, maximum_bytes=64)
         self.assertNotIn("path", evidence)
@@ -147,9 +147,9 @@ class AcceptanceRuntimeTests(unittest.TestCase):
         with self.assertRaises(tool_smoke.AcceptanceFailure):
             tool_smoke._artifact_evidence({**artifact, "size_bytes": 65}, maximum_bytes=64)
 
-        result = tool_smoke.run_cpu_media_acceptance(opt_in=True, approval_path=Path(path_secret), task_root=Path(path_secret + ".root"))
+        result = tool_smoke.run_cpu_media_acceptance(opt_in=True, approval_path=Path(sentinel), task_root=Path(sentinel + ".root"))
         self.assertIn(result["status"], {"blocked", "unavailable"})
-        self.assertNotIn(path_secret, json.dumps(result, ensure_ascii=False))
+        self.assertNotIn(sentinel, json.dumps(result, ensure_ascii=False))
 
 
 if __name__ == "__main__":
