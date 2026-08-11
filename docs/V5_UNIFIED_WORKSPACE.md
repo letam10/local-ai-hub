@@ -123,6 +123,36 @@ the later LAH 2 lane. On `.graph-editor`, LAH 2 may set
 `--node-inspector-width`, and preview-height variables. With attributes absent,
 the current responsive fallback remains active.
 
+The Node Studio adapter keeps exactly one LiteGraph editor and uses its
+supported canvas callbacks for plain-click selection, Ctrl/Shift additive
+selection, empty-canvas marquee, multi-node movement, middle-drag panning,
+arrow-key movement, safe deletion, and undo/persist dirty tracking. A dangling
+typed socket may open an accessible, searchable picker at the drop position.
+The picker lists only directional compatible ports, reports occupied
+non-multi inputs, auto-connects a single unambiguous candidate, and requires an
+explicit choice when there is more than one. Escape, outside click, and
+incompatible links cancel or reject without adding a node. No vendor LiteGraph
+file is modified.
+
+The in-Node-Studio Node Guide is a compact drawer/details panel backed by
+versioned localStorage UI state only. It explains typed sockets, selection and
+keyboard behavior, truthful validation/dirty/cache/progress/error states,
+opaque-artifact preview and recovery, and save/import/export. Template buttons
+reuse the existing server-owned preset route; they do not create another graph
+engine or registry.
+
+Video vocabulary is deliberately closed and status-aware. video_grade accepts
+bounded brightness, contrast, saturation, gamma, denoise, and sharpen controls;
+logo_overlay accepts only a typed IMAGE artifact plus fixed position/opacity;
+and audio_loudness accepts typed AUDIO plus bounded loudness/gain controls.
+text_overlay remains unavailable until a server-owned font and escaping
+contract exists, with Subtitle Burn as the documented fallback. Registry
+opening reads a cached server-owned encoder snapshot with not_run/unavailable
+truth when no explicit probe has populated it; it never invokes FFmpeg.
+Encode, subtitle burn, RIFE/interpolation, AnimeSR, FFmpeg transforms, and video
+generation remain partial/unavailable unless their separate bounded runtime
+evidence exists.
+
 Image AI Quick, Hub Nodes, and ComfyUI Advanced remain distinct modes. No
 second ComfyUI frontend is introduced. The UI adapter in
 src/ui/workflow_library.js uses only an explicitly supplied typed

@@ -27,6 +27,21 @@ const TYPE_COLORS = {
   TEXT: "#6c8cff", NUMBER: "#a9c6ff", BOOLEAN: "#e5d66a", MODEL: "#e291c7", METADATA: "#8794ad",
 };
 const CATEGORY_COLORS = { utility: "#6c8cff", image: "#cf7cff", vision: "#42c6a0", media: "#f1ad5f", video: "#f17c8e", annotation: "#8794ad" };
+const NODE_UI_STATE_VERSION = 1;
+const NODE_UI_STATE_PREFIX = `${LOCAL_PREFIX}:ui:v${NODE_UI_STATE_VERSION}`;
+const OPAQUE_ARTIFACT_ID = /^artifact_[a-f0-9]{32}$/;
+const SAFE_ARTIFACT_URL = /^\/api\/artifacts\/artifact_[a-f0-9]{32}$/;
+const PANEL_STATE_DEFAULTS = Object.freeze({
+  version: NODE_UI_STATE_VERSION,
+  palette: "open",
+  inspector: "open",
+  canvasFocus: false,
+  preview: "compact",
+  paletteWidth: "default",
+  inspectorWidth: "default",
+  guide: false,
+  pickerSearch: "",
+});
 
 const clone = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 const keyFor = (scope) => `${LOCAL_PREFIX}:${scope}`;
@@ -40,6 +55,80 @@ const safeWorkflowId = (value, fallback = "workflow") => {
   const normalized = String(value || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
   return normalized || fallback;
 };
+
+export function normalizeNodePanelState(value) {
+  const source = value && typeof value === "object" && value.version === NODE_UI_STATE_VERSION ? value : {};
+  return {
+    ...PANEL_STATE_DEFAULTS,
+    palette: ["open", "collapsed"].includes(source.palette) ? source.palette : PANEL_STATE_DEFAULTS.palette,
+    inspector: ["open", "collapsed"].includes(source.inspector) ? source.inspector : PANEL_STATE_DEFAULTS.inspector,
+    canvasFocus: source.canvasFocus === true,
+    preview: ["compact", "expanded"].includes(source.preview) ? source.preview : PANEL_STATE_DEFAULTS.preview,
+    paletteWidth: ["default", "narrow", "wide"].includes(source.paletteWidth) ? source.paletteWidth : PANEL_STATE_DEFAULTS.paletteWidth,
+    inspectorWidth: ["default", "narrow", "wide"].includes(source.inspectorWidth) ? source.inspectorWidth : PANEL_STATE_DEFAULTS.inspectorWidth,
+    guide: source.guide === true,
+    pickerSearch: typeof source.pickerSearch === "string" ? source.pickerSearch.slice(0, 120) : "",
+  };
+}
+
+export function connectionPortDecision(sourcePort, targetPort, occupied = false) {
+  const sourceType = String(sourcePort?.type || "");
+  const targetType = String(targetPort?.type || "");
+  if (!sourceType || !targetType || sourceType !== targetType) {
+    return { compatible: false, reason: `Typed socket mismatch: ${sourceType || "unknown"} -> ${targetType || "unknown"}.` };
+  }
+  if (occupied && !targetPort?.multi) {
+    return { compatible: false, reason: "Input is already connected and is not multi." };
+  }
+  return { compatible: true, reason: "Compatible typed socket." };
+}
+
+export function getConnectionPortCandidates(definitions, { direction = "input", type = "", occupied = [] } = {}) {
+  const items = definitions instanceof Map ? [...definitions.values()] : Array.isArray(definitions) ? definitions : [];
+  const occupiedSet = occupied instanceof Set ? occupied : new Set(Array.isArray(occupied) ? occupied : []);
+  const compatible = [];
+  const rejected = [];
+  for (const definition of items) {
+    if (!definition || typeof definition.type !== "string") continue;
+    const ports = direction === "output" ? definition.outputs || [] : definition.inputs || [];
+    for (const port of ports) {
+      const decision = connectionPortDecision(
+        direction === "output" ? port : { type },
+        direction === "output" ? { type } : port,
+        occupiedSet.has(`${definition.type}:${port.name}`),
+      );
+      const candidate = { definition, port, direction, key: `${definition.type}:${port.name}` };
+      (decision.compatible ? compatible : rejected).push({ ...candidate, reason: decision.reason });
+    }
+  }
+  return { compatible, rejected };
+}
+
+export function chooseConnectionCandidate(candidates) {
+  const values = Array.isArray(candidates) ? candidates : candidates?.compatible;
+  return values?.length === 1 ? values[0] : null;
+}
+
+export function safeArtifactProjection(value) {
+  if (!value || typeof value !== "object") return { safe: false, reason: "Artifact metadata is unavailable." };
+  const id = String(value.id || "");
+  const url = String(value.url || "");
+  const mediaType = String(value.media_type || "application/octet-stream").split(";", 1)[0].trim().toLocaleLowerCase();
+  if (!OPAQUE_ARTIFACT_ID.test(id) || url !== `/api/artifacts/${id}` || !SAFE_ARTIFACT_URL.test(url)) {
+    return { safe: false, reason: "Preview requires the existing opaque Hub artifact URL." };
+  }
+  const kind = mediaType.startsWith("image/") ? "image" : mediaType.startsWith("video/") ? "video" : mediaType.startsWith("audio/") ? "audio" : "metadata";
+  return {
+    safe: true,
+    id,
+    url,
+    name: String(value.name || "Artifact").replace(/[\\/\r\n]+/g, " ").slice(0, 160),
+    mediaType,
+    sizeBytes: Number.isFinite(Number(value.size_bytes)) ? Number(value.size_bytes) : null,
+    kind,
+    mask: Boolean(value.mask || mediaType.includes("mask")),
+  };
+}
 
 function readWorkflowIndex(scope) {
   try {
@@ -121,7 +210,7 @@ function propertyControl(node, property) {
     return `<label class="graph-property graph-property--toggle"><input type="checkbox" data-graph-property="${escapeHtml(target)}" ${value ? "checked" : ""} /><span>${label}</span></label>`;
   }
   if (property.kind === "select" || property.kind === "encoder") {
-    const options = property.options || [];
+    const options = property.options || (property.kind === "encoder" ? ["auto"] : []);
     return `<label class="graph-property"><span>${label}</span><select data-graph-property="${escapeHtml(target)}">${options.map((option) => `<option value="${escapeHtml(option)}" ${String(option) === String(value) ? "selected" : ""}>${escapeHtml(option)}</option>`).join("")}</select></label>`;
   }
   if (property.kind === "textarea") {
@@ -173,6 +262,31 @@ class HubGraphEditor {
     this.unsaved = false;
     this.recovered = false;
     this.autosavedAt = null;
+    this.panelState = this.readPanelState();
+    this.connectionPicker = null;
+    this.pendingConnection = null;
+    this.connectionNotice = "";
+    this.encoderCapabilities = null;
+  }
+
+  panelStateKey() { return `${NODE_UI_STATE_PREFIX}:${this.scope}`; }
+
+  readPanelState() {
+    try { return normalizeNodePanelState(JSON.parse(localStorage.getItem(this.panelStateKey()) || "null")); }
+    catch { return normalizeNodePanelState(null); }
+  }
+
+  writePanelState() {
+    try { localStorage.setItem(this.panelStateKey(), JSON.stringify(this.panelState)); }
+    catch { /* WebView storage may be unavailable; graph work remains local-only. */ }
+  }
+
+  isTextControl(target) {
+    return Boolean(target?.matches?.("input,textarea,select,[contenteditable='true']"));
+  }
+
+  isCanvasActive() {
+    return Boolean(this.canvasElement && (document.activeElement === this.canvasElement || this.canvasElement.matches(":focus")));
   }
 
   async initialize() {
@@ -184,6 +298,7 @@ class HubGraphEditor {
     try {
       const [registryPayload, presetPayload, availabilityPayload] = await Promise.all([getNodeRegistry(this.scope), getNodePresets(), getNodeAvailability(this.scope)]);
       this.registry = new Map((registryPayload.nodes || []).map((item) => [item.type, item]));
+      this.applyEncoderCapabilities(registryPayload.encoder_capabilities);
       this.availability = availabilityPayload.availability || registryPayload.availability || { counts: {}, nodes: [] };
       this.presets = (presetPayload.presets || []).filter((item) => item.scope === this.scope);
       this.workflowIndex = readWorkflowIndex(this.scope);
@@ -229,8 +344,20 @@ class HubGraphEditor {
     return this.workflowLibraryState;
   }
 
+  applyEncoderCapabilities(snapshot) {
+    this.encoderCapabilities = snapshot && typeof snapshot === "object" ? snapshot : { status: "not_run", execution: "not_run", available: false, encoders: [] };
+    const definition = this.registry.get("encode");
+    const property = definition?.properties?.find((item) => item.name === "codec" && item.kind === "encoder");
+    if (!property) return;
+    const ids = this.encoderCapabilities.status === "completed" && this.encoderCapabilities.available && Array.isArray(this.encoderCapabilities.encoders)
+      ? this.encoderCapabilities.encoders.map((item) => item?.id).filter((item) => typeof item === "string" && /^[a-z0-9_]{1,64}$/.test(item))
+      : [];
+    property.options = ["auto", ...new Set(ids)];
+  }
+
   destroy() {
     this.abort.abort();
+    this.closeConnectionPicker(false);
     if (this.pollTimer) clearInterval(this.pollTimer);
     if (this.autoTimer) clearTimeout(this.autoTimer);
     this.resizeObserver?.disconnect();
@@ -418,13 +545,29 @@ class HubGraphEditor {
           ctx.restore();
         }
       };
+      HubLiteNode.prototype.onConnectInput = function guardOccupiedInput(slot) {
+        const input = this.inputs?.[slot];
+        if (input?.link != null && !input.multi) {
+          this._hubEditor?.showConnectionNotice("Input is already connected; disconnect it before adding another edge.");
+          return false;
+        }
+        return true;
+      };
+      HubLiteNode.prototype.onConnectOutput = function guardOutputType(slot, type) {
+        const output = this.outputs?.[slot];
+        if (output && type && output.type !== type) {
+          this._hubEditor?.showConnectionNotice(`Incompatible typed socket: ${output.type} -> ${type}.`);
+          return false;
+        }
+        return true;
+      };
       LiteGraph.registerNodeType(typeName, HubLiteNode);
     }
   }
 
   renderShell() {
     this.root.innerHTML = `
-      <section class="graph-editor" aria-label="Hub Nodes ${escapeHtml(this.scope)}">
+      <section class="graph-editor" aria-label="Hub Nodes ${escapeHtml(this.scope)}" data-node-palette="${escapeHtml(this.panelState.palette)}" data-node-inspector="${escapeHtml(this.panelState.inspector)}" data-node-canvas-focus="${String(this.panelState.canvasFocus)}" data-node-preview="${escapeHtml(this.panelState.preview)}" data-node-palette-width="${escapeHtml(this.panelState.paletteWidth)}" data-node-inspector-width="${escapeHtml(this.panelState.inspectorWidth)}">
         <header class="graph-editor__header">
           <div><span class="eyebrow">NODE WORKFLOW</span><h2>${escapeHtml(this.graphData.title || `Image ${this.scope}`)}</h2><p>Canvas typed socket cho người mới: nối đúng kiểu dữ liệu, kiểm tra trước khi chạy và luôn thấy trạng thái backend.</p></div>
           <div class="graph-editor__header-status" data-graph-summary><span class="status-pill" data-status="idle">Chưa chạy</span><span class="tag">${escapeHtml(this.scope)}</span></div>
@@ -436,6 +579,25 @@ class HubGraphEditor {
         </div>
         <div class="graph-editor__options"><label><input type="checkbox" data-graph-option="auto" ${this.autoPreview ? "checked" : ""} /> Preview tự động (Auto Preview)</label><label><input type="checkbox" data-graph-option="draft" ${this.draft ? "checked" : ""} /> Draft ảnh</label><span>Bấm node để cộng dồn lựa chọn · Ctrl/Shift cũng cộng dồn · kéo nhóm để di chuyển · kéo vùng để chọn · bấm nền trống, Esc hoặc Xóa chọn để bỏ chọn</span></div>
         <div class="graph-editor__statusbar"><span data-graph-validation>Chưa kiểm tra workflow.</span><span class="graph-editor__availability">${this.availability.counts?.operational || 0} sẵn sàng · ${this.availability.counts?.partial || 0} partial · ${this.availability.counts?.unavailable || 0} unavailable</span></div>
+        <div class="graph-editor__panel-controls" role="toolbar" aria-label="Node Studio panels">
+          <button class="button button--compact" type="button" data-graph-action="toggle-palette" aria-expanded="${String(this.panelState.palette !== "collapsed")}">Palette</button>
+          <button class="button button--compact" type="button" data-graph-action="toggle-inspector" aria-expanded="${String(this.panelState.inspector !== "collapsed")}">Inspector</button>
+          <button class="button button--compact" type="button" data-graph-action="toggle-canvas-focus" aria-pressed="${String(this.panelState.canvasFocus)}">Canvas focus</button>
+          <button class="button button--compact" type="button" data-graph-action="cycle-palette-width">Palette width</button>
+          <button class="button button--compact" type="button" data-graph-action="cycle-inspector-width">Inspector width</button>
+          <button class="button button--compact" type="button" data-graph-action="toggle-preview">Preview size</button>
+          <button class="button button--compact" type="button" data-graph-action="toggle-guide" aria-expanded="${String(this.panelState.guide)}">Node Guide</button>
+        </div>
+        <details class="graph-guide" data-graph-guide ${this.panelState.guide ? "open" : ""}>
+          <summary>Node Guide · typed workflow authoring</summary>
+          <div class="graph-guide__content">
+            <p><strong>Typed sockets:</strong> connect matching IMAGE, MASK, VIDEO, AUDIO, TEXT, NUMBER, BOOLEAN or METADATA ports. A filled non-multi input rejects a second edge.</p>
+            <p><strong>Canvas:</strong> middle-drag pans; plain click selects one node; Ctrl/Shift adds; drag empty canvas for marquee; drag selected nodes together; Escape clears; Delete removes safely; arrows move selected nodes and Shift makes a larger step.</p>
+            <p><strong>Status truth:</strong> validation, dirty/downstream, cache, progress and error are shown per node. Registry statuses remain operational, partial or unavailable; opening this editor never runs a worker or probes FFmpeg.</p>
+            <p><strong>Preview/recovery:</strong> previews use only opaque Hub artifact URLs. Video/audio use metadata preload; masks without raster media show a truthful fallback. Local draft, save, import and export keep paths and secrets out of localStorage.</p>
+            <div class="graph-guide__templates"><strong>Start from a template</strong>${this.presets.filter((item) => item.scope === this.scope).slice(0, 6).map((item) => `<button class="button button--compact" type="button" data-graph-guide-preset="${escapeHtml(item.id)}" title="${escapeHtml(item.description || "")}">${escapeHtml(item.title || item.id)}</button>`).join("") || "<span>No template metadata available.</span>"}</div>
+          </div>
+        </details>
         <div class="graph-editor__layout">
           <aside class="graph-palette"><input type="search" data-graph-search placeholder="Tìm node…" aria-label="Tìm node" /><div data-graph-palette></div></aside>
           <div class="graph-canvas-shell"><canvas class="graph-canvas" data-graph-canvas></canvas><div class="graph-canvas__actions"><button type="button" data-graph-action="fit">Fit</button><button type="button" data-graph-action="clear-selection">Bỏ chọn</button><button type="button" data-graph-action="delete">Xóa chọn</button></div><canvas class="graph-minimap" data-graph-minimap width="180" height="118" aria-label="Minimap graph"></canvas></div>
@@ -465,18 +627,23 @@ class HubGraphEditor {
     const autoPreviewLabel = this.root.querySelector('[data-graph-option="auto"]')?.parentElement;
     if (autoPreviewLabel?.lastChild) autoPreviewLabel.lastChild.textContent = " Preview indicator (manual; no auto-run)";
     this.canvasElement = this.root.querySelector("[data-graph-canvas]");
+    this.canvasElement.tabIndex = 0;
+    this.canvasElement.setAttribute("role", "application");
+    this.canvasElement.setAttribute("aria-label", "LiteGraph workflow canvas");
     this.minimap = this.root.querySelector("[data-graph-minimap]");
     this.paletteElement = this.root.querySelector("[data-graph-palette]");
     this.inspectorElement = this.root.querySelector("[data-graph-inspector]");
+    this.editorElement = this.root.querySelector(".graph-editor");
+    this.applyPanelState();
     this.liteGraph = new globalThis.LiteGraph.LGraph();
     this.liteCanvas = new globalThis.LiteGraph.LGraphCanvas(this.canvasElement, this.liteGraph, { autoresize: false });
     this.liteCanvas.allow_dragcanvas = true;
     this.liteCanvas.allow_dragnodes = true;
     this.liteCanvas.allow_reconnect_links = true;
     this.liteCanvas.allow_searchbox = true;
-    // LiteGraph's true mode makes a plain click additive.  Ctrl/Shift stay
-    // additive too; explicit clear paths below keep the selection reversible.
-    this.liteCanvas.multi_select = true;
+    // Plain click selects one node. LiteGraph keeps Ctrl/Shift additive when
+    // multi_select is false, matching the Hub authoring contract.
+    this.liteCanvas.multi_select = false;
     this.liteCanvas.render_shadows = true;
     this.liteCanvas.render_connections_border = true;
     this.liteCanvas.links_render_mode = globalThis.LiteGraph.SPLINE_LINK;
@@ -484,6 +651,9 @@ class HubGraphEditor {
     this.liteCanvas.onAfterChange = () => this.captureAfterChange();
     this.liteCanvas.onSelectionChange = () => { this.renderInspector(); this.drawMinimap(); };
     this.liteCanvas.onNodeMoved = () => this.drawMinimap();
+    this.liteCanvas.onMouse = (event) => this.handleCanvasMouse(event);
+    this.liteGraph.onNodeConnectionChange = () => this.captureConnectionChange();
+    this.bindConnectionPickerHook();
     this.bindCanvasShortcuts();
     this.bindEvents();
     this.renderPalette();
@@ -501,6 +671,8 @@ class HubGraphEditor {
       if (action) this.handleAction(action);
       const add = event.target.closest("[data-graph-add]")?.dataset.graphAdd;
       if (add) this.addNode(add);
+      const guidePreset = event.target.closest("[data-graph-guide-preset]")?.dataset.graphGuidePreset;
+      if (guidePreset) this.loadPreset(guidePreset);
     }, { signal });
     this.root.addEventListener("input", (event) => {
       if (event.target.matches("[data-graph-search]")) { this.search = event.target.value; this.renderPalette(); }
@@ -522,7 +694,9 @@ class HubGraphEditor {
     // Escape/Delete event before this adapter can make selection state and
     // persistence consistent.
     window.addEventListener("keydown", (event) => {
-      if (!this.root.isConnected || /INPUT|TEXTAREA|SELECT/.test(event.target?.tagName || "")) return;
+      if (!this.root.isConnected) return;
+      if (this.connectionPicker && this.handlePickerKey(event)) return;
+      if (this.isTextControl(event.target)) return;
       if (this.handleSelectionShortcut(event)) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); event.shiftKey ? this.redo() : this.undo(); }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") { event.preventDefault(); this.redo(); }
@@ -547,18 +721,278 @@ class HubGraphEditor {
     this.canvasElement.addEventListener("keydown", hubAwareKeyHandler, true);
   }
 
-  handleSelectionShortcut(event) {
-    if (/INPUT|TEXTAREA|SELECT/.test(event.target?.tagName || "")) return false;
+  handleCanvasMouse(event) {
+    if (!this.liteGraph || event.which !== 1 || this.connectionPicker || this.liteCanvas.connecting_node) return false;
+    const now = globalThis.LiteGraph?.getTime?.() || Date.now();
+    if (now - Number(this.liteCanvas.last_mouseclick || 0) < 300) return false;
+    const node = this.liteGraph.getNodeOnPos(event.canvasX, event.canvasY, this.liteCanvas.visible_nodes);
+    const group = this.liteGraph.getGroupOnPos?.(event.canvasX, event.canvasY);
+    if (node || group) return false;
+    this.liteCanvas.dragging_rectangle = new Float32Array([event.canvasX, event.canvasY, 0, 0]);
+    if (!event.shiftKey && !event.ctrlKey && !event.metaKey) this.liteCanvas.deselectAllNodes();
+    return true;
+  }
+
+  captureConnectionChange() {
+    if (this.hydrating || !this.liteGraph) return;
+    const next = this.toHubGraph();
+    const after = graphFingerprint(next);
+    const before = this.beforeChange || graphFingerprint(this.graphData);
+    if (before !== after) {
+      this.history.push(before);
+      if (this.history.length > MAX_HISTORY) this.history.shift();
+      this.future = [];
+      this.graphData = next;
+      this.unsaved = true;
+      this.markDirty(next.nodes.map((node) => node.id));
+      this.persist();
+      this.renderInspector();
+      this.renderGraphStatus();
+    }
+    this.beforeChange = null;
+  }
+
+  showConnectionNotice(message) {
+    this.connectionNotice = String(message || "").slice(0, 240);
+    if (this.connectionNotice) this.showToast(this.connectionNotice, "warning");
+  }
+
+  connectionDescriptor(event) {
+    const canvas = this.liteCanvas;
+    if (!canvas?.connecting_node || (!canvas.connecting_output && !canvas.connecting_input)) return null;
+    canvas.adjustMouseEvent(event);
+    const node = this.liteGraph.getNodeOnPos(event.canvasX, event.canvasY, canvas.visible_nodes);
+    if (node) return null;
+    if (canvas.connecting_output) {
+      return {
+        direction: "input",
+        type: String(canvas.connecting_output.type || ""),
+        node: canvas.connecting_node,
+        slot: canvas.connecting_slot,
+        port: canvas.connecting_output,
+        position: { x: event.canvasX, y: event.canvasY },
+      };
+    }
+    return {
+      direction: "output",
+      type: String(canvas.connecting_input.type || ""),
+      node: canvas.connecting_node,
+      slot: canvas.connecting_slot,
+      port: canvas.connecting_input,
+      position: { x: event.canvasX, y: event.canvasY },
+    };
+  }
+
+  cancelNativeConnection() {
+    if (!this.liteCanvas) return;
+    this.liteCanvas.connecting_output = null;
+    this.liteCanvas.connecting_input = null;
+    this.liteCanvas.connecting_pos = null;
+    this.liteCanvas.connecting_node = null;
+    this.liteCanvas.connecting_slot = -1;
+    this.liteCanvas._highlight_input = null;
+    this.liteCanvas._highlight_output = null;
+  }
+
+  bindConnectionPickerHook() {
+    const canvas = this.liteCanvas;
+    const LiteGraph = globalThis.LiteGraph;
+    const original = canvas?._mouseup_callback;
+    if (!canvas || !original || !LiteGraph?.pointerListenerRemove || !LiteGraph?.pointerListenerAdd) return;
+    const rootDocument = canvas.getCanvasWindow?.()?.document || document;
+    const wrapper = (event) => {
+      const pending = this.connectionDescriptor(event);
+      if (!pending) return original(event);
+      this.cancelNativeConnection();
+      const result = original(event);
+      this.openConnectionPicker(pending);
+      return result;
+    };
+    LiteGraph.pointerListenerRemove(canvas.canvas, "up", original, true);
+    LiteGraph.pointerListenerRemove(rootDocument, "up", original, true);
+    LiteGraph.pointerListenerAdd(canvas.canvas, "up", wrapper, true);
+    canvas._mouseup_callback = wrapper;
+  }
+
+  openConnectionPicker(pending) {
+    this.closeConnectionPicker(false);
+    this.pendingConnection = pending;
+    const candidates = getConnectionPortCandidates(this.registry, { direction: pending.direction, type: pending.type });
+    const automatic = chooseConnectionCandidate(candidates.compatible);
+    if (automatic) {
+      if (this.connectPickerCandidate(automatic)) this.showToast(`Auto-connected ${automatic.definition.title} · ${automatic.port.label || automatic.port.name}.`);
+      return;
+    }
+    const shell = this.root.querySelector(".graph-canvas-shell");
+    if (!shell) return;
+    const picker = document.createElement("div");
+    picker.className = "graph-connection-picker callout";
+    picker.dataset.graphConnectionPicker = "true";
+    picker.setAttribute("role", "dialog");
+    picker.setAttribute("aria-modal", "true");
+    picker.setAttribute("aria-labelledby", `graph-picker-title-${this.scope}`);
+    picker.style.cssText = "position:absolute;z-index:5;width:min(340px,calc(100% - 16px));max-height:72%;overflow:auto;padding:10px;background:var(--panel);box-shadow:var(--shadow);";
+    const scale = Number(this.liteCanvas.ds.scale || 1);
+    const left = Number(this.liteCanvas.ds.offset?.[0] || 0) + pending.position.x * scale;
+    const top = Number(this.liteCanvas.ds.offset?.[1] || 0) + pending.position.y * scale;
+    picker.style.left = `${Math.max(8, Math.min(Math.max(8, shell.clientWidth - 350), left))}px`;
+    picker.style.top = `${Math.max(8, Math.min(Math.max(8, shell.clientHeight - 300), top))}px`;
+    picker.innerHTML = `<div class="graph-connection-picker__head"><strong id="graph-picker-title-${escapeHtml(this.scope)}">Connect ${escapeHtml(pending.type)} socket</strong><button class="button button--compact" type="button" data-graph-picker-close aria-label="Close connection picker">Esc</button></div><input type="search" data-graph-picker-search aria-label="Search compatible nodes" placeholder="Search compatible nodes" value="${escapeHtml(this.panelState.pickerSearch)}" /><div data-graph-picker-results role="listbox" aria-label="Compatible node ports"></div><div data-graph-picker-rejected class="graph-empty" role="status"></div>`;
+    shell.appendChild(picker);
+    this.connectionPicker = { element: picker, candidates, pending };
+    const input = picker.querySelector("[data-graph-picker-search]");
+    input?.addEventListener("input", () => {
+      this.panelState.pickerSearch = input.value.slice(0, 120);
+      this.writePanelState();
+      this.renderConnectionPicker();
+    });
+    picker.addEventListener("click", (event) => {
+      const candidateButton = event.target.closest("[data-graph-picker-candidate]");
+      if (candidateButton) {
+        const index = Number(candidateButton.dataset.graphPickerCandidate);
+        const candidate = this.connectionPicker?.candidates.compatible[index];
+        if (candidate) this.connectPickerCandidate(candidate);
+      }
+      if (event.target.closest("[data-graph-picker-close]")) this.closeConnectionPicker();
+    });
+    this._pickerOutsideHandler = (event) => {
+      if (this.connectionPicker && !this.connectionPicker.element.contains(event.target)) this.closeConnectionPicker();
+    };
+    document.addEventListener("pointerdown", this._pickerOutsideHandler, true);
+    this.renderConnectionPicker();
+    setTimeout(() => input?.focus(), 0);
+  }
+
+  renderConnectionPicker() {
+    const state = this.connectionPicker;
+    if (!state) return;
+    const query = String(state.element.querySelector("[data-graph-picker-search]")?.value || "").trim().toLocaleLowerCase();
+    const matches = state.candidates.compatible.map((candidate, index) => ({ candidate, index })).filter(({ candidate }) => {
+      const haystack = `${candidate.definition.title} ${candidate.definition.type} ${candidate.port.label || candidate.port.name} ${candidate.definition.description}`.toLocaleLowerCase();
+      return !query || haystack.includes(query);
+    });
+    const results = state.element.querySelector("[data-graph-picker-results]");
+    if (results) results.innerHTML = matches.length ? matches.map(({ candidate, index }) => `<button class="button button--compact" type="button" role="option" data-graph-picker-candidate="${index}" title="${escapeHtml(candidate.definition.description || "")}">${escapeHtml(candidate.definition.title)} · ${escapeHtml(candidate.port.label || candidate.port.name)} <small>${escapeHtml(candidate.definition.availability?.status || candidate.definition.status || "operational")}</small></button>`).join("") : `<p class="graph-empty">No compatible node port matches this search.</p>`;
+    const rejected = state.element.querySelector("[data-graph-picker-rejected]");
+    if (rejected) {
+      const reasons = state.candidates.rejected.slice(0, 4).map((item) => `${item.definition.title} · ${item.port.label || item.port.name}: ${item.reason}`);
+      rejected.textContent = reasons.length ? `Rejected candidates: ${reasons.join("; ")}` : "Only explicitly compatible typed ports are shown.";
+    }
+  }
+
+  connectPickerCandidate(candidate) {
+    const pending = this.pendingConnection;
+    if (!pending || !candidate) return false;
+    const definition = this.registry.get(candidate.definition.type);
+    if (!definition) return false;
+    const node = globalThis.LiteGraph.createNode(`local-ai-hub/${definition.type}`);
+    if (!node) return false;
+    node.hubType = definition.type;
+    node.hubId = uid();
+    node._hubEditor = this;
+    node.pos = [pending.position.x, pending.position.y];
+    const targetSlot = pending.direction === "input" ? node.inputs?.findIndex((port) => port.hubPort === candidate.port.name) : node.outputs?.findIndex((port) => port.hubPort === candidate.port.name);
+    if (targetSlot === undefined || targetSlot < 0) return false;
+    let connected = false;
+    this.mutate(() => {
+      this.liteGraph.add(node);
+      connected = pending.direction === "input"
+        ? pending.node.connect(pending.slot, node, targetSlot)
+        : node.connect(targetSlot, pending.node, pending.slot);
+      if (!connected) {
+        this.liteGraph.remove(node);
+      }
+    });
+    if (!connected) {
+      this.showConnectionNotice("Compatible socket could not be connected safely; no node was added.");
+      return false;
+    }
+    this.closeConnectionPicker(false);
+    this.liteCanvas.selectNode(node);
+    this.renderInspector();
+    return true;
+  }
+
+  closeConnectionPicker(restoreFocus = true) {
+    if (this._pickerOutsideHandler) {
+      document.removeEventListener("pointerdown", this._pickerOutsideHandler, true);
+      this._pickerOutsideHandler = null;
+    }
+    this.connectionPicker?.element.remove();
+    this.connectionPicker = null;
+    this.pendingConnection = null;
+    if (restoreFocus) this.canvasElement?.focus();
+  }
+
+  applyPanelState() {
+    if (!this.editorElement) return;
+    const attributes = {
+      "data-node-palette": this.panelState.palette,
+      "data-node-inspector": this.panelState.inspector,
+      "data-node-canvas-focus": String(this.panelState.canvasFocus),
+      "data-node-preview": this.panelState.preview,
+      "data-node-palette-width": this.panelState.paletteWidth,
+      "data-node-inspector-width": this.panelState.inspectorWidth,
+    };
+    Object.entries(attributes).forEach(([name, value]) => this.editorElement.setAttribute(name, value));
+    const guide = this.root.querySelector("[data-graph-guide]");
+    if (guide) guide.open = this.panelState.guide;
+    const expanded = this.root.querySelector('[data-graph-action="toggle-guide"]');
+    if (expanded) expanded.setAttribute("aria-expanded", String(this.panelState.guide));
+    const palette = this.root.querySelector('[data-graph-action="toggle-palette"]');
+    if (palette) palette.setAttribute("aria-expanded", String(this.panelState.palette !== "collapsed"));
+    const inspector = this.root.querySelector('[data-graph-action="toggle-inspector"]');
+    if (inspector) inspector.setAttribute("aria-expanded", String(this.panelState.inspector !== "collapsed"));
+    const focus = this.root.querySelector('[data-graph-action="toggle-canvas-focus"]');
+    if (focus) focus.setAttribute("aria-pressed", String(this.panelState.canvasFocus));
+    this.writePanelState();
+  }
+
+  updatePanelState(changes) {
+    this.panelState = normalizeNodePanelState({ ...this.panelState, ...changes, version: NODE_UI_STATE_VERSION });
+    this.applyPanelState();
+    this.resizeCanvas();
+  }
+
+  handlePickerKey(event) {
+    if (!this.connectionPicker) return false;
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopImmediatePropagation();
-      this.clearSelection();
+      this.closeConnectionPicker();
       return true;
     }
+    return false;
+  }
+
+  handleSelectionShortcut(event) {
+    if (this.isTextControl(event.target)) return false;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (this.connectionPicker) this.closeConnectionPicker();
+      else this.clearSelection();
+      return true;
+    }
+    if (!this.isCanvasActive()) return false;
     if (event.key === "Delete" || event.key === "Backspace") {
       event.preventDefault();
       event.stopImmediatePropagation();
       this.deleteSelected();
+      return true;
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      this.selectAllNodes();
+      return true;
+    }
+    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) {
+      const step = event.shiftKey ? 25 : 5;
+      const delta = { ArrowUp: [0, -step], ArrowDown: [0, step], ArrowLeft: [-step, 0], ArrowRight: [step, 0] }[event.key];
+      this.moveSelected(delta[0], delta[1]);
+      event.preventDefault();
+      event.stopImmediatePropagation();
       return true;
     }
     return false;
@@ -614,12 +1048,29 @@ class HubGraphEditor {
     const definition = this.registry.get(node.hubType);
     const state = this.nodeStates.get(node.hubId) || {};
     const artifact = firstArtifact(state.output);
-    const preview = artifact?.url ? (String(artifact.media_type || "").startsWith("image/")
-      ? `<img class="graph-preview-image" src="${escapeHtml(artifact.url)}" alt="${escapeHtml(artifact.name || "Output")}" />`
-      : `<button class="button button--compact" type="button" data-preview-artifact="${escapeHtml(artifact.id || "")}" data-artifact-url="${escapeHtml(artifact.url)}" data-artifact-name="${escapeHtml(artifact.name || "Output")}" data-artifact-type="${escapeHtml(artifact.media_type || "application/octet-stream")}">Mở output</button>`) : "";
+    const preview = this.renderArtifactPreview(artifact);
     const availability = definition?.availability || { status: definition?.status || "operational", reason: "", action: "" };
     const action = state.next_action || availability.action;
-    this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(definition?.category || "node")}</span><h3>${escapeHtml(definition?.title || node.hubType)}</h3><p>${escapeHtml(definition?.description || "")}</p></div><div class="graph-node-state" data-status="${escapeHtml(state.status || availability.status)}"><b>${escapeHtml(state.status || availability.status)}</b><span>${escapeHtml(state.message || state.error || availability.reason || "")}</span></div></div>${action ? `<div class="graph-action-hint"><strong>Bước tiếp theo</strong><span>${escapeHtml(action)}</span></div>` : ""}${preview ? `<section class="graph-inspector__section"><strong>Live preview</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>Thông số</strong>${(definition?.properties || []).map((property) => propertyControl(node, property)).join("") || `<p class="graph-empty">Node này không có property.</p>`}</section>`;
+    const validation = this.validation ? (this.validation.errors?.length ? `${this.validation.errors.length} error(s)` : "valid") : "not_run";
+    const dirty = this.dirty.has(node.hubId) ? "dirty" : "clean";
+    const cache = state.cache_hit === true ? "hit" : state.cache_hit === false ? "miss" : "not_run";
+    const progress = state.progress === undefined || state.progress === null ? "not_run" : Number.isFinite(Number(state.progress)) ? `${Math.max(0, Math.min(100, Number(state.progress)))}%` : "unavailable";
+    const error = state.error ? String(state.error).slice(0, 240) : "none";
+    const statusRows = [["Validation", validation], ["Dirty / downstream", dirty], ["Cache", cache], ["Progress", progress], ["Error", error]]
+      .map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
+    this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(definition?.category || "node")}</span><h3>${escapeHtml(definition?.title || node.hubType)}</h3><p>${escapeHtml(definition?.description || "")}</p></div><div class="graph-node-state" data-status="${escapeHtml(state.status || availability.status)}"><b>${escapeHtml(state.status || availability.status)}</b><span>${escapeHtml(state.message || state.error || availability.reason || "")}</span></div></div>${action ? `<div class="graph-action-hint"><strong>Bước tiếp theo</strong><span>${escapeHtml(action)}</span></div>` : ""}<section class="graph-inspector__section"><strong>Status truthful</strong><dl class="graph-status-list">${statusRows}</dl></section>${preview ? `<section class="graph-inspector__section"><strong>Safe artifact preview</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>Thông số</strong>${(definition?.properties || []).map((property) => propertyControl(node, property)).join("") || `<p class="graph-empty">Node này không có property.</p>`}</section>`;
+  }
+
+  renderArtifactPreview(artifact) {
+    if (!artifact) return `<p class="graph-empty">No artifact output yet; execution has not been claimed.</p>`;
+    const safe = safeArtifactProjection(artifact);
+    if (!safe.safe) return `<div class="graph-preview-fallback"><strong>Preview unavailable</strong><p>${escapeHtml(safe.reason)}</p><p>Only escaped, opaque Hub artifact metadata is displayed.</p></div>`;
+    const metadata = `<dl class="graph-preview-meta"><div><dt>Artifact</dt><dd>${escapeHtml(safe.name)}</dd></div><div><dt>Type</dt><dd>${escapeHtml(safe.mediaType)}</dd></div>${safe.sizeBytes === null ? "" : `<div><dt>Size</dt><dd>${escapeHtml(String(safe.sizeBytes))} bytes</dd></div>`}</dl>`;
+    const open = `<button class="button button--compact" type="button" data-preview-artifact="${escapeHtml(safe.id)}" data-artifact-url="${escapeHtml(safe.url)}" data-artifact-name="${escapeHtml(safe.name)}" data-artifact-type="${escapeHtml(safe.mediaType)}" data-artifact-mask="${String(safe.mask)}">Open preview</button>`;
+    if (safe.kind === "image") return `${metadata}<img class="graph-preview-image" src="${escapeHtml(safe.url)}" alt="${escapeHtml(safe.name)}" loading="lazy" />${open}`;
+    if (safe.kind === "video") return `${metadata}<video class="graph-preview-media" controls preload="metadata" src="${escapeHtml(safe.url)}">Video preview unavailable in this browser.</video>${open}`;
+    if (safe.kind === "audio") return `${metadata}<audio class="graph-preview-media" controls preload="metadata" src="${escapeHtml(safe.url)}">Audio preview unavailable in this browser.</audio>${open}`;
+    return `${metadata}<div class="graph-preview-fallback"><strong>No native preview</strong><p>Escaped metadata only; this artifact type is not rendered as media.</p></div>`;
   }
 
   selectedNodes() {
@@ -664,11 +1115,32 @@ class HubGraphEditor {
     if (!node) return;
     node.hubType = type;
     node.hubId = uid();
+    node._hubEditor = this;
     const count = this.liteGraph._nodes.length;
     node.pos = [260 + (count % 5) * 46, 130 + (count % 7) * 34];
     this.mutate(() => this.liteGraph.add(node));
     this.liteCanvas.selectNode(node);
     this.liteCanvas.centerOnNode(node);
+  }
+
+  selectAllNodes() {
+    if (!this.liteCanvas) return;
+    this.liteCanvas.deselectAllNodes();
+    this.liteCanvas.selectNodes(this.liteGraph?._nodes || [], false);
+    this.renderInspector();
+  }
+
+  moveSelected(dx, dy) {
+    const selected = this.selectedNodes();
+    if (!selected.length) return;
+    this.mutate(() => {
+      selected.forEach((node) => {
+        node.pos[0] = Math.round(Number(node.pos?.[0] || 0) + dx);
+        node.pos[1] = Math.round(Number(node.pos?.[1] || 0) + dy);
+        node.setDirtyCanvas?.(true, true);
+      });
+    });
+    this.drawMinimap();
   }
 
   deleteSelected() {
@@ -751,6 +1223,7 @@ class HubGraphEditor {
       if (!node) continue;
       node.hubType = type;
       node.hubId = String(source.id || uid());
+      node._hubEditor = this;
       node.pos = [asNumber(source.position?.x, 80), asNumber(source.position?.y, 80)];
       node.properties = { ...node.properties, ...(source.data || {}) };
       this.liteGraph.add(node);
@@ -1016,12 +1489,23 @@ class HubGraphEditor {
     if (action === "redo") this.redo();
     if (action === "clear-selection") this.clearSelection();
     if (action === "delete") this.deleteSelected();
+    if (action === "toggle-palette") this.updatePanelState({ palette: this.panelState.palette === "collapsed" ? "open" : "collapsed" });
+    if (action === "toggle-inspector") this.updatePanelState({ inspector: this.panelState.inspector === "collapsed" ? "open" : "collapsed" });
+    if (action === "toggle-canvas-focus") this.updatePanelState({ canvasFocus: !this.panelState.canvasFocus });
+    if (action === "toggle-preview") this.updatePanelState({ preview: this.panelState.preview === "expanded" ? "compact" : "expanded" });
+    if (action === "toggle-guide") this.updatePanelState({ guide: !this.panelState.guide });
+    if (action === "cycle-palette-width") this.updatePanelState({ paletteWidth: this.nextPanelWidth(this.panelState.paletteWidth) });
+    if (action === "cycle-inspector-width") this.updatePanelState({ inspectorWidth: this.nextPanelWidth(this.panelState.inspectorWidth) });
     if (action === "save-local") { this.saveLocal(); return; }
     if (action === "duplicate") this.duplicateWorkflow();
     if (action === "fit") this.fitView();
     if (action === "export") this.exportGraph();
     if (action === "save-library") { this.saveToLibrary(); return; }
     if (action === "save-local") { this.persist(); this.showToast("Workflow đã lưu local trong WebView."); }
+  }
+
+  nextPanelWidth(value) {
+    return { default: "wide", wide: "narrow", narrow: "default" }[value] || "default";
   }
 }
 

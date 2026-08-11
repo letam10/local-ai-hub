@@ -9,11 +9,18 @@ a shell command or a workstation path.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
+import re
 from typing import Any, Iterable
 
 
 GRAPH_SCHEMA_VERSION = 1
 PORT_TYPES = ("IMAGE", "MASK", "VIDEO", "AUDIO", "TEXT", "NUMBER", "BOOLEAN", "MODEL", "METADATA")
+OPAQUE_ARTIFACT_ID = re.compile(r"^artifact_[a-f0-9]{32}$")
+_UNSAFE_PROPERTY_NAMES = {
+    "command", "commands", "executable", "executable_path", "filter", "filter_complex",
+    "font", "font_path", "path", "path_override", "secret", "token", "url", "vf",
+}
 
 
 @dataclass(frozen=True)
@@ -124,6 +131,63 @@ def _node(
     )
 
 
+def validate_node_data(graph: object) -> list[dict[str, Any]]:
+    """Validate closed node properties without echoing unsafe values.
+
+    The graph schema owns graph topology.  This companion contract keeps new
+    media controls closed over finite numbers, enum values and opaque artifact
+    IDs while rejecting command/filter/path-shaped client fields.
+    """
+
+    if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), list):
+        return []
+    errors: list[dict[str, Any]] = []
+    for node in graph["nodes"]:
+        if not isinstance(node, dict):
+            continue
+        node_id = node.get("id")
+        definition = get_definition(str(node.get("type") or ""))
+        data = node.get("data")
+        if definition is None or not isinstance(data, dict):
+            continue
+        properties = {str(item.get("name")): item for item in definition.properties}
+        for name, value in data.items():
+            key = str(name)
+            lowered = key.casefold()
+            if lowered in _UNSAFE_PROPERTY_NAMES or any(token in lowered for token in ("command", "executable", "filter", "font_path", "path_override", "secret")):
+                errors.append({"code": "unsafe_node_property", "message": "Node property khong nam trong allowlist an toan.", "node_id": node_id, "property": key})
+                continue
+            property_definition = properties.get(key)
+            if property_definition is None:
+                continue
+            kind = property_definition.get("kind")
+            if kind == "asset" and value not in (None, "") and (not isinstance(value, str) or not OPAQUE_ARTIFACT_ID.fullmatch(value)):
+                errors.append({"code": "invalid_asset_id", "message": "Asset property phai dung opaque artifact ID cua Hub.", "node_id": node_id, "property": key})
+            elif kind == "number":
+                try:
+                    numeric_value = float(value)
+                except (TypeError, ValueError, OverflowError):
+                    numeric_value = math.nan
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(numeric_value):
+                    errors.append({"code": "invalid_number", "message": "Number property phai la gia tri huu han.", "node_id": node_id, "property": key})
+                    continue
+                if property_definition.get("min") is not None and numeric_value < float(property_definition["min"]):
+                    errors.append({"code": "number_below_minimum", "message": "Number property vuot gioi han toi thieu.", "node_id": node_id, "property": key})
+                if property_definition.get("max") is not None and numeric_value > float(property_definition["max"]):
+                    errors.append({"code": "number_above_maximum", "message": "Number property vuot gioi han toi da.", "node_id": node_id, "property": key})
+            elif kind in {"select", "encoder"}:
+                options = property_definition.get("options") if isinstance(property_definition.get("options"), list) else []
+                allowed_encoder_fallback = kind == "encoder" and not options and value == "auto"
+                allowed_values = {str(item) for item in options}
+                if str(value) not in allowed_values and not allowed_encoder_fallback:
+                    errors.append({"code": "invalid_option", "message": "Select property khong nam trong allowlist.", "node_id": node_id, "property": key})
+            elif kind in {"text", "textarea"} and not isinstance(value, str):
+                errors.append({"code": "invalid_text", "message": "Text property phai la chuoi.", "node_id": node_id, "property": key})
+            if isinstance(value, str) and property_definition.get("max_length") is not None and len(value) > int(property_definition["max_length"]):
+                errors.append({"code": "text_too_long", "message": "Text property vuot gioi han.", "node_id": node_id, "property": key})
+    return errors
+
+
 _DEFINITIONS: tuple[NodeDefinition, ...] = (
     # Utility and asset nodes
     _node("load_image", "Load Image", "utility", "Chọn image artifact đã upload vào Hub.", "load_artifact", outputs=(_port("image", "IMAGE"),), properties=(_prop("asset_id", "Image artifact", "asset", "", accept="image/*"),)),
@@ -204,6 +268,75 @@ _DEFINITIONS: tuple[NodeDefinition, ...] = (
         heavy=True,
     ),
 
+    # Safe video production vocabulary.  Each control is closed over bounded
+    # numeric/select properties; no arbitrary filter, font or command enters
+    # the graph contract.
+    _node(
+        "video_grade",
+        "Video Grade",
+        "video",
+        "Color grade VIDEO voi brightness, contrast, saturation, gamma va tuy chon denoise/sharpen bounded; khong nhan filter tuy y.",
+        "video_grade",
+        inputs=(_port("video", "VIDEO", required=True),),
+        outputs=(_port("video", "VIDEO"), _port("metadata", "METADATA")),
+        properties=(
+            _prop("brightness", "Brightness", "number", 0, min=-1, max=1, step=0.05),
+            _prop("contrast", "Contrast", "number", 1, min=0, max=3, step=0.05),
+            _prop("saturation", "Saturation", "number", 1, min=0, max=3, step=0.05),
+            _prop("gamma", "Gamma", "number", 1, min=0.1, max=4, step=0.05),
+            _prop("denoise", "Denoise", "select", "off", options=["off", "light", "medium"]),
+            _prop("sharpen", "Sharpen", "select", "off", options=["off", "light", "medium"]),
+        ),
+        status="partial",
+        status_reason="Video grade chi co safe FFmpeg command contract; chua co bounded video smoke trong lane nay.",
+        status_action="Kiem tra FFmpeg canonical va chay smoke voi video nho truoc khi dung production.",
+    ),
+    _node(
+        "logo_overlay",
+        "Logo / Image Overlay",
+        "video",
+        "Overlay IMAGE artifact opaque voi position co dinh va opacity bounded; khong nhan raw path, font hay filter.",
+        "logo_overlay",
+        inputs=(_port("video", "VIDEO", required=True), _port("image", "IMAGE", required=True, label="Logo image")),
+        outputs=(_port("video", "VIDEO"), _port("metadata", "METADATA")),
+        properties=(
+            _prop("position", "Position", "select", "top_right", options=["top_left", "top_right", "bottom_left", "bottom_right", "center"]),
+            _prop("opacity", "Opacity", "number", 0.85, min=0, max=1, step=0.05),
+        ),
+        status="partial",
+        status_reason="Logo overlay chi cho phep IMAGE artifact va vi tri/opacity allowlist; chua co bounded video smoke.",
+        status_action="Upload mot IMAGE artifact, kiem tra adapter va chay smoke voi video nho.",
+    ),
+    _node(
+        "audio_loudness",
+        "Audio Loudness",
+        "media",
+        "Normalize AUDIO bang loudnorm va gain bounded; dau vao/dau ra deu la AUDIO, khong co filter tuy y.",
+        "audio_loudness",
+        inputs=(_port("audio", "AUDIO", required=True),),
+        outputs=(_port("audio", "AUDIO"), _port("metadata", "METADATA")),
+        properties=(
+            _prop("target_lufs", "Target LUFS", "number", -16, min=-40, max=-5, step=0.5),
+            _prop("true_peak", "True peak", "number", -1.5, min=-9, max=0, step=0.1),
+            _prop("gain_db", "Gain dB", "number", 0, min=-24, max=24, step=0.5),
+        ),
+        status="partial",
+        status_reason="Audio loudness co safe FFmpeg filter contract; chua co bounded audio smoke trong lane nay.",
+        status_action="Chon AUDIO artifact, kiem tra loudness output va chay smoke bounded khi duoc phep.",
+    ),
+    _node(
+        "text_overlay",
+        "Text Overlay (unavailable)",
+        "video",
+        "Text overlay chua co server-owned font va escaping contract day du; dung Subtitle Burn voi SRT/ASS artifact thay the.",
+        "text_overlay",
+        inputs=(_port("video", "VIDEO", required=True), _port("text", "TEXT", required=True)),
+        outputs=(_port("video", "VIDEO"),),
+        status="unavailable",
+        status_reason="Hub chua co font registry server-owned va escaping contract an toan cho text overlay.",
+        status_action="Dung Load Subtitle -> Subtitle Burn voi SRT/ASS artifact da upload.",
+    ),
+
     # SAM2 and vision
     _node("grounding_prompt", "Grounding Prompt", "vision", "Prompt TEXT cho Grounding DINO.", "text", outputs=(_port("text", "TEXT"),), properties=(_prop("text", "Prompt", "text", "person . object ."),)),
     _node("grounding_dino", "Grounding DINO", "vision", "Prompt → boxes; output có thể nối trực tiếp SAM2 Segment.", "grounding", inputs=(_port("image", "IMAGE", required=True), _port("prompt", "TEXT", required=True)), outputs=(_port("boxes", "METADATA"),), properties=(_prop("box_threshold", "Box threshold", "number", 0.35, min=0, max=1, step=0.01), _prop("text_threshold", "Text threshold", "number", 0.25, min=0, max=1, step=0.01)), status="partial", heavy=True),
@@ -212,8 +345,11 @@ _DEFINITIONS: tuple[NodeDefinition, ...] = (
     _node("sam2_track", "SAM2 Track", "vision", "Theo dõi object trên VIDEO; chỉ chạy khi user bấm Run Graph.", "sam2_track", inputs=(_port("video", "VIDEO", required=True), _port("points", "METADATA"), _port("box", "METADATA")), outputs=(_port("video", "VIDEO"), _port("mask", "MASK"), _port("metadata", "METADATA")), status="partial", heavy=True),
     _node("mask_preview", "Mask Preview", "vision", "Preview typed MASK trong Inspector.", "passthrough", inputs=(_port("mask", "MASK", required=True),), outputs=(_port("mask", "MASK"),)),
 
+    # Keep media probes typed: VIDEO and AUDIO are distinct contracts.
+    _node("probe_audio", "Probe Audio", "media", "FFprobe doc metadata cua AUDIO typed.", "probe_audio", inputs=(_port("audio", "AUDIO", required=True),), outputs=(_port("metadata", "METADATA"),), status="operational"),
+
     # Media, encoding and video AI
-    _node("probe_media", "Probe", "media", "FFprobe đọc metadata của VIDEO/AUDIO.", "probe", inputs=(_port("media", "VIDEO", required=True),), outputs=(_port("metadata", "METADATA"),), status="operational"),
+    _node("probe_media", "Probe Video", "media", "FFprobe đọc metadata của VIDEO typed.", "probe", inputs=(_port("media", "VIDEO", required=True),), outputs=(_port("metadata", "METADATA"),), status="operational"),
     _node("trim_cut", "Trim / Cut", "media", "Cắt VIDEO bằng FFmpeg allowlist.", "media", inputs=(_port("video", "VIDEO", required=True),), outputs=(_port("video", "VIDEO"),), properties=(_prop("start", "Start", "number", 0, min=0, step=0.1), _prop("end", "End", "number", 5, min=0.1, step=0.1)), status="partial"),
     _node("concat", "Concat", "media", "Ghép nhiều VIDEO artifacts theo thứ tự dây nối.", "media", inputs=(_port("videos", "VIDEO", required=True, multi=True),), outputs=(_port("video", "VIDEO"),), status="partial"),
     _node("video_crop", "Crop", "media", "Crop VIDEO bằng FFmpeg allowlist.", "media", inputs=(_port("video", "VIDEO", required=True),), outputs=(_port("video", "VIDEO"),), properties=(_prop("width", "Width", "number", 720, min=2), _prop("height", "Height", "number", 720, min=2), _prop("x", "X", "number", 0, min=0), _prop("y", "Y", "number", 0, min=0)), status="partial"),
@@ -273,17 +409,65 @@ def graph_has_heavy_nodes(graph: object) -> bool:
     return False
 
 
+def _safe_encoder_snapshot(value: object) -> dict[str, Any]:
+    """Project only cached, server-owned encoder fields to the public palette."""
+
+    fallback = {
+        "status": "not_run",
+        "execution": "not_run",
+        "available": False,
+        "reason": "Encoder discovery is not run when the Node Studio registry opens.",
+        "encoders": [],
+        "containers": ["mp4", "mkv", "webm"],
+        "audio_encoders": [],
+    }
+    if not isinstance(value, dict):
+        return fallback
+    status = str(value.get("status") or ("completed" if value.get("available") else "unavailable"))
+    if status not in {"completed", "unavailable", "not_run"}:
+        status = "unavailable"
+    raw_reason = str(value.get("reason") or fallback["reason"])
+    reason = "Server-owned encoder snapshot reason redacted." if re.search(r"(?:[A-Za-z]:[\\/]|/|\\\\)", raw_reason) else raw_reason[:240]
+    raw_execution = str(value.get("execution") or "completed")
+    execution = raw_execution if raw_execution in {"not_run", "completed", "unavailable"} else "unavailable"
+    result = {
+        "status": status,
+        "execution": "not_run" if status == "not_run" else execution,
+        "available": bool(value.get("available")) if status == "completed" else False,
+        "reason": reason,
+        "encoders": [],
+        "containers": [item for item in value.get("containers", []) if item in {"mp4", "mkv", "webm"}] if isinstance(value.get("containers"), list) else fallback["containers"],
+        "audio_encoders": [item for item in value.get("audio_encoders", []) if isinstance(item, str) and re.fullmatch(r"[a-z0-9_]{1,40}", item)] if isinstance(value.get("audio_encoders"), list) else [],
+    }
+    if result["available"] and isinstance(value.get("encoders"), list):
+        for item in value["encoders"]:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not re.fullmatch(r"[a-z0-9_]{1,64}", item["id"]):
+                continue
+            result["encoders"].append({
+                "id": item["id"],
+                "codec": str(item.get("codec") or "")[:32],
+                "available": bool(item.get("available")),
+                "pixel_formats": [fmt for fmt in item.get("pixel_formats", []) if isinstance(fmt, str) and re.fullmatch(r"[a-z0-9_]{1,32}", fmt)] if isinstance(item.get("pixel_formats"), list) else [],
+                "rate_controls": [rate for rate in item.get("rate_controls", []) if rate in {"quality", "vbr", "cbr"}] if isinstance(item.get("rate_controls"), list) else [],
+                "quality_option": item.get("quality_option") if item.get("quality_option") in {"crf", "cq", None} else None,
+                "preset_supported": bool(item.get("preset_supported")),
+                "multipass_supported": bool(item.get("multipass_supported")),
+                "hardware": bool(item.get("hardware")),
+            })
+    return result
+
+
 def registry_payload(scope: str | None = None) -> dict[str, Any]:
-    """Return the offline palette plus the detected FFmpeg encode capabilities."""
+    """Return the offline palette plus a cached FFmpeg capability snapshot."""
 
     capabilities: dict[str, Any] = {"available": False, "reason": "Chưa dò FFmpeg."}
     try:
         # This stays lazy: opening the API or desktop shell never starts FFmpeg.
-        from src.modules.media_editor.backend.adapter import encoder_capabilities
+        from src.modules.media_editor.backend.adapter import cached_encoder_capabilities
 
-        capabilities = encoder_capabilities()
-    except Exception as exc:  # pragma: no cover - optional runtime may be absent
-        capabilities = {"available": False, "reason": str(exc)}
+        capabilities = _safe_encoder_snapshot(cached_encoder_capabilities())
+    except Exception:  # pragma: no cover - optional runtime may be absent
+        capabilities = _safe_encoder_snapshot({"status": "unavailable", "execution": "not_run", "available": False, "reason": "Cached encoder snapshot is unavailable."})
     definitions = list(definitions_for_scope(scope))
     counts = {status: sum(1 for item in definitions if item.status == status) for status in ("operational", "partial", "unavailable")}
     return {

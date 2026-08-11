@@ -14,7 +14,7 @@ from typing import Any, Callable
 from src.services.artifact_store import describe, publicize, register_path, resolve
 from src.shared.paths.registry import OUTPUT_ROOT
 
-from .registry import NodeDefinition, get_definition
+from .registry import NodeDefinition, get_definition, validate_node_data
 from .schema import validate_graph
 from .state import graph_runs
 
@@ -301,6 +301,52 @@ def _run_video_transform(data: dict[str, Any], inputs: dict[str, Any], context: 
     return output
 
 
+def _run_video_grade(data: dict[str, Any], inputs: dict[str, Any], context: Any, execute_tool: ToolExecutor) -> dict[str, Any]:
+    source = _input_artifact(inputs, "video")
+    payload = {
+        "operation": "video_grade",
+        "path": str(source.path),
+        "brightness": data.get("brightness", 0),
+        "contrast": data.get("contrast", 1),
+        "saturation": data.get("saturation", 1),
+        "gamma": data.get("gamma", 1),
+        "denoise": data.get("denoise", "off"),
+        "sharpen": data.get("sharpen", "off"),
+    }
+    output = _media_result(execute_tool("run_media_operation", payload, context), expected_output="video")
+    output.setdefault("metadata", {}).update({"operation": "video_grade", "safe_controls": True})
+    return output
+
+
+def _run_logo_overlay(data: dict[str, Any], inputs: dict[str, Any], context: Any, execute_tool: ToolExecutor) -> dict[str, Any]:
+    video = _input_artifact(inputs, "video")
+    image = _input_artifact(inputs, "image")
+    payload = {
+        "operation": "logo_overlay",
+        "path": str(video.path),
+        "overlay_artifact_id": image.artifact_id,
+        "position": data.get("position", "top_right"),
+        "opacity": data.get("opacity", 0.85),
+    }
+    output = _media_result(execute_tool("run_media_operation", payload, context), expected_output="video")
+    output.setdefault("metadata", {}).update({"operation": "logo_overlay", "safe_artifact_input": True})
+    return output
+
+
+def _run_audio_loudness(data: dict[str, Any], inputs: dict[str, Any], context: Any, execute_tool: ToolExecutor) -> dict[str, Any]:
+    source = _input_artifact(inputs, "audio")
+    payload = {
+        "operation": "audio_loudness",
+        "path": str(source.path),
+        "target_lufs": data.get("target_lufs", -16),
+        "true_peak": data.get("true_peak", -1.5),
+        "gain_db": data.get("gain_db", 0),
+    }
+    output = _media_result(execute_tool("run_media_operation", payload, context), expected_output="audio")
+    output.setdefault("metadata", {}).update({"operation": "audio_loudness", "safe_controls": True})
+    return output
+
+
 def _run_video_upscale(data: dict[str, Any], inputs: dict[str, Any], context: Any, execute_tool: ToolExecutor) -> dict[str, Any]:
     source = _input_artifact(inputs, "video")
     backend = str(data.get("backend") or "ffmpeg_scale")
@@ -499,6 +545,12 @@ def _run_node(definition: NodeDefinition, data: dict[str, Any], inputs: dict[str
         return _run_frame_interpolate(data, inputs, context, execute_tool)
     if runner == "video_transform":
         return _run_video_transform(data, inputs, context, execute_tool)
+    if runner == "video_grade":
+        return _run_video_grade(data, inputs, context, execute_tool)
+    if runner == "logo_overlay":
+        return _run_logo_overlay(data, inputs, context, execute_tool)
+    if runner == "audio_loudness":
+        return _run_audio_loudness(data, inputs, context, execute_tool)
     if runner == "video_upscale":
         return _run_video_upscale(data, inputs, context, execute_tool)
     if runner == "encode":
@@ -508,6 +560,12 @@ def _run_node(definition: NodeDefinition, data: dict[str, Any], inputs: dict[str
     if runner == "video_generate":
         raise NodeFailure(
             "Video generation backend chưa khả dụng trong Hub.",
+            status="unavailable",
+            next_action=definition.status_action,
+        )
+    if runner == "text_overlay":
+        raise NodeFailure(
+            "Text overlay chua co server-owned font/escaping contract; dung Subtitle Burn voi SRT/ASS artifact.",
             status="unavailable",
             next_action=definition.status_action,
         )
@@ -539,6 +597,12 @@ def _run_node(definition: NodeDefinition, data: dict[str, Any], inputs: dict[str
         result = execute_tool("probe_media", {"path": str(source.path)}, context)
         if result.get("status") != "completed":
             raise NodeFailure(str(result.get("error") or result.get("reason") or "FFprobe không hoàn tất."), status=str(result.get("status") or "failed"))
+        return {"metadata": _public_value(result)}
+    if runner == "probe_audio":
+        source = _input_artifact(inputs, "audio")
+        result = execute_tool("probe_media", {"path": str(source.path)}, context)
+        if result.get("status") != "completed":
+            raise NodeFailure(str(result.get("error") or result.get("reason") or "FFprobe audio khong hoan tat."), status=str(result.get("status") or "failed"))
         return {"metadata": _public_value(result)}
     if runner == "animesr":
         source = _input_artifact(inputs, "video")
@@ -573,6 +637,9 @@ def execute_graph(graph: dict[str, Any], context: Any, execute_tool: ToolExecuto
     if not validation["valid"]:
         return {"status": "error", "error": "Graph không hợp lệ.", "validation": {"errors": validation["errors"]}}
     value = validation["graph"]
+    contract_errors = validate_node_data(value)
+    if contract_errors:
+        return {"status": "error", "error": "Graph node properties are invalid.", "validation": {"errors": contract_errors}}
     graph_runs.begin(str(context.job_id), value)
     node_lookup = {str(node["id"]): node for node in value["nodes"]}
     outputs: dict[str, dict[str, Any]] = {}
