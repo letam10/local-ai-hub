@@ -7,6 +7,7 @@ history; older terminal entries move to an ignored cold archive.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -379,6 +380,18 @@ def active_heavy_jobs() -> list[dict[str, Any]]:
 _load()
 
 
+class DurableStoreHealthError(RuntimeError):
+    """Fail-closed durable-store health error without filesystem reflection."""
+
+    def __init__(self, code: str, action: str = "Restore or repair durable job state through an administrator-controlled recovery procedure.") -> None:
+        super().__init__(code)
+        self.code = code
+        self.action = action
+
+    def public(self) -> dict[str, str]:
+        return {"status": "unavailable", "code": self.code, "action": self.action}
+
+
 class DurableJobStore:
     """Small atomic JSON store used by the V5 declarative work engine.
 
@@ -396,6 +409,7 @@ class DurableJobStore:
         self.history_limit = max(1, min(1000, int(history_limit)))
         self._records: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
+        self._disk_fingerprint: str | None = None
         self._writer = CoalescingWriter(self._write)
         self._load_records()
 
@@ -413,23 +427,61 @@ class DurableJobStore:
     def _sort_key(record: dict[str, Any]) -> str:
         return str(record.get("finished_at") or record.get("updated_at") or record.get("created_at") or "")
 
-    def _load_records(self) -> None:
+    @staticmethod
+    def _fingerprint(value: bytes) -> str:
+        return hashlib.sha256(value).hexdigest()
+
+    def _read_existing_bytes(self) -> bytes | None:
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            return self.path.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise DurableStoreHealthError("DURABLE_STORE_UNREADABLE") from exc
+
+    @staticmethod
+    def _validate_root(raw: bytes) -> dict[str, Any]:
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DurableStoreHealthError("DURABLE_STORE_UNREADABLE") from exc
+        if type(value) is not dict:
+            raise DurableStoreHealthError("DURABLE_STORE_INVALID_ROOT")
+        return value
+
+    def _verify_disk_locked(self) -> None:
+        """Refuse an overwrite if the original file changed or became unreadable."""
+
+        current = self._read_existing_bytes()
+        current_fingerprint = self._fingerprint(current) if current is not None else None
+        if current_fingerprint == self._disk_fingerprint:
             return
-        if type(raw) is not dict:
+        if current is None and self._disk_fingerprint is None:
             return
+        if current is not None:
+            # Different but valid bytes still require a human-controlled
+            # resolution; malformed/non-object content gets a more specific
+            # fail-closed code and is never replaced.
+            self._validate_root(current)
+        raise DurableStoreHealthError("DURABLE_STORE_CHANGED")
+
+    def _load_records(self) -> None:
+        raw_bytes = self._read_existing_bytes()
+        if raw_bytes is None:
+            return
+        raw = self._validate_root(raw_bytes)
         with self._lock:
             for job_id, record in raw.items():
                 if not isinstance(job_id, str) or type(record) is not dict:
-                    continue
+                    raise DurableStoreHealthError("DURABLE_STORE_INVALID_RECORD")
                 try:
                     copied = self._copy(record)
-                except ValueError:
-                    continue
-                if copied.get("id") == job_id:
-                    self._records[job_id] = copied
+                except ValueError as exc:
+                    raise DurableStoreHealthError("DURABLE_STORE_INVALID_RECORD") from exc
+                if copied.get("id") != job_id:
+                    raise DurableStoreHealthError("DURABLE_STORE_INVALID_RECORD")
+                self._records[job_id] = copied
+            self._disk_fingerprint = self._fingerprint(raw_bytes)
             self._trim_locked()
 
     def _trim_locked(self) -> None:
@@ -446,14 +498,24 @@ class DurableJobStore:
 
     def _write(self) -> None:
         with self._lock:
+            self._verify_disk_locked()
             self._trim_locked()
             payload = self._copy({job_id: self._records[job_id] for job_id in sorted(self._records)})
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_name(f".{self.path.name}.tmp")
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(payload, handle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            handle.write("\n")
-        temporary.replace(self.path)
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        temporary = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+                handle.write(encoded)
+            with self._lock:
+                # Re-check immediately before replacement so a later corrupt
+                # write cannot be silently overwritten by this store.
+                self._verify_disk_locked()
+                temporary.replace(self.path)
+                self._disk_fingerprint = self._fingerprint(encoded.encode("utf-8"))
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
 
     def put(self, record: dict[str, Any]) -> dict[str, Any]:
         copied = self._copy(record)
@@ -461,6 +523,7 @@ class DurableJobStore:
         if not isinstance(job_id, str) or not job_id:
             raise ValueError("Durable job record requires an opaque ID.")
         with self._lock:
+            self._verify_disk_locked()
             if job_id in self._records:
                 raise ValueError("Durable job ID already exists.")
             self._records[job_id] = copied
@@ -479,6 +542,7 @@ class DurableJobStore:
     def update(self, job_id: str, changes: dict[str, Any], *, progress_only: bool = False) -> dict[str, Any] | None:
         copied = self._copy(changes)
         with self._lock:
+            self._verify_disk_locked()
             record = self._records.get(job_id)
             if record is None:
                 return None
@@ -488,6 +552,8 @@ class DurableJobStore:
         return result
 
     def flush(self) -> None:
+        with self._lock:
+            self._verify_disk_locked()
         self._writer.flush()
 
     def close(self) -> None:

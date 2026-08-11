@@ -12,7 +12,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from src.services import artifact_store
-from src.services.api.jobs import DurableJobStore
+from src.services.api.jobs import DurableJobStore, DurableStoreHealthError
 from src.services.api.api_server import HubHandler
 from src.services.job_manager import DurableWorkEngine, JobContractError, ServerOwnedAdapterRegistry
 
@@ -129,11 +129,14 @@ class DurableWorkEngineTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "INVALID_RESOURCE_REQUEST")
 
     def test_restart_reconciliation_and_retry_only_when_reconstructable(self) -> None:
-        pending = self.engine.submit(self.spec())
-        self.store.update(pending["id"], {"status": "running", "state_history": ["queued", "starting", "running"]})
-        self.store.flush()
+        initial_store = DurableJobStore(self.root / "restart" / "durable-jobs.json")
+        initial = DurableWorkEngine(initial_store, self.registry)
+        pending = initial.submit(self.spec())
+        initial_store.update(pending["id"], {"status": "running", "state_history": ["queued", "starting", "running"]})
+        initial_store.flush()
+        self.assertTrue(initial.close())
 
-        restarted_store = DurableJobStore(self.store.path)
+        restarted_store = DurableJobStore(initial_store.path)
         restarted = DurableWorkEngine(restarted_store, self.registry)
         self.addCleanup(restarted.close)
         report = restarted.reconcile_startup()
@@ -146,13 +149,46 @@ class DurableWorkEngineTests(unittest.TestCase):
         self.assertEqual(retry["attempt"], 2)
 
         self.registry.register("unit.no-retry", lambda _descriptor, _context: {"status": "failed"})
-        non_reconstructable = self.engine.submit(self.spec(adapter_id="unit.no-retry", reconstructable=False))
-        failed = self.engine.run(non_reconstructable["id"])
+        non_reconstructable = restarted.submit(self.spec(adapter_id="unit.no-retry", reconstructable=False))
+        failed = restarted.run(non_reconstructable["id"])
         self.assertEqual(failed["status"], "failed")
         self.assertFalse(failed["retry_available"])
         with self.assertRaises(JobContractError) as caught:
-            self.engine.retry(non_reconstructable["id"])
+            restarted.retry(non_reconstructable["id"])
         self.assertEqual(caught.exception.code, "JOB_NOT_RECONSTRUCTABLE")
+
+    def test_corrupt_store_fails_closed_without_overwriting_original_bytes(self) -> None:
+        for name, raw, expected_code in (
+            ("malformed", b'{"jobv5_bad":', "DURABLE_STORE_UNREADABLE"),
+            ("non-object", b"[]", "DURABLE_STORE_INVALID_ROOT"),
+        ):
+            with self.subTest(name=name):
+                path = self.root / name / "durable-jobs.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(raw)
+                with self.assertRaises(DurableStoreHealthError) as caught:
+                    DurableJobStore(path)
+                self.assertEqual(path.read_bytes(), raw)
+                self.assertEqual(caught.exception.code, expected_code)
+                self.assertEqual(caught.exception.public()["status"], "unavailable")
+                self.assertTrue(caught.exception.public()["action"])
+                self.assertNotIn(str(path), str(caught.exception))
+                self.assertNotIn(raw.decode("utf-8"), str(caught.exception))
+
+        path = self.root / "changed" / "durable-jobs.json"
+        store = DurableJobStore(path)
+        store.put({"id": "healthy", "status": "queued"})
+        corrupt_bytes = b'{"jobv5_bad":'
+        path.write_bytes(corrupt_bytes)
+        for mutation in (
+            lambda: store.put({"id": "second", "status": "queued"}),
+            lambda: store.update("healthy", {"status": "running"}),
+            store.flush,
+        ):
+            with self.assertRaises(DurableStoreHealthError) as caught:
+                mutation()
+            self.assertEqual(caught.exception.code, "DURABLE_STORE_UNREADABLE")
+            self.assertEqual(path.read_bytes(), corrupt_bytes)
 
     def test_invalid_persisted_descriptor_becomes_unavailable(self) -> None:
         record = self.engine.submit(self.spec())
