@@ -177,6 +177,28 @@ operational or executing claim. Install, repair, and uninstall are explanatory
 states only. Productization and resource planning remain `execution: not_run`
 with `dry_run: true` until a separately authorized runtime boundary exists.
 
+## Job recovery and artifact journey
+
+Dashboard also exposes a concise Job Recovery card with server-published active,
+attention, interrupted, and recoverable counts. Its focused action navigates to
+the existing Jobs route and applies the attention filter; it adds no endpoint or
+client-side discovery.
+
+Jobs treats `productization.jobs.records` and `counts` as the canonical recovery
+snapshot. Records are bounded, escaped, deterministically deduplicated, and
+sorted. Only a matching hot-job record may add published lifecycle timestamps,
+progress detail, opaque artifact metadata, or provenance. Durable records are
+shown as Durable and do not receive a Resume control unless the server publishes
+`resumable: true`; the current production-shaped durable snapshot therefore
+remains unavailable with no fabricated preview or media.
+
+Existing legacy cancel/resume requests are followed by the existing fast
+snapshot refresh and expose role=status feedback. Artifact cards use only the
+opaque artifact ID/URL transport. If no artifact detail is published, Jobs says
+`Preview unavailable in this snapshot`; no path, secret, command, manifest, or
+unknown object is rendered. This is static/fixture acceptance evidence only and
+does not promote recovery, media, GPU, provider, or execution capability.
+
 ## V5-D integration boundary
 
 The future integration lane must provide server-owned methods equivalent to:

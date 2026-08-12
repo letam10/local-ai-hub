@@ -68,7 +68,7 @@ import {
 import { disposeNodeStudios, mountNodeStudios } from "./node_studio.js";
 import { mountImageMaskCanvases } from "./image_mask_studio.js";
 import { createWorkflowLibraryAdapter } from "./workflow_library.js";
-import { NAVIGATION, renderPage } from "./pages.js";
+import { NAVIGATION, jobRecoverySnapshot, renderPage } from "./pages.js";
 
 const state = {
   health: {}, capabilities: {}, productization: {}, components: [], tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", apiStatus: "loading", apiError: "",
@@ -251,10 +251,17 @@ const routeId = () => {
   return NAVIGATION.flatMap((group) => group.items).some(([id]) => id === value) ? value : "dashboard";
 };
 
+const safeDisplayMessage = (value, fallback) => typeof value === "string" && value.trim() ? value : fallback;
+const setJobActionStatus = (message, kind = "") => {
+  const status = document.querySelector("[data-job-action-status]");
+  if (!status) return;
+  status.textContent = safeDisplayMessage(message, "Hub returned no displayable action message.");
+  status.dataset.status = kind;
+};
 const showToast = (message, kind = "") => {
   const toast = document.createElement("div");
   toast.className = `toast ${kind ? `toast--${kind}` : ""}`;
-  toast.textContent = message;
+  toast.textContent = safeDisplayMessage(message, "Hub returned no displayable message.");
   toastRegion.append(toast);
   window.setTimeout(() => toast.remove(), 5200);
 };
@@ -444,9 +451,8 @@ const updateTopbar = () => {
   topStatus.textContent = health.status ? `${formatStatus(health.status)} · Workflow trực tiếp` : "Đang khởi động API…";
   diskMetric.textContent = disk.free_bytes ? `Ổ đĩa ${formatGb(disk.free_bytes)} trống` : "Ổ đĩa —";
   gpuMetric.textContent = gpu.name ? `GPU ${gpu.name}` : "GPU chưa phát hiện";
-  const allJobs = [...state.jobs, ...state.durableJobs];
-  const active = allJobs.filter((job) => ["queued", "starting", "running", "cancelling"].includes(job.status)).length;
-  jobSummary.textContent = `Jobs: ${active} đang chạy · ${allJobs.length} bản ghi`;
+  const recovery = jobRecoverySnapshot(state);
+  jobSummary.textContent = `Jobs: ${recovery.counts.active} active · ${recovery.counts.total} records`;
 };
 
 const render = () => {
@@ -933,7 +939,12 @@ document.addEventListener("click", async (event) => {
   if (preview) { showArtifactPreview(preview); return; }
   if (event.target.closest("[data-refresh-api]")) { await initialize(); return; }
   const route = event.target.closest("[data-route], [data-readiness-route]");
-  if (route) { closeMobileSidebar(); window.location.hash = `#/${route.dataset.route || route.dataset.readinessRoute}`; return; }
+  if (route) {
+    const nextRoute = route.dataset.route || route.dataset.readinessRoute;
+    if (route.dataset.recoveryFocus === "attention") state.jobFilter = "attention";
+    if (route.dataset.recoveryFocus === "all") state.jobFilter = "all";
+    closeMobileSidebar(); window.location.hash = `#/${nextRoute}`; return;
+  }
   if (event.target.closest("[data-refresh-creative]")) {
     try { await refreshCreative(); showToast("Đã làm mới Creative Workspace."); }
     catch (error) { showToast(error.message, "error"); }
@@ -1160,11 +1171,44 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const cancel = event.target.closest("[data-cancel-job]");
-  if (cancel) { cancel.disabled = true; try { showToast((await cancelJob(cancel.dataset.cancelJob)).message || "Đang hủy job."); await refreshFast({ quiet: true }); } catch (error) { showToast(error.message, "error"); } return; }
+  if (cancel) {
+    cancel.disabled = true;
+    try {
+      const result = await cancelJob(cancel.dataset.cancelJob);
+      await refreshFast({ quiet: true });
+      const message = safeDisplayMessage(result?.message, "Cancel request sent; Jobs snapshot refreshed.");
+      setJobActionStatus(message, "success"); showToast(message, "success");
+    } catch (error) {
+      setJobActionStatus(error.message, "error"); showToast(error.message, "error");
+    }
+    return;
+  }
   const resume = event.target.closest("[data-resume-job]");
-  if (resume) { resume.disabled = true; try { showToast(`Đã tạo ${((await resumeJob(resume.dataset.resumeJob)).job || {}).id || "job tiếp tục"}.`); await refreshFast({ quiet: true }); } catch (error) { showToast(error.message, "error"); } return; }
+  if (resume) {
+    resume.disabled = true;
+    try {
+      await resumeJob(resume.dataset.resumeJob);
+      await refreshFast({ quiet: true });
+      const message = "Legacy recovery request sent; Jobs snapshot refreshed.";
+      setJobActionStatus(message, "success"); showToast(message, "success");
+    } catch (error) {
+      setJobActionStatus(error.message, "error"); showToast(error.message, "error");
+    }
+    return;
+  }
   const durableResume = event.target.closest("[data-resume-durable-job]");
-  if (durableResume) { durableResume.disabled = true; try { const result = await resumeDurableJob(durableResume.dataset.resumeDurableJob); showToast(result.next_action || "V5 durable recovery remains server-owned.", "warning"); await refreshFast({ quiet: true }); } catch (error) { showToast(error.message, "error"); } return; }
+  if (durableResume) {
+    durableResume.disabled = true;
+    try {
+      const result = await resumeDurableJob(durableResume.dataset.resumeDurableJob);
+      await refreshFast({ quiet: true });
+      const message = safeDisplayMessage(result?.next_action, "Durable recovery response received; the server snapshot remains authoritative.");
+      setJobActionStatus(message, result?.status === "unavailable" ? "warning" : "success"); showToast(message, "warning");
+    } catch (error) {
+      setJobActionStatus(error.message, "error"); showToast(error.message, "error");
+    }
+    return;
+  }
   const open = event.target.closest("[data-open-artifact]");
   if (open) { try { showToast((await openArtifact(open.dataset.openArtifact)).message || "Đã yêu cầu mở artifact."); } catch (error) { showToast(error.message, "error"); } return; }
   const comfyAction = event.target.closest("[data-comfy-action]")?.dataset.comfyAction;
@@ -1218,6 +1262,11 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("keydown", async (event) => {
+  if (event.key === "Escape" && artifactPreviewLayer && !artifactPreviewLayer.matches(":empty")) {
+    event.preventDefault();
+    closeArtifactPreview();
+    return;
+  }
   if (routeId() !== "image" || state.workspaceTabs.image !== "studio") return;
   const target = event.target;
   if (target?.matches?.("input, textarea, select, [contenteditable=true]")) return;

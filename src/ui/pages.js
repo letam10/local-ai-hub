@@ -69,6 +69,14 @@ const READINESS_STATUS_LABELS = Object.freeze({
   planned: "Planned",
   missing: "Missing",
   unknown: "Unknown",
+  queued: "Queued",
+  starting: "Starting",
+  running: "Running",
+  cancelling: "Cancelling",
+  cancelled: "Cancelled",
+  failed: "Failed",
+  interrupted: "Interrupted",
+  completed: "Completed",
 });
 const UI_STATUS_RE = /^[a-z][a-z0-9_-]{0,39}$/;
 const uiStatus = (value, fallback = "unknown") => {
@@ -96,6 +104,76 @@ const safeUiText = (value, fallback = "") => {
 const safeUiIdentifier = (value, fallback = "unknown") => {
   const candidate = typeof value === "string" ? value.trim() : "";
   return /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,119}$/.test(candidate) ? candidate : fallback;
+};
+const safeJobId = (value, fallback = "") => {
+  const candidate = safeUiText(value, "");
+  return /^[A-Za-z0-9][A-Za-z0-9._:@_-]{0,119}$/.test(candidate) ? candidate : fallback;
+};
+const safeJobStatus = (value, fallback = "unavailable") => {
+  const candidate = uiStatus(value, fallback);
+  return Object.prototype.hasOwnProperty.call(READINESS_STATUS_LABELS, candidate) ? candidate : fallback;
+};
+const safeJobTimestamp = (value) => {
+  const candidate = safeUiText(value, "");
+  return /^[0-9T:.+Z-]{8,80}$/.test(candidate) ? candidate : "";
+};
+const safeJobCount = (value, fallback = 0) => Number.isInteger(value) && value >= 0 && value <= 500 ? value : fallback;
+const safeArtifactMediaType = (value) => {
+  const candidate = typeof value === "string" ? value.split(";", 1)[0].trim().toLowerCase() : "";
+  return /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(candidate) ? candidate : "application/octet-stream";
+};
+const safeJobArtifacts = (value) => {
+  const records = Array.isArray(value) ? value : [];
+  return records.slice(0, 64).flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const rawId = typeof item.id === "string" ? item.id : typeof item.artifact_id === "string" ? item.artifact_id : "";
+    const id = opaqueArtifactId(rawId);
+    const url = opaqueArtifactUrl(item.url);
+    if (!id && !url) return [];
+    const nameValue = typeof item.name === "string" ? item.name : "";
+    const record = {
+      id: id || url.split("/").pop() || "",
+      url,
+      name: safeArtifactName(nameValue),
+      media_type: safeArtifactMediaType(item.media_type),
+      size_bytes: Number.isInteger(item.size_bytes) && item.size_bytes >= 0 ? item.size_bytes : null,
+      created_at: typeof item.created_at === "string" ? item.created_at : "",
+      sha256: typeof item.sha256 === "string" ? item.sha256 : "",
+      provenance: item.provenance && typeof item.provenance === "object" && !Array.isArray(item.provenance) ? item.provenance : {},
+    };
+    if (item.mask === true || item.is_mask === true || item.artifact_kind === "mask") record.is_mask = true;
+    return [record];
+  });
+};
+const safeJobProvenance = (value) => {
+  const records = Array.isArray(value) ? value : [];
+  return records.slice(0, 64).flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const artifactId = typeof item.artifact_id === "string" ? opaqueArtifactId(item.artifact_id) : "";
+    const nodeType = safeUiIdentifier(item.node_type, "node");
+    const nameValue = typeof item.name === "string" ? item.name : artifactId;
+    return [{ artifact_id: artifactId, node_type: nodeType, name: safeArtifactName(nameValue) }];
+  });
+};
+const safeHotJobDetail = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const detail = value;
+  const result = detail.result && typeof detail.result === "object" && !Array.isArray(detail.result) ? detail.result : {};
+  const rawArtifacts = Array.isArray(result.artifacts) ? result.artifacts : Array.isArray(detail.artifacts) ? detail.artifacts : [];
+  const rawProvenance = Array.isArray(result.provenance) ? result.provenance : Array.isArray(detail.provenance) ? detail.provenance : [];
+  const lifecycleValue = typeof detail.lifecycle === "string" ? detail.lifecycle : typeof detail.lifecycle_status === "string" ? detail.lifecycle_status : "";
+  return {
+    lifecycle: safeUiText(lifecycleValue),
+    message: safeUiText(detail.message),
+    contractVersion: safeUiText(detail.contract_version),
+    createdAt: safeJobTimestamp(detail.created_at),
+    startedAt: safeJobTimestamp(detail.started_at),
+    updatedAt: safeJobTimestamp(detail.updated_at),
+    finishedAt: safeJobTimestamp(detail.finished_at),
+    artifactsPublished: Array.isArray(result.artifacts) || Array.isArray(detail.artifacts),
+    artifacts: safeJobArtifacts(rawArtifacts),
+    provenance: safeJobProvenance(rawProvenance),
+  };
 };
 const safeReadinessModules = (state) => {
   const productization = state?.productization && typeof state.productization === "object" ? state.productization : {};
@@ -210,6 +288,110 @@ const readinessSnapshot = (state) => {
     resourceSnapshot: Object.keys(control).length > 0 ? "current server capability snapshot" : "not published",
   };
 };
+const JOB_STATUS_RANK = Object.freeze({
+  failed: 0,
+  unavailable: 0,
+  interrupted: 0,
+  cancelled: 0,
+  queued: 1,
+  starting: 1,
+  running: 1,
+  cancelling: 1,
+  completed: 2,
+});
+const textKey = (value) => String(value ?? "").trim().toLowerCase();
+export const jobRecoverySnapshot = (state) => {
+  const source = state && typeof state === "object" ? state : {};
+  const productization = source.productization && typeof source.productization === "object" ? source.productization : {};
+  const productJobs = productization.jobs && typeof productization.jobs === "object" && !Array.isArray(productization.jobs) ? productization.jobs : {};
+  const hasCanonical = Array.isArray(productJobs.records);
+  const hotRecords = Array.isArray(source.jobs) ? source.jobs : [];
+  const durableRecords = Array.isArray(source.durableJobs) ? source.durableJobs : [];
+  const fallbackRecords = [
+    ...hotRecords.map((item) => item && typeof item === "object" && !Array.isArray(item) ? { ...item, source: item.source === "durable" ? "durable" : "hot" } : {}),
+    ...durableRecords.map((item) => item && typeof item === "object" && !Array.isArray(item) ? { ...item, source: "durable" } : {}),
+  ];
+  const rawRecords = hasCanonical ? productJobs.records : fallbackRecords;
+  const hotDetails = new Map();
+  hotRecords.forEach((item) => {
+    const id = safeJobId(item?.id);
+    const detail = safeHotJobDetail(item);
+    const displayId = safeUiText(item?.id, "");
+    if (id && detail) hotDetails.set(id, detail);
+    if (displayId && detail) hotDetails.set(displayId, detail);
+  });
+  const candidates = rawRecords.slice(0, 500).flatMap((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const id = safeUiText(item.id, `job-${index + 1}`) || `job-${index + 1}`;
+    const actionId = safeJobId(item.id);
+    const jobSource = item.source === "durable" ? "durable" : "hot";
+    const detail = jobSource === "hot" ? hotDetails.get(actionId) || hotDetails.get(id) : null;
+    const status = safeJobStatus(item.status);
+    const progress = Number.isInteger(item.progress) && item.progress >= 0 && item.progress <= 100 ? item.progress : 0;
+    return [{
+      id,
+      actionId,
+      tool: safeUiText(item.tool, "Job"),
+      source: jobSource,
+      sourceLabel: jobSource === "durable" ? "Durable" : "Hot",
+      status,
+      progress,
+      resumable: item.resumable === true,
+      reason: safeUiText(item.reason),
+      nextAction: safeUiText(item.next_action, "Review the job state and create a new task when recovery is unavailable."),
+      lifecycle: detail?.lifecycle || "",
+      lifecycleNote: detail?.message || "",
+      contractVersion: detail?.contractVersion || "",
+      createdAt: detail?.createdAt || "",
+      startedAt: detail?.startedAt || "",
+      updatedAt: detail?.updatedAt || "",
+      finishedAt: detail?.finishedAt || "",
+      artifactsPublished: detail?.artifactsPublished === true,
+      artifacts: detail?.artifacts || [],
+      provenance: detail?.provenance || [],
+    }];
+  });
+  const candidateKey = (item) => `${textKey(item.source)}|${textKey(item.id)}|${textKey(item.status)}|${textKey(item.tool)}`;
+  const orderedCandidates = [...candidates].sort((left, right) => {
+    const leftKey = candidateKey(left);
+    const rightKey = candidateKey(right);
+    return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+  });
+  const seen = new Set();
+  const records = orderedCandidates.filter((item) => {
+    const key = `${item.source}|${item.actionId || item.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).sort((left, right) => {
+    const leftRank = Object.prototype.hasOwnProperty.call(JOB_STATUS_RANK, left.status) ? JOB_STATUS_RANK[left.status] : 3;
+    const rightRank = Object.prototype.hasOwnProperty.call(JOB_STATUS_RANK, right.status) ? JOB_STATUS_RANK[right.status] : 3;
+    if (leftRank !== rightRank) return leftRank - rightRank;
+    const leftKey = `${textKey(left.id)}|${textKey(left.source)}`;
+    const rightKey = `${textKey(right.id)}|${textKey(right.source)}`;
+    return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+  });
+  const derivedCounts = {
+    active: records.filter((item) => ["queued", "starting", "running", "cancelling"].includes(item.status)).length,
+    attention: records.filter((item) => ["failed", "unavailable", "cancelled", "interrupted"].includes(item.status)).length,
+    interrupted: records.filter((item) => item.status === "interrupted").length,
+    recoverable: records.filter((item) => item.resumable === true).length,
+    total: records.length,
+  };
+  const publishedCounts = productJobs.counts && typeof productJobs.counts === "object" && !Array.isArray(productJobs.counts) ? productJobs.counts : {};
+  const counts = Object.fromEntries(Object.keys(derivedCounts).map((key) => [key, safeJobCount(publishedCounts[key], derivedCounts[key])]));
+  const fallbackStatus = counts.attention > 0 ? "partial" : "ready";
+  return {
+    source: hasCanonical ? "productization.jobs" : "legacy job snapshot fallback",
+    status: readinessStatus(productJobs.status, fallbackStatus),
+    execution: ["not_run", "dry_run"].includes(productJobs.execution) ? productJobs.execution : "not_published",
+    dryRun: productJobs.dry_run === true,
+    counts,
+    records,
+    reason: safeUiText(productJobs.reason, counts.attention > 0 ? "The server recovery snapshot has jobs that need review." : "No recovery attention is published in this snapshot."),
+    nextAction: safeUiText(productJobs.next_action, "Open Jobs to review the server-owned recovery state."),
+  };
+};
 const readinessModuleDetails = (modules) => modules.length
   ? modules.map((item) => `<article class="readiness-module" data-status="${escapeHtml(item.status)}" role="listitem"><div class="readiness-module__head"><div><h3>${escapeHtml(item.label)}</h3><p>${escapeHtml(item.kind)}${item.version ? ` · ${escapeHtml(item.version)}` : ""}</p></div>${statusPill(item.status, readinessStatusLabel(item.status))}</div><div class="readiness-module__guidance"><div><span>Reason</span><p>${escapeHtml(item.reason)}</p></div><div><span>Next action</span><p>${escapeHtml(item.nextAction)}</p></div></div></article>`).join("")
   : `<div class="empty-state compact"><strong>No module rows published</strong><span>The server snapshot contains no safe module projection.</span></div>`;
@@ -316,12 +498,12 @@ const legacyArtifactList = (value) => {
 };
 
 const artifactList = (value) => {
-  const items = artifacts(value);
+  const items = safeJobArtifacts(Array.isArray(value) ? value : value?.artifacts);
   if (!items.length) return "";
   return `<div class="artifact-list">${items.map((item) => {
     const name = safeArtifactName(item.name);
     const url = opaqueArtifactUrl(item.url);
-    const id = opaqueArtifactId(item.id) || url.split("/").pop();
+    const id = opaqueArtifactId(item.id) || url.split("/").pop() || "";
     const mediaType = String(item.media_type || "application/octet-stream").split(";", 1)[0].trim().toLowerCase();
     const isImage = mediaType.startsWith("image/");
     const mask = isMaskArtifact(item, name);
@@ -333,9 +515,9 @@ const artifactList = (value) => {
 };
 
 const provenanceList = (job) => {
-  const items = job?.result?.provenance || job?.provenance || [];
+  const items = Array.isArray(job) ? job : Array.isArray(job?.provenance) ? job.provenance : [];
   if (!Array.isArray(items) || !items.length) return "";
-  return `<details class="job-provenance"><summary>Provenance · ${items.length} artifact</summary><div class="tag-list">${items.map((item) => `<span class="tag">${escapeHtml(item.node_type || "node")} → ${escapeHtml(item.name || item.artifact_id || "artifact")}</span>`).join("")}</div></details>`;
+  return `<details class="job-provenance"><summary>Provenance · ${items.length} artifact</summary><div class="tag-list">${items.map((item) => `<span class="tag">${escapeHtml(safeUiIdentifier(item?.node_type, "node"))} → ${escapeHtml(safeArtifactName(typeof item?.name === "string" ? item.name : typeof item?.artifact_id === "string" ? item.artifact_id : "Artifact"))}</span>`).join("")}</div></details>`;
 };
 
 const formResult = (id) => `<div class="form-result" id="${escapeHtml(id)}" role="status" aria-live="polite"></div>`;
@@ -349,19 +531,16 @@ function renderDashboard(state) {
   const storage = source.storage && typeof source.storage === "object" ? source.storage : (productization.storage && typeof productization.storage === "object" ? productization.storage : {});
   const readinessView = readinessSnapshot(source);
   const volumes = readinessView.volumes;
-  const jobs = [
-    ...(Array.isArray(source.jobs) ? source.jobs : []),
-    ...(Array.isArray(source.durableJobs) ? source.durableJobs : []),
-  ];
+  const jobRecovery = jobRecoverySnapshot(source);
+  const jobs = jobRecovery.records;
   const components = Array.isArray(source.components) ? source.components : [];
   const componentFallback = components.map((item) => item);
   const control = source.capabilities && typeof source.capabilities === "object" ? source.capabilities : {};
   const readiness = readinessView.status !== "unknown" ? readinessView.status : readinessStatus(control.status || health.status);
-  const activeJobs = jobs.filter((item) => ["queued", "starting", "running", "cancelling"].includes(String(item?.status || ""))).length;
+  const activeJobs = jobRecovery.counts.active;
   const metric = (label, value, detail) => `<article class="metric-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail)}</small></article>`;
   const statusRank = { error: 0, unavailable: 0, missing: 0, not_published: 0, partial: 1, not_run: 1, planned: 2, starting: 3, installed: 4, operational: 5, healthy: 5, ready: 5, clean: 5 };
   const rankOf = (status) => Object.prototype.hasOwnProperty.call(statusRank, status) ? statusRank[status] : 3;
-  const textKey = (value) => String(value ?? "").trim().toLowerCase();
   const productCapabilities = productization.capabilities && typeof productization.capabilities === "object" ? productization.capabilities : {};
   const modules = Array.isArray(productCapabilities.modules) ? readinessView.modules : safeReadinessModules({ ...source, components: componentFallback });
   modules.sort((left, right) => {
@@ -379,8 +558,8 @@ function renderDashboard(state) {
     attention.push({ id: `module-${item.id}`, title: item.label, detail: item.kind, status: item.status });
   });
   jobs.filter((item) => ["failed", "unavailable", "cancelled", "interrupted"].includes(String(item?.status || ""))).forEach((item, index) => {
-    const jobId = String(item?.id || `job-${index + 1}`);
-    attention.push({ id: `job-${jobId}`, title: jobId, detail: String(item?.message || item?.error || "Job cần kiểm tra"), status: String(item?.status || "failed") });
+    const jobId = item?.id || `job-${index + 1}`;
+    attention.push({ id: `job-${jobId}`, title: jobId, detail: item?.reason || item?.lifecycleNote || "Job needs review", status: item?.status || "failed" });
   });
   attention.sort((left, right) => {
     const rankDifference = rankOf(left.status) - rankOf(right.status);
@@ -450,6 +629,17 @@ function renderDashboard(state) {
       <div class="card-title-row"><div><span class="eyebrow">STORAGE PROJECTION</span><h2 id="dashboard-storage-title">C:/ & D:/ dung lượng</h2><p class="small">Server-owned, allowlisted volume snapshot · execution: ${escapeHtml(storageExecution)}</p></div>${statusPill(storageStatus, formatStatus(storageStatus))}</div>
       <div class="dashboard-storage-grid">${storageHtml}</div>
       ${storageWarning}
+    </section>
+    <section class="job-recovery-card card" aria-labelledby="dashboard-recovery-title" data-recovery-source="${escapeHtml(jobRecovery.source)}" data-recovery-status="${escapeHtml(jobRecovery.status)}">
+      <div class="card-title-row"><div><span class="eyebrow">JOB RECOVERY</span><h2 id="dashboard-recovery-title">Recovery attention</h2><p>${escapeHtml(jobRecovery.reason)}</p></div>${statusPill(jobRecovery.status, readinessStatusLabel(jobRecovery.status))}</div>
+      <div class="job-recovery-counts" aria-label="Job recovery counts">
+        <div data-recovery-count="active"><span>Active</span><strong>${escapeHtml(String(jobRecovery.counts.active))}</strong></div>
+        <div data-recovery-count="attention"><span>Attention</span><strong>${escapeHtml(String(jobRecovery.counts.attention))}</strong></div>
+        <div data-recovery-count="interrupted"><span>Interrupted</span><strong>${escapeHtml(String(jobRecovery.counts.interrupted))}</strong></div>
+        <div data-recovery-count="recoverable"><span>Recoverable</span><strong>${escapeHtml(String(jobRecovery.counts.recoverable))}</strong></div>
+      </div>
+      <div class="job-recovery-guidance"><span>Next action</span><p>${escapeHtml(jobRecovery.nextAction)}</p></div>
+      <button class="button button--compact" type="button" data-route="jobs" data-recovery-focus="${jobRecovery.counts.attention ? "attention" : "all"}" aria-controls="jobs-page">Open focused Jobs</button>
     </section>
     <section class="dashboard-main-grid">
       <section class="dashboard-primary card" aria-labelledby="dashboard-modules-title">
@@ -755,22 +945,36 @@ function renderCreativeWorkspace(state) {
 }
 
 function renderJobs(state) {
-  const jobs = [...(state.jobs || []), ...(state.durableJobs || [])];
+  const recovery = jobRecoverySnapshot(state);
   const filter = state.jobFilter || "all";
-  const filtered = jobs.filter((job) => filter === "all" || (filter === "active" && ["queued", "starting", "running", "cancelling"].includes(job.status)) || (filter === "attention" && ["failed", "unavailable", "cancelled", "interrupted"].includes(job.status)) || (filter === "completed" && job.status === "completed"));
+  const filtered = recovery.records.filter((job) => filter === "all" || (filter === "active" && ["queued", "starting", "running", "cancelling"].includes(job.status)) || (filter === "attention" && ["failed", "unavailable", "cancelled", "interrupted"].includes(job.status)) || (filter === "completed" && job.status === "completed"));
   const rows = filtered.map((job) => {
     const durable = job.source === "durable";
-    const actions = ["queued", "starting", "running", "cancelling"].includes(job.status)
-      ? `<button class="button button--compact button--danger" type="button" data-cancel-job="${escapeHtml(job.id)}">Hủy</button>`
-      : job.resumable
+    const active = ["queued", "starting", "running", "cancelling"].includes(job.status);
+    const actions = active && !durable && job.actionId
+      ? `<button class="button button--compact button--danger" type="button" data-cancel-job="${escapeHtml(job.actionId)}">Cancel</button>`
+      : job.resumable === true && job.actionId
         ? durable
-          ? `<button class="button button--compact" type="button" data-resume-durable-job="${escapeHtml(job.id)}">${job.status === "cancelled" ? "Tiếp tục" : "Thử lại"}</button>`
-          : `<button class="button button--compact" type="button" data-resume-job="${escapeHtml(job.id)}">${job.status === "cancelled" ? "Tiếp tục" : "Thử lại"}</button>`
+          ? `<button class="button button--compact" type="button" data-resume-durable-job="${escapeHtml(job.id)}">${job.status === "cancelled" ? "Resume" : "Retry"}</button>`
+          : `<button class="button button--compact" type="button" data-resume-job="${escapeHtml(job.id)}">${job.status === "cancelled" ? "Resume" : "Retry"}</button>`
         : "";
-    return `<article class="job-card" data-job-status="${escapeHtml(job.status)}"><div class="split"><div><strong>${escapeHtml(job.tool)}</strong><div class="row-meta">${escapeHtml(job.id)} · ${escapeHtml(job.created_at || "")}${job.contract_version ? ` · ${escapeHtml(job.contract_version)}` : ""}</div></div>${statusPill(job.status)}</div><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.max(0, Math.min(100, Number(job.progress || 0)))}"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, Number(job.progress || 0)))}%"></div></div><p class="job-message">${escapeHtml(job.message || job.error || "")}</p>${job.next_action ? `<div class="job-next-action"><strong>Bước tiếp theo</strong><span>${escapeHtml(job.next_action)}</span></div>` : ""}${provenanceList(job)}${artifactList(job.result)}<div class="form-actions">${actions}</div></article>`;
+    const timestampRows = [
+      ["Created", job.createdAt],
+      ["Started", job.startedAt],
+      ["Updated", job.updatedAt],
+      ["Finished", job.finishedAt],
+    ].filter(([, value]) => value).map(([label, value]) => `<span><strong>${escapeHtml(label)}</strong>${escapeHtml(value)}</span>`).join("");
+    const timestamps = timestampRows ? `<div class="job-timestamps">${timestampRows}</div>` : `<div class="job-timestamps"><span>Lifecycle timestamps not published in this snapshot.</span></div>`;
+    const artifactSummary = job.artifacts.length
+      ? `<div class="job-artifact-summary" data-artifact-state="available"><strong>Artifact preview</strong><span>${escapeHtml(String(job.artifacts.length))} available</span></div>${artifactList(job.artifacts)}`
+      : `<div class="job-artifact-summary" data-artifact-state="unavailable"><strong>Artifact preview unavailable</strong><span>Preview unavailable in this snapshot.</span></div>`;
+    const recoveryReason = job.reason || "No recovery reason was published in this snapshot.";
+    const lifecycle = job.lifecycle || "Not published";
+    return `<article class="job-card" id="job-${escapeHtml(job.id)}" data-job-id="${escapeHtml(job.id)}" data-job-source="${escapeHtml(job.source)}" data-job-status="${escapeHtml(job.status)}" data-job-resumable="${job.resumable === true}"><div class="split"><div><div class="job-card__title"><strong>${escapeHtml(job.tool)}</strong><span class="tag job-source" data-job-source-label="${escapeHtml(job.source)}">${escapeHtml(job.sourceLabel)}</span></div><div class="row-meta">${escapeHtml(job.id)}${job.contractVersion ? ` · ${escapeHtml(job.contractVersion)}` : ""}</div></div>${statusPill(job.status, readinessStatusLabel(job.status))}</div><div class="job-lifecycle"><span>Lifecycle</span><strong>${escapeHtml(lifecycle)}</strong></div><div class="progress-track" role="progressbar" aria-label="${escapeHtml(job.id)} progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${job.progress}"><div class="progress-bar" style="width:${job.progress}%"></div></div>${job.lifecycleNote ? `<p class="job-message">${escapeHtml(job.lifecycleNote)}</p>` : ""}<div class="job-recovery-detail"><div><span>Recovery reason</span><p>${escapeHtml(recoveryReason)}</p></div><div><span>Next action</span><p>${escapeHtml(job.nextAction)}</p></div></div>${timestamps}${provenanceList(job.provenance)}${artifactSummary}<div class="form-actions">${actions || `<span class="job-action-note">No recovery action is available from this server snapshot.</span>`}</div></article>`;
   }).join("");
-  const filters = [ ["all", "Tất cả"], ["active", "Đang chạy"], ["attention", "Cần chú ý"], ["completed", "Hoàn tất"] ].map(([id, label]) => `<button class="tab ${filter === id ? "is-selected" : ""}" type="button" data-job-filter="${id}" aria-pressed="${filter === id}">${label}</button>`).join("");
-  return heading("CONTROL PLANE", "Jobs", "Theo dõi queue và lịch sử job do Hub tạo; cancel/retry chỉ tác động tới process và payload do Hub sở hữu.") + `<div class="module-tabs job-filters" role="group" aria-label="Bộ lọc lịch sử job">${filters}</div><div class="job-list">${rows || `<div class="empty-state"><strong>Không có job trong bộ lọc này</strong><span>Chạy workflow từ module bất kỳ hoặc chuyển sang Tất cả.</span></div>`}</div>`;
+  const filters = [["all", "All"], ["active", "Active"], ["attention", "Attention"], ["completed", "Completed"]].map(([id, label]) => `<button class="tab ${filter === id ? "is-selected" : ""}" type="button" data-job-filter="${id}" aria-pressed="${filter === id}">${label}</button>`).join("");
+  const counts = recovery.counts;
+  return `<section id="jobs-page" class="jobs-page" data-job-recovery-source="${escapeHtml(recovery.source)}" data-job-recovery-status="${escapeHtml(recovery.status)}">${heading("CONTROL PLANE", "Jobs", "Track server-owned queue and recovery state; actions only appear when the published record gates them.")}<div class="job-recovery-banner card"><div class="card-title-row"><div><span class="eyebrow">RECOVERY SNAPSHOT</span><h2>Jobs recovery</h2><p>${escapeHtml(recovery.reason)}</p></div>${statusPill(recovery.status, readinessStatusLabel(recovery.status))}</div><div class="job-recovery-counts"><div><span>Active</span><strong>${escapeHtml(String(counts.active))}</strong></div><div><span>Attention</span><strong>${escapeHtml(String(counts.attention))}</strong></div><div><span>Interrupted</span><strong>${escapeHtml(String(counts.interrupted))}</strong></div><div><span>Recoverable</span><strong>${escapeHtml(String(counts.recoverable))}</strong></div></div><p class="small">Source: ${escapeHtml(recovery.source)} · execution: ${escapeHtml(recovery.execution)}${recovery.dryRun ? " · dry_run: true" : ""}</p></div><div class="module-tabs job-filters" role="group" aria-label="Job history filters">${filters}</div><div class="job-action-status" data-job-action-status role="status" aria-live="polite"></div><div class="job-list">${rows || `<div class="empty-state"><strong>No jobs in this filter</strong><span>Choose All to see the complete server snapshot.</span></div>`}</div></section>`;
 }
 
 function renderModels(state) {

@@ -24,6 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 UI_ROOT = ROOT / "src" / "ui"
 _ARTIFACT_PATH = re.compile(r"^/api/artifacts/(artifact_[a-f0-9]{32})$")
 _RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
+_JOB_ACTION_PATH = re.compile(r"^/jobs/([^/]+)/(cancel|resume)$")
+_DURABLE_RESUME_PATH = re.compile(r"^/api/durable-jobs/([^/]+)/resume$")
 _PNG_BYTES = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
 _GIB = 1024**3
 
@@ -148,15 +150,92 @@ STORAGE = {
 }
 
 _artifact_records = [item["record"] for item in ARTIFACTS.values()]
-JOBS = [{
-    "id": "jobv5_" + "1" * 32,
-    "tool": "acceptance_fixture",
-    "status": "completed",
-    "created_at": "2026-08-12T00:00:00Z",
-    "progress": 100,
-    "message": "Synthetic preview records; no execution was started.",
-    "result": {"artifacts": _artifact_records},
-}]
+HOT_ACTIVE_ID = "job_20260812_000001_aaaaaaaa"
+HOT_FAILED_ID = "job_20260812_000002_bbbbbbbb"
+HOT_INTERRUPTED_ID = "job_20260812_000003_cccccccc"
+HOT_UNAVAILABLE_ID = "job_20260812_000004_dddddddd"
+HOT_COMPLETED_ID = "jobv5_" + "1" * 32
+DURABLE_ID = "jobv5_" + "9" * 32
+JOBS = [
+    {
+        "id": HOT_ACTIVE_ID,
+        "tool": "acceptance_active",
+        "status": "running",
+        "created_at": "2026-08-12T00:01:00Z",
+        "started_at": "2026-08-12T00:01:01Z",
+        "updated_at": "2026-08-12T00:01:12Z",
+        "progress": 42,
+        "message": "Synthetic active record; no execution was started.",
+        "lifecycle": "waiting_for_authorized_worker",
+        "resumable": False,
+    },
+    {
+        "id": HOT_FAILED_ID,
+        "tool": "acceptance_failed",
+        "status": "failed",
+        "created_at": "2026-08-12T00:02:00Z",
+        "finished_at": "2026-08-12T00:02:02Z",
+        "progress": 18,
+        "message": "Synthetic failed recovery record.",
+        "resumable": True,
+    },
+    {
+        "id": HOT_INTERRUPTED_ID,
+        "tool": "acceptance_interrupted",
+        "status": "interrupted",
+        "created_at": "2026-08-12T00:03:00Z",
+        "finished_at": "2026-08-12T00:03:03Z",
+        "progress": 55,
+        "message": "Synthetic interrupted record; no resume proof is published.",
+        "resumable": False,
+    },
+    {
+        "id": HOT_UNAVAILABLE_ID,
+        "tool": "acceptance_unavailable",
+        "status": "unavailable",
+        "created_at": "2026-08-12T00:04:00Z",
+        "progress": 0,
+        "message": "Synthetic unavailable record.",
+        "resumable": False,
+    },
+    {
+        "id": HOT_COMPLETED_ID,
+        "tool": "acceptance_fixture",
+        "status": "completed",
+        "created_at": "2026-08-12T00:05:00Z",
+        "finished_at": "2026-08-12T00:05:05Z",
+        "progress": 100,
+        "message": "Synthetic preview records; no execution was started.",
+        "result": {"artifacts": _artifact_records, "provenance": [{"artifact_id": ARTIFACTS["artifact_" + "1" * 32]["record"]["id"], "node_type": "acceptance_preview", "name": "opaque preview batch"}]},
+        "resumable": False,
+    },
+]
+DURABLE_RECORD = {
+    "id": DURABLE_ID,
+    "tool": "acceptance_durable",
+    "source": "durable",
+    "status": "interrupted",
+    "progress": 0,
+    "resumable": False,
+    "next_action": "Create a new allowlisted descriptor; durable resume is unavailable in this snapshot.",
+}
+PRODUCT_JOB_RECORDS = [
+    {"id": HOT_ACTIVE_ID, "tool": "acceptance_active", "source": "legacy", "status": "running", "progress": 42, "resumable": False, "reason": "Active lifecycle is published without runtime execution proof.", "next_action": "Monitor the next server snapshot."},
+    {"id": HOT_FAILED_ID, "tool": "acceptance_failed", "source": "legacy", "status": "failed", "progress": 18, "resumable": True, "reason": "The server snapshot marks this job failed.", "next_action": "Retry only through the published legacy recovery action."},
+    {"id": HOT_INTERRUPTED_ID, "tool": "acceptance_interrupted", "source": "legacy", "status": "interrupted", "progress": 55, "resumable": False, "reason": "No resumable proof is published for this interrupted job.", "next_action": "Create a new allowlisted job descriptor."},
+    {"id": HOT_UNAVAILABLE_ID, "tool": "acceptance_unavailable", "source": "legacy", "status": "unavailable", "progress": 0, "resumable": False, "reason": "The source job is unavailable in this snapshot.", "next_action": "Review the job state before creating a new task."},
+    {"id": HOT_COMPLETED_ID, "tool": "acceptance_fixture", "source": "legacy", "status": "completed", "progress": 100, "resumable": False, "reason": "Completed record has opaque artifact details from the matching hot snapshot.", "next_action": "Open an opaque artifact preview if needed."},
+    {"id": DURABLE_ID, "tool": "acceptance_durable", "source": "durable", "status": "interrupted", "progress": 0, "resumable": False, "reason": "Durable detail is not published in this production-shaped snapshot.", "next_action": "Create a new allowlisted descriptor; durable resume is unavailable."},
+]
+PRODUCT_JOBS = {
+    "status": "partial",
+    "execution": "not_run",
+    "dry_run": True,
+    "counts": {"active": 1, "attention": 4, "interrupted": 2, "recoverable": 1, "total": 6},
+    "reason": "The server recovery snapshot mixes active, attention and completed records.",
+    "next_action": "Open Jobs to review recovery actions and opaque artifact availability.",
+    "records": PRODUCT_JOB_RECORDS,
+}
 HEALTH = {"status": "healthy", "version": "5.0.0-fixture", "disk": {"free_bytes": 80 * _GIB}, "gpu": {"status": "unavailable"}, "active_jobs": 0}
 CAPABILITY_MODULES = [
     {"id": "image-engine", "provider": "fixture.provider", "component": "image", "status": "operational", "version": "1.0", "reason": "Bounded static evidence is present.", "next_action": "Keep any runtime request separately authorized."},
@@ -211,6 +290,7 @@ PRODUCTIZATION = {
         "next_action": "Review the plan; no install, repair or uninstall action is available.",
         "modules": CAPABILITY_MODULES,
     },
+    "jobs": PRODUCT_JOBS,
     "storage": STORAGE,
     "warnings": [{"id": "volume-c", "status": "partial", "reason": "C: is below the low-space threshold."}, {"id": "volume-d", "status": "unavailable", "reason": "D: statistics are unavailable."}, {"id": "resource", "status": "partial", "reason": "Resource fit is dry-run evidence only."}],
 }
@@ -220,7 +300,7 @@ BOOTSTRAP = {
     "components": [],
     "applications": [],
     "jobs": JOBS,
-    "durable_jobs": {"status": "completed", "records": [], "execution": "not_run", "dry_run": True},
+    "durable_jobs": {"status": "partial", "records": [DURABLE_RECORD], "execution": "not_run", "dry_run": True},
     "tools": [],
     "settings": {"minimum_width": 1280, "minimum_height": 720, "model_load_policy": "on_demand", "max_heavy_gpu_jobs": 1},
     "lifecycle": {"comfyui": {"status": "partial", "reason": "Not started by the acceptance fixture.", "action": "No runtime action is available."}},
@@ -308,7 +388,7 @@ class AcceptanceHandler(BaseHTTPRequestHandler):
         if path in {"/api/jobs", "/jobs"}:
             return {"status": "completed", "jobs": JOBS}
         if path == "/api/durable-jobs":
-            return {"status": "completed", "records": [], "execution": "not_run", "dry_run": True}
+            return BOOTSTRAP["durable_jobs"]
         if path == "/api/capabilities":
             return CAPABILITIES
         if path == "/api/workflow-library":
@@ -371,6 +451,25 @@ class AcceptanceHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - HTTP handler API
         path = unquote(urlparse(self.path).path)
+        job_action = _JOB_ACTION_PATH.fullmatch(path)
+        if job_action:
+            job_id, action = job_action.groups()
+            known = any(item.get("id") == job_id for item in JOBS)
+            if not known:
+                self._write_json({"status": "not_found", "next_action": "Use a server-published hot job ID."}, HTTPStatus.NOT_FOUND)
+                return
+            if action == "resume" and job_id != HOT_FAILED_ID:
+                self._write_json({"status": "unavailable", "execution": "not_run", "dry_run": True, "next_action": "This fixture publishes no legacy resume proof for the selected job."})
+                return
+            self._write_json({"status": "queued" if action == "resume" else "cancelling", "execution": "not_run", "dry_run": True, "message": f"Synthetic {action} response; no execution was started."})
+            return
+        durable_resume = _DURABLE_RESUME_PATH.fullmatch(path)
+        if durable_resume:
+            if durable_resume.group(1) != DURABLE_ID:
+                self._write_json({"status": "not_found", "execution": "not_run", "dry_run": True}, HTTPStatus.NOT_FOUND)
+                return
+            self._write_json({"status": "unavailable", "execution": "not_run", "dry_run": True, "next_action": "Durable resume is unavailable in this production-shaped snapshot."})
+            return
         if path == "/api/node-studio/validate":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(min(length, 2 * 1024 * 1024))
