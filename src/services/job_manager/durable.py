@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.services.api.jobs import DurableJobStore, DurableStoreHealthError
+from src.services import artifact_store
 from src.services.artifact_store import atomic_write_job_output
 
 from .contracts import (
@@ -37,7 +38,30 @@ MAX_SERVER_ADAPTERS = 64
 MAX_RUNNER_STATES = 64
 MAX_STATE_HISTORY = 32
 _ADAPTER_ID = re.compile(r"[a-z][a-z0-9_.-]{0,63}")
+_JOB_ID = re.compile(r"jobv5_[a-f0-9]{32}")
+_FINGERPRINT = re.compile(r"[a-f0-9]{64}")
+_SAFE_REASON_CODES = frozenset({
+    "GPU_SLOT_UNAVAILABLE", "RUNNER_STATE_LIMIT", "CONCURRENCY_LIMIT", "GPU_SLOT_BUSY",
+    "EXCLUSIVE_GROUP_BUSY", "CANCEL_REQUESTED", "CANCELLED", "INVALID_ADAPTER_RESULT",
+    "ADAPTER_UNAVAILABLE", "INVALID_PERSISTED_DESCRIPTOR", "RESTART_INTERRUPTED", "ADAPTER_FAILED",
+})
+_SAFE_ACTION_CODES = frozenset({
+    "CONFIGURE_GPU_SLOT", "RETRY_LATER", "WAIT_FOR_STOP", "RETRY_IF_RECONSTRUCTABLE",
+    "CREATE_NEW_JOB", "CHECK_SERVER_ADAPTER",
+})
 _RESULT_STATUSES = frozenset({"completed", "failed", "unavailable"})
+_RECOVERY_ACTION_CREATE = "CREATE_NEW_JOB"
+_RECOVERY_ACTION_RETRY = "RETRY_IF_RECONSTRUCTABLE"
+_RECOVERY_STATUS_AVAILABLE = "available"
+_RECOVERY_STATUS_UNAVAILABLE = "unavailable"
+RECOVERY_REASON_INVALID = "The persisted job descriptor is not safely reconstructable."
+RECOVERY_REASON_ACTIVE = "The job is active or terminal; automatic recovery is unavailable."
+RECOVERY_REASON_NOT_RECONSTRUCTABLE = "The persisted descriptor is not marked reconstructable."
+RECOVERY_REASON_ADAPTER_UNAVAILABLE = "No current server-owned adapter is registered for this job."
+RECOVERY_REASON_AVAILABLE = "A current server-owned adapter can reconstruct this job."
+RECOVERY_NEXT_CREATE = "Create a new allowlisted job descriptor."
+RECOVERY_NEXT_RETRY = "An explicit server-owned retry may be queued without starting runtime work."
+_SAFE_ARTIFACT_MEDIA = re.compile(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+")
 _ALLOWED_TRANSITIONS = {
     "queued": frozenset({"starting", "cancelling", "unavailable", "interrupted"}),
     "starting": frozenset({"running", "cancelling", "failed", "unavailable", "interrupted"}),
@@ -54,6 +78,234 @@ Adapter = Callable[[ExecutionDescriptor, "DurableJobContext"], dict[str, Any]]
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _recovery_unavailable(reason: str = RECOVERY_REASON_INVALID) -> dict[str, Any]:
+    """Return the fixed fail-closed recovery contract."""
+
+    return {
+        "status": _RECOVERY_STATUS_UNAVAILABLE,
+        "action": _RECOVERY_ACTION_CREATE,
+        "action_available": False,
+        "reason": reason,
+        "next_action": RECOVERY_NEXT_CREATE,
+    }
+
+
+def public_recovery_decision(record: object, registry: "ServerOwnedAdapterRegistry") -> dict[str, Any]:
+    """Decide recovery from validated durable data and server-owned code only.
+
+    Persisted retry flags, reason/action codes, and free-form values are never
+    consulted. A positive decision only permits a new queued attempt; it never
+    means runtime has started.
+    """
+
+    if not isinstance(record, dict) or not isinstance(registry, ServerOwnedAdapterRegistry):
+        return _recovery_unavailable()
+    if not _JOB_ID.fullmatch(str(record.get("id") or "")):
+        return _recovery_unavailable()
+    if record.get("contract_version") != JOB_RECORD_VERSION:
+        return _recovery_unavailable()
+    status = record.get("status")
+    if not isinstance(status, str) or status not in JOB_STATES:
+        return _recovery_unavailable()
+    try:
+        spec = validate_job_spec(record.get("job_spec"))
+    except JobContractError:
+        return _recovery_unavailable(RECOVERY_REASON_INVALID)
+    if record.get("job_spec_fingerprint") != spec.fingerprint:
+        return _recovery_unavailable(RECOVERY_REASON_INVALID)
+    if record.get("descriptor_summary") != spec.descriptor.summary():
+        return _recovery_unavailable(RECOVERY_REASON_INVALID)
+    attempt = record.get("attempt")
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or not 1 <= attempt <= 10_000:
+        return _recovery_unavailable(RECOVERY_REASON_INVALID)
+    retry_of = record.get("retry_of")
+    if retry_of is not None and (not isinstance(retry_of, str) or not _JOB_ID.fullmatch(retry_of)):
+        return _recovery_unavailable(RECOVERY_REASON_INVALID)
+    if status not in RETRYABLE_JOB_STATES:
+        return _recovery_unavailable(RECOVERY_REASON_ACTIVE)
+    if spec.descriptor.reconstructable is not True:
+        return _recovery_unavailable(RECOVERY_REASON_NOT_RECONSTRUCTABLE)
+    if not registry.contains(spec.descriptor.adapter_id):
+        return _recovery_unavailable(RECOVERY_REASON_ADAPTER_UNAVAILABLE)
+    return {
+        "status": _RECOVERY_STATUS_AVAILABLE,
+        "action": _RECOVERY_ACTION_RETRY,
+        "action_available": True,
+        "reason": RECOVERY_REASON_AVAILABLE,
+        "next_action": RECOVERY_NEXT_RETRY,
+    }
+
+
+def _safe_timestamp(value: object) -> str | None:
+    if not isinstance(value, str) or not 1 <= len(value) <= 64:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.isoformat()
+
+
+def public_lifecycle(record: object) -> dict[str, Any]:
+    """Project bounded state history without allowing terminal regression."""
+
+    source = record if isinstance(record, dict) else {}
+    raw_current = source.get("status")
+    current = raw_current if isinstance(raw_current, str) and raw_current in JOB_STATES else "unavailable"
+    raw_history = source.get("state_history")
+    history = [item for item in raw_history if isinstance(item, str) and item in JOB_STATES] if isinstance(raw_history, list) else []
+    history = history[:MAX_STATE_HISTORY]
+    terminal_index = next((index for index, item in enumerate(history) if item in TERMINAL_JOB_STATES), None)
+    if terminal_index is not None:
+        history = history[: terminal_index + 1]
+        current = history[-1]
+    elif current in TERMINAL_JOB_STATES:
+        history.append(current)
+    elif not history or history[-1] != current:
+        history.append(current)
+    history = history[-MAX_STATE_HISTORY:]
+    timestamps = {
+        key: _safe_timestamp(source.get(key))
+        for key in ("created_at", "updated_at", "started_at", "finished_at")
+    }
+    attempt = source.get("attempt")
+    safe_attempt = attempt if isinstance(attempt, int) and not isinstance(attempt, bool) and 1 <= attempt <= 10_000 else 1
+    retry_of = source.get("retry_of")
+    safe_retry_of = retry_of if isinstance(retry_of, str) and _JOB_ID.fullmatch(retry_of) else None
+    return {
+        "state": current,
+        "history": history,
+        "attempt": safe_attempt,
+        "retry_of": safe_retry_of,
+        "timestamps": timestamps,
+    }
+
+
+def _artifact_unavailable(artifact_id: str | None = None) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": "unavailable",
+        "preview_available": False,
+        "reason": "Artifact metadata is unavailable or its durable provenance does not match.",
+        "next_action": "Refresh the durable job after server-owned artifact validation.",
+    }
+    if artifact_id is not None and is_artifact_id(artifact_id):
+        result["id"] = artifact_id
+    return result
+
+
+def _safe_artifact_metadata(value: object, record: dict[str, Any], artifact_id: str) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or value.get("id") != artifact_id:
+        return None
+    name = value.get("name")
+    if (
+        not isinstance(name, str)
+        or not 1 <= len(name) <= 160
+        or any(char in name for char in ("\x00", "\r", "\n", "/", "\\"))
+        or ".." in name
+    ):
+        return None
+    size = value.get("size_bytes")
+    media_type = value.get("media_type")
+    digest = value.get("sha256")
+    if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= 8 * 1024**3:
+        return None
+    if not isinstance(media_type, str) or not 1 <= len(media_type) <= 128 or not _SAFE_ARTIFACT_MEDIA.fullmatch(media_type):
+        return None
+    if not isinstance(digest, str) or not _FINGERPRINT.fullmatch(digest):
+        return None
+    if value.get("url") != f"/api/artifacts/{artifact_id}":
+        return None
+    provenance = value.get("provenance")
+    if not isinstance(provenance, dict) or set(provenance) != {"job_id", "job_spec_fingerprint", "adapter_id", "attempt", "status"}:
+        return None
+    expected_adapter = (record.get("descriptor_summary") or {}).get("adapter_id")
+    expected = {
+        "job_id": record.get("id"),
+        "job_spec_fingerprint": record.get("job_spec_fingerprint"),
+        "adapter_id": expected_adapter,
+        "attempt": record.get("attempt"),
+        "status": record.get("status"),
+    }
+    if provenance != expected:
+        return None
+    if not _JOB_ID.fullmatch(str(expected["job_id"] or "")) or not _FINGERPRINT.fullmatch(str(expected["job_spec_fingerprint"] or "")):
+        return None
+    if not isinstance(expected_adapter, str) or not _ADAPTER_ID.fullmatch(expected_adapter):
+        return None
+    if isinstance(expected["attempt"], bool) or not isinstance(expected["attempt"], int) or not 1 <= expected["attempt"] <= 10_000:
+        return None
+    if not isinstance(expected["status"], str) or expected["status"] not in {"queued", "starting", "running", "cancelling", "completed", "failed", "unavailable", "interrupted"}:
+        return None
+    return {
+        "id": artifact_id,
+        "name": name,
+        "media_type": media_type,
+        "size_bytes": size,
+        "sha256": digest,
+        "url": f"/api/artifacts/{artifact_id}",
+        "status": "available",
+        "preview_available": True,
+        "provenance": dict(expected),
+    }
+
+
+def public_durable_artifacts(record: object) -> list[dict[str, Any]]:
+    """Resolve only opaque artifact IDs and validate durable lineage."""
+
+    if not isinstance(record, dict):
+        return []
+    values = record.get("artifacts") if isinstance(record.get("artifacts"), list) else []
+    try:
+        spec = validate_job_spec(record.get("job_spec"))
+    except JobContractError:
+        return [_artifact_unavailable() for _ in values[:64]]
+    if record.get("job_spec_fingerprint") != spec.fingerprint or record.get("descriptor_summary") != spec.descriptor.summary():
+        return [_artifact_unavailable() for _ in values[:64]]
+    result: list[dict[str, Any]] = []
+    for value in values[:64]:
+        if not is_artifact_id(value):
+            result.append(_artifact_unavailable())
+            continue
+        try:
+            resolved = artifact_store.resolve(value)
+            described = artifact_store.describe(value) if resolved is not None else None
+        except Exception:
+            resolved = None
+            described = None
+        if resolved is None:
+            result.append(_artifact_unavailable(value))
+            continue
+        safe = _safe_artifact_metadata(described, record, value)
+        result.append(safe if safe is not None else _artifact_unavailable(value))
+    return result
+
+
+def _public_result_summary(value: object) -> dict[str, Any] | None:
+    """Keep adapter summaries bounded and free of persisted free-form data."""
+
+    if not isinstance(value, dict) or set(value) - {"count", "artifact_ids", "result_type"}:
+        return None
+    result: dict[str, Any] = {}
+    count = value.get("count")
+    if count is not None:
+        if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 1_000_000:
+            return None
+        result["count"] = count
+    artifact_ids = value.get("artifact_ids")
+    if artifact_ids is not None:
+        if type(artifact_ids) is not list or len(artifact_ids) > 64:
+            return None
+        result["artifact_ids"] = [item for item in artifact_ids if is_artifact_id(item)]
+    result_type = value.get("result_type")
+    if result_type is not None:
+        if not isinstance(result_type, str) or not _ADAPTER_ID.fullmatch(result_type):
+            return None
+        result["result_type"] = result_type
+    return result
 
 
 class ServerOwnedAdapterRegistry:
@@ -281,7 +533,7 @@ class DurableWorkEngine:
         stored = self.store.put(record)
         if start and stored.get("status") == "queued":
             self.start(str(stored["id"]))
-        return self.public_job(stored)
+        return self.public_job(stored, registry=self.registry)
 
     def start(self, job_id: str) -> dict[str, Any] | None:
         """Start a daemon coordinator thread only for a trusted, queued job."""
@@ -290,10 +542,10 @@ class DurableWorkEngine:
             with self._lock:
                 record = self.store.get(job_id)
                 if record is None or record.get("status") != "queued" or job_id in self._threads:
-                    return self.public_job(record) if record is not None else None
+                    return self.public_job(record, registry=self.registry) if record is not None else None
                 if len(self._threads) >= self.max_runner_states:
                     self._update_locked(job_id, {"reason_code": "RUNNER_STATE_LIMIT", "action_code": "RETRY_LATER"})
-                    return self.public_job(self.store.get(job_id) or record)
+                    return self.public_job(self.store.get(job_id) or record, registry=self.registry)
                 thread = threading.Thread(target=self.run, args=(job_id,), name=f"LocalAIHub-V5-{job_id[-8:]}", daemon=True)
                 self._threads[job_id] = thread
         except DurableStoreHealthError:
@@ -396,7 +648,7 @@ class DurableWorkEngine:
                 self._transition_locked(job_id, "interrupted", reason_code="CANCELLED", action_code="CREATE_NEW_JOB")
                 return self.get(job_id)
             if record.get("status") != "queued":
-                return self.public_job(record)
+                return self.public_job(record, registry=self.registry)
             try:
                 spec = validate_job_spec(record.get("job_spec"))
             except JobContractError:
@@ -494,7 +746,7 @@ class DurableWorkEngine:
             with self._lock:
                 record = self.store.get(job_id)
                 if record is None or str(record.get("status")) in TERMINAL_JOB_STATES:
-                    return False, self.public_job(record) if record is not None else None
+                    return False, self.public_job(record, registry=self.registry) if record is not None else None
                 context = self._contexts.get(job_id)
                 if context is not None:
                     context.cancel()
@@ -617,40 +869,60 @@ class DurableWorkEngine:
             record = self.store.get(job_id)
         except DurableStoreHealthError:
             return self._store_unavailable(job_id)
-        return self.public_job(record) if record is not None else None
+        return self.public_job(record, registry=self.registry) if record is not None else None
 
     @classmethod
-    def public_job(cls, record: dict[str, Any]) -> dict[str, Any]:
-        """Project opaque summaries only; private descriptors never cross it."""
+    def public_job(
+        cls,
+        record: dict[str, Any],
+        *,
+        registry: "ServerOwnedAdapterRegistry | None" = None,
+    ) -> dict[str, Any]:
+        """Project a durable record without exposing private or stale fields."""
 
-        allowed = {
-            "id",
-            "contract_version",
-            "status",
-            "created_at",
-            "updated_at",
-            "started_at",
-            "finished_at",
-            "progress",
-            "execution",
-            "dry_run",
-            "job_spec_fingerprint",
-            "descriptor_summary",
-            "resource_plan",
-            "attempt",
-            "retry_of",
-            "retry_available",
-            "reason_code",
-            "action_code",
-            "result_summary",
-            "artifacts",
-        }
-        result = {key: detached_json(value) for key, value in record.items() if key in allowed and value is not None}
+        source = record if isinstance(record, dict) else {}
+        active_registry = registry if isinstance(registry, ServerOwnedAdapterRegistry) else ServerOwnedAdapterRegistry()
+        decision = public_recovery_decision(source, active_registry)
+        lifecycle = public_lifecycle(source)
+        result: dict[str, Any] = {}
+        job_id = source.get("id")
+        if isinstance(job_id, str) and _JOB_ID.fullmatch(job_id):
+            result["id"] = job_id
+        if source.get("contract_version") == JOB_RECORD_VERSION:
+            result["contract_version"] = JOB_RECORD_VERSION
+        status = lifecycle["state"]
+        result["status"] = status
+        for key, value in lifecycle["timestamps"].items():
+            if value is not None:
+                result[key] = value
+        progress = source.get("progress")
+        result["progress"] = max(0, min(100, progress)) if isinstance(progress, int) and not isinstance(progress, bool) else 0
+        try:
+            spec = validate_job_spec(source.get("job_spec"))
+        except JobContractError:
+            spec = None
+        if spec is not None and source.get("job_spec_fingerprint") == spec.fingerprint:
+            result["tool"] = spec.tool
+            result["job_spec_fingerprint"] = spec.fingerprint
+            result["descriptor_summary"] = detached_json(spec.descriptor.summary())
+            result["resource_plan"] = cls._resource_plan(spec)
+        result["attempt"] = lifecycle["attempt"]
+        if lifecycle["retry_of"] is not None:
+            result["retry_of"] = lifecycle["retry_of"]
+        result["retry_available"] = decision["action_available"] if status in RETRYABLE_JOB_STATES else False
+        for key, safe_values in (("reason_code", _SAFE_REASON_CODES), ("action_code", _SAFE_ACTION_CODES)):
+            value = source.get(key)
+            if isinstance(value, str) and value in safe_values:
+                result[key] = value
+        summary = _public_result_summary(source.get("result_summary"))
+        if summary is not None:
+            result["result_summary"] = summary
+        result["artifacts"] = public_durable_artifacts(source)
+        result["lifecycle"] = lifecycle
+        result["recovery"] = decision
         result["execution"] = "not_run"
         result["dry_run"] = True
-        result["capability_status"] = cls._public_status(record)
-        if str(record.get("status")) not in RETRYABLE_JOB_STATES:
-            result["retry_available"] = False
+        result["capability_status"] = "unavailable" if status == "unavailable" else "partial"
         return result
 
     def wait_for_idle(self, timeout_seconds: float = 1.0) -> bool:

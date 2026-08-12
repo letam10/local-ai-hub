@@ -8,13 +8,26 @@ starts a worker, or changes durable state.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 import math
+import re
 from typing import Any
 
 from src.services.api.config import CONFIG_ROOT
 from src.services.api.jobs import DurableJobStore, DurableStoreHealthError
 from src.services.job_manager import DurableWorkEngine, ServerOwnedAdapterRegistry
+from src.services.job_manager.contracts import JOB_STATES, TERMINAL_JOB_STATES, is_artifact_id
+from src.services.job_manager.durable import (
+    RECOVERY_NEXT_CREATE,
+    RECOVERY_NEXT_RETRY,
+    RECOVERY_REASON_ACTIVE,
+    RECOVERY_REASON_ADAPTER_UNAVAILABLE,
+    RECOVERY_REASON_AVAILABLE,
+    RECOVERY_REASON_INVALID,
+    RECOVERY_REASON_NOT_RECONSTRUCTABLE,
+    public_recovery_decision,
+)
 
 
 PRODUCT_SURFACE_SCHEMA_VERSION = "v5-product-surface.v1"
@@ -36,6 +49,18 @@ DURABLE_JOBS_PATH = CONFIG_ROOT / "durable_jobs.v5.json"
 _RUNTIME_EVIDENCE_CLASSES = frozenset({
     "filter_graph", "image_decode", "stream_mapping", "encoder_or_mux", "filesystem", "timeout", "unknown",
 })
+_RECOVERY_KEYS = frozenset({"status", "action", "action_available", "reason", "next_action"})
+_RECOVERY_REASONS = frozenset({
+    RECOVERY_REASON_INVALID,
+    RECOVERY_REASON_ACTIVE,
+    RECOVERY_REASON_NOT_RECONSTRUCTABLE,
+    RECOVERY_REASON_ADAPTER_UNAVAILABLE,
+    RECOVERY_REASON_AVAILABLE,
+})
+_LIFECYCLE_STATES = frozenset(JOB_STATES)
+_LIFECYCLE_TERMINAL = frozenset(TERMINAL_JOB_STATES)
+_LIFECYCLE_JOB_ID = re.compile(r"jobv5_[a-f0-9]{32}")
+_LIFECYCLE_FINGERPRINT = re.compile(r"[a-f0-9]{64}")
 
 
 def _status(value: object, fallback: str = "partial") -> str:
@@ -276,6 +301,183 @@ def project_capability_modules(control_plane: object) -> list[dict[str, Any]]:
     return projected
 
 
+def _recovery_fallback() -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "action": "CREATE_NEW_JOB",
+        "action_available": False,
+        "reason": RECOVERY_REASON_INVALID,
+        "next_action": RECOVERY_NEXT_CREATE,
+    }
+
+
+def _project_recovery(value: object) -> dict[str, Any]:
+    """Copy only the fixed server-owned recovery decision."""
+
+    if not isinstance(value, Mapping) or set(value) != _RECOVERY_KEYS:
+        return _recovery_fallback()
+    status = value.get("status")
+    action = value.get("action")
+    available = value.get("action_available")
+    reason = value.get("reason")
+    next_action = value.get("next_action")
+    if type(available) is not bool:
+        return _recovery_fallback()
+    if status == "available":
+        if (
+            action != "RETRY_IF_RECONSTRUCTABLE"
+            or available is not True
+            or reason != RECOVERY_REASON_AVAILABLE
+            or next_action != RECOVERY_NEXT_RETRY
+        ):
+            return _recovery_fallback()
+    elif status == "unavailable":
+        if (
+            action != "CREATE_NEW_JOB"
+            or available is not False
+            or reason not in _RECOVERY_REASONS - {RECOVERY_REASON_AVAILABLE}
+            or next_action != RECOVERY_NEXT_CREATE
+        ):
+            return _recovery_fallback()
+    else:
+        return _recovery_fallback()
+    return {
+        "status": status,
+        "action": action,
+        "action_available": available,
+        "reason": reason,
+        "next_action": next_action,
+    }
+
+
+def _safe_lifecycle_timestamp(value: object) -> str | None:
+    if not isinstance(value, str) or not 1 <= len(value) <= 64:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.isoformat()
+
+
+def _project_lifecycle(value: object, fallback_state: str) -> dict[str, Any]:
+    """Keep a finite lifecycle projection and stop history after a terminal."""
+
+    source = value if isinstance(value, Mapping) else {}
+    raw_state = source.get("state")
+    state = raw_state if isinstance(raw_state, str) and raw_state in _LIFECYCLE_STATES else fallback_state
+    raw_history = source.get("history")
+    history = [item for item in raw_history if isinstance(item, str) and item in _LIFECYCLE_STATES] if isinstance(raw_history, list) else []
+    history = history[:32]
+    terminal_index = next((index for index, item in enumerate(history) if item in _LIFECYCLE_TERMINAL), None)
+    if terminal_index is not None:
+        history = history[: terminal_index + 1]
+        state = history[-1]
+    elif state in _LIFECYCLE_TERMINAL:
+        history.append(state)
+    elif not history or history[-1] != state:
+        history.append(state)
+    timestamps = source.get("timestamps") if isinstance(source.get("timestamps"), Mapping) else {}
+    attempt = source.get("attempt")
+    safe_attempt = attempt if isinstance(attempt, int) and not isinstance(attempt, bool) and 1 <= attempt <= 10_000 else 1
+    retry_of = source.get("retry_of")
+    safe_retry_of = retry_of if isinstance(retry_of, str) and _LIFECYCLE_JOB_ID.fullmatch(retry_of) else None
+    return {
+        "state": state,
+        "history": history[-32:],
+        "attempt": safe_attempt,
+        "retry_of": safe_retry_of,
+        "timestamps": {
+            key: _safe_lifecycle_timestamp(timestamps.get(key))
+            for key in ("created_at", "updated_at", "started_at", "finished_at")
+        },
+    }
+
+
+def _artifact_unavailable_projection(artifact_id: object = None) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": "unavailable",
+        "preview_available": False,
+        "reason": "Artifact metadata is unavailable or its durable provenance does not match.",
+        "next_action": "Refresh the durable job after server-owned artifact validation.",
+    }
+    if isinstance(artifact_id, str) and is_artifact_id(artifact_id):
+        result["id"] = artifact_id
+    return result
+
+
+def _project_artifacts(value: object) -> list[dict[str, Any]]:
+    values = value if isinstance(value, list) else []
+    projected: list[dict[str, Any]] = []
+    for item in values[:64]:
+        if not isinstance(item, Mapping):
+            projected.append(_artifact_unavailable_projection())
+            continue
+        artifact_id = item.get("id")
+        if item.get("status") != "available" or item.get("preview_available") is not True or not is_artifact_id(artifact_id):
+            projected.append(_artifact_unavailable_projection(artifact_id))
+            continue
+        name = item.get("name")
+        media_type = item.get("media_type")
+        size = item.get("size_bytes")
+        digest = item.get("sha256")
+        if (
+            not isinstance(name, str)
+            or not 1 <= len(name) <= 160
+            or any(char in name for char in ("\x00", "\r", "\n", "/", "\\"))
+            or ".." in name
+            or not isinstance(media_type, str)
+            or not re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", media_type)
+            or isinstance(size, bool)
+            or not isinstance(size, int)
+            or not 0 <= size <= 8 * 1024**3
+            or not isinstance(digest, str)
+            or not _LIFECYCLE_FINGERPRINT.fullmatch(digest)
+            or item.get("url") != f"/api/artifacts/{artifact_id}"
+        ):
+            projected.append(_artifact_unavailable_projection(artifact_id))
+            continue
+        provenance = item.get("provenance")
+        if not isinstance(provenance, Mapping) or set(provenance) != {"job_id", "job_spec_fingerprint", "adapter_id", "attempt", "status"}:
+            projected.append(_artifact_unavailable_projection(artifact_id))
+            continue
+        if (
+            not isinstance(provenance.get("job_id"), str)
+            or not _LIFECYCLE_JOB_ID.fullmatch(provenance["job_id"])
+            or not isinstance(provenance.get("job_spec_fingerprint"), str)
+            or not _LIFECYCLE_FINGERPRINT.fullmatch(provenance["job_spec_fingerprint"])
+            or not isinstance(provenance.get("adapter_id"), str)
+            or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,63}", provenance["adapter_id"])
+            or isinstance(provenance.get("attempt"), bool)
+            or not isinstance(provenance.get("attempt"), int)
+            or not 1 <= provenance["attempt"] <= 10_000
+            or not isinstance(provenance.get("status"), str)
+            or provenance.get("status") not in _LIFECYCLE_STATES
+        ):
+            projected.append(_artifact_unavailable_projection(artifact_id))
+            continue
+        projected.append({
+            "id": artifact_id,
+            "name": name,
+            "media_type": media_type,
+            "size_bytes": size,
+            "sha256": digest,
+            "url": f"/api/artifacts/{artifact_id}",
+            "status": "available",
+            "preview_available": True,
+            "provenance": {
+                "job_id": provenance["job_id"],
+                "job_spec_fingerprint": provenance["job_spec_fingerprint"],
+                "adapter_id": provenance["adapter_id"],
+                "attempt": provenance["attempt"],
+                "status": provenance["status"],
+            },
+        })
+    return projected
+
+
 def project_job_recovery(jobs: object) -> dict[str, Any]:
     """Project recovery truth without inputs, descriptors, callables, or paths."""
 
@@ -286,18 +488,33 @@ def project_job_recovery(jobs: object) -> dict[str, Any]:
         if not isinstance(item, Mapping):
             continue
         status = _status(item.get("status"), "unavailable")
-        resumable = bool(item.get("resumable") is True or item.get("retry_available") is True)
+        durable_record = item.get("contract_version") == "durable-job.v1" and isinstance(item.get("job_spec"), Mapping)
+        if durable_record:
+            item = DurableWorkEngine.public_job(dict(item))
+            status = _status(item.get("status"), "unavailable")
+        durable = durable_record or item.get("source") == "durable" or item.get("contract_version") == "durable-job.v1"
+        recovery = _project_recovery(item.get("recovery")) if durable else None
+        resumable = recovery["action_available"] if recovery is not None else bool(item.get("resumable") is True or item.get("retry_available") is True)
         raw_progress = item.get("progress", 0)
         progress = max(0, min(100, int(raw_progress))) if type(raw_progress) in {int, float} and math.isfinite(raw_progress) else 0
-        record = {
-            "id": _safe_id(item.get("id"), "job"),
+        job_id = item.get("id")
+        safe_job_id = job_id if isinstance(job_id, str) and _LIFECYCLE_JOB_ID.fullmatch(job_id) else _safe_id(job_id, "job")
+        record: dict[str, Any] = {
+            "id": safe_job_id,
             "tool": _safe_id(item.get("tool"), "job"),
-            "source": _safe_id(item.get("source"), "legacy"),
+            "source": "durable" if durable else _safe_id(item.get("source"), "legacy"),
             "status": status,
             "progress": progress,
-            "resumable": resumable and status in _ATTENTION_JOB_STATES,
-            "next_action": _text(item.get("next_action") or item.get("action_code"), "Review the job state and create a new task when recovery is unavailable."),
+            "resumable": bool(resumable) and status in _ATTENTION_JOB_STATES,
+            "next_action": recovery["next_action"] if recovery is not None else _text(
+                item.get("next_action") or item.get("action_code"),
+                "Review the job state and create a new task when recovery is unavailable.",
+            ),
         }
+        if recovery is not None:
+            record["recovery"] = recovery
+            record["lifecycle"] = _project_lifecycle(item.get("lifecycle"), status)
+            record["artifacts"] = _project_artifacts(item.get("artifacts"))
         records.append(record)
         counts["total"] += 1
         if status in _ACTIVE_JOB_STATES:
@@ -318,17 +535,20 @@ def project_job_recovery(jobs: object) -> dict[str, Any]:
     }
 
 
-def durable_jobs_snapshot(path: Path = DURABLE_JOBS_PATH) -> dict[str, Any]:
+def durable_jobs_snapshot(
+    path: Path = DURABLE_JOBS_PATH,
+    *,
+    registry: ServerOwnedAdapterRegistry | None = None,
+) -> dict[str, Any]:
     """Read the V5-A durable store through its public projection only."""
 
+    active_registry = registry if isinstance(registry, ServerOwnedAdapterRegistry) else ServerOwnedAdapterRegistry()
     try:
         store = DurableJobStore(path)
         try:
             records = []
             for item in store.records():
-                detached = dict(item)
-                detached["retry_available"] = False
-                records.append(DurableWorkEngine.public_job(detached))
+                records.append(DurableWorkEngine.public_job(item, registry=active_registry))
             health = store.health()
         finally:
             store.close()
@@ -358,36 +578,66 @@ def reconcile_durable_jobs(path: Path = DURABLE_JOBS_PATH) -> dict[str, Any]:
         engine.close()
 
 
-def resume_durable_job(job_id: str, path: Path = DURABLE_JOBS_PATH) -> dict[str, Any]:
+def resume_durable_job(
+    job_id: str,
+    path: Path = DURABLE_JOBS_PATH,
+    *,
+    registry: ServerOwnedAdapterRegistry | None = None,
+) -> dict[str, Any]:
     """Attempt V5-A resume only through the server-owned adapter registry."""
 
-    if not isinstance(job_id, str) or not job_id.startswith("jobv5_") or len(job_id) != 38:
+    if not isinstance(job_id, str) or not _LIFECYCLE_JOB_ID.fullmatch(job_id):
         return {"status": "invalid", "execution": "not_run", "dry_run": True, "next_action": "Use the opaque durable job ID returned by Hub."}
-    store = DurableJobStore(path)
-    engine = DurableWorkEngine(store, ServerOwnedAdapterRegistry())
+    active_registry = registry if isinstance(registry, ServerOwnedAdapterRegistry) else ServerOwnedAdapterRegistry()
     try:
-        record = engine.get(job_id)
-        if record is None:
+        store = DurableJobStore(path)
+    except DurableStoreHealthError as exc:
+        return {
+            "status": "unavailable",
+            "execution": "not_run",
+            "dry_run": True,
+            "recovery": {"status": "unavailable", "action": "CREATE_NEW_JOB", "action_available": False, "reason": "Durable job state is unavailable.", "next_action": RECOVERY_NEXT_CREATE},
+            "next_action": RECOVERY_NEXT_CREATE,
+            "reason": exc.code,
+        }
+    engine = DurableWorkEngine(store, active_registry)
+    try:
+        try:
+            raw_record = store.get(job_id)
+        except DurableStoreHealthError as exc:
+            return {
+                "status": "unavailable",
+                "execution": "not_run",
+                "dry_run": True,
+                "recovery": _recovery_fallback(),
+                "next_action": RECOVERY_NEXT_CREATE,
+                "reason": exc.code,
+            }
+        if raw_record is None:
             return {"status": "not_found", "execution": "not_run", "dry_run": True, "next_action": "Create a new allowlisted job descriptor."}
-        if record.get("retry_available") is not True:
+        decision = public_recovery_decision(raw_record, active_registry)
+        record = DurableWorkEngine.public_job(raw_record, registry=active_registry)
+        if decision["action_available"] is not True:
             return {
                 "status": "unavailable",
                 "execution": "not_run",
                 "dry_run": True,
                 "job": record,
-                "next_action": "Create a new allowlisted descriptor; no server adapter is currently reconstructable.",
+                "recovery": decision,
+                "next_action": decision["next_action"],
             }
         try:
-            resumed = engine.resume(job_id)
+            resumed = engine.resume(job_id, start=False)
         except Exception:
             return {
                 "status": "unavailable",
                 "execution": "not_run",
                 "dry_run": True,
                 "job": record,
-                "next_action": "Create a new allowlisted descriptor after server adapter review.",
+                "recovery": {**decision, "status": "unavailable", "action": "CREATE_NEW_JOB", "action_available": False, "reason": RECOVERY_REASON_INVALID, "next_action": RECOVERY_NEXT_CREATE},
+                "next_action": RECOVERY_NEXT_CREATE,
             }
-        return {"status": "queued", "execution": "not_run", "dry_run": True, "job": resumed}
+        return {"status": "queued", "execution": "not_run", "dry_run": True, "job": resumed, "recovery": decision}
     finally:
         engine.close()
 
