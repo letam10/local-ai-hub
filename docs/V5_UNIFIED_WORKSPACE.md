@@ -160,6 +160,23 @@ pywebview.api.workflow_library bridge. Until V5-D supplies that bridge, save
 and migration actions remain partial with a reason/action; no guessed fetch
 route is called.
 
+## Readiness and Module Plan journey
+
+Dashboard is the concise entry point: it shows the current server-owned
+readiness state, module attention, C:/D: storage projection, and a direct
+`Readiness & Module Plan` route into Settings. Settings is the detailed view.
+Its module rows come from the bootstrap product surface and show only the
+projected id/provider/component/version/status/reason/next action fields.
+Allowlisted resource-fit and C:/D: constraints remain dry-run evidence; unknown
+objects, paths, secrets, manifests, and commands are not rendered.
+
+The detailed view is explicitly a server snapshot. Fast refresh may replace
+the capability snapshot, but it does not fetch or recompute productization and
+never upgrades a partial, unavailable, not_published, or not_run state into an
+operational or executing claim. Install, repair, and uninstall are explanatory
+states only. Productization and resource planning remain `execution: not_run`
+with `dry_run: true` until a separately authorized runtime boundary exists.
+
 ## V5-D integration boundary
 
 The future integration lane must provide server-owned methods equivalent to:

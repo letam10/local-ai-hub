@@ -54,7 +54,190 @@ const artifactProvenance = (item) => {
 };
 const isMaskArtifact = (item, name) => item?.mask === true || item?.is_mask === true || item?.artifact_kind === "mask" || /(?:^|[._ -])mask(?:[._ -]|$)/i.test(name);
 
-const statusPill = (status, label = formatStatus(status)) => `<span class="status-pill" data-status="${escapeHtml(status || "unknown")}">${escapeHtml(label)}</span>`;
+const READINESS_STATUS_LABELS = Object.freeze({
+  operational: "Operational",
+  healthy: "Healthy",
+  ready: "Ready",
+  clean: "Clean",
+  partial: "Partial",
+  unavailable: "Unavailable",
+  not_published: "Not published",
+  not_run: "Not run",
+  error: "Error",
+  available: "Available",
+  installed: "Installed",
+  planned: "Planned",
+  missing: "Missing",
+  unknown: "Unknown",
+});
+const UI_STATUS_RE = /^[a-z][a-z0-9_-]{0,39}$/;
+const uiStatus = (value, fallback = "unknown") => {
+  const candidate = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return UI_STATUS_RE.test(candidate) ? candidate : fallback;
+};
+const readinessStatus = (value, fallback = "unknown") => {
+  const candidate = uiStatus(value, fallback);
+  return Object.prototype.hasOwnProperty.call(READINESS_STATUS_LABELS, candidate) ? candidate : fallback;
+};
+const readinessStatusLabel = (value) => {
+  const normalized = readinessStatus(value);
+  return READINESS_STATUS_LABELS[normalized] || formatStatus(normalized);
+};
+const statusPill = (status, label) => {
+  const normalized = uiStatus(status);
+  return `<span class="status-pill" data-status="${escapeHtml(normalized)}">${escapeHtml(label || READINESS_STATUS_LABELS[normalized] || formatStatus(normalized))}</span>`;
+};
+const unsafeUiText = /(?:[a-z]:[\\/]|\\\\|(?:^|\s)\/(?:etc|tmp|var|home)(?:[\\/]|$)|(?:file|data):|(?:api[_-]?key|password|secret|token)\s*[:=])/i;
+const safeUiText = (value, fallback = "") => {
+  if (typeof value !== "string") return fallback;
+  const candidate = value.trim().slice(0, 240);
+  return candidate && !unsafeUiText.test(candidate) ? candidate : fallback;
+};
+const safeUiIdentifier = (value, fallback = "unknown") => {
+  const candidate = typeof value === "string" ? value.trim() : "";
+  return /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,119}$/.test(candidate) ? candidate : fallback;
+};
+const safeReadinessModules = (state) => {
+  const productization = state?.productization && typeof state.productization === "object" ? state.productization : {};
+  const capabilities = productization.capabilities && typeof productization.capabilities === "object" ? productization.capabilities : {};
+  const fromProductSurface = Array.isArray(capabilities.modules);
+  const values = fromProductSurface ? capabilities.modules : (Array.isArray(state?.components) ? state.components : []);
+  return values.slice(0, 64).map((item, index) => {
+    const record = item && typeof item === "object" && !Array.isArray(item) ? item : {};
+    const id = safeUiIdentifier(record.id, `module-${index + 1}`);
+    return {
+      id,
+      label: fromProductSurface ? safeUiIdentifier(record.component, id) : safeUiText(record.name || record.component, id),
+      kind: fromProductSurface ? safeUiIdentifier(record.provider, "server-owned") : safeUiText(record.kind || record.provider, "component"),
+      version: safeUiText(record.version),
+      status: readinessStatus(record.status || record.component_status, "missing"),
+      reason: safeUiText(record.reason, "No additional reason was published in this server snapshot."),
+      nextAction: safeUiText(record.next_action, "Review the server-owned evidence before runtime work."),
+    };
+  });
+};
+const safeStorageVolumes = (state) => {
+  const productization = state?.productization && typeof state.productization === "object" ? state.productization : {};
+  const storage = state?.storage && typeof state.storage === "object" ? state.storage : (productization.storage && typeof productization.storage === "object" ? productization.storage : {});
+  const raw = Array.isArray(storage.volumes) ? storage.volumes : [];
+  const byId = new Map(raw.filter((item) => item && typeof item === "object" && !Array.isArray(item)).map((item) => [String(item.id || "").toLowerCase(), item]));
+  return ["c", "d"].map((id) => {
+    const item = byId.get(id) || {};
+    const status = readinessStatus(item.status, "unavailable");
+    const numeric = ["total_bytes", "free_bytes", "used_bytes"].every((key) => Number.isInteger(item[key]) && item[key] >= 0);
+    const available = status === "available" && numeric;
+    return {
+      id,
+      label: id === "c" ? "C:" : "D:",
+      status,
+      available,
+      totalBytes: available ? item.total_bytes : null,
+      freeBytes: available ? item.free_bytes : null,
+      usedBytes: available ? item.used_bytes : null,
+      lowSpace: item.low_space === true,
+      reason: safeUiText(item.reason, "Volume statistics are unavailable; no figures are shown."),
+      nextAction: safeUiText(item.next_action, "Verify that the volume is mounted and readable, then refresh storage."),
+    };
+  });
+};
+const safeResourceGpu = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return {
+    vendor: safeUiIdentifier(value.vendor, "unknown"),
+    deviceClass: safeUiIdentifier(value.device_class, "unknown"),
+    model: safeUiText(value.model, "unknown"),
+    vramMb: Number.isInteger(value.vram_mb) && value.vram_mb >= 0 ? value.vram_mb : null,
+  };
+};
+const safeResourceFits = (value, fitKey) => {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 64).flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    return [{
+      id: safeUiIdentifier(item.id),
+      status: readinessStatus(item.status),
+      gpu: safeUiIdentifier(item.gpu, "unassigned"),
+      fit: typeof item[fitKey] === "boolean" ? item[fitKey] : null,
+    }];
+  });
+};
+const safeResourceErrors = (value) => {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 32).flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const code = safeUiIdentifier(item.code, "resource_error");
+    const module = safeUiIdentifier(item.module, "");
+    return [{ code, module }];
+  });
+};
+const safeResourceActions = (value) => Array.isArray(value)
+  ? value.slice(0, 32).map((item) => safeUiText(item)).filter(Boolean)
+  : [];
+const safeResourcePlan = (state) => {
+  const capabilities = state?.capabilities && typeof state.capabilities === "object" ? state.capabilities : {};
+  const manager = capabilities.module_manager && typeof capabilities.module_manager === "object" ? capabilities.module_manager : {};
+  const value = manager.resource_plan && typeof manager.resource_plan === "object" && !Array.isArray(manager.resource_plan) ? manager.resource_plan : {};
+  return {
+    available: Object.keys(value).length > 0,
+    status: readinessStatus(value.status, "not_run"),
+    mode: value.mode === "parallel" || value.mode === "serial" ? value.mode : "not_published",
+    targetGpu: safeResourceGpu(value.target_gpu),
+    physical: safeResourceFits(value.physical, "physical_fit"),
+    concurrent: safeResourceFits(value.concurrent, "concurrent_fit"),
+    errors: safeResourceErrors(value.errors),
+    actions: safeResourceActions(value.actions),
+  };
+};
+const readinessSnapshot = (state) => {
+  const productization = state?.productization && typeof state.productization === "object" ? state.productization : {};
+  const surface = productization.capabilities && typeof productization.capabilities === "object" ? productization.capabilities : {};
+  const readiness = productization.readiness && typeof productization.readiness === "object" ? productization.readiness : {};
+  const control = state?.capabilities && typeof state.capabilities === "object" ? state.capabilities : {};
+  const storage = state?.storage && typeof state.storage === "object" ? state.storage : {};
+  const executionValue = productization.execution || storage.execution || control.execution;
+  return {
+    status: readinessStatus(readiness.status || productization.status),
+    reason: safeUiText(readiness.reason, "Readiness is derived from server-owned static capability evidence."),
+    nextAction: safeUiText(readiness.next_action, "Review the module plan before requesting runtime work."),
+    planStatus: readinessStatus(surface.module_plan_status, "not_run"),
+    planReason: safeUiText(surface.reason, "Module preflight is server-owned static metadata."),
+    planAction: safeUiText(surface.next_action, "Review the plan before any separately authorized operation."),
+    modules: safeReadinessModules(state),
+    resourcePlan: safeResourcePlan(state),
+    volumes: safeStorageVolumes(state),
+    execution: ["not_run", "dry_run"].includes(executionValue) ? executionValue : "not_published",
+    dryRun: productization.dry_run === true,
+    resourceSnapshot: Object.keys(control).length > 0 ? "current server capability snapshot" : "not published",
+  };
+};
+const readinessModuleDetails = (modules) => modules.length
+  ? modules.map((item) => `<article class="readiness-module" data-status="${escapeHtml(item.status)}" role="listitem"><div class="readiness-module__head"><div><h3>${escapeHtml(item.label)}</h3><p>${escapeHtml(item.kind)}${item.version ? ` · ${escapeHtml(item.version)}` : ""}</p></div>${statusPill(item.status, readinessStatusLabel(item.status))}</div><div class="readiness-module__guidance"><div><span>Reason</span><p>${escapeHtml(item.reason)}</p></div><div><span>Next action</span><p>${escapeHtml(item.nextAction)}</p></div></div></article>`).join("")
+  : `<div class="empty-state compact"><strong>No module rows published</strong><span>The server snapshot contains no safe module projection.</span></div>`;
+const readinessFitLabel = (fit) => fit === true ? "Fit" : fit === false ? "No fit" : "Unknown";
+const readinessResourceDetails = (resource) => {
+  const target = resource.targetGpu;
+  const targetText = target
+    ? `${target.vendor} · ${target.deviceClass} · ${target.model}${target.vramMb == null ? "" : ` · ${target.vramMb} MB VRAM`}`
+    : "No target GPU published";
+  const fitRows = [
+    ...resource.physical.map((item) => ({ ...item, kind: "Physical fit", fit: item.fit })),
+    ...resource.concurrent.map((item) => ({ ...item, kind: "Concurrent fit", fit: item.fit })),
+  ];
+  const rows = fitRows.length
+    ? fitRows.map((item) => `<div class="readiness-resource-row"><span>${escapeHtml(item.kind)} · ${escapeHtml(item.id)}</span><span>${escapeHtml(item.gpu)} · ${escapeHtml(readinessFitLabel(item.fit))}</span></div>`).join("")
+    : `<div class="empty-state compact"><span>No per-module resource fit was published.</span></div>`;
+  const errors = resource.errors.length
+    ? `<div class="readiness-resource-errors"><strong>Resource notes</strong>${resource.errors.map((item) => `<span>${escapeHtml(item.code)}${item.module ? ` · ${escapeHtml(item.module)}` : ""}</span>`).join("")}</div>`
+    : "";
+  const actions = resource.actions.length
+    ? `<div class="readiness-guidance"><div><span>Next safe action</span><p>${escapeHtml(resource.actions[0])}</p></div></div>`
+    : "";
+  return `<section class="readiness-resource card card--flat" aria-labelledby="readiness-resource-title" data-resource-plan-status="${escapeHtml(resource.status)}"><div class="card-title-row"><div><span class="eyebrow">RESOURCE PREFLIGHT</span><h2 id="readiness-resource-title">Dry-run resource fit</h2></div>${statusPill(resource.status, readinessStatusLabel(resource.status))}</div><div class="readiness-resource-summary"><div><span>Mode</span><strong>${escapeHtml(resource.mode)}</strong></div><div><span>Target</span><strong>${escapeHtml(targetText)}</strong></div><div><span>Source</span><strong>Server-owned</strong></div></div><div class="readiness-resource-list">${rows}</div>${errors}${actions}<p class="small muted">Resource fit is planning evidence only; no provider, install, repair, uninstall, GPU or media operation ran.</p></section>`;
+};
+const readinessStorageDetails = (volumes) => `<section class="readiness-storage card card--flat" aria-labelledby="readiness-storage-title"><div class="card-title-row"><div><span class="eyebrow">STORAGE CONSTRAINTS</span><h2 id="readiness-storage-title">Allowlisted volume constraints</h2></div><span class="tag">C: / D:</span></div><div class="readiness-storage-grid">${volumes.map((volume) => {
+  const value = (key) => volume.available ? formatGb(volume[`${key}Bytes`]) : "\u2014";
+  return `<article class="readiness-storage-item" data-volume-id="${escapeHtml(volume.id)}" data-status="${escapeHtml(volume.status)}"><div class="readiness-module__head"><div><h3>${escapeHtml(volume.label)}</h3><p>Server-owned snapshot</p></div>${statusPill(volume.status, readinessStatusLabel(volume.status))}</div><div class="readiness-storage-values"><div><span>Total</span><strong>${escapeHtml(value("total"))}</strong></div><div><span>Free</span><strong>${escapeHtml(value("free"))}</strong></div><div><span>Used</span><strong>${escapeHtml(value("used"))}</strong></div></div><p>${escapeHtml(volume.reason)}</p><div class="readiness-guidance"><div><span>${volume.lowSpace ? "Low-space action" : "Next action"}</span><p>${escapeHtml(volume.nextAction)}</p></div></div></article>`;
+}).join("")}</div></section>`;
 const heading = (eyebrow, title, description, actions = "") => `
   <header class="page-heading"><div class="heading-copy"><div class="eyebrow">${escapeHtml(eyebrow)}</div><h1>${escapeHtml(title)}</h1><p>${escapeHtml(description)}</p></div><div class="heading-actions">${actions}</div></header>`;
 const card = (title, content, action = "", extra = "") => `<section class="card ${extra}"><div class="card-title-row"><h2>${escapeHtml(title)}</h2>${action}</div>${content}</section>`;
@@ -164,36 +347,23 @@ function renderDashboard(state) {
   const gpu = health.gpu && typeof health.gpu === "object" ? health.gpu : {};
   const productization = source.productization && typeof source.productization === "object" ? source.productization : {};
   const storage = source.storage && typeof source.storage === "object" ? source.storage : (productization.storage && typeof productization.storage === "object" ? productization.storage : {});
-  const volumes = Array.isArray(storage.volumes) ? storage.volumes.slice(0, 2) : [];
+  const readinessView = readinessSnapshot(source);
+  const volumes = readinessView.volumes;
   const jobs = [
     ...(Array.isArray(source.jobs) ? source.jobs : []),
     ...(Array.isArray(source.durableJobs) ? source.durableJobs : []),
   ];
   const components = Array.isArray(source.components) ? source.components : [];
+  const componentFallback = components.map((item) => item);
   const control = source.capabilities && typeof source.capabilities === "object" ? source.capabilities : {};
-  const registry = control.registry && typeof control.registry === "object" ? control.registry : {};
-  const modulePlan = control.module_manager && typeof control.module_manager === "object" ? control.module_manager : {};
-  const capabilityRecords = Array.isArray(registry.records) ? registry.records : [];
-  const readiness = String(control.status || health.status || "unknown");
+  const readiness = readinessView.status !== "unknown" ? readinessView.status : readinessStatus(control.status || health.status);
   const activeJobs = jobs.filter((item) => ["queued", "starting", "running", "cancelling"].includes(String(item?.status || ""))).length;
   const metric = (label, value, detail) => `<article class="metric-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail)}</small></article>`;
-  const statusRank = { unavailable: 0, missing: 0, partial: 1, planned: 2, starting: 3, installed: 4, operational: 5, healthy: 5 };
+  const statusRank = { error: 0, unavailable: 0, missing: 0, not_published: 0, partial: 1, not_run: 1, planned: 2, starting: 3, installed: 4, operational: 5, healthy: 5, ready: 5, clean: 5 };
   const rankOf = (status) => Object.prototype.hasOwnProperty.call(statusRank, status) ? statusRank[status] : 3;
   const textKey = (value) => String(value ?? "").trim().toLowerCase();
-  const componentFallback = components.map((item) => item);
-  const modules = (capabilityRecords.length ? capabilityRecords : componentFallback).map((item, index) => {
-    const record = item && typeof item === "object" ? item : {};
-    const status = String(record.status || record.component_status || "missing");
-    return {
-      id: String(record.id || `component-${index + 1}`),
-      label: String(record.component || record.name || record.id || "Module"),
-      kind: String(record.provider || record.kind || "component"),
-      version: record.version ? String(record.version) : "",
-      status,
-      reason: String(record.reason || "Static readiness evidence is bounded."),
-      nextAction: String(record.next_action || record.action || "Review the server-owned evidence before runtime work."),
-    };
-  });
+  const productCapabilities = productization.capabilities && typeof productization.capabilities === "object" ? productization.capabilities : {};
+  const modules = Array.isArray(productCapabilities.modules) ? readinessView.modules : safeReadinessModules({ ...source, components: componentFallback });
   modules.sort((left, right) => {
     const rankDifference = rankOf(left.status) - rankOf(right.status);
     if (rankDifference) return rankDifference;
@@ -205,7 +375,7 @@ function renderDashboard(state) {
   if (readiness !== "healthy" && readiness !== "operational") {
     attention.push({ id: "hub-api", title: "Hub API", detail: "Readiness snapshot needs review", status: readiness });
   }
-  modules.filter((item) => ["unavailable", "missing", "partial"].includes(item.status)).forEach((item) => {
+  modules.filter((item) => ["error", "unavailable", "missing", "partial", "not_published", "not_run"].includes(item.status)).forEach((item) => {
     attention.push({ id: `module-${item.id}`, title: item.label, detail: item.kind, status: item.status });
   });
   jobs.filter((item) => ["failed", "unavailable", "cancelled", "interrupted"].includes(String(item?.status || ""))).forEach((item, index) => {
@@ -219,13 +389,13 @@ function renderDashboard(state) {
   });
   const attentionItems = attention.slice(0, 4);
   const moduleRows = modules.length
-    ? modules.slice(0, 12).map((item) => `<div class="dashboard-module-row"><div class="row-main"><strong>${escapeHtml(item.label)}</strong><span class="row-meta">${escapeHtml(item.kind)}${item.version ? ` · ${escapeHtml(item.version)}` : ""}</span></div>${statusPill(item.status, formatStatus(item.status))}</div>`).join("")
+    ? modules.slice(0, 12).map((item) => `<div class="dashboard-module-row"><div class="row-main"><strong>${escapeHtml(item.label)}</strong><span class="row-meta">${escapeHtml(item.kind)}${item.version ? ` · ${escapeHtml(item.version)}` : ""}</span></div>${statusPill(item.status, readinessStatusLabel(item.status))}</div>`).join("")
     : `<p class="small muted">Chưa có module trong readiness snapshot.</p>`;
   const attentionRows = attentionItems.length
-    ? attentionItems.map((item) => `<div class="dashboard-module-row"><div class="row-main"><strong>${escapeHtml(item.title)}</strong><span class="row-meta">${escapeHtml(item.detail)}</span></div>${statusPill(item.status, formatStatus(item.status))}</div>`).join("")
+    ? attentionItems.map((item) => `<div class="dashboard-module-row"><div class="row-main"><strong>${escapeHtml(item.title)}</strong><span class="row-meta">${escapeHtml(item.detail)}</span></div>${statusPill(item.status, readinessStatusLabel(item.status))}</div>`).join("")
     : `<p class="small muted">Không có hạng mục cần chú ý.</p>`;
   const moduleEvidenceRows = modules.length
-    ? modules.slice(0, 12).map((item) => `<div class="dashboard-module-row"><div class="row-main"><strong>${escapeHtml(item.label)}</strong><span class="row-meta">${escapeHtml(item.reason)}</span><span class="row-meta">${escapeHtml(item.nextAction)}</span></div>${statusPill(item.status, formatStatus(item.status))}</div>`).join("")
+    ? modules.slice(0, 12).map((item) => `<div class="dashboard-module-row"><div class="row-main"><strong>${escapeHtml(item.label)}</strong><span class="row-meta">${escapeHtml(item.reason)}</span><span class="row-meta">${escapeHtml(item.nextAction)}</span></div>${statusPill(item.status, readinessStatusLabel(item.status))}</div>`).join("")
     : `<p class="small muted">No server-owned module evidence.</p>`;
   const quickActions = [
     ["image", "Image AI", "Compose và chỉnh sửa ảnh"],
@@ -233,6 +403,7 @@ function renderDashboard(state) {
     ["jobs", "Jobs", "Theo dõi queue và artifact"],
     ["models", "Models & Storage", "Kiểm tra inventory"],
   ].map(([route, label, detail]) => `<button class="button button--compact" type="button" data-route="${escapeHtml(route)}"><strong>${escapeHtml(label)}</strong><span class="row-meta">${escapeHtml(detail)}</span></button>`).join("");
+  const readinessAction = `<button class="button button--compact" type="button" data-readiness-route="settings"><strong>Readiness & Module Plan</strong><span class="row-meta">Review the server snapshot</span></button>`;
   const workflowSteps = [
     ["01", "Check readiness", "Review module health and attention."],
     ["02", "Choose a route", "Open an existing Hub workspace."],
@@ -242,24 +413,24 @@ function renderDashboard(state) {
   const gpuDetail = gpu.memory_free_mib != null ? `${gpu.memory_free_mib} MiB VRAM trống` : "Snapshot GPU chưa sẵn sàng";
   const diskValue = disk.free_bytes != null ? formatGb(disk.free_bytes) : "—";
   const readinessNote = readiness === "healthy" || readiness === "operational" ? "Hub API snapshot ổn định; readiness của từng module vẫn được hiển thị riêng." : "Kiểm tra các mục cần chú ý trước khi chạy workflow.";
-  const planStatus = String(modulePlan.status || registry.status || readiness);
-  const planReason = String(modulePlan.reason || "Module preflight is server-owned static metadata.");
-  const planAction = String(modulePlan.next_action || "Review the plan before any separately authorized operation.");
-  const storageStatus = String(storage.status || "unavailable");
-  const storageExecution = String(storage.execution || productization.execution || "not_run");
+  const planStatus = readinessView.planStatus;
+  const planReason = readinessView.planReason;
+  const planAction = readinessView.planAction;
+  const storageStatus = readinessStatus(storage.status, "unavailable");
+  const storageExecution = readinessView.execution;
   const storageVolumeCard = (volume) => {
     const volumeId = String(volume?.id || "").toLowerCase();
     const label = volumeId === "c" ? "C:" : volumeId === "d" ? "D:" : "Volume";
-    const status = String(volume?.status || "unavailable");
-    const available = status === "available" && Number.isInteger(volume?.total_bytes) && Number.isInteger(volume?.free_bytes) && Number.isInteger(volume?.used_bytes);
-    const value = (key) => available ? formatGb(volume[key]) : "\u2014";
-    const low = volume?.low_space === true;
-    const reason = String(volume?.reason || "Volume statistics are unavailable; no figures are shown.");
-    const action = String(volume?.next_action || "Verify the volume is mounted and readable, then refresh storage.");
-    return `<article class="dashboard-storage-volume" data-volume-id="${escapeHtml(volumeId || "unknown")}" data-status="${escapeHtml(status)}" data-low-space="${low}"><div class="card-title-row"><div><span class="eyebrow">SERVER-OWNED VOLUME</span><h3>${escapeHtml(label)}</h3></div>${statusPill(status, status === "available" ? "Available" : "Unavailable")}</div><div class="dashboard-storage-values"><div><span>Total</span><strong>${escapeHtml(value("total_bytes"))}</strong></div><div><span>Free</span><strong>${escapeHtml(value("free_bytes"))}</strong></div><div><span>Used</span><strong>${escapeHtml(value("used_bytes"))}</strong></div></div><p class="dashboard-storage-reason">${escapeHtml(reason)}</p>${low ? `<div class="callout callout--warning dashboard-storage-warning" role="alert"><strong>Low space</strong><span>${escapeHtml(action)}</span></div>` : `<div class="dashboard-storage-action"><strong>Next action</strong><span>${escapeHtml(action)}</span></div>`}</article>`;
+    const status = readinessStatus(volume?.status, "unavailable");
+    const available = volume?.available === true;
+    const value = (key) => available ? formatGb(volume[`${key}Bytes`]) : "\u2014";
+    const low = volume?.lowSpace === true;
+    const reason = volume?.reason || "Volume statistics are unavailable; no figures are shown.";
+    const action = volume?.nextAction || "Verify that the volume is mounted and readable, then refresh storage.";
+    return `<article class="dashboard-storage-volume" data-volume-id="${escapeHtml(volumeId || "unknown")}" data-status="${escapeHtml(status)}" data-low-space="${low}"><div class="card-title-row"><div><span class="eyebrow">SERVER-OWNED VOLUME</span><h3>${escapeHtml(label)}</h3></div>${statusPill(status, status === "available" ? "Available" : "Unavailable")}</div><div class="dashboard-storage-values"><div><span>Total</span><strong>${escapeHtml(value("total"))}</strong></div><div><span>Free</span><strong>${escapeHtml(value("free"))}</strong></div><div><span>Used</span><strong>${escapeHtml(value("used"))}</strong></div></div><p class="dashboard-storage-reason">${escapeHtml(reason)}</p>${low ? `<div class="callout callout--warning dashboard-storage-warning" role="alert"><strong>Low space</strong><span>${escapeHtml(action)}</span></div>` : `<div class="dashboard-storage-action"><strong>Next action</strong><span>${escapeHtml(action)}</span></div>`}</article>`;
   };
   const storageHtml = volumes.length ? volumes.map(storageVolumeCard).join("") : `<div class="empty-state compact"><strong>Storage projection unavailable</strong><span>C:/ and D:/ figures are not available in this snapshot.</span></div>`;
-  const lowSpaceVolumes = volumes.filter((volume) => volume?.low_space === true);
+  const lowSpaceVolumes = volumes.filter((volume) => volume?.lowSpace === true);
   const storageWarning = lowSpaceVolumes.length ? `<div class="callout callout--warning dashboard-storage-warning" role="alert"><strong>Low-space warning</strong><span>${escapeHtml(lowSpaceVolumes.map((volume) => String(volume?.id || "").toLowerCase() === "c" ? "C:" : String(volume?.id || "").toLowerCase() === "d" ? "D:" : "volume").join(", "))} review storage before new writes.</span></div>` : "";
   const workflowLibraryHtml = workflowLibraryState(source.workflowLibrary);
   return `<section class="dashboard-page" aria-labelledby="dashboard-title">
@@ -289,7 +460,7 @@ function renderDashboard(state) {
       </section>
       <aside class="dashboard-aside">
         <section class="card" aria-labelledby="dashboard-attention-title"><div class="card-title-row"><h2 id="dashboard-attention-title">Cần chú ý</h2><span class="tag">Tối đa 4</span></div><div class="dashboard-attention-list">${attentionRows}</div></section>
-        <section class="card" aria-labelledby="dashboard-quick-title"><div class="card-title-row"><h2 id="dashboard-quick-title">Điều hướng nhanh</h2></div><div class="dashboard-quick-actions">${quickActions}</div></section>
+        <section class="card" aria-labelledby="dashboard-quick-title"><div class="card-title-row"><h2 id="dashboard-quick-title">Điều hướng nhanh</h2></div><div class="dashboard-quick-actions">${quickActions}${readinessAction}</div></section>
         <section class="card" aria-labelledby="dashboard-workflow-title"><div class="card-title-row"><h2 id="dashboard-workflow-title">Workflow ngắn</h2></div><ol class="dashboard-module-list">${workflowSteps}</ol></section>
       </aside>
     </section>
@@ -616,7 +787,18 @@ function renderModels(state) {
 
 function renderSettings(state) {
   const settings = state.settings || {};
+  const snapshot = readinessSnapshot(state);
   return heading("SYSTEM", "Settings", "Cấu hình startup, chính sách GPU, storage và advanced integrations. Không hiển thị secrets hay local machine paths.") + `
+    <section class="readiness-page" aria-labelledby="readiness-page-title" data-readiness-source="server-snapshot">
+      <section class="readiness-summary card" aria-labelledby="readiness-page-title" data-readiness-status="${escapeHtml(snapshot.status)}">
+        <div class="card-title-row"><div><span class="eyebrow">SERVER SNAPSHOT</span><h2 id="readiness-page-title">Readiness & Module Plan</h2><p>Bootstrap product-surface evidence is shown as received; fast refresh never promotes it to execution.</p></div><div class="readiness-summary__pills">${statusPill(snapshot.status, readinessStatusLabel(snapshot.status))}<span class="tag">${escapeHtml(snapshot.resourceSnapshot)}</span></div></div>
+        <div class="readiness-summary__metrics"><div><span>Overall readiness</span><strong>${escapeHtml(readinessStatusLabel(snapshot.status))}</strong></div><div><span>Module plan</span><strong>${escapeHtml(readinessStatusLabel(snapshot.planStatus))}</strong></div><div><span>Modules</span><strong>${escapeHtml(String(snapshot.modules.length))}</strong></div><div><span>Execution</span><strong>${escapeHtml(snapshot.execution)}</strong></div></div>
+        <div class="readiness-guidance"><div><span>Reason</span><p>${escapeHtml(snapshot.reason)}</p></div><div><span>Next action</span><p>${escapeHtml(snapshot.nextAction)}</p></div></div>
+        <div class="readiness-safety"><span class="tag">dry_run: ${snapshot.dryRun ? "true" : "false"}</span><span class="tag">Install / repair / uninstall: explanatory only</span></div>
+      </section>
+      <section class="readiness-modules card" aria-labelledby="readiness-modules-title"><div class="card-title-row"><div><span class="eyebrow">MODULE EVIDENCE</span><h2 id="readiness-modules-title">Safe module projection</h2><p>Rows are limited to server-projected id, provider, component, status, version, reason and next action.</p></div><span class="tag">${escapeHtml(String(snapshot.modules.length))} rows</span></div><div class="readiness-module-list" role="list">${readinessModuleDetails(snapshot.modules)}</div></section>
+      <div class="workspace-grid workspace-grid--two readiness-detail-grid">${readinessResourceDetails(snapshot.resourcePlan)}${readinessStorageDetails(snapshot.volumes)}</div>
+    </section>
     <div class="workspace-grid workspace-grid--two">
       ${card("Appearance & startup", `<div class="row-list"><div class="row-item"><span>Start maximized</span><strong>${settings.start_maximized ? "Bật" : "Tắt"}</strong></div><div class="row-item"><span>Minimum window</span><strong>${escapeHtml(settings.minimum_width || 1280)} × ${escapeHtml(settings.minimum_height || 720)}</strong></div><div class="row-item"><span>Theme</span><button class="button button--compact" type="button" data-cycle-theme>Đổi theme</button></div></div>`)}
       ${card("Workers & lifecycle", `<div class="row-list"><div class="row-item"><span>Model policy</span><strong>${escapeHtml(settings.model_load_policy || "on_demand")}</strong></div><div class="row-item"><span>Heavy GPU slots</span><strong>${escapeHtml(settings.max_heavy_gpu_jobs || 1)}</strong></div><div class="row-item"><span>ComfyUI port</span><strong>${escapeHtml(settings.comfyui_port || 8188)}</strong></div></div><div class="form-actions"><button class="button" type="button" data-close-backends>Đóng backend Hub-owned rảnh</button></div>`)}
