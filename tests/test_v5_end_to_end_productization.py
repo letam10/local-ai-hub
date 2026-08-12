@@ -8,6 +8,7 @@ from pathlib import Path
 from src.services.api.v5_productization import (
     PRODUCT_SURFACE_SCHEMA_VERSION,
     durable_jobs_snapshot,
+    project_media_operation_scope,
     project_job_recovery,
     project_product_surface,
     project_runtime_evidence,
@@ -120,7 +121,71 @@ class V5EndToEndProductizationTests(unittest.TestCase):
         self.assertEqual(surface["execution"], "not_run")
         self.assertTrue(surface["dry_run"])
         self.assertEqual(surface["capabilities"]["runtime_evidence"]["outcome"], "error")
+        self.assertEqual(surface["capabilities"]["media_operation_scope"]["operations"], ["video_grade", "logo_overlay", "encode"])
+        self.assertFalse(surface["capabilities"]["media_operation_scope"]["evidence_verified"])
         self.assertNotIn(marker, json.dumps(surface))
+
+    def test_runtime_evidence_malformed_nested_values_fail_closed_without_type_errors(self) -> None:
+        safe = {
+            "schema_version": "runtime-evidence-projection.v1",
+            "subject": "media_overlay_cpu_acceptance",
+            "status": "unavailable",
+            "outcome": "error",
+            "execution": "attempted",
+            "failure_class": "unknown",
+            "invocation_count": 1,
+            "cleanup": {"processes_remaining": 0, "temp_cleaned": True},
+            "artifact_published": False,
+            "source_overwrite_checked": False,
+            "source_overwritten": None,
+        }
+        marker = "malformed-runtime-marker"
+        cases = [
+            ("status", []),
+            ("status", {}),
+            ("outcome", []),
+            ("outcome", {}),
+            ("failure_class", []),
+            ("failure_class", {}),
+            ("cleanup", []),
+            ("cleanup", {}),
+            ("cleanup", {"processes_remaining": [], "temp_cleaned": True}),
+            ("cleanup", {"processes_remaining": 0, "temp_cleaned": {}}),
+        ]
+        for field, value in cases:
+            malformed = {**safe, field: value}
+            projection = project_runtime_evidence(malformed)
+            self.assertEqual(projection["status"], "unavailable", field)
+            self.assertEqual(projection["outcome"], "not_run", field)
+            self.assertEqual(projection["execution"], "not_run", field)
+            self.assertNotIn(marker, json.dumps(projection))
+
+        surface = project_product_surface(
+            control_plane={**control_plane(), "runtime_evidence": {**safe, "status": []}},
+            health={"status": "healthy", "gpu": {"status": "unavailable"}, "disk": {}},
+            jobs=[],
+            workflow_library={},
+        )
+        self.assertEqual(surface["capabilities"]["runtime_evidence"]["outcome"], "not_run")
+        self.assertEqual(surface["execution"], "not_run")
+        self.assertTrue(surface["dry_run"])
+
+        scope = project_media_operation_scope({
+            "schema_version": "runtime-operation-scope.v1",
+            "subject": "media_overlay_cpu_acceptance",
+            "status": "operational",
+            "execution": "completed",
+            "evidence_verified": True,
+            "operations": ["video_grade", "logo_overlay", "encode"],
+            "available_operations": ["video_grade", "logo_overlay", "encode"],
+            "operation_status": {"video_grade": "operational", "logo_overlay": "operational", "encode": "operational"},
+        })
+        self.assertEqual(scope["available_operations"], ["video_grade", "logo_overlay", "encode"])
+        malformed_scope = dict(scope)
+        malformed_scope["operation_status"] = {"video_grade": [], "logo_overlay": "operational", "encode": "operational"}
+        self.assertFalse(project_media_operation_scope(malformed_scope)["evidence_verified"])
+        malformed_scope["operation_status"] = []
+        self.assertFalse(project_media_operation_scope(malformed_scope)["evidence_verified"])
 
     def test_storage_projection_is_fixed_bounded_and_truthful(self) -> None:
         marker = "C:/private/secret"

@@ -116,6 +116,47 @@ assert.equal(normalized.pickerSearch, "typed");
         self.assertEqual(payload["encoder_capabilities"]["execution"], "not_run")
         self.assertFalse(payload["encoder_capabilities"]["available"])
         self.assertEqual(payload["encoder_capabilities"]["encoders"], [])
+        self.assertEqual(payload["operation_scope"]["operations"], ["video_grade", "logo_overlay", "encode"])
+        self.assertFalse(payload["operation_scope"]["evidence_verified"])
+        self.assertTrue(all(
+            item["status"] == "partial"
+            for item in payload["nodes"]
+            if item["type"] in {"video_grade", "logo_overlay", "encode"}
+        ))
+
+    def test_registry_promotes_only_exact_scoped_nodes_from_completed_evidence(self) -> None:
+        from src.modules.media_editor.backend import adapter
+        from src.services.node_studio import registry
+
+        snapshot = {
+            "status": "not_run",
+            "execution": "not_run",
+            "available": False,
+            "reason": "explicit probe not authorized",
+            "encoders": [],
+            "containers": ["mp4"],
+            "audio_encoders": [],
+        }
+        scope = {
+            "schema_version": "runtime-operation-scope.v1",
+            "subject": "media_overlay_cpu_acceptance",
+            "status": "operational",
+            "execution": "completed",
+            "evidence_verified": True,
+            "operations": ["video_grade", "logo_overlay", "encode"],
+            "available_operations": ["video_grade", "logo_overlay", "encode"],
+            "operation_status": {"video_grade": "operational", "logo_overlay": "operational", "encode": "operational"},
+        }
+        with (
+            patch.object(adapter, "cached_encoder_capabilities", return_value=snapshot),
+            patch.object(registry, "runtime_evidence_operation_scope", return_value=scope),
+        ):
+            payload = registry.registry_payload("media")
+        nodes = {item["type"]: item for item in payload["nodes"]}
+        for node_type in ("video_grade", "logo_overlay", "encode"):
+            self.assertEqual(nodes[node_type]["status"], "operational")
+        self.assertEqual(nodes["audio_loudness"]["status"], "partial")
+        self.assertEqual(payload["operation_scope"]["available_operations"], ["video_grade", "logo_overlay", "encode"])
 
     def test_new_video_contracts_are_closed_and_status_truthful(self) -> None:
         from src.services.node_studio.registry import get_definition, validate_node_data

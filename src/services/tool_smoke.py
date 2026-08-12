@@ -105,6 +105,8 @@ def _canonical_json_bytes(value: object) -> bytes:
 RUNTIME_EVIDENCE_CONTRACT_FINGERPRINT = hashlib.sha256(_canonical_json_bytes(RUNTIME_EVIDENCE_RUNTIME_CONTRACT)).hexdigest()
 RUNTIME_EVIDENCE_OUTCOMES = ("completed", "error", "unavailable", "blocked", "not_run")
 RUNTIME_EVIDENCE_EXECUTIONS = ("completed", "attempted", "not_run")
+RUNTIME_EVIDENCE_OPERATION_SCOPE_SCHEMA_VERSION = "runtime-operation-scope.v1"
+RUNTIME_EVIDENCE_OPERATION_SCOPE = tuple(ACCEPTANCE_OPERATIONS)
 _RUNTIME_EVIDENCE_RECORD_KEYS = frozenset({
     "schema_version",
     "source",
@@ -479,10 +481,52 @@ def runtime_evidence_passed(record: object | None = None, *, path: Path | None =
     )
 
 
+def runtime_evidence_operation_scope(record: object | None = None, *, path: Path | None = None) -> dict[str, Any]:
+    """Project strict evidence into the exact operation scope it can support.
+
+    This is a read-only server-owned projection.  A completed record can only
+    mark the three operations in ``ACCEPTANCE_OPERATIONS`` operational; it can
+    never promote the generic media tool or an unrelated Node Studio node.
+    """
+
+    candidate = read_runtime_evidence(path) if record is None else record
+    verified = runtime_evidence_passed(candidate)
+    operation_status = {
+        operation: "operational" if verified else "partial"
+        for operation in RUNTIME_EVIDENCE_OPERATION_SCOPE
+    }
+    if verified:
+        return {
+            "schema_version": RUNTIME_EVIDENCE_OPERATION_SCOPE_SCHEMA_VERSION,
+            "subject": RUNTIME_EVIDENCE_SUBJECT,
+            "status": "operational",
+            "execution": "completed",
+            "evidence_verified": True,
+            "operations": list(RUNTIME_EVIDENCE_OPERATION_SCOPE),
+            "available_operations": list(RUNTIME_EVIDENCE_OPERATION_SCOPE),
+            "operation_status": operation_status,
+            "reason": "A completed exact evidence record covers only the listed media operations.",
+            "next_action": "Use only the listed operations with opaque artifacts; keep all other media tools partial.",
+        }
+    return {
+        "schema_version": RUNTIME_EVIDENCE_OPERATION_SCOPE_SCHEMA_VERSION,
+        "subject": RUNTIME_EVIDENCE_SUBJECT,
+        "status": "unavailable",
+        "execution": "not_run",
+        "evidence_verified": False,
+        "operations": list(RUNTIME_EVIDENCE_OPERATION_SCOPE),
+        "available_operations": [],
+        "operation_status": operation_status,
+        "reason": "No completed exact evidence is available for the listed media operations.",
+        "next_action": "Keep the listed operations and all other media tools partial until separately evidenced.",
+    }
+
+
 def _runtime_evidence_unavailable_projection() -> dict[str, Any]:
     return {
         "schema_version": "runtime-evidence-projection.v1",
         "subject": RUNTIME_EVIDENCE_SUBJECT,
+        "operations": list(ACCEPTANCE_OPERATIONS),
         "status": "unavailable",
         "outcome": "not_run",
         "execution": "not_run",
@@ -501,7 +545,7 @@ def runtime_evidence_projection(*, path: Path | None = None) -> dict[str, Any]:
     """Return a safe local-only summary; reading never writes or starts runtime work."""
 
     record = read_runtime_evidence(path)
-    if record is None:
+    if not _runtime_evidence_record_valid(record):
         return _runtime_evidence_unavailable_projection()
     cleanup = {
         "processes_remaining": 0 if record["cleanup"]["processes_remaining"] == 0 else 1,
@@ -511,6 +555,7 @@ def runtime_evidence_projection(*, path: Path | None = None) -> dict[str, Any]:
         return {
             "schema_version": "runtime-evidence-projection.v1",
             "subject": RUNTIME_EVIDENCE_SUBJECT,
+            "operations": list(ACCEPTANCE_OPERATIONS),
             "status": "operational",
             "outcome": "completed",
             "execution": "completed",
@@ -527,6 +572,7 @@ def runtime_evidence_projection(*, path: Path | None = None) -> dict[str, Any]:
         return {
             "schema_version": "runtime-evidence-projection.v1",
             "subject": RUNTIME_EVIDENCE_SUBJECT,
+            "operations": list(ACCEPTANCE_OPERATIONS),
             "status": "unavailable",
             "outcome": "error",
             "execution": "attempted",
@@ -549,6 +595,7 @@ def runtime_evidence_projection(*, path: Path | None = None) -> dict[str, Any]:
         return {
             "schema_version": "runtime-evidence-projection.v1",
             "subject": RUNTIME_EVIDENCE_SUBJECT,
+            "operations": list(ACCEPTANCE_OPERATIONS),
             "status": "unavailable",
             "outcome": record["outcome"],
             "execution": "not_run",

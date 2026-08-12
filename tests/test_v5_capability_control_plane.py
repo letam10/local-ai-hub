@@ -137,6 +137,8 @@ class V5CapabilityControlPlaneTests(unittest.TestCase):
         self.assertEqual(snapshot["execution"], "not_run")
         self.assertTrue(snapshot["dry_run"])
         self.assertEqual(snapshot["module_manager"]["execution"], "not_run")
+        self.assertEqual(snapshot["media_operation_scope"]["operations"], ["video_grade", "logo_overlay", "encode"])
+        self.assertFalse(snapshot["media_operation_scope"]["evidence_verified"])
         detached = copy.deepcopy(snapshot)
         detached["registry"]["records"].clear()
         self.assertTrue(snapshot["registry"]["records"])
@@ -170,7 +172,42 @@ class V5CapabilityControlPlaneTests(unittest.TestCase):
         self.assertEqual(failed["tool_status"], "partial")
         with patch.object(core, "runtime_evidence_passed", return_value=True):
             completed = core._tool_readiness("run_media_operation", {"ffmpeg": {"component_status": "installed"}})
-        self.assertEqual(completed["tool_status"], "operational")
+        self.assertEqual(completed["tool_status"], "partial")
+
+    def test_completed_scoped_evidence_never_promotes_generic_or_unrelated_tools(self) -> None:
+        from src.services import tool_smoke
+
+        completed = tool_smoke._runtime_evidence_record({
+            "status": "completed",
+            "execution": "completed",
+            "artifacts": {"encoded": {"id": "artifact_" + "a" * 32, "size_bytes": 10, "sha256": "a" * 64}},
+            "processes_remaining": 0,
+            "temp_cleaned": True,
+            "source_overwritten": False,
+        })
+        scope = tool_smoke.runtime_evidence_operation_scope(completed)
+        self.assertTrue(scope["evidence_verified"])
+        self.assertEqual(scope["operations"], ["video_grade", "logo_overlay", "encode"])
+        with (
+            patch.object(core, "runtime_evidence_operation_scope", return_value=scope),
+            patch.object(core, "runtime_evidence_passed", side_effect=AssertionError("generic readiness must not verify broad evidence")),
+        ):
+            generic = core._tool_readiness("run_media_operation", {
+                "ffmpeg": {"component_status": "installed"},
+            })
+            unrelated = core._tool_readiness("upscale_anime_video", {
+                "animesr": {"component_status": "installed"},
+            })
+            catalog = core.tool_catalog([
+                {"id": "ffmpeg", "component_status": "installed"},
+                {"id": "animesr", "component_status": "installed"},
+            ])
+        self.assertEqual(generic["tool_status"], "partial")
+        self.assertEqual(generic["operation_scope"]["available_operations"], ["video_grade", "logo_overlay", "encode"])
+        self.assertEqual(unrelated["tool_status"], "partial")
+        catalog_by_name = {item["name"]: item for item in catalog}
+        self.assertEqual(catalog_by_name["run_media_operation"]["tool_status"], "partial")
+        self.assertEqual(catalog_by_name["upscale_anime_video"]["tool_status"], "partial")
 
     def test_module_plan_schema_validation(self) -> None:
         plan = build_module_plan([_record("schema-check")])
