@@ -92,6 +92,20 @@ def _recovery_unavailable(reason: str = RECOVERY_REASON_INVALID) -> dict[str, An
     }
 
 
+def _current_adapter_input_valid(spec: JobSpec) -> bool:
+    """Revalidate inputs for code-owned production adapters only."""
+
+    if spec.descriptor.adapter_id != "media.video_grade.v1":
+        return True
+    try:
+        from .durable_adapters import validate_media_video_grade_spec
+
+        validate_media_video_grade_spec(spec.to_mapping(), resolve_input=True)
+    except Exception:
+        return False
+    return True
+
+
 def public_recovery_decision(record: object, registry: "ServerOwnedAdapterRegistry") -> dict[str, Any]:
     """Decide recovery from validated durable data and server-owned code only.
 
@@ -116,6 +130,8 @@ def public_recovery_decision(record: object, registry: "ServerOwnedAdapterRegist
     if record.get("job_spec_fingerprint") != spec.fingerprint:
         return _recovery_unavailable(RECOVERY_REASON_INVALID)
     if record.get("descriptor_summary") != spec.descriptor.summary():
+        return _recovery_unavailable(RECOVERY_REASON_INVALID)
+    if not _current_adapter_input_valid(spec):
         return _recovery_unavailable(RECOVERY_REASON_INVALID)
     attempt = record.get("attempt")
     if isinstance(attempt, bool) or not isinstance(attempt, int) or not 1 <= attempt <= 10_000:
@@ -510,12 +526,18 @@ class DurableWorkEngine:
             spec = validate_job_spec(record.get("job_spec"))
         except JobContractError:
             return False
-        return spec.descriptor.reconstructable and self.registry.contains(spec.descriptor.adapter_id)
+        return (
+            spec.descriptor.reconstructable
+            and _current_adapter_input_valid(spec)
+            and self.registry.contains(spec.descriptor.adapter_id)
+        )
 
     def submit(self, value: Any, *, start: bool = False, retry_of: str | None = None, attempt: int = 1) -> dict[str, Any]:
         """Persist a validated job.  It never accepts a callable or loader."""
 
         spec = validate_job_spec(value)
+        if not _current_adapter_input_valid(spec):
+            raise JobContractError("INVALID_MEDIA_JOB", "Create a new allowlisted media.video_grade.v1 job.")
         if not self.registry.contains(spec.descriptor.adapter_id):
             raise JobContractError("ADAPTER_UNAVAILABLE", "Select a server-supported adapter.")
         record = self._make_record(spec, retry_of=retry_of, attempt=attempt)
@@ -775,7 +797,7 @@ class DurableWorkEngine:
             spec = validate_job_spec(record.get("job_spec"))
         except JobContractError as exc:
             raise JobContractError("INVALID_PERSISTED_DESCRIPTOR", "Create a new allowlisted job descriptor.") from exc
-        if not spec.descriptor.reconstructable or not self.registry.contains(spec.descriptor.adapter_id):
+        if not spec.descriptor.reconstructable or not _current_adapter_input_valid(spec) or not self.registry.contains(spec.descriptor.adapter_id):
             raise JobContractError("JOB_NOT_RECONSTRUCTABLE", "Create a new allowlisted job descriptor.")
         attempt = int(record.get("attempt") or 1) + 1
         return self.submit(spec.to_mapping(), start=start, retry_of=job_id, attempt=attempt)
@@ -803,6 +825,7 @@ class DurableWorkEngine:
                 unavailable += 1
                 continue
             retry_available = spec.descriptor.reconstructable and self.registry.contains(spec.descriptor.adapter_id)
+            retry_available = retry_available and _current_adapter_input_valid(spec)
             with self._lock:
                 current = self.store.get(job_id)
                 if current is None:
@@ -821,6 +844,16 @@ class DurableWorkEngine:
                     self._update_locked(job_id, {"retry_available": retry_available})
         self.store.flush()
         return {"interrupted": reconciled, "unavailable": unavailable}
+
+    def persist_managed_output(self, _job_id: str, _output_path: object) -> None:
+        """Defer output publication until a cross-store atomic API exists.
+
+        Registering an artifact and linking it to the durable record are two
+        different stores.  This package intentionally performs neither step
+        so a failed linkage can never leave an orphaned public artifact.
+        """
+
+        return None
 
     def persist_output(
         self,
