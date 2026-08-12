@@ -128,6 +128,24 @@ process.stdout.write(html);
             else:
                 self.assertIn('data-media-evidence-outcome="not_run"', html)
 
+    def test_runtime_schema_version_is_required_and_hostile_shapes_fail_closed(self) -> None:
+        for replacement in ("missing", [], {}, "runtime-evidence-projection.v0"):
+            state = self._state()
+            evidence = state["productization"]["capabilities"]["runtime_evidence"]
+            if replacement == "missing":
+                evidence.pop("schema_version", None)
+            else:
+                evidence["schema_version"] = replacement
+            html = self._render("media", state)
+            self.assertIn('data-media-evidence-status="unavailable"', html)
+            self.assertIn('data-media-evidence-outcome="not_run"', html)
+            self.assertIn('data-media-evidence-verified="false"', html)
+            self.assertNotIn('data-media-evidence-status="operational"', html)
+
+        model_slice = self.pages[self.pages.index("const MEDIA_EVIDENCE_OPERATIONS"):self.pages.index("const JOB_STATUS_RANK")]
+        self.assertIn('value.schema_version !== "runtime-evidence-projection.v1"', model_slice)
+        self.assertNotIn("value.schema_version !== undefined", model_slice)
+
     def test_hostile_unknown_evidence_is_fixed_safe_and_not_echoed(self) -> None:
         state = self._state()
         hostile = copy.deepcopy(state)
@@ -152,12 +170,38 @@ process.stdout.write(html);
         self.assertNotIn("getStorage()", refresh_slice)
 
     def test_node_studio_consumes_registry_scope_without_a_second_editor(self) -> None:
-        for marker in ("operation_scope", "normalizeOperationScope", "operationEvidenceFor", "data-operation-scope-status", "data-graph-operation-evidence", "video_grade", "logo_overlay", "encode", 'setAttribute("role", "application")'):
+        for marker in ("operation_scope", "normalizeOperationScope", "operationEvidenceFor", "operationAvailabilityFor", "mediaGraphRunEligibility", "data-operation-scope-status", "data-graph-operation-evidence", "video_grade", "logo_overlay", "encode", 'setAttribute("role", "application")'):
             self.assertIn(marker, self.node)
         self.assertEqual(self.node.count("new globalThis.LiteGraph.LGraphCanvas"), 1)
         self.assertEqual(self.node.count("new globalThis.LiteGraph.LGraph()"), 1)
         self.assertNotIn("getCapabilities", self.node)
         self.assertIn("focus-visible", self.styles)
+
+    def test_completed_scope_cannot_run_generic_operational_media_node(self) -> None:
+        script = """
+import { mediaGraphRunEligibility } from './src/ui/node_studio.js';
+const scope = {status: 'operational', execution: 'completed', evidenceVerified: true, availableOperations: ['video_grade', 'logo_overlay', 'encode'], operationStatus: {video_grade: 'operational', logo_overlay: 'operational', encode: 'operational'}};
+const exact = {nodes: [{type: 'video_grade'}, {type: 'encode'}]};
+const generic = {nodes: [{type: 'generic_media', status: 'operational'}]};
+const mixed = {nodes: [{type: 'video_grade'}, {type: 'generic_media', status: 'operational'}]};
+const hostileScope = {...scope, operationStatus: {...scope.operationStatus, generic_media: 'operational'}};
+process.stdout.write(JSON.stringify({exact: mediaGraphRunEligibility('media', exact, scope), generic: mediaGraphRunEligibility('media', generic, scope), mixed: mediaGraphRunEligibility('media', mixed, scope), unavailable: mediaGraphRunEligibility('media', exact, {...scope, evidenceVerified: false}), hostileScope: mediaGraphRunEligibility('media', exact, hostileScope)}));
+"""
+        result = subprocess.run(["node", "--input-type=module", "--eval", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=15, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outcome = json.loads(result.stdout)
+        self.assertTrue(outcome["exact"]["eligible"])
+        self.assertFalse(outcome["generic"]["eligible"])
+        self.assertFalse(outcome["mixed"]["eligible"])
+        self.assertFalse(outcome["unavailable"]["eligible"])
+        self.assertFalse(outcome["hostileScope"]["eligible"])
+        run_slice = self.node[self.node.index("async run("):self.node.index("async cancel(")]
+        self.assertIn("const eligibility = this.runEligibility()", run_slice)
+        self.assertIn("if (!eligibility.eligible)", run_slice)
+        self.assertLess(run_slice.index("if (!eligibility.eligible)"), run_slice.index("runNodeGraph"))
+        handle_slice = self.node[self.node.index("handleAction(action)"):self.node.index("nextPanelWidth(value)")]
+        self.assertIn("this.runEligibility()", handle_slice)
+        self.assertIn("if (!eligibility.eligible)", handle_slice)
 
     def test_registry_fixture_publishes_scope_and_unrelated_node_stays_partial(self) -> None:
         payload = self._json("/api/node-studio/registry?scope=media")
@@ -166,6 +210,12 @@ process.stdout.write(html);
         for operation in fixture.MEDIA_OPERATIONS:
             self.assertEqual(nodes[operation]["status"], "operational")
         self.assertEqual(nodes["generic_media"]["status"], "partial")
+        generic_operational = copy.deepcopy(nodes["generic_media"])
+        generic_operational["status"] = "operational"
+        generic_operational["availability"]["status"] = "operational"
+        generic_operational["availability"]["reason"] = "Hostile completed generic mock must remain non-operational in the UI."
+        self.assertEqual(generic_operational["status"], "operational")
+        self.assertIn("operationAvailabilityFor", self.node)
         self.assertNotIn("[object Object]", json.dumps(payload))
 
 

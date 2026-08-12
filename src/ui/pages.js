@@ -320,7 +320,7 @@ const mediaEvidenceFallback = () => ({
   genericNextAction: "Use only the published evidence rows; no generic media execution is claimed.",
 });
 const normalizeRuntimeMediaEvidence = (value) => {
-  if (!isMediaEvidenceRecord(value) || (value.schema_version !== undefined && value.schema_version !== "runtime-evidence-projection.v1") || value.subject !== "media_overlay_cpu_acceptance" || !exactMediaOperationList(value.operations)) return null;
+  if (!isMediaEvidenceRecord(value) || value.schema_version !== "runtime-evidence-projection.v1" || value.subject !== "media_overlay_cpu_acceptance" || !exactMediaOperationList(value.operations)) return null;
   const status = ["operational", "partial", "unavailable"].includes(value.status) ? value.status : "";
   const outcome = Object.prototype.hasOwnProperty.call(MEDIA_EVIDENCE_OUTCOME_LABELS, value.outcome) ? value.outcome : "";
   const execution = Object.prototype.hasOwnProperty.call(MEDIA_EVIDENCE_EXECUTION_LABELS, value.execution) ? value.execution : "";
