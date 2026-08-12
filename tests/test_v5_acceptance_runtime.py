@@ -442,6 +442,12 @@ class AcceptanceRuntimeTests(unittest.TestCase):
         stale_contract = copy.deepcopy(completed)
         stale_contract["contract_fingerprint"] = "b" * 64
         self.assertFalse(tool_smoke._runtime_evidence_record_valid(stale_contract))
+        with TemporaryDirectory() as directory:
+            stale_path = Path(directory) / "runtime-evidence.json"
+            stale_path.write_text(json.dumps(stale_contract), encoding="utf-8")
+            stale_projection = tool_smoke.runtime_evidence_projection(path=stale_path)
+        self.assertEqual(stale_projection["outcome"], "not_run")
+        self.assertEqual(stale_projection["reason"], "No bounded media acceptance evidence is available.")
 
         for failure_class in tool_smoke.ACCEPTANCE_DIAGNOSTIC_CLASSES:
             failed = tool_smoke._runtime_evidence_record({
@@ -463,6 +469,50 @@ class AcceptanceRuntimeTests(unittest.TestCase):
             with patch.object(tool_smoke, "STATE_PATH", legacy_state):
                 tool_smoke.record_completed("legacy_tool")
                 self.assertTrue(tool_smoke.passed("legacy_tool"))
+
+    def test_runtime_evidence_source_overwrite_is_tri_state_and_never_promotes(self) -> None:
+        from src.services import tool_smoke
+
+        unchecked = tool_smoke._runtime_evidence_record({
+            "status": "error",
+            "execution": "attempted",
+            "diagnostic": {"version": tool_smoke.ACCEPTANCE_DIAGNOSTIC_VERSION, "class": "unknown"},
+            "processes_remaining": 0,
+            "temp_cleaned": True,
+        })
+        self.assertFalse(unchecked["source_overwrite_checked"])
+        self.assertIsNone(unchecked["source_overwritten"])
+        self.assertTrue(tool_smoke._runtime_evidence_record_valid(unchecked))
+        self.assertFalse(tool_smoke.runtime_evidence_passed(unchecked))
+        invalid_unchecked = copy.deepcopy(unchecked)
+        invalid_unchecked["source_overwritten"] = False
+        self.assertFalse(tool_smoke._runtime_evidence_record_valid(invalid_unchecked))
+
+        with TemporaryDirectory() as directory:
+            state = Path(directory) / "runtime-evidence.json"
+            for overwritten in (False, True):
+                checked = copy.deepcopy(unchecked)
+                checked["source_overwrite_checked"] = True
+                checked["source_overwritten"] = overwritten
+                self.assertTrue(tool_smoke._runtime_evidence_record_valid(checked))
+                self.assertFalse(tool_smoke.runtime_evidence_passed(checked))
+                self.assertTrue(tool_smoke._write_runtime_evidence(checked, path=state))
+                projection = tool_smoke.runtime_evidence_projection(path=state)
+                self.assertEqual(projection["source_overwrite_checked"], True)
+                self.assertEqual(projection["source_overwritten"], overwritten)
+                self.assertEqual(projection["status"], "unavailable")
+
+            for outcome in ("blocked", "not_run"):
+                record = tool_smoke._runtime_evidence_record({"status": outcome, "execution": "not_run"})
+                self.assertTrue(tool_smoke._write_runtime_evidence(record, path=state))
+                projection = tool_smoke.runtime_evidence_projection(path=state)
+                self.assertEqual(projection["outcome"], outcome)
+                self.assertEqual(projection["execution"], "not_run")
+                self.assertEqual(projection["status"], "unavailable")
+                self.assertNotEqual(projection["status"], "operational")
+            missing = tool_smoke.runtime_evidence_projection(path=Path(directory) / "missing.json")
+            self.assertEqual(missing["outcome"], "not_run")
+            self.assertEqual(missing["reason"], "No bounded media acceptance evidence is available.")
 
     def test_runtime_evidence_finalizer_writes_only_after_cleanup_and_reader_is_read_only(self) -> None:
         from src.services import tool_smoke

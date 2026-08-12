@@ -72,8 +72,41 @@ class V5EndToEndProductizationTests(unittest.TestCase):
         self.assertEqual(failed["execution"], "attempted")
         self.assertTrue(failed["cleanup"]["temp_cleaned"])
         self.assertFalse(failed["artifact_published"])
+        self.assertTrue(failed["source_overwrite_checked"])
+        self.assertFalse(failed["source_overwritten"])
         self.assertNotIn(marker, json.dumps(failed))
         self.assertNotIn("source", failed)
+        checked_false = {**failed, "source_overwrite_checked": True, "source_overwritten": False}
+        self.assertEqual(project_runtime_evidence(checked_false)["source_overwritten"], False)
+        checked_true = {**failed, "source_overwrite_checked": True, "source_overwritten": True}
+        true_projection = project_runtime_evidence(checked_true)
+        self.assertEqual(true_projection["source_overwritten"], True)
+        self.assertEqual(true_projection["status"], "unavailable")
+        self.assertNotEqual(true_projection["status"], "operational")
+        malformed = {**failed, "source_overwrite_checked": False, "source_overwritten": False}
+        malformed_projection = project_runtime_evidence(malformed)
+        self.assertIsNone(malformed_projection["source_overwritten"])
+        for outcome, expected_reason in (
+            ("blocked", "The bounded media acceptance was blocked before execution."),
+            ("not_run", "No bounded media acceptance invocation was recorded."),
+        ):
+            safe_not_run = project_runtime_evidence({
+                "schema_version": "runtime-evidence-projection.v1",
+                "subject": "media_overlay_cpu_acceptance",
+                "status": "unavailable",
+                "outcome": outcome,
+                "execution": "not_run",
+                "failure_class": None,
+                "invocation_count": 0,
+                "cleanup": {"processes_remaining": 0, "temp_cleaned": True},
+                "artifact_published": False,
+                "source_overwrite_checked": False,
+                "source_overwritten": None,
+            })
+            self.assertEqual(safe_not_run["outcome"], outcome)
+            self.assertEqual(safe_not_run["execution"], "not_run")
+            self.assertEqual(safe_not_run["status"], "unavailable")
+            self.assertEqual(safe_not_run["reason"], expected_reason)
         fallback = project_runtime_evidence({"status": "operational", "reason": marker})
         self.assertEqual(fallback["status"], "unavailable")
         self.assertEqual(fallback["execution"], "not_run")

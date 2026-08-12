@@ -136,10 +136,11 @@ _ACCEPTANCE_DIAGNOSTIC_PATTERNS = (
 class AcceptanceFailure(RuntimeError):
     """Internal bounded acceptance failure; never expose its detail publicly."""
 
-    def __init__(self, code: str, *, unavailable: bool = False) -> None:
+    def __init__(self, code: str, *, unavailable: bool = False, source_overwritten: bool | None = None) -> None:
         super().__init__(code)
         self.code = code
         self.unavailable = unavailable
+        self.source_overwritten = source_overwritten
 
 
 class _AcceptanceOwner:
@@ -272,9 +273,12 @@ def _runtime_evidence_record_valid(record: object) -> bool:
         return False
     if type(cleanup.get("temp_cleaned")) is not bool:
         return False
-    if any(type(record.get(key)) is not bool for key in ("artifact_published", "source_overwrite_checked", "source_overwritten")):
+    if any(type(record.get(key)) is not bool for key in ("artifact_published", "source_overwrite_checked")):
         return False
-    if record["source_overwritten"] and not record["source_overwrite_checked"]:
+    if record["source_overwrite_checked"]:
+        if type(record.get("source_overwritten")) is not bool:
+            return False
+    elif record.get("source_overwritten") is not None:
         return False
 
     outcome = record["outcome"]
@@ -427,7 +431,7 @@ def _runtime_evidence_record(result: dict[str, Any]) -> dict[str, Any]:
         and len(encoded["sha256"]) == 64
     )
     source_overwrite_checked = type(result.get("source_overwritten")) is bool
-    source_overwritten = result.get("source_overwritten") is True if source_overwrite_checked else False
+    source_overwritten = result.get("source_overwritten") if source_overwrite_checked else None
     return {
         "schema_version": RUNTIME_EVIDENCE_SCHEMA_VERSION,
         "source": dict(RUNTIME_EVIDENCE_SOURCE),
@@ -487,7 +491,7 @@ def _runtime_evidence_unavailable_projection() -> dict[str, Any]:
         "cleanup": {"processes_remaining": 0, "temp_cleaned": True},
         "artifact_published": False,
         "source_overwrite_checked": False,
-        "source_overwritten": False,
+        "source_overwritten": None,
         "reason": "No bounded media acceptance evidence is available.",
         "next_action": "Keep media operations partial until a separately authorized bounded acceptance completes.",
     }
@@ -515,7 +519,7 @@ def runtime_evidence_projection(*, path: Path | None = None) -> dict[str, Any]:
             "cleanup": cleanup,
             "artifact_published": True,
             "source_overwrite_checked": True,
-            "source_overwritten": False,
+            "source_overwritten": record["source_overwritten"],
             "reason": "A bounded media acceptance completed for the approved source.",
             "next_action": "Use the existing allowlisted media operations with opaque artifacts.",
         }
@@ -531,9 +535,31 @@ def runtime_evidence_projection(*, path: Path | None = None) -> dict[str, Any]:
             "cleanup": cleanup,
             "artifact_published": False,
             "source_overwrite_checked": record["source_overwrite_checked"],
-            "source_overwritten": False,
+            "source_overwritten": record["source_overwritten"],
             "reason": "The last bounded media acceptance stopped before a publishable output.",
             "next_action": "Keep media operations partial; request a new exact-source approval before any future attempt.",
+        }
+    if record["execution"] == "not_run" and record["outcome"] in {"blocked", "not_run"}:
+        if record["outcome"] == "blocked":
+            reason = "The bounded media acceptance was blocked before execution."
+            next_action = "Keep media operations partial; obtain a fresh exact-source approval before any attempt."
+        else:
+            reason = "No bounded media acceptance invocation was recorded."
+            next_action = "Keep media operations partial until a separately authorized bounded acceptance is recorded."
+        return {
+            "schema_version": "runtime-evidence-projection.v1",
+            "subject": RUNTIME_EVIDENCE_SUBJECT,
+            "status": "unavailable",
+            "outcome": record["outcome"],
+            "execution": "not_run",
+            "failure_class": None,
+            "invocation_count": 0,
+            "cleanup": cleanup,
+            "artifact_published": False,
+            "source_overwrite_checked": record["source_overwrite_checked"],
+            "source_overwritten": record["source_overwritten"],
+            "reason": reason,
+            "next_action": next_action,
         }
     return _runtime_evidence_unavailable_projection()
 
@@ -846,7 +872,7 @@ def _run_cpu_pipeline(task_root: Path, ffmpeg: Path, owner: _AcceptanceOwner) ->
             raise AcceptanceFailure("encode_output_scope") from None
         encoded = _register_output(encoded_path, media_type="video/mp4", maximum_bytes=ACCEPTANCE_OUTPUT_MAX_BYTES, artifact_store=artifact_store)
         if hashlib.sha256(seed_path.read_bytes()).hexdigest() != source_before or hashlib.sha256(source_artifact_path.read_bytes()).hexdigest() != source_artifact_before:
-            raise AcceptanceFailure("source_overwritten")
+            raise AcceptanceFailure("source_overwritten", source_overwritten=True)
         return {
             "pipeline": ["video_grade", "logo_overlay", "encode"],
             "artifacts": {"source": source_evidence, "overlay": overlay_evidence, "graded": graded, "overlaid": overlaid, "encoded": encoded},
@@ -913,6 +939,8 @@ def run_cpu_media_acceptance(*, opt_in: bool | None = None, approval_path: Path 
                 pass
         cleaned = created and not root.exists()
         result = {"status": "unavailable" if exc.unavailable else "error", "execution": "attempted", "failure_code": exc.code, "reason": "CPU acceptance pipeline did not complete.", "process_lifecycle": lifecycle, "processes_remaining": 0 if owner is None or owner.clean() else 1, "temp_cleaned": cleaned}
+        if exc.source_overwritten is not None:
+            result["source_overwritten"] = exc.source_overwritten
         if diagnostic is not None:
             result["diagnostic"] = diagnostic
         return _persist_runtime_evidence(result)

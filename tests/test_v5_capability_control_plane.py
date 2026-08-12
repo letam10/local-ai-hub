@@ -153,7 +153,7 @@ class V5CapabilityControlPlaneTests(unittest.TestCase):
             "cleanup": {"processes_remaining": 0, "temp_cleaned": True},
             "artifact_published": False,
             "source_overwrite_checked": False,
-            "source_overwritten": False,
+            "source_overwritten": None,
             "reason": "The last bounded media acceptance stopped before a publishable output.",
             "next_action": "Keep media operations partial; request a new exact-source approval before any future attempt.",
         }

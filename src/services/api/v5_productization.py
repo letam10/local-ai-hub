@@ -66,7 +66,7 @@ def _runtime_evidence_fallback() -> dict[str, Any]:
         "cleanup": {"processes_remaining": 0, "temp_cleaned": True},
         "artifact_published": False,
         "source_overwrite_checked": False,
-        "source_overwritten": False,
+        "source_overwritten": None,
         "reason": "No bounded media acceptance evidence is available.",
         "next_action": "Keep media operations partial until a separately authorized bounded acceptance completes.",
     }
@@ -80,6 +80,14 @@ def project_runtime_evidence(value: object) -> dict[str, Any]:
     cleanup = value.get("cleanup")
     cleanup_ok = isinstance(cleanup, Mapping) and cleanup.get("processes_remaining") == 0 and cleanup.get("temp_cleaned") is True
     safe_cleanup = {"processes_remaining": 0 if cleanup_ok else 1, "temp_cleaned": cleanup_ok}
+    source_overwrite_checked = value.get("source_overwrite_checked")
+    source_overwritten = value.get("source_overwritten")
+    if source_overwrite_checked is True and type(source_overwritten) is bool:
+        safe_overwrite = (True, source_overwritten)
+    elif source_overwrite_checked is False and source_overwritten is None:
+        safe_overwrite = (False, None)
+    else:
+        safe_overwrite = None
     failure_class = value.get("failure_class")
     if (
         value.get("status") in {"partial", "unavailable"}
@@ -88,6 +96,7 @@ def project_runtime_evidence(value: object) -> dict[str, Any]:
         and value.get("invocation_count") == 1
         and failure_class in _RUNTIME_EVIDENCE_CLASSES
         and value.get("artifact_published") is False
+        and safe_overwrite is not None
     ):
         return {
             "schema_version": "runtime-evidence-projection.v1",
@@ -99,10 +108,40 @@ def project_runtime_evidence(value: object) -> dict[str, Any]:
             "invocation_count": 1,
             "cleanup": safe_cleanup,
             "artifact_published": False,
-            "source_overwrite_checked": value.get("source_overwrite_checked") is True,
-            "source_overwritten": False,
+            "source_overwrite_checked": safe_overwrite[0],
+            "source_overwritten": safe_overwrite[1],
             "reason": "The last bounded media acceptance stopped before a publishable output.",
             "next_action": "Keep media operations partial; request a new exact-source approval before any future attempt.",
+        }
+    if (
+        value.get("status") in {"partial", "unavailable"}
+        and value.get("outcome") in {"blocked", "not_run"}
+        and value.get("execution") == "not_run"
+        and value.get("invocation_count") == 0
+        and value.get("failure_class") is None
+        and value.get("artifact_published") is False
+        and safe_overwrite is not None
+    ):
+        if value.get("outcome") == "blocked":
+            reason = "The bounded media acceptance was blocked before execution."
+            next_action = "Keep media operations partial; obtain a fresh exact-source approval before any attempt."
+        else:
+            reason = "No bounded media acceptance invocation was recorded."
+            next_action = "Keep media operations partial until a separately authorized bounded acceptance is recorded."
+        return {
+            "schema_version": "runtime-evidence-projection.v1",
+            "subject": "media_overlay_cpu_acceptance",
+            "status": "unavailable",
+            "outcome": value.get("outcome"),
+            "execution": "not_run",
+            "failure_class": None,
+            "invocation_count": 0,
+            "cleanup": safe_cleanup,
+            "artifact_published": False,
+            "source_overwrite_checked": safe_overwrite[0],
+            "source_overwritten": safe_overwrite[1],
+            "reason": reason,
+            "next_action": next_action,
         }
     if (
         value.get("status") == "operational"
@@ -112,8 +151,7 @@ def project_runtime_evidence(value: object) -> dict[str, Any]:
         and value.get("failure_class") is None
         and cleanup_ok
         and value.get("artifact_published") is True
-        and value.get("source_overwrite_checked") is True
-        and value.get("source_overwritten") is False
+        and safe_overwrite == (True, False)
     ):
         return {
             "schema_version": "runtime-evidence-projection.v1",
