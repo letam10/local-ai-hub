@@ -10,6 +10,7 @@ from src.services.api.v5_productization import (
     durable_jobs_snapshot,
     project_job_recovery,
     project_product_surface,
+    project_runtime_evidence,
     project_storage_projection,
     project_workflow_library,
 )
@@ -46,6 +47,81 @@ def control_plane() -> dict[str, object]:
 
 
 class V5EndToEndProductizationTests(unittest.TestCase):
+    def test_runtime_evidence_product_projection_is_allowlisted_and_truthful(self) -> None:
+        marker = "client-private-runtime-marker"
+        failed = project_runtime_evidence({
+            "schema_version": "runtime-evidence-projection.v1",
+            "subject": "media_overlay_cpu_acceptance",
+            "status": "partial",
+            "outcome": "error",
+            "execution": "attempted",
+            "failure_class": "unknown",
+            "invocation_count": 1,
+            "cleanup": {"processes_remaining": 0, "temp_cleaned": True},
+            "artifact_published": False,
+            "source_overwrite_checked": True,
+            "source_overwritten": False,
+            "reason": marker,
+            "next_action": marker,
+            "source": marker,
+            "fingerprint": marker,
+            "command": marker,
+        })
+        self.assertEqual(failed["status"], "unavailable")
+        self.assertEqual(failed["outcome"], "error")
+        self.assertEqual(failed["execution"], "attempted")
+        self.assertTrue(failed["cleanup"]["temp_cleaned"])
+        self.assertFalse(failed["artifact_published"])
+        self.assertTrue(failed["source_overwrite_checked"])
+        self.assertFalse(failed["source_overwritten"])
+        self.assertNotIn(marker, json.dumps(failed))
+        self.assertNotIn("source", failed)
+        checked_false = {**failed, "source_overwrite_checked": True, "source_overwritten": False}
+        self.assertEqual(project_runtime_evidence(checked_false)["source_overwritten"], False)
+        checked_true = {**failed, "source_overwrite_checked": True, "source_overwritten": True}
+        true_projection = project_runtime_evidence(checked_true)
+        self.assertEqual(true_projection["source_overwritten"], True)
+        self.assertEqual(true_projection["status"], "unavailable")
+        self.assertNotEqual(true_projection["status"], "operational")
+        malformed = {**failed, "source_overwrite_checked": False, "source_overwritten": False}
+        malformed_projection = project_runtime_evidence(malformed)
+        self.assertIsNone(malformed_projection["source_overwritten"])
+        for outcome, expected_reason in (
+            ("blocked", "The bounded media acceptance was blocked before execution."),
+            ("not_run", "No bounded media acceptance invocation was recorded."),
+        ):
+            safe_not_run = project_runtime_evidence({
+                "schema_version": "runtime-evidence-projection.v1",
+                "subject": "media_overlay_cpu_acceptance",
+                "status": "unavailable",
+                "outcome": outcome,
+                "execution": "not_run",
+                "failure_class": None,
+                "invocation_count": 0,
+                "cleanup": {"processes_remaining": 0, "temp_cleaned": True},
+                "artifact_published": False,
+                "source_overwrite_checked": False,
+                "source_overwritten": None,
+            })
+            self.assertEqual(safe_not_run["outcome"], outcome)
+            self.assertEqual(safe_not_run["execution"], "not_run")
+            self.assertEqual(safe_not_run["status"], "unavailable")
+            self.assertEqual(safe_not_run["reason"], expected_reason)
+        fallback = project_runtime_evidence({"status": "operational", "reason": marker})
+        self.assertEqual(fallback["status"], "unavailable")
+        self.assertEqual(fallback["execution"], "not_run")
+
+        surface = project_product_surface(
+            control_plane={**control_plane(), "runtime_evidence": failed},
+            health={"status": "healthy", "gpu": {"status": "unavailable"}, "disk": {}},
+            jobs=[],
+            workflow_library={},
+        )
+        self.assertEqual(surface["execution"], "not_run")
+        self.assertTrue(surface["dry_run"])
+        self.assertEqual(surface["capabilities"]["runtime_evidence"]["outcome"], "error")
+        self.assertNotIn(marker, json.dumps(surface))
+
     def test_storage_projection_is_fixed_bounded_and_truthful(self) -> None:
         marker = "C:/private/secret"
         projection = project_storage_projection({
