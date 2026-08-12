@@ -13,16 +13,19 @@ push, process termination, or any other mutation.
 projection. `preflight` performs the same checks and appends one bounded event
 to the ignored local `Reports/canonical_git_integrity.local.json` snapshot.
 The snapshot is versioned, atomic, limited to 32 events, and contains only
-finite states, fingerprints, a timestamp, an operation code, and a dirty
-boolean. Paths, URLs, commands, Git output, filenames, logs, user values and
+the fixed canonical policy path, finite event type/operation/outcome/target
+kind, fingerprints, a timestamp, an operation code, and a dirty boolean.
+Target paths, URLs, commands, Git output, filenames, logs, user values and
 secrets are never persisted or printed. A malformed, oversized, linked, or
-unreadable snapshot fails closed; a writer failure refuses the preflight.
+unreadable snapshot fails closed; a writer failure refuses the preflight or
+any material cleanup decision.
 
 The canonical root and `.git` must be real directories, the Git top level and
 common directory must match the canonical identity, HEAD must be a 40-character
 commit, the branch must be a safe non-default branch, and exactly one HTTPS
-origin must normalize to the allowlisted LocalAIHub repository. Dirty or
-ambiguous canonical state returns `CANONICAL_PRESERVATION_REQUIRED`; no
+origin and effective `remote.origin.pushurl` must be absent or normalize to
+the same allowlisted LocalAIHub repository. Dirty or ambiguous canonical state
+returns `CANONICAL_PRESERVATION_REQUIRED`; no
 automatic stash, reset, clean, checkout, or integration is attempted.
 
 ## Disposable-worktree decision
@@ -33,9 +36,17 @@ issued by the trusted manager and an injected positive
 is an existing, clean, non-linked disposable worktree outside the canonical
 root and `.git`, with the expected linked-worktree metadata, branch, base
 ancestry, HEAD and common Git directory. Any uncertainty, dirty/untracked
-state, path relation, identity mismatch, or owned process refuses with a
-finite code. The result is a decision only; callers remain responsible for
-any separately authorized action.
+state, path relation, protected common-directory relation, identity mismatch,
+or owned process refuses with a finite code. Every cleanup authorization or
+refusal is appended to the sanitized forensic snapshot before the decision is
+returned. The result is a decision only; callers remain responsible for any
+separately authorized action.
+
+`decide_canonical_assignment()` is a named read-only assignment/integration
+preflight. A clean canonical checkout yields only an observation decision;
+dirty canonical state yields `OBSERVE_ONLY` with
+`CANONICAL_PRESERVATION_REQUIRED`. It never authorizes stash, reset, clean,
+checkout, worktree removal, deletion, or process control.
 
 The guard protects LocalAIHub automation that invokes it. It cannot prevent an
 Administrator, the operating system, another process, or an external tool

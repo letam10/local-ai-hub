@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 
 
 CANONICAL_ROOT = Path(r"D:\LocalAIHub")
+CANONICAL_POLICY_PATH = r"D:\LocalAIHub"
 CANONICAL_DESIGNATION = "localaihub-canonical"
 FORENSIC_SNAPSHOT_PATH = CANONICAL_ROOT / "Reports" / "canonical_git_integrity.local.json"
 SCHEMA_VERSION = "canonical-git-integrity.v1"
@@ -52,6 +53,7 @@ CODE_ORIGIN_MISSING = "CANONICAL_ORIGIN_MISSING"
 CODE_ORIGIN_INVALID = "CANONICAL_ORIGIN_INVALID"
 CODE_ORIGIN_CREDENTIALS = "CANONICAL_ORIGIN_CREDENTIALS"
 CODE_ORIGIN_UNALLOWLISTED = "CANONICAL_ORIGIN_UNALLOWLISTED"
+CODE_ORIGIN_PUSH_MISMATCH = "CANONICAL_ORIGIN_PUSH_MISMATCH"
 CODE_WORKTREE_DIRTY = "CANONICAL_PRESERVATION_REQUIRED"
 CODE_SNAPSHOT_INVALID = "FORENSIC_SNAPSHOT_INVALID"
 CODE_SNAPSHOT_WRITE_FAILED = "FORENSIC_SNAPSHOT_WRITE_FAILED"
@@ -62,6 +64,7 @@ CODE_TARGET_LINKED = "WORKTREE_TARGET_LINKED"
 CODE_TARGET_RELATION_UNSAFE = "WORKTREE_TARGET_RELATION_UNSAFE"
 CODE_TARGET_GITLINK_INVALID = "WORKTREE_GITLINK_INVALID"
 CODE_TARGET_COMMON_DIR_MISMATCH = "WORKTREE_COMMON_DIR_MISMATCH"
+CODE_COMMON_DIR_PROTECTED = "CANONICAL_COMMON_DIR_PROTECTED"
 CODE_TARGET_TOP_LEVEL_MISMATCH = "WORKTREE_TOP_LEVEL_MISMATCH"
 CODE_TARGET_BRANCH_MISMATCH = "WORKTREE_BRANCH_MISMATCH"
 CODE_TARGET_HEAD_INVALID = "WORKTREE_HEAD_INVALID"
@@ -92,6 +95,7 @@ _ALL_CODES = frozenset({
     CODE_ORIGIN_INVALID,
     CODE_ORIGIN_CREDENTIALS,
     CODE_ORIGIN_UNALLOWLISTED,
+    CODE_ORIGIN_PUSH_MISMATCH,
     CODE_WORKTREE_DIRTY,
     CODE_SNAPSHOT_INVALID,
     CODE_SNAPSHOT_WRITE_FAILED,
@@ -102,6 +106,7 @@ _ALL_CODES = frozenset({
     CODE_TARGET_RELATION_UNSAFE,
     CODE_TARGET_GITLINK_INVALID,
     CODE_TARGET_COMMON_DIR_MISMATCH,
+    CODE_COMMON_DIR_PROTECTED,
     CODE_TARGET_TOP_LEVEL_MISMATCH,
     CODE_TARGET_BRANCH_MISMATCH,
     CODE_TARGET_HEAD_INVALID,
@@ -116,7 +121,7 @@ _SAFE_BRANCH = re.compile(r"(?:feature|fix|docs|test|release)/[A-Za-z0-9][A-Za-z
 _HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 _SAFE_OUTPUT_STATES = frozenset({"directory", "missing", "invalid", "linked", "valid", "safe", "allowlisted", "clean", "dirty", "unknown"})
-_SNAPSHOT_KEYS = frozenset({"schema_version", "canonical_designation", "events"})
+_SNAPSHOT_KEYS = frozenset({"schema_version", "canonical_designation", "canonical_path", "events"})
 _EVENT_KEYS = frozenset({
     "timestamp",
     "git_state",
@@ -128,7 +133,15 @@ _EVENT_KEYS = frozenset({
     "worktree_state",
     "operation_code",
     "dirty",
+    "event_type",
+    "operation",
+    "outcome",
+    "target_kind",
 })
+_EVENT_TYPES = frozenset({"preflight", "assignment_decision", "cleanup_decision"})
+_EVENT_OPERATIONS = frozenset({"canonical_preflight", "canonical_assignment", "owned_worktree_cleanup"})
+_EVENT_OUTCOMES = frozenset({"ok", "refused", "preservation_required", "error"})
+_EVENT_TARGET_KINDS = frozenset({"canonical", "disposable_worktree"})
 _ALLOWED_GIT_COMMANDS = frozenset({"rev-parse", "symbolic-ref", "config", "status", "merge-base"})
 _LEASE_TOKEN = object()
 _SNAPSHOT_LOCK = threading.RLock()
@@ -227,6 +240,27 @@ def _path_is_inside(path: Path, parent: Path) -> bool:
         return False
 
 
+def _protected_common_dir_relation(path: Path) -> bool | None:
+    """Return True for canonical relations, False for safe, None if uncertain."""
+
+    if not isinstance(path, Path) or not path.is_absolute() or _has_link_or_reparse_component(path):
+        return None
+    resolved_path = _resolved(path)
+    if resolved_path is None:
+        return None
+    for protected in (CANONICAL_ROOT, CANONICAL_ROOT / ".git"):
+        resolved_protected = _resolved(protected)
+        if resolved_protected is None:
+            return None
+        if (
+            _same_path(resolved_path, resolved_protected)
+            or _path_is_inside(resolved_path, resolved_protected)
+            or _path_is_inside(resolved_protected, resolved_path)
+        ):
+            return True
+    return False
+
+
 def _public_result(
     code: str,
     *,
@@ -264,7 +298,10 @@ def _run_git(root: Path, args: Sequence[str]) -> _GitResult:
     safe_args = tuple(args)
     if any(not isinstance(item, str) or not item or "\x00" in item for item in safe_args):
         return _GitResult(2, code=CODE_GIT_QUERY_FAILED)
-    if safe_args[0] == "config" and safe_args != ("config", "--get-all", "remote.origin.url"):
+    if safe_args[0] == "config" and safe_args not in {
+        ("config", "--get-all", "remote.origin.url"),
+        ("config", "--get-all", "remote.origin.pushurl"),
+    }:
         return _GitResult(2, code=CODE_GIT_QUERY_FAILED)
     if safe_args[0] == "symbolic-ref" and safe_args != ("symbolic-ref", "--quiet", "--short", "HEAD"):
         return _GitResult(2, code=CODE_GIT_QUERY_FAILED)
@@ -458,6 +495,81 @@ def _canonical_status() -> tuple[dict[str, Any], str | None]:
             branch_state="safe",
             origin_state="invalid" if origin_code != CODE_ORIGIN_CREDENTIALS else "unknown",
         ), None
+    push_result = _run_git(root, ("config", "--get-all", "remote.origin.pushurl"))
+    if push_result.code in {CODE_GIT_UNAVAILABLE, CODE_GIT_TIMEOUT, CODE_GIT_OUTPUT_OVERSIZE}:
+        return _public_result(
+            push_result.code,
+            git_state="directory",
+            head_state="valid",
+            head_fingerprint=_fingerprint(head),
+            branch_state="safe",
+            origin_state="allowlisted",
+            origin_fingerprint=_fingerprint(normalized),
+        ), None
+    if push_result.code is not None:
+        return _public_result(
+            _query_code(push_result),
+            git_state="directory",
+            head_state="valid",
+            head_fingerprint=_fingerprint(head),
+            branch_state="safe",
+            origin_state="allowlisted",
+            origin_fingerprint=_fingerprint(normalized),
+        ), None
+    if push_result.returncode == 1 and not push_result.stdout and not push_result.stderr:
+        push_text = ""
+    elif push_result.returncode != 0:
+        return _public_result(
+            _query_code(push_result),
+            git_state="directory",
+            head_state="valid",
+            head_fingerprint=_fingerprint(head),
+            branch_state="safe",
+            origin_state="allowlisted",
+            origin_fingerprint=_fingerprint(normalized),
+        ), None
+    else:
+        push_text = _text(push_result)
+        if push_text is None:
+            return _public_result(
+                _query_code(push_result),
+                git_state="directory",
+                head_state="valid",
+                head_fingerprint=_fingerprint(head),
+                branch_state="safe",
+                origin_state="allowlisted",
+                origin_fingerprint=_fingerprint(normalized),
+            ), None
+    push_origins = [line.strip() for line in push_text.splitlines() if line.strip()]
+    if len(push_origins) > 1:
+        return _public_result(
+            CODE_METADATA_AMBIGUOUS,
+            git_state="directory",
+            head_state="valid",
+            head_fingerprint=_fingerprint(head),
+            branch_state="safe",
+            origin_state="unknown",
+        ), None
+    if push_origins:
+        push_normalized, push_code = _normalize_origin(push_origins[0])
+        if push_normalized is None:
+            return _public_result(
+                push_code,
+                git_state="directory",
+                head_state="valid",
+                head_fingerprint=_fingerprint(head),
+                branch_state="safe",
+                origin_state="unknown" if push_code == CODE_ORIGIN_CREDENTIALS else "invalid",
+            ), None
+        if push_normalized != normalized:
+            return _public_result(
+                CODE_ORIGIN_PUSH_MISMATCH,
+                git_state="directory",
+                head_state="valid",
+                head_fingerprint=_fingerprint(head),
+                branch_state="safe",
+                origin_state="unknown",
+            ), None
     status_result = _run_git(root, ("status", "--porcelain=v1", "--untracked-files=all"))
     status_text = _text(status_result)
     if status_text is None:
@@ -527,10 +639,42 @@ def _valid_event(value: object) -> bool:
         return False
     if not isinstance(value.get("operation_code"), str) or value["operation_code"] not in _ALL_CODES:
         return False
-    return type(value.get("dirty")) is bool
+    if type(value.get("dirty")) is not bool:
+        return False
+    if not isinstance(value.get("event_type"), str) or value["event_type"] not in _EVENT_TYPES:
+        return False
+    if not isinstance(value.get("operation"), str) or value["operation"] not in _EVENT_OPERATIONS:
+        return False
+    if not isinstance(value.get("outcome"), str) or value["outcome"] not in _EVENT_OUTCOMES:
+        return False
+    if not isinstance(value.get("target_kind"), str) or value["target_kind"] not in _EVENT_TARGET_KINDS:
+        return False
+    if value["event_type"] == "preflight" and value["operation"] != "canonical_preflight":
+        return False
+    if value["event_type"] == "assignment_decision" and value["operation"] != "canonical_assignment":
+        return False
+    if value["event_type"] == "cleanup_decision" and value["operation"] != "owned_worktree_cleanup":
+        return False
+    expected_target = {
+        "preflight": "canonical",
+        "assignment_decision": "canonical",
+        "cleanup_decision": "disposable_worktree",
+    }[value["event_type"]]
+    if value["target_kind"] != expected_target:
+        return False
+    return True
 
 
-def _event_from_result(result: Mapping[str, Any]) -> dict[str, Any]:
+def _event_from_result(
+    result: Mapping[str, Any],
+    *,
+    event_type: str = "preflight",
+    operation: str = "canonical_preflight",
+    target_kind: str = "canonical",
+) -> dict[str, Any]:
+    code = result.get("operation_code", CODE_GIT_QUERY_FAILED)
+    dirty = result.get("dirty") is True
+    outcome = "ok" if code == CODE_OK else "preservation_required" if dirty else "refused"
     return {
         "timestamp": _timestamp(),
         "git_state": result.get("git_state", "unknown"),
@@ -541,7 +685,11 @@ def _event_from_result(result: Mapping[str, Any]) -> dict[str, Any]:
         "origin_fingerprint": result.get("origin_fingerprint"),
         "worktree_state": result.get("worktree_state", "unknown"),
         "operation_code": result.get("operation_code", CODE_GIT_QUERY_FAILED),
-        "dirty": result.get("dirty") is True,
+        "dirty": dirty,
+        "event_type": event_type,
+        "operation": operation,
+        "outcome": outcome,
+        "target_kind": target_kind,
     }
 
 
@@ -553,7 +701,12 @@ def _read_snapshot_file(*, missing_is_empty: bool = False) -> dict[str, Any] | N
         raw = path.read_bytes()
     except FileNotFoundError:
         if missing_is_empty:
-            return {"schema_version": SCHEMA_VERSION, "canonical_designation": CANONICAL_DESIGNATION, "events": []}
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "canonical_designation": CANONICAL_DESIGNATION,
+                "canonical_path": CANONICAL_POLICY_PATH,
+                "events": [],
+            }
         return None
     except OSError:
         return None
@@ -568,6 +721,7 @@ def _read_snapshot_file(*, missing_is_empty: bool = False) -> dict[str, Any] | N
         or set(value) != _SNAPSHOT_KEYS
         or value.get("schema_version") != SCHEMA_VERSION
         or value.get("canonical_designation") != CANONICAL_DESIGNATION
+        or value.get("canonical_path") != CANONICAL_POLICY_PATH
         or type(value.get("events")) is not list
         or len(value["events"]) > MAX_FORENSIC_EVENTS
         or any(not _valid_event(item) for item in value["events"])
@@ -603,6 +757,7 @@ def write_forensic_snapshot(event: Mapping[str, Any]) -> bool:
         payload = {
             "schema_version": SCHEMA_VERSION,
             "canonical_designation": CANONICAL_DESIGNATION,
+            "canonical_path": CANONICAL_POLICY_PATH,
             "events": events,
         }
         try:
@@ -667,6 +822,7 @@ def issue_owned_temporary_worktree(
         or not _safe_branch(branch)
         or not isinstance(base, str)
         or not _HEX40.fullmatch(base)
+        or _protected_common_dir_relation(common_git_dir) is not False
     ):
         return None
     return OwnedTemporaryWorktree(target, branch, base, common_git_dir, _LEASE_TOKEN)
@@ -698,6 +854,69 @@ def _decision(code: str, *, allowed: bool = False, dirty: bool = False) -> dict[
     }
 
 
+def _audited_decision(
+    decision: Mapping[str, Any],
+    *,
+    context: Mapping[str, Any] | None,
+    event_type: str,
+    operation: str,
+    target_kind: str,
+) -> dict[str, Any]:
+    """Record a fixed decision before exposing it; logging failure refuses."""
+
+    event_source: dict[str, Any] = dict(context) if isinstance(context, Mapping) else {}
+    event_source.update(decision)
+    event = _event_from_result(
+        event_source,
+        event_type=event_type,
+        operation=operation,
+        target_kind=target_kind,
+    )
+    try:
+        written = write_forensic_snapshot(event)
+    except Exception:
+        written = False
+    if not written:
+        return _decision(CODE_SNAPSHOT_WRITE_FAILED, dirty=decision.get("dirty") is True)
+    return dict(decision)
+
+
+def _assignment_decision(canonical: Mapping[str, Any]) -> dict[str, Any]:
+    code = canonical.get("operation_code", CODE_GIT_QUERY_FAILED)
+    dirty = canonical.get("dirty") is True
+    if code == CODE_OK:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "operation_code": CODE_OK,
+            "action": "OBSERVE_ONLY",
+            "action_available": False,
+            "target_state": "verified_clean_observation",
+            "dirty": False,
+        }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "operation_code": code if code in _ALL_CODES else CODE_GIT_QUERY_FAILED,
+        "action": "OBSERVE_ONLY" if dirty else "REFUSE",
+        "action_available": False,
+        "target_state": "preserved_dirty" if dirty else "unavailable",
+        "dirty": dirty,
+    }
+
+
+def decide_canonical_assignment() -> dict[str, Any]:
+    """Return a pure read-only assignment/integration preflight decision."""
+
+    canonical = inspect_canonical()
+    decision = _assignment_decision(canonical)
+    return _audited_decision(
+        decision,
+        context=canonical,
+        event_type="assignment_decision",
+        operation="canonical_assignment",
+        target_kind="canonical",
+    )
+
+
 def decide_owned_temporary_worktree_cleanup(
     lease: OwnedTemporaryWorktree,
     process_probe: Callable[[], OwnedProcessProbe],
@@ -705,23 +924,37 @@ def decide_owned_temporary_worktree_cleanup(
     """Return only a safe decision; never execute cleanup or process control."""
 
     canonical = inspect_canonical()
+
+    def finish(code: str, *, allowed: bool = False, dirty: bool = False, context: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        decision = _decision(code, allowed=allowed, dirty=dirty)
+        return _audited_decision(
+            decision,
+            context=context or canonical,
+            event_type="cleanup_decision",
+            operation="owned_worktree_cleanup",
+            target_kind="disposable_worktree",
+        )
+
     if canonical.get("operation_code") != CODE_OK:
-        return _decision(canonical.get("operation_code", CODE_GIT_QUERY_FAILED), dirty=canonical.get("dirty") is True)
+        return finish(canonical.get("operation_code", CODE_GIT_QUERY_FAILED), dirty=canonical.get("dirty") is True)
     if not _lease_is_valid(lease):
-        return _decision(CODE_LEASE_INVALID)
+        return finish(CODE_LEASE_INVALID)
+    common_relation = _protected_common_dir_relation(lease.common_git_dir)
+    if common_relation is not False:
+        return finish(CODE_COMMON_DIR_PROTECTED)
     target = lease.target
     canonical_root = CANONICAL_ROOT
     if _has_link_or_reparse_component(target):
-        return _decision(CODE_TARGET_LINKED)
+        return finish(CODE_TARGET_LINKED)
     if not target.exists():
-        return _decision(CODE_TARGET_MISSING)
+        return finish(CODE_TARGET_MISSING)
     if not target.is_dir():
-        return _decision(CODE_TARGET_NOT_DIRECTORY)
+        return finish(CODE_TARGET_NOT_DIRECTORY)
     resolved_target = _resolved(target)
     resolved_canonical = _resolved(canonical_root)
     resolved_git = _resolved(canonical_root / ".git")
     if resolved_target is None or resolved_canonical is None or resolved_git is None:
-        return _decision(CODE_TARGET_RELATION_UNSAFE)
+        return finish(CODE_TARGET_RELATION_UNSAFE)
     if (
         os.path.normcase(str(resolved_target)) in {os.path.normcase(str(resolved_canonical)), os.path.normcase(str(resolved_git))}
         or _path_is_inside(resolved_target, resolved_canonical)
@@ -729,18 +962,18 @@ def decide_owned_temporary_worktree_cleanup(
         or _path_is_inside(resolved_target, resolved_git)
         or _path_is_inside(resolved_git, resolved_target)
     ):
-        return _decision(CODE_TARGET_RELATION_UNSAFE)
+        return finish(CODE_TARGET_RELATION_UNSAFE)
     if _has_link_or_reparse_component(lease.common_git_dir) or not lease.common_git_dir.is_dir():
-        return _decision(CODE_TARGET_COMMON_DIR_MISMATCH)
+        return finish(CODE_TARGET_COMMON_DIR_MISMATCH)
     marker = target / ".git"
     if _is_link_or_reparse(marker) or not marker.is_file():
-        return _decision(CODE_TARGET_GITLINK_INVALID)
+        return finish(CODE_TARGET_GITLINK_INVALID)
     try:
         marker_text = marker.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
-        return _decision(CODE_TARGET_GITLINK_INVALID)
+        return finish(CODE_TARGET_GITLINK_INVALID)
     if len(marker_text) > 1024 or not marker_text.startswith("gitdir: ") or marker_text.count("\n") > 1:
-        return _decision(CODE_TARGET_GITLINK_INVALID)
+        return finish(CODE_TARGET_GITLINK_INVALID)
     git_link = marker_text.strip()[8:].strip()
     linked_path = Path(git_link)
     if not linked_path.is_absolute():
@@ -748,62 +981,63 @@ def decide_owned_temporary_worktree_cleanup(
     linked_path = _resolved(linked_path)
     expected_common = _resolved(lease.common_git_dir)
     if linked_path is None or expected_common is None or _has_link_or_reparse_component(linked_path):
-        return _decision(CODE_TARGET_GITLINK_INVALID)
+        return finish(CODE_TARGET_GITLINK_INVALID)
     try:
         linked_path.relative_to(expected_common / "worktrees")
     except ValueError:
-        return _decision(CODE_TARGET_COMMON_DIR_MISMATCH)
+        return finish(CODE_TARGET_COMMON_DIR_MISMATCH)
     top_result = _run_git(target, ("rev-parse", "--show-toplevel"))
     top_text = _text(top_result)
     top_path = _resolve_git_output(target, top_text or "") if top_text is not None else None
     if top_path is None or not _same_path(top_path, target):
-        return _decision(CODE_TARGET_TOP_LEVEL_MISMATCH)
+        return finish(CODE_TARGET_TOP_LEVEL_MISMATCH)
     common_result = _run_git(target, ("rev-parse", "--git-common-dir"))
     common_text = _text(common_result)
     common_path = _resolve_git_output(target, common_text or "") if common_text is not None else None
     if common_path is None or not _same_path(common_path, lease.common_git_dir):
-        return _decision(CODE_TARGET_COMMON_DIR_MISMATCH)
+        return finish(CODE_TARGET_COMMON_DIR_MISMATCH)
     git_dir_result = _run_git(target, ("rev-parse", "--git-dir"))
     git_dir_text = _text(git_dir_result)
     git_dir_path = _resolve_git_output(target, git_dir_text or "") if git_dir_text is not None else None
     if git_dir_path is None or not _same_path(git_dir_path, linked_path):
-        return _decision(CODE_TARGET_GITLINK_INVALID)
+        return finish(CODE_TARGET_GITLINK_INVALID)
     branch_result = _run_git(target, ("symbolic-ref", "--quiet", "--short", "HEAD"))
     branch_text = _text(branch_result)
     if branch_text is None:
-        return _decision(_query_code(branch_result))
+        return finish(_query_code(branch_result))
     if branch_text.strip() != lease.branch:
-        return _decision(CODE_TARGET_BRANCH_MISMATCH)
+        return finish(CODE_TARGET_BRANCH_MISMATCH)
     head_result = _run_git(target, ("rev-parse", "--verify", "HEAD^{commit}"))
     head_text = _text(head_result)
     if head_text is None or not _HEX40.fullmatch(head_text.strip()):
-        return _decision(CODE_TARGET_HEAD_INVALID)
+        return finish(CODE_TARGET_HEAD_INVALID)
     base_result = _run_git(target, ("merge-base", "--is-ancestor", lease.base, "HEAD"))
     if base_result.code is not None:
-        return _decision(_query_code(base_result))
+        return finish(_query_code(base_result))
     if base_result.returncode != 0:
-        return _decision(CODE_TARGET_BASE_NOT_ANCESTOR)
+        return finish(CODE_TARGET_BASE_NOT_ANCESTOR)
     status_result = _run_git(target, ("status", "--porcelain=v1", "--untracked-files=all"))
     status_text = _text(status_result)
     if status_text is None:
-        return _decision(_query_code(status_result))
+        return finish(_query_code(status_result))
     if status_text:
-        return _decision(CODE_TARGET_DIRTY, dirty=True)
+        return finish(CODE_TARGET_DIRTY, dirty=True)
     try:
         probe = process_probe()
     except Exception:
-        return _decision(CODE_PROCESS_UNKNOWN)
+        return finish(CODE_PROCESS_UNKNOWN)
     if not isinstance(probe, OwnedProcessProbe) or probe.scope != "owned-temporary-worktree" or probe.known is not True:
-        return _decision(CODE_PROCESS_UNKNOWN)
+        return finish(CODE_PROCESS_UNKNOWN)
     if isinstance(probe.owned_count, bool) or not isinstance(probe.owned_count, int):
-        return _decision(CODE_PROCESS_UNKNOWN)
+        return finish(CODE_PROCESS_UNKNOWN)
     if probe.owned_count != 0:
-        return _decision(CODE_PROCESS_PRESENT)
-    return _decision(CODE_OK, allowed=True)
+        return finish(CODE_PROCESS_PRESENT)
+    return finish(CODE_OK, allowed=True)
 
 
 __all__ = [
     "CANONICAL_ROOT",
+    "CANONICAL_POLICY_PATH",
     "CANONICAL_DESIGNATION",
     "FORENSIC_SNAPSHOT_PATH",
     "SCHEMA_VERSION",
@@ -813,9 +1047,12 @@ __all__ = [
     "CODE_WORKTREE_DIRTY",
     "CODE_SNAPSHOT_WRITE_FAILED",
     "CODE_LEASE_INVALID",
+    "CODE_COMMON_DIR_PROTECTED",
+    "CODE_ORIGIN_PUSH_MISMATCH",
     "CODE_TARGET_DIRTY",
     "CODE_PROCESS_PRESENT",
     "CODE_PROCESS_UNKNOWN",
+    "decide_canonical_assignment",
     "decide_owned_temporary_worktree_cleanup",
     "inspect_canonical",
     "issue_owned_temporary_worktree",

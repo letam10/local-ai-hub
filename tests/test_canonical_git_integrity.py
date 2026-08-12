@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -124,6 +125,9 @@ class CanonicalGitIntegrityTests(unittest.TestCase):
             (("config", "--get-all", "remote.origin.url"), self._ok("https://secret@github.com/letam10/local-ai-hub.git\n"), guard.CODE_ORIGIN_CREDENTIALS),
             (("config", "--get-all", "remote.origin.url"), self._ok("https://github.com/other/project.git\n"), guard.CODE_ORIGIN_UNALLOWLISTED),
             (("config", "--get-all", "remote.origin.url"), self._ok("https://github.com/letam10/local-ai-hub.git\nhttps://github.com/letam10/local-ai-hub.git\n"), guard.CODE_METADATA_AMBIGUOUS),
+            (("config", "--get-all", "remote.origin.pushurl"), self._ok("https://secret@github.com/letam10/local-ai-hub.git\n"), guard.CODE_ORIGIN_CREDENTIALS),
+            (("config", "--get-all", "remote.origin.pushurl"), self._ok("https://github.com/other/project.git\n"), guard.CODE_ORIGIN_UNALLOWLISTED),
+            (("config", "--get-all", "remote.origin.pushurl"), self._ok("https://github.com/letam10/local-ai-hub.git\nhttps://github.com/letam10/local-ai-hub.git\n"), guard.CODE_METADATA_AMBIGUOUS),
         )
         for command, value, expected in cases:
             with self.subTest(expected=expected):
@@ -133,6 +137,31 @@ class CanonicalGitIntegrityTests(unittest.TestCase):
                 self.assertEqual(result["operation_code"], expected)
                 self.assertNotIn("secret", json.dumps(result))
                 self.assertNotIn("other/project", json.dumps(result))
+
+        self._reset_git_outputs()
+        self.canonical_outputs[("config", "--get-all", "remote.origin.pushurl")] = guard._GitResult(
+            1,
+            b"",
+            b"private pushurl failure",
+        )
+        failed = guard.inspect_canonical()
+        self.assertEqual(failed["operation_code"], guard.CODE_GIT_QUERY_FAILED)
+        self.assertNotIn("private pushurl failure", json.dumps(failed))
+
+    def test_pushurl_mismatch_is_a_fixed_refusal_without_echo(self) -> None:
+        self._reset_git_outputs()
+        self.canonical_outputs[("config", "--get-all", "remote.origin.pushurl")] = self._ok(
+            "https://github.com/letam10/local-ai-hub.git\n"
+        )
+        with patch.object(
+            guard,
+            "_normalize_origin",
+            side_effect=[("fetch-origin", guard.CODE_OK), ("push-origin", guard.CODE_OK)],
+        ):
+            result = guard.inspect_canonical()
+        self.assertEqual(result["operation_code"], guard.CODE_ORIGIN_PUSH_MISMATCH)
+        self.assertNotIn("fetch-origin", json.dumps(result))
+        self.assertNotIn("push-origin", json.dumps(result))
 
     def test_canonical_dirty_is_preservation_required_and_untracked_is_not_echoed(self) -> None:
         marker = "?? secret-canonical-marker.txt\n"
@@ -170,6 +199,10 @@ class CanonicalGitIntegrityTests(unittest.TestCase):
         first = guard.read_forensic_snapshot()
         self.assertIsNotNone(first)
         self.assertEqual(len(first["events"]), 1)
+        self.assertEqual(first["canonical_path"], guard.CANONICAL_POLICY_PATH)
+        self.assertEqual(first["events"][0]["event_type"], "preflight")
+        self.assertEqual(first["events"][0]["operation"], "canonical_preflight")
+        self.assertEqual(first["events"][0]["target_kind"], "canonical")
         for _ in range(40):
             self.assertTrue(guard.write_forensic_snapshot(event))
         value = guard.read_forensic_snapshot()
@@ -258,6 +291,23 @@ class CanonicalGitIntegrityTests(unittest.TestCase):
         self.assertEqual(result["operation_code"], guard.CODE_SNAPSHOT_WRITE_FAILED)
         self.assertFalse(result["ok"])
 
+    def test_cleanup_decision_is_audited_and_writer_failure_refuses(self) -> None:
+        lease = self._lease()
+        result = guard.decide_owned_temporary_worktree_cleanup(lease, lambda: guard.OwnedProcessProbe(True, 0))
+        self.assertEqual(result["operation_code"], guard.CODE_OK)
+        snapshot = guard.read_forensic_snapshot()
+        self.assertIsNotNone(snapshot)
+        event = snapshot["events"][-1]
+        self.assertEqual(event["event_type"], "cleanup_decision")
+        self.assertEqual(event["operation"], "owned_worktree_cleanup")
+        self.assertEqual(event["target_kind"], "disposable_worktree")
+        self.assertNotIn(str(self.target), json.dumps(snapshot))
+
+        with patch.object(guard, "write_forensic_snapshot", return_value=False):
+            refused = guard.decide_owned_temporary_worktree_cleanup(lease, lambda: guard.OwnedProcessProbe(True, 0))
+        self.assertEqual(refused["operation_code"], guard.CODE_SNAPSHOT_WRITE_FAILED)
+        self.assertFalse(refused["action_available"])
+
     def test_valid_manager_lease_allows_only_decision_with_zero_owned_processes(self) -> None:
         lease = self._lease()
         self.assertIsNotNone(lease)
@@ -282,6 +332,28 @@ class CanonicalGitIntegrityTests(unittest.TestCase):
             guard.decide_owned_temporary_worktree_cleanup(lease, lambda: guard.OwnedProcessProbe(True, 1))["operation_code"],
             guard.CODE_PROCESS_PRESENT,
         )
+
+    def test_protected_common_git_dir_is_refused_at_lease_and_decision(self) -> None:
+        candidates = (
+            self.canonical / ".git",
+            self.canonical / ".git" / "worktrees",
+            self.canonical / "nested-common",
+            self.canonical.parent,
+        )
+        for candidate in candidates:
+            with self.subTest(candidate=str(candidate)):
+                self.assertIsNone(self._lease(common=candidate))
+
+        lease = self._lease()
+        self.assertIsNotNone(lease)
+        protected = replace(lease, common_git_dir=self.canonical / ".git")
+        result = guard.decide_owned_temporary_worktree_cleanup(protected, lambda: guard.OwnedProcessProbe(True, 0))
+        self.assertEqual(result["operation_code"], guard.CODE_COMMON_DIR_PROTECTED)
+        self.assertFalse(result["action_available"])
+        self.assertNotIn(str(self.canonical), json.dumps(result))
+
+        separate = self._lease(common=self.common)
+        self.assertIsNotNone(separate)
 
     def test_target_dirty_untracked_missing_and_path_relations_refuse(self) -> None:
         lease = self._lease()
@@ -350,6 +422,20 @@ class CanonicalGitIntegrityTests(unittest.TestCase):
         result = guard.decide_owned_temporary_worktree_cleanup(lease, probe)
         self.assertEqual(result["operation_code"], guard.CODE_WORKTREE_DIRTY)
         self.assertFalse(called)
+
+    def test_dirty_canonical_assignment_is_observation_only_and_preserved(self) -> None:
+        self.canonical_outputs[("status", "--porcelain=v1", "--untracked-files=all")] = self._ok(" M preserved.txt\n")
+        result = guard.decide_canonical_assignment()
+        self.assertEqual(result["operation_code"], guard.CODE_WORKTREE_DIRTY)
+        self.assertEqual(result["action"], "OBSERVE_ONLY")
+        self.assertFalse(result["action_available"])
+        self.assertEqual(result["target_state"], "preserved_dirty")
+        self.assertTrue(result["dirty"])
+        self.assertNotIn("preserved.txt", json.dumps(result))
+        snapshot = guard.read_forensic_snapshot()
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["events"][-1]["event_type"], "assignment_decision")
+        self.assertEqual(snapshot["events"][-1]["outcome"], "preservation_required")
 
 
 if __name__ == "__main__":
