@@ -86,6 +86,8 @@ const toastRegion = document.querySelector("#toast-region");
 const sidebar = document.querySelector(".sidebar");
 const sidebarToggle = document.querySelector("#sidebar-toggle");
 const artifactPreviewLayer = document.querySelector("#artifact-preview-layer");
+const mainContent = document.querySelector("#main-content");
+const snapshotStatus = document.querySelector("#snapshot-status");
 const workflowLibraryAdapter = createWorkflowLibraryAdapter(null, {
   list: getWorkflowLibrary,
   save: ({ entry, expected_revision }) => saveWorkflowLibrary(entry, expected_revision),
@@ -100,6 +102,31 @@ let disposeImageMaskCanvases = () => {};
 const SIDEBAR_PREFERENCE_KEY = "local-ai-hub-sidebar-v1";
 const SIDEBAR_PREFERENCE_VERSION = 1;
 const MOBILE_NAV_MAX_WIDTH = 980;
+const SNAPSHOT_STATUS_TEXT = Object.freeze({
+  received: "Snapshot received.",
+  deferred: "Snapshot update deferred while preserving your interaction.",
+  preserved: "Snapshot applied; your interaction was preserved.",
+  unavailable: "Snapshot update unavailable; the current view is preserved.",
+});
+const FOCUS_TOKEN_SELECTORS = Object.freeze({
+  "job-filter-all": '[data-focus-key="job-filter-all"]',
+  "job-filter-active": '[data-focus-key="job-filter-active"]',
+  "job-filter-attention": '[data-focus-key="job-filter-attention"]',
+  "job-filter-completed": '[data-focus-key="job-filter-completed"]',
+  "job-action-cancel": '[data-focus-key="job-action-cancel"]',
+  "job-action-resume": '[data-focus-key="job-action-resume"]',
+  "job-action-resume-durable": '[data-focus-key="job-action-resume-durable"]',
+  "artifact-preview-opener": '[data-focus-key="artifact-preview-opener"]',
+  "artifact-preview-close": '[data-focus-key="artifact-preview-close"]',
+});
+const SAFE_FOCUS_TOKENS = new Set(Object.keys(FOCUS_TOKEN_SELECTORS));
+const focusTokenSelector = (token) => SAFE_FOCUS_TOKENS.has(token) ? FOCUS_TOKEN_SELECTORS[token] : "";
+const setSnapshotStatus = (stateKey) => {
+  if (!snapshotStatus) return;
+  const key = Object.prototype.hasOwnProperty.call(SNAPSHOT_STATUS_TEXT, stateKey) ? stateKey : "received";
+  snapshotStatus.textContent = SNAPSHOT_STATUS_TEXT[key];
+  snapshotStatus.dataset.state = key;
+};
 
 const safeStorageGet = (key) => {
   try { return window.localStorage?.getItem(key) ?? null; } catch { return null; }
@@ -107,6 +134,50 @@ const safeStorageGet = (key) => {
 
 const safeStorageSet = (key, value) => {
   try { window.localStorage?.setItem(key, value); } catch { /* Storage can be disabled or unavailable. */ }
+};
+
+const readScrollContinuity = () => ({
+  windowX: Number(window.scrollX || 0),
+  windowY: Number(window.scrollY || 0),
+  mainTop: Number(mainContent?.scrollTop || 0),
+  viewTop: Number(view?.scrollTop || 0),
+});
+
+const restoreScrollContinuity = (scroll) => {
+  if (!scroll) return;
+  if (mainContent) mainContent.scrollTop = scroll.mainTop;
+  if (view) view.scrollTop = scroll.viewTop;
+  if (typeof window.scrollTo === "function") window.scrollTo(scroll.windowX, scroll.windowY);
+};
+
+const captureFocusContinuity = () => {
+  const active = document.activeElement;
+  const insideView = Boolean(active && (active === mainContent || active === view || view?.contains(active)));
+  const insidePreview = Boolean(active && artifactPreviewLayer?.contains(active));
+  const continuity = { activeInside: insideView || insidePreview, token: "", ordinal: 0, scroll: readScrollContinuity() };
+  if (!continuity.activeInside) return continuity;
+  if (active === mainContent || active === view) { continuity.token = "main"; return continuity; }
+  const token = active?.dataset?.focusKey;
+  const selector = focusTokenSelector(token);
+  if (!selector) return continuity;
+  continuity.token = token;
+  continuity.ordinal = [...document.querySelectorAll(selector)].indexOf(active);
+  return continuity;
+};
+
+const focusMainContent = () => {
+  if (mainContent && typeof mainContent.focus === "function") mainContent.focus({ preventScroll: true });
+};
+
+const restoreFocusContinuity = (continuity, explicitFocus = "") => {
+  if (explicitFocus === "main") { focusMainContent(); return; }
+  if (!continuity?.activeInside) return;
+  if (continuity.token === "main") { focusMainContent(); return; }
+  const selector = focusTokenSelector(continuity.token);
+  const candidates = selector ? [...document.querySelectorAll(selector)] : [];
+  const candidate = candidates[continuity.ordinal] || candidates[0];
+  if (candidate && !candidate.disabled && typeof candidate.focus === "function") candidate.focus({ preventScroll: true });
+  else focusMainContent();
 };
 
 const readSidebarPreference = () => {
@@ -266,10 +337,19 @@ const showToast = (message, kind = "") => {
   window.setTimeout(() => toast.remove(), 5200);
 };
 
-const closeArtifactPreview = () => artifactPreviewLayer?.replaceChildren();
+let artifactPreviewOpener = null;
+const closeArtifactPreview = ({ restoreFocus = true } = {}) => {
+  const opener = artifactPreviewOpener;
+  artifactPreviewLayer?.replaceChildren();
+  artifactPreviewOpener = null;
+  if (!restoreFocus) return;
+  if (opener?.isConnected && !opener.disabled && typeof opener.focus === "function") opener.focus({ preventScroll: true });
+  else focusMainContent();
+};
 
 const legacyShowArtifactPreview = (button) => {
   if (!artifactPreviewLayer) return;
+  artifactPreviewOpener = button;
   artifactPreviewLayer.replaceChildren();
   const dialog = document.createElement("section");
   dialog.className = "artifact-preview-dialog";
@@ -282,6 +362,7 @@ const legacyShowArtifactPreview = (button) => {
   const close = document.createElement("button");
   close.className = "button button--compact";
   close.type = "button";
+  close.dataset.focusKey = "artifact-preview-close";
   close.dataset.closeArtifactPreview = "true";
   close.textContent = "Đóng";
   header.append(title, close);
@@ -351,6 +432,7 @@ const appendArtifactRecord = (body, title, record, keys) => {
 };
 const showArtifactPreview = (button) => {
   if (!artifactPreviewLayer) return;
+  artifactPreviewOpener = button;
   artifactPreviewLayer.replaceChildren();
   const dialog = document.createElement("section");
   dialog.className = "artifact-preview-dialog";
@@ -364,6 +446,7 @@ const showArtifactPreview = (button) => {
   const close = document.createElement("button");
   close.className = "button button--compact";
   close.type = "button";
+  close.dataset.focusKey = "artifact-preview-close";
   close.dataset.closeArtifactPreview = "true";
   close.textContent = "Đóng";
   header.append(title, close);
@@ -455,13 +538,21 @@ const updateTopbar = () => {
   jobSummary.textContent = `Jobs: ${recovery.counts.active} active · ${recovery.counts.total} records`;
 };
 
-const render = () => {
+const render = ({ background = false, focus = "" } = {}) => {
+  const continuity = captureFocusContinuity();
+  if (background && continuity.token) {
+    setSnapshotStatus("deferred");
+    updateTopbar();
+    return false;
+  }
   disposeNodeStudios();
   disposeImageMaskCanvases();
   renderNavigation();
   syncSidebarState();
   view.innerHTML = `${renderApiState()}${renderPage(routeId(), state)}`;
-  view.focus({ preventScroll: true });
+  restoreScrollContinuity(continuity.scroll);
+  restoreFocusContinuity(continuity, focus);
+  setSnapshotStatus(background ? (continuity.activeInside ? "preserved" : "received") : (continuity.activeInside && !focus ? "preserved" : "received"));
   updateTopbar();
   if (view.querySelector("[data-node-studio]")) {
     mountNodeStudios({
@@ -489,6 +580,7 @@ const render = () => {
       onCancel: () => { /* Escape only discards the unsaved pointer draft. */ },
     });
   }
+  return true;
 };
 
 const applyBootstrap = (payload) => {
@@ -519,9 +611,11 @@ const refreshFast = async ({ quiet = false } = {}) => {
   else failed = true;
   if (durableJobs.status === "fulfilled") state.durableJobs = durableJobs.value?.records || [];
   else failed = true;
-  if (["dashboard", "settings", "jobs"].includes(routeId())) render(); else updateTopbar();
+  const rendered = ["dashboard", "settings", "jobs"].includes(routeId()) ? render({ background: true }) : false;
   if (failed && state.apiStatus === "ready") state.apiStatus = "degraded";
   if (failed && !quiet) showToast("API đang khởi động hoặc một snapshot nhanh chưa sẵn sàng.", "warning");
+  if (failed && rendered !== false) setSnapshotStatus("unavailable");
+  return rendered;
 };
 
 const refreshCreative = async ({ renderView = true } = {}) => {
@@ -630,7 +724,7 @@ const initialize = async () => {
     const library = await workflowLibraryAdapter.list();
     if (library?.status) state.workflowLibrary = library;
   } catch { /* Keep the explicit partial adapter state. */ }
-  render();
+  render({ focus: "main" });
   await loadRouteData();
 };
 
@@ -1175,12 +1269,13 @@ document.addEventListener("click", async (event) => {
     cancel.disabled = true;
     try {
       const result = await cancelJob(cancel.dataset.cancelJob);
-      await refreshFast({ quiet: true });
+      const refreshed = await refreshFast({ quiet: true });
+      if (refreshed === false) render();
       const message = safeDisplayMessage(result?.message, "Cancel request sent; Jobs snapshot refreshed.");
       setJobActionStatus(message, "success"); showToast(message, "success");
     } catch (error) {
       setJobActionStatus(error.message, "error"); showToast(error.message, "error");
-    }
+    } finally { cancel.disabled = false; }
     return;
   }
   const resume = event.target.closest("[data-resume-job]");
@@ -1188,12 +1283,13 @@ document.addEventListener("click", async (event) => {
     resume.disabled = true;
     try {
       await resumeJob(resume.dataset.resumeJob);
-      await refreshFast({ quiet: true });
+      const refreshed = await refreshFast({ quiet: true });
+      if (refreshed === false) render();
       const message = "Legacy recovery request sent; Jobs snapshot refreshed.";
       setJobActionStatus(message, "success"); showToast(message, "success");
     } catch (error) {
       setJobActionStatus(error.message, "error"); showToast(error.message, "error");
-    }
+    } finally { resume.disabled = false; }
     return;
   }
   const durableResume = event.target.closest("[data-resume-durable-job]");
@@ -1201,12 +1297,13 @@ document.addEventListener("click", async (event) => {
     durableResume.disabled = true;
     try {
       const result = await resumeDurableJob(durableResume.dataset.resumeDurableJob);
-      await refreshFast({ quiet: true });
+      const refreshed = await refreshFast({ quiet: true });
+      if (refreshed === false) render();
       const message = safeDisplayMessage(result?.next_action, "Durable recovery response received; the server snapshot remains authoritative.");
       setJobActionStatus(message, result?.status === "unavailable" ? "warning" : "success"); showToast(message, "warning");
     } catch (error) {
       setJobActionStatus(error.message, "error"); showToast(error.message, "error");
-    }
+    } finally { durableResume.disabled = false; }
     return;
   }
   const open = event.target.closest("[data-open-artifact]");
@@ -1284,7 +1381,7 @@ document.addEventListener("keydown", async (event) => {
 });
 
 window.addEventListener("resize", syncSidebarState);
-window.addEventListener("hashchange", async () => { render(); await loadRouteData(); });
+window.addEventListener("hashchange", async () => { render({ focus: "main" }); await loadRouteData(); });
 syncSidebarState();
 applyTheme(currentTheme());
 initialize();
