@@ -8,12 +8,14 @@ future V5-D integration change.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
 import time
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from src.services.api.jobs import DurableJobStore, DurableStoreHealthError
@@ -92,6 +94,20 @@ def _recovery_unavailable(reason: str = RECOVERY_REASON_INVALID) -> dict[str, An
     }
 
 
+def _current_adapter_input_valid(spec: JobSpec) -> bool:
+    """Revalidate inputs for code-owned production adapters only."""
+
+    if spec.descriptor.adapter_id != "media.video_grade.v1":
+        return True
+    try:
+        from .durable_adapters import validate_media_video_grade_spec
+
+        validate_media_video_grade_spec(spec.to_mapping(), resolve_input=True)
+    except Exception:
+        return False
+    return True
+
+
 def public_recovery_decision(record: object, registry: "ServerOwnedAdapterRegistry") -> dict[str, Any]:
     """Decide recovery from validated durable data and server-owned code only.
 
@@ -116,6 +132,8 @@ def public_recovery_decision(record: object, registry: "ServerOwnedAdapterRegist
     if record.get("job_spec_fingerprint") != spec.fingerprint:
         return _recovery_unavailable(RECOVERY_REASON_INVALID)
     if record.get("descriptor_summary") != spec.descriptor.summary():
+        return _recovery_unavailable(RECOVERY_REASON_INVALID)
+    if not _current_adapter_input_valid(spec):
         return _recovery_unavailable(RECOVERY_REASON_INVALID)
     attempt = record.get("attempt")
     if isinstance(attempt, bool) or not isinstance(attempt, int) or not 1 <= attempt <= 10_000:
@@ -510,12 +528,18 @@ class DurableWorkEngine:
             spec = validate_job_spec(record.get("job_spec"))
         except JobContractError:
             return False
-        return spec.descriptor.reconstructable and self.registry.contains(spec.descriptor.adapter_id)
+        return (
+            spec.descriptor.reconstructable
+            and _current_adapter_input_valid(spec)
+            and self.registry.contains(spec.descriptor.adapter_id)
+        )
 
     def submit(self, value: Any, *, start: bool = False, retry_of: str | None = None, attempt: int = 1) -> dict[str, Any]:
         """Persist a validated job.  It never accepts a callable or loader."""
 
         spec = validate_job_spec(value)
+        if not _current_adapter_input_valid(spec):
+            raise JobContractError("INVALID_MEDIA_JOB", "Create a new allowlisted media.video_grade.v1 job.")
         if not self.registry.contains(spec.descriptor.adapter_id):
             raise JobContractError("ADAPTER_UNAVAILABLE", "Select a server-supported adapter.")
         record = self._make_record(spec, retry_of=retry_of, attempt=attempt)
@@ -775,7 +799,7 @@ class DurableWorkEngine:
             spec = validate_job_spec(record.get("job_spec"))
         except JobContractError as exc:
             raise JobContractError("INVALID_PERSISTED_DESCRIPTOR", "Create a new allowlisted job descriptor.") from exc
-        if not spec.descriptor.reconstructable or not self.registry.contains(spec.descriptor.adapter_id):
+        if not spec.descriptor.reconstructable or not _current_adapter_input_valid(spec) or not self.registry.contains(spec.descriptor.adapter_id):
             raise JobContractError("JOB_NOT_RECONSTRUCTABLE", "Create a new allowlisted job descriptor.")
         attempt = int(record.get("attempt") or 1) + 1
         return self.submit(spec.to_mapping(), start=start, retry_of=job_id, attempt=attempt)
@@ -803,6 +827,7 @@ class DurableWorkEngine:
                 unavailable += 1
                 continue
             retry_available = spec.descriptor.reconstructable and self.registry.contains(spec.descriptor.adapter_id)
+            retry_available = retry_available and _current_adapter_input_valid(spec)
             with self._lock:
                 current = self.store.get(job_id)
                 if current is None:
@@ -821,6 +846,105 @@ class DurableWorkEngine:
                     self._update_locked(job_id, {"retry_available": retry_available})
         self.store.flush()
         return {"interrupted": reconciled, "unavailable": unavailable}
+
+    def persist_managed_output(self, job_id: str, output_path: Path) -> dict[str, Any] | None:
+        """Attach one completed managed output using a bounded chunked digest.
+
+        This hook is intentionally narrower than ``persist_output``: it only
+        accepts the fixed V6 video-grade output name/media type, only after a
+        durable record is completed, and never buffers the file in memory.
+        """
+
+        if not isinstance(job_id, str) or not _JOB_ID.fullmatch(job_id) or not isinstance(output_path, Path):
+            return None
+        try:
+            candidate = output_path.resolve()
+            candidate.relative_to(artifact_store.OUTPUT_ROOT.resolve())
+            initial = candidate.stat()
+        except (OSError, ValueError):
+            return None
+        if (
+            not candidate.is_file()
+            or not candidate.name.startswith(f"hub-job-{job_id[-8:]}-")
+            or initial.st_size < 0
+            or initial.st_size > artifact_store.MAX_JOB_OUTPUT_BYTES
+        ):
+            return None
+        with self._lock:
+            record = self.store.get(job_id)
+            if record is None or record.get("status") != "completed":
+                return None
+            try:
+                spec = validate_job_spec(record.get("job_spec"))
+            except JobContractError:
+                return None
+            if (
+                spec.descriptor.adapter_id != "media.video_grade.v1"
+                or record.get("job_spec_fingerprint") != spec.fingerprint
+                or record.get("descriptor_summary") != spec.descriptor.summary()
+            ):
+                return None
+            fingerprint = record.get("job_spec_fingerprint")
+            attempt = record.get("attempt")
+            if (
+                not isinstance(fingerprint, str)
+                or not _FINGERPRINT.fullmatch(fingerprint)
+                or isinstance(attempt, bool)
+                or not isinstance(attempt, int)
+                or not 1 <= attempt <= 10_000
+            ):
+                return None
+            provenance = {
+                "job_id": job_id,
+                "job_spec_fingerprint": fingerprint,
+                "adapter_id": spec.descriptor.adapter_id,
+                "attempt": attempt,
+                "status": "completed",
+            }
+        digest = hashlib.sha256()
+        try:
+            with candidate.open("rb") as handle:
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+            final = candidate.stat()
+        except OSError:
+            return None
+        if final.st_size != initial.st_size:
+            return None
+        try:
+            artifact = artifact_store.register_path(
+                candidate,
+                name="video_grade.mp4",
+                media_type="video/mp4",
+                sha256=digest.hexdigest(),
+                provenance=provenance,
+            )
+        except Exception:
+            return None
+        if (
+            not isinstance(artifact, dict)
+            or not is_artifact_id(artifact.get("id"))
+            or artifact.get("media_type") != "video/mp4"
+            or artifact.get("name") != "video_grade.mp4"
+            or artifact.get("size_bytes") != final.st_size
+            or artifact.get("sha256") != digest.hexdigest()
+            or artifact.get("url") != f"/api/artifacts/{artifact.get('id')}"
+            or artifact.get("provenance") != provenance
+        ):
+            return None
+        with self._lock:
+            current = self.store.get(job_id)
+            if current is None or current.get("status") != "completed":
+                return None
+            existing = current.get("artifacts") if isinstance(current.get("artifacts"), list) else []
+            artifact_ids = [item for item in existing if is_artifact_id(item)]
+            if artifact["id"] not in artifact_ids:
+                artifact_ids.append(artifact["id"])
+            self._update_locked(job_id, {"artifacts": artifact_ids})
+        return detached_json(artifact)
 
     def persist_output(
         self,

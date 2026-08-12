@@ -16,8 +16,14 @@ from typing import Any
 
 from src.services.api.config import CONFIG_ROOT
 from src.services.api.jobs import DurableJobStore, DurableStoreHealthError
-from src.services.job_manager import DurableWorkEngine, ServerOwnedAdapterRegistry
+from src.services.job_manager import DurableWorkEngine, JobContractError, ServerOwnedAdapterRegistry
 from src.services.job_manager.contracts import JOB_STATES, TERMINAL_JOB_STATES, is_artifact_id
+from src.services.job_manager.durable_adapters import (
+    MEDIA_VIDEO_GRADE_ADAPTER_ID,
+    MEDIA_VIDEO_GRADE_UNAVAILABLE_ACTION,
+    build_production_registry,
+    validate_media_video_grade_spec,
+)
 from src.services.job_manager.durable import (
     RECOVERY_NEXT_CREATE,
     RECOVERY_NEXT_RETRY,
@@ -646,6 +652,84 @@ def project_job_recovery(jobs: object) -> dict[str, Any]:
     }
 
 
+def _durable_admission_invalid(error: JobContractError) -> dict[str, Any]:
+    return {
+        "status": "invalid",
+        "execution": "not_run",
+        "dry_run": True,
+        "error": {"code": error.code, "action": error.action},
+    }
+
+
+def _durable_admission_unavailable(code: str, *, action: str = MEDIA_VIDEO_GRADE_UNAVAILABLE_ACTION) -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "execution": "not_run",
+        "dry_run": True,
+        "recovery": {
+            "status": "unavailable",
+            "action": "CREATE_NEW_JOB",
+            "action_available": False,
+            "reason": "The current server-owned durable adapter or input artifact is unavailable.",
+            "next_action": "Create a new allowlisted media.video_grade.v1 job.",
+        },
+        "error": {"code": code, "action": action},
+    }
+
+
+def admit_durable_job(
+    value: object,
+    path: Path = DURABLE_JOBS_PATH,
+    *,
+    registry: ServerOwnedAdapterRegistry | None = None,
+) -> dict[str, Any]:
+    """Admit exactly one new server-owned media.video_grade.v1 JobSpec.
+
+    Admission persists a queued dry-run record only.  It never starts the
+    engine and never accepts a client registry, callable, path, or execution
+    flag.
+    """
+
+    try:
+        spec = validate_media_video_grade_spec(value, resolve_input=False)
+    except JobContractError as exc:
+        return _durable_admission_invalid(exc)
+    active_registry = registry if isinstance(registry, ServerOwnedAdapterRegistry) else build_production_registry()
+    if not active_registry.contains(MEDIA_VIDEO_GRADE_ADAPTER_ID):
+        return _durable_admission_unavailable("ADAPTER_UNAVAILABLE")
+    try:
+        validate_media_video_grade_spec(spec.to_mapping(), resolve_input=True)
+    except JobContractError as exc:
+        if exc.code == "SOURCE_ARTIFACT_UNAVAILABLE":
+            return _durable_admission_unavailable(exc.code, action=exc.action)
+        return _durable_admission_invalid(exc)
+    try:
+        store = DurableJobStore(path)
+    except DurableStoreHealthError as exc:
+        return _durable_admission_unavailable(exc.code)
+    engine = DurableWorkEngine(store, active_registry, gpu_slots=0)
+    try:
+        try:
+            job = engine.submit(spec.to_mapping(), start=False)
+        except DurableStoreHealthError as exc:
+            return _durable_admission_unavailable(exc.code)
+        except JobContractError as exc:
+            if exc.code in {"ADAPTER_UNAVAILABLE", "INVALID_MEDIA_JOB"}:
+                return _durable_admission_unavailable(exc.code)
+            return _durable_admission_invalid(exc)
+        return {
+            "status": "accepted",
+            "execution": "not_run",
+            "dry_run": True,
+            "job": job,
+        }
+    finally:
+        try:
+            engine.close()
+        except DurableStoreHealthError:
+            pass
+
+
 def durable_jobs_snapshot(
     path: Path = DURABLE_JOBS_PATH,
     *,
@@ -653,7 +737,7 @@ def durable_jobs_snapshot(
 ) -> dict[str, Any]:
     """Read the V5-A durable store through its public projection only."""
 
-    active_registry = registry if isinstance(registry, ServerOwnedAdapterRegistry) else ServerOwnedAdapterRegistry()
+    active_registry = registry if isinstance(registry, ServerOwnedAdapterRegistry) else build_production_registry()
     try:
         store = DurableJobStore(path)
         try:
@@ -681,7 +765,7 @@ def reconcile_durable_jobs(path: Path = DURABLE_JOBS_PATH) -> dict[str, Any]:
     """Reconcile pre-crash V5-A records without registering runtime adapters."""
 
     store = DurableJobStore(path)
-    engine = DurableWorkEngine(store, ServerOwnedAdapterRegistry())
+    engine = DurableWorkEngine(store, build_production_registry())
     try:
         report = engine.reconcile_startup()
         return {"status": "ready", "execution": "not_run", "dry_run": True, **report}
@@ -699,7 +783,7 @@ def resume_durable_job(
 
     if not isinstance(job_id, str) or not _LIFECYCLE_JOB_ID.fullmatch(job_id):
         return {"status": "invalid", "execution": "not_run", "dry_run": True, "next_action": "Use the opaque durable job ID returned by Hub."}
-    active_registry = registry if isinstance(registry, ServerOwnedAdapterRegistry) else ServerOwnedAdapterRegistry()
+    active_registry = registry if isinstance(registry, ServerOwnedAdapterRegistry) else build_production_registry()
     try:
         store = DurableJobStore(path)
     except DurableStoreHealthError as exc:
@@ -859,6 +943,7 @@ def project_product_surface(
 __all__ = [
     "DURABLE_JOBS_PATH",
     "PRODUCT_SURFACE_SCHEMA_VERSION",
+    "admit_durable_job",
     "durable_jobs_snapshot",
     "reconcile_durable_jobs",
     "project_capability_modules",

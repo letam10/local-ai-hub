@@ -29,7 +29,7 @@ from .core import capability_control_plane, component_statuses, get_job_or_error
 from .jobs import flush as flush_jobs
 from .jobs import reconcile_startup
 from .jobs import get_job, list_jobs
-from .v5_productization import durable_jobs_snapshot, project_product_surface, reconcile_durable_jobs, resume_durable_job
+from .v5_productization import admit_durable_job, durable_jobs_snapshot, project_product_surface, reconcile_durable_jobs, resume_durable_job
 
 
 LOG = logging.getLogger("local-ai-hub")
@@ -60,6 +60,11 @@ def _workflow_http_status(payload: object) -> int:
         "recovery_required": 503,
         "error": 500,
     }.get(status, 200)
+
+
+def _durable_admission_http_status(payload: object) -> int:
+    status = payload.get("status") if isinstance(payload, dict) else None
+    return {"accepted": 202, "invalid": 400, "unavailable": 503}.get(status, 500)
 
 
 def _workflow_library_payload() -> dict:
@@ -846,6 +851,23 @@ class HubHandler(BaseHTTPRequestHandler):
             job_id = path[len("/api/durable-jobs/") : -len("/resume")].strip("/")
             result = resume_durable_job(job_id)
             self._write(_workflow_http_status(result), result)
+            return
+        if path == "/api/durable-jobs":
+            try:
+                request = self._read_json(strict=True)
+            except ValueError:
+                self._write(400, {
+                    "status": "invalid",
+                    "execution": "not_run",
+                    "dry_run": True,
+                    "error": {
+                        "code": "INVALID_JOB_SPEC",
+                        "action": "Create a new allowlisted media.video_grade.v1 job.",
+                    },
+                })
+                return
+            result = admit_durable_job(request)
+            self._write(_durable_admission_http_status(result), result)
             return
         if path == "/api/projects":
             self._creative(lambda: project_manager.create_project(self._read_json()))
