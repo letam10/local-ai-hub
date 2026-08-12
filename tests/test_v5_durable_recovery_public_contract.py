@@ -163,6 +163,30 @@ class DurableRecoveryPublicContractTests(unittest.TestCase):
         self.assertIsNone(lifecycle["retry_of"])
         self.assertIsNone(lifecycle["timestamps"]["created_at"])
 
+    def test_wrong_type_status_fails_closed_without_snapshot_or_helper_crash(self) -> None:
+        registry = ServerOwnedAdapterRegistry()
+        for invalid_status in ([], {}):
+            with self.subTest(invalid_status=type(invalid_status).__name__):
+                raw = record()
+                raw["status"] = invalid_status
+                raw["state_history"] = {"client": "state"}
+                decision = public_recovery_decision(raw, registry)
+                self.assertEqual(decision["status"], "unavailable")
+                self.assertEqual(decision["action"], "CREATE_NEW_JOB")
+                self.assertFalse(decision["action_available"])
+                lifecycle = public_lifecycle(raw)
+                self.assertEqual(lifecycle["state"], "unavailable")
+                with tempfile.TemporaryDirectory() as temporary:
+                    path = Path(temporary) / "durable.json"
+                    store = DurableJobStore(path)
+                    store.put(raw)
+                    store.close()
+                    snapshot = durable_jobs_snapshot(path)
+                self.assertEqual(snapshot["status"], "partial")
+                self.assertEqual(snapshot["records"][0]["status"], "unavailable")
+                self.assertFalse(snapshot["records"][0]["recovery"]["action_available"])
+                self.assertNotIn("client", json.dumps(snapshot))
+
     def test_matching_artifact_is_public_and_mismatch_has_no_preview_link(self) -> None:
         raw = record(status="completed", artifacts=[ARTIFACT_ID, "not-an-artifact"])
         safe = {

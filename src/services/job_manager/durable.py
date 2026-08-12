@@ -107,7 +107,7 @@ def public_recovery_decision(record: object, registry: "ServerOwnedAdapterRegist
     if record.get("contract_version") != JOB_RECORD_VERSION:
         return _recovery_unavailable()
     status = record.get("status")
-    if status not in JOB_STATES:
+    if not isinstance(status, str) or status not in JOB_STATES:
         return _recovery_unavailable()
     try:
         spec = validate_job_spec(record.get("job_spec"))
@@ -154,7 +154,8 @@ def public_lifecycle(record: object) -> dict[str, Any]:
     """Project bounded state history without allowing terminal regression."""
 
     source = record if isinstance(record, dict) else {}
-    current = source.get("status") if source.get("status") in JOB_STATES else "unavailable"
+    raw_current = source.get("status")
+    current = raw_current if isinstance(raw_current, str) and raw_current in JOB_STATES else "unavailable"
     raw_history = source.get("state_history")
     history = [item for item in raw_history if isinstance(item, str) and item in JOB_STATES] if isinstance(raw_history, list) else []
     history = history[:MAX_STATE_HISTORY]
@@ -237,7 +238,7 @@ def _safe_artifact_metadata(value: object, record: dict[str, Any], artifact_id: 
         return None
     if isinstance(expected["attempt"], bool) or not isinstance(expected["attempt"], int) or not 1 <= expected["attempt"] <= 10_000:
         return None
-    if expected["status"] not in {"queued", "starting", "running", "cancelling", "completed", "failed", "unavailable", "interrupted"}:
+    if not isinstance(expected["status"], str) or expected["status"] not in {"queued", "starting", "running", "cancelling", "completed", "failed", "unavailable", "interrupted"}:
         return None
     return {
         "id": artifact_id,
