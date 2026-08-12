@@ -33,6 +33,9 @@ _MAX_TEXT = 240
 _LOW_SPACE_BYTES = 20 * 1024**3
 _VOLUME_LABELS = {"c": "C:", "d": "D:"}
 DURABLE_JOBS_PATH = CONFIG_ROOT / "durable_jobs.v5.json"
+_RUNTIME_EVIDENCE_CLASSES = frozenset({
+    "filter_graph", "image_decode", "stream_mapping", "encoder_or_mux", "filesystem", "timeout", "unknown",
+})
 
 
 def _status(value: object, fallback: str = "partial") -> str:
@@ -49,6 +52,85 @@ def _text(value: object, fallback: str = "") -> str:
 def _safe_id(value: object, fallback: str = "unknown") -> str:
     candidate = _text(value, fallback)
     return candidate if candidate and "\\" not in candidate and "/" not in candidate and ".." not in candidate else fallback
+
+
+def _runtime_evidence_fallback() -> dict[str, Any]:
+    return {
+        "schema_version": "runtime-evidence-projection.v1",
+        "subject": "media_overlay_cpu_acceptance",
+        "status": "unavailable",
+        "outcome": "not_run",
+        "execution": "not_run",
+        "failure_class": None,
+        "invocation_count": 0,
+        "cleanup": {"processes_remaining": 0, "temp_cleaned": True},
+        "artifact_published": False,
+        "source_overwrite_checked": False,
+        "source_overwritten": False,
+        "reason": "No bounded media acceptance evidence is available.",
+        "next_action": "Keep media operations partial until a separately authorized bounded acceptance completes.",
+    }
+
+
+def project_runtime_evidence(value: object) -> dict[str, Any]:
+    """Copy only safe runtime-evidence semantics into the product surface."""
+
+    if not isinstance(value, Mapping) or value.get("subject") != "media_overlay_cpu_acceptance":
+        return _runtime_evidence_fallback()
+    cleanup = value.get("cleanup")
+    cleanup_ok = isinstance(cleanup, Mapping) and cleanup.get("processes_remaining") == 0 and cleanup.get("temp_cleaned") is True
+    safe_cleanup = {"processes_remaining": 0 if cleanup_ok else 1, "temp_cleaned": cleanup_ok}
+    failure_class = value.get("failure_class")
+    if (
+        value.get("status") in {"partial", "unavailable"}
+        and value.get("outcome") == "error"
+        and value.get("execution") == "attempted"
+        and value.get("invocation_count") == 1
+        and failure_class in _RUNTIME_EVIDENCE_CLASSES
+        and value.get("artifact_published") is False
+    ):
+        return {
+            "schema_version": "runtime-evidence-projection.v1",
+            "subject": "media_overlay_cpu_acceptance",
+            "status": "unavailable",
+            "outcome": "error",
+            "execution": "attempted",
+            "failure_class": failure_class,
+            "invocation_count": 1,
+            "cleanup": safe_cleanup,
+            "artifact_published": False,
+            "source_overwrite_checked": value.get("source_overwrite_checked") is True,
+            "source_overwritten": False,
+            "reason": "The last bounded media acceptance stopped before a publishable output.",
+            "next_action": "Keep media operations partial; request a new exact-source approval before any future attempt.",
+        }
+    if (
+        value.get("status") == "operational"
+        and value.get("outcome") == "completed"
+        and value.get("execution") == "completed"
+        and value.get("invocation_count") == 1
+        and value.get("failure_class") is None
+        and cleanup_ok
+        and value.get("artifact_published") is True
+        and value.get("source_overwrite_checked") is True
+        and value.get("source_overwritten") is False
+    ):
+        return {
+            "schema_version": "runtime-evidence-projection.v1",
+            "subject": "media_overlay_cpu_acceptance",
+            "status": "operational",
+            "outcome": "completed",
+            "execution": "completed",
+            "failure_class": None,
+            "invocation_count": 1,
+            "cleanup": safe_cleanup,
+            "artifact_published": True,
+            "source_overwrite_checked": True,
+            "source_overwritten": False,
+            "reason": "A bounded media acceptance completed for the approved source.",
+            "next_action": "Use the existing allowlisted media operations with opaque artifacts.",
+        }
+    return _runtime_evidence_fallback()
 
 
 def _volume_numbers(value: Mapping[str, Any]) -> tuple[int, int, int] | None:
@@ -365,6 +447,7 @@ def project_product_surface(
             "reason": _text(plan.get("reason"), "Module preflight is server-owned static metadata."),
             "next_action": _text(plan.get("next_action"), "Review the plan before any separately authorized operation."),
             "modules": project_capability_modules(control),
+            "runtime_evidence": project_runtime_evidence(control.get("runtime_evidence")),
         },
         "jobs": recovery,
         "workflow_library": library,
@@ -381,6 +464,7 @@ __all__ = [
     "project_capability_modules",
     "project_job_recovery",
     "project_product_surface",
+    "project_runtime_evidence",
     "project_storage_projection",
     "project_workflow_library",
     "resume_durable_job",

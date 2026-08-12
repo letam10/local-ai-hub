@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 import unittest
+from unittest.mock import patch
 
+from src.services.api import core
 from src.services.api.core import capability_control_plane
 from src.services.module_manager import build_capability_registry, build_module_plan, plan_module_resources
 from src.shared.schemas.module_manager import (
@@ -138,6 +140,37 @@ class V5CapabilityControlPlaneTests(unittest.TestCase):
         detached = copy.deepcopy(snapshot)
         detached["registry"]["records"].clear()
         self.assertTrue(snapshot["registry"]["records"])
+
+    def test_runtime_evidence_is_read_only_server_owned_and_preserves_control_plane_dry_run(self) -> None:
+        safe_failure = {
+            "schema_version": "runtime-evidence-projection.v1",
+            "subject": "media_overlay_cpu_acceptance",
+            "status": "unavailable",
+            "outcome": "error",
+            "execution": "attempted",
+            "failure_class": "unknown",
+            "invocation_count": 1,
+            "cleanup": {"processes_remaining": 0, "temp_cleaned": True},
+            "artifact_published": False,
+            "source_overwrite_checked": False,
+            "source_overwritten": False,
+            "reason": "The last bounded media acceptance stopped before a publishable output.",
+            "next_action": "Keep media operations partial; request a new exact-source approval before any future attempt.",
+        }
+        with patch.object(core, "runtime_evidence_projection", return_value=safe_failure) as reader:
+            snapshot = capability_control_plane(sources=_sources(), hardware=None, mode="serial")
+        reader.assert_called_once_with()
+        self.assertEqual(snapshot["execution"], "not_run")
+        self.assertTrue(snapshot["dry_run"])
+        self.assertEqual(snapshot["runtime_evidence"]["failure_class"], "unknown")
+        self.assertEqual(snapshot["runtime_evidence"]["artifact_published"], False)
+        self.assertNotIn("source", snapshot["runtime_evidence"])
+        with patch.object(core, "runtime_evidence_passed", return_value=False):
+            failed = core._tool_readiness("run_media_operation", {"ffmpeg": {"component_status": "installed"}})
+        self.assertEqual(failed["tool_status"], "partial")
+        with patch.object(core, "runtime_evidence_passed", return_value=True):
+            completed = core._tool_readiness("run_media_operation", {"ffmpeg": {"component_status": "installed"}})
+        self.assertEqual(completed["tool_status"], "operational")
 
     def test_module_plan_schema_validation(self) -> None:
         plan = build_module_plan([_record("schema-check")])

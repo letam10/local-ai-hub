@@ -13,7 +13,7 @@ from typing import Any
 from src.services.artifact_store import resolve
 from src.shared.version import PRODUCT_VERSION
 from src.services.job_manager.manager import JobContext, job_manager
-from src.services.tool_smoke import passed as smoke_passed
+from src.services.tool_smoke import passed as smoke_passed, runtime_evidence_passed, runtime_evidence_projection
 
 from .config import BASE_DIR, component, components, hub_config, module_manager_config
 from .gpu import gpu_policy, query_gpu
@@ -283,6 +283,7 @@ def capability_control_plane(*, hardware: dict[str, Any] | None = None, sources:
         "dry_run": True,
         "registry": registry,
         "module_manager": plan,
+        "runtime_evidence": runtime_evidence_projection(),
     }
 
 
@@ -297,6 +298,9 @@ def _tool_readiness(tool: str, statuses: dict[str, dict[str, Any]]) -> dict[str,
     elif tool_status == "partial" and tool in SMOKE_ELIGIBLE_TOOLS and smoke_passed(tool):
         tool_status = "operational"
         reason = "Đã có một direct job bounded hoàn tất trên máy này; trạng thái được lưu cục bộ, không chứa đường dẫn hoặc dữ liệu input."
+    if tool_status == "partial" and tool == "run_media_operation" and runtime_evidence_passed():
+        tool_status = "operational"
+        reason = "Bounded media acceptance evidence matches the approved source and contract; no path or runtime detail is exposed."
     return {
         "component": component_id,
         "component_status": component_status,

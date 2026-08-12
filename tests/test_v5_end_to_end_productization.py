@@ -10,6 +10,7 @@ from src.services.api.v5_productization import (
     durable_jobs_snapshot,
     project_job_recovery,
     project_product_surface,
+    project_runtime_evidence,
     project_storage_projection,
     project_workflow_library,
 )
@@ -46,6 +47,48 @@ def control_plane() -> dict[str, object]:
 
 
 class V5EndToEndProductizationTests(unittest.TestCase):
+    def test_runtime_evidence_product_projection_is_allowlisted_and_truthful(self) -> None:
+        marker = "client-private-runtime-marker"
+        failed = project_runtime_evidence({
+            "schema_version": "runtime-evidence-projection.v1",
+            "subject": "media_overlay_cpu_acceptance",
+            "status": "partial",
+            "outcome": "error",
+            "execution": "attempted",
+            "failure_class": "unknown",
+            "invocation_count": 1,
+            "cleanup": {"processes_remaining": 0, "temp_cleaned": True},
+            "artifact_published": False,
+            "source_overwrite_checked": True,
+            "source_overwritten": False,
+            "reason": marker,
+            "next_action": marker,
+            "source": marker,
+            "fingerprint": marker,
+            "command": marker,
+        })
+        self.assertEqual(failed["status"], "unavailable")
+        self.assertEqual(failed["outcome"], "error")
+        self.assertEqual(failed["execution"], "attempted")
+        self.assertTrue(failed["cleanup"]["temp_cleaned"])
+        self.assertFalse(failed["artifact_published"])
+        self.assertNotIn(marker, json.dumps(failed))
+        self.assertNotIn("source", failed)
+        fallback = project_runtime_evidence({"status": "operational", "reason": marker})
+        self.assertEqual(fallback["status"], "unavailable")
+        self.assertEqual(fallback["execution"], "not_run")
+
+        surface = project_product_surface(
+            control_plane={**control_plane(), "runtime_evidence": failed},
+            health={"status": "healthy", "gpu": {"status": "unavailable"}, "disk": {}},
+            jobs=[],
+            workflow_library={},
+        )
+        self.assertEqual(surface["execution"], "not_run")
+        self.assertTrue(surface["dry_run"])
+        self.assertEqual(surface["capabilities"]["runtime_evidence"]["outcome"], "error")
+        self.assertNotIn(marker, json.dumps(surface))
+
     def test_storage_projection_is_fixed_bounded_and_truthful(self) -> None:
         marker = "C:/private/secret"
         projection = project_storage_projection({

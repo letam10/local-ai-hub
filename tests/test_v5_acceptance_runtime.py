@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import subprocess
 import time
 import unittest
@@ -250,10 +251,12 @@ class AcceptanceRuntimeTests(unittest.TestCase):
             ffprobe = parent / "ffprobe.exe"
             ffmpeg.write_bytes(b"fixture")
             ffprobe.write_bytes(b"fixture")
+            evidence_path = parent / "runtime-evidence.json"
             with (
                 patch.object(tool_smoke, "_approval_guard", return_value=(True, "ok")),
                 patch("src.modules.media_editor.backend.adapter._paths", return_value=(ffmpeg, ffprobe)),
                 patch.object(tool_smoke, "_run_cpu_pipeline", return_value=evidence),
+                patch.object(tool_smoke, "RUNTIME_EVIDENCE_STATE_PATH", evidence_path),
             ):
                 result = tool_smoke.run_cpu_media_acceptance(opt_in=True, approval_path=approval, task_root=task_root, repo_root=parent)
             self.assertEqual(result["status"], "completed")
@@ -265,6 +268,7 @@ class AcceptanceRuntimeTests(unittest.TestCase):
                 patch.object(tool_smoke, "_approval_guard", return_value=(True, "ok")),
                 patch("src.modules.media_editor.backend.adapter._paths", return_value=(ffmpeg, ffprobe)),
                 patch.object(tool_smoke, "_run_cpu_pipeline", side_effect=tool_smoke.AcceptanceFailure("timeout", unavailable=True)),
+                patch.object(tool_smoke, "RUNTIME_EVIDENCE_STATE_PATH", evidence_path),
             ):
                 failure = tool_smoke.run_cpu_media_acceptance(opt_in=True, approval_path=approval, task_root=failure_root, repo_root=parent)
             self.assertEqual(failure["status"], "unavailable")
@@ -334,6 +338,7 @@ class AcceptanceRuntimeTests(unittest.TestCase):
                 patch.object(tool_smoke, "_approval_guard", return_value=(True, "ok")),
                 patch("src.modules.media_editor.backend.adapter._paths", return_value=(ffmpeg, ffprobe)),
                 patch.object(tool_smoke, "_run_cpu_pipeline", side_effect=fail_logo_overlay),
+                patch.object(tool_smoke, "RUNTIME_EVIDENCE_STATE_PATH", parent / "runtime-evidence.json"),
             ):
                 result = tool_smoke.run_cpu_media_acceptance(opt_in=True, approval_path=approval, task_root=task_root, repo_root=parent)
             self.assertEqual(result["failure_code"], "logo_overlay_failed")
@@ -348,10 +353,149 @@ class AcceptanceRuntimeTests(unittest.TestCase):
                 patch.object(tool_smoke, "_approval_guard", return_value=(True, "ok")),
                 patch("src.modules.media_editor.backend.adapter._paths", return_value=(ffmpeg, ffprobe)),
                 patch.object(tool_smoke, "_run_cpu_pipeline", side_effect=tool_smoke.AcceptanceFailure("video_grade_failed")),
+                patch.object(tool_smoke, "RUNTIME_EVIDENCE_STATE_PATH", parent / "runtime-evidence.json"),
             ):
                 non_logo = tool_smoke.run_cpu_media_acceptance(opt_in=True, approval_path=approval, task_root=non_logo_root, repo_root=parent)
             self.assertNotIn("diagnostic", non_logo)
             self.assertFalse(non_logo_root.exists())
+
+    def test_runtime_evidence_writer_is_bounded_atomic_and_cleans_failed_temps(self) -> None:
+        from src.services import tool_smoke
+
+        result = {
+            "status": "error",
+            "execution": "attempted",
+            "failure_code": "logo_overlay_failed",
+            "diagnostic": {"version": tool_smoke.ACCEPTANCE_DIAGNOSTIC_VERSION, "class": "unknown"},
+            "processes_remaining": 0,
+            "temp_cleaned": True,
+            "source_overwritten": False,
+        }
+        record = tool_smoke._runtime_evidence_record(result)
+        with TemporaryDirectory() as directory:
+            parent = Path(directory)
+            state = parent / "runtime-evidence.json"
+            self.assertTrue(tool_smoke._write_runtime_evidence(record, path=state))
+            original = state.read_bytes()
+            self.assertEqual(tool_smoke.read_runtime_evidence(state), record)
+            projection = tool_smoke.runtime_evidence_projection(path=state)
+            self.assertEqual(projection["status"], "unavailable")
+            self.assertEqual(projection["outcome"], "error")
+            self.assertEqual(projection["failure_class"], "unknown")
+            for failure in ("fsync", "replace"):
+                state.write_bytes(original)
+                with patch.object(tool_smoke.os, failure, side_effect=OSError("synthetic persistence failure")):
+                    self.assertFalse(tool_smoke._write_runtime_evidence(record, path=state))
+                self.assertEqual(state.read_bytes(), original)
+                self.assertEqual(list(parent.glob(".*.tmp")), [])
+
+    def test_runtime_evidence_reader_fails_closed_and_preserves_invalid_bytes(self) -> None:
+        from src.services import tool_smoke
+
+        base = tool_smoke._runtime_evidence_record({
+            "status": "error",
+            "execution": "attempted",
+            "diagnostic": {"version": tool_smoke.ACCEPTANCE_DIAGNOSTIC_VERSION, "class": "unknown"},
+            "processes_remaining": 0,
+            "temp_cleaned": True,
+            "source_overwritten": False,
+        })
+        marker = "client-private-marker"
+        cases = [
+            b"{}",
+            b"x" * (tool_smoke.RUNTIME_EVIDENCE_MAX_BYTES + 1),
+            json.dumps({**base, "unknown_control": marker}).encode("utf-8"),
+            json.dumps({**base, "outcome": 7}).encode("utf-8"),
+        ]
+        with TemporaryDirectory() as directory:
+            state = Path(directory) / "runtime-evidence.json"
+            for payload in cases:
+                state.write_bytes(payload)
+                before = state.read_bytes()
+                self.assertIsNone(tool_smoke.read_runtime_evidence(state))
+                self.assertEqual(state.read_bytes(), before)
+                self.assertNotIn(marker, json.dumps(tool_smoke.runtime_evidence_projection(path=state)))
+            state.write_bytes(json.dumps(base).encode("utf-8"))
+            with patch.object(Path, "is_symlink", return_value=True):
+                self.assertIsNone(tool_smoke.read_runtime_evidence(state))
+            with patch.object(Path, "open", side_effect=OSError("synthetic unreadable state")):
+                self.assertIsNone(tool_smoke.read_runtime_evidence(state))
+
+    def test_runtime_evidence_requires_exact_source_contract_and_outcome_rules(self) -> None:
+        from src.services import tool_smoke
+
+        completed = tool_smoke._runtime_evidence_record({
+            "status": "completed",
+            "execution": "completed",
+            "artifacts": {"encoded": {"id": "artifact_" + "a" * 32, "size_bytes": 10, "sha256": "a" * 64}},
+            "processes_remaining": 0,
+            "temp_cleaned": True,
+            "source_overwritten": False,
+        })
+        self.assertTrue(tool_smoke._runtime_evidence_record_valid(completed))
+        self.assertTrue(tool_smoke.runtime_evidence_passed(completed))
+        for field in ("branch", "base", "head", "tree"):
+            stale = copy.deepcopy(completed)
+            stale["source"][field] = "f" * 40
+            self.assertFalse(tool_smoke._runtime_evidence_record_valid(stale))
+            self.assertFalse(tool_smoke.runtime_evidence_passed(stale))
+        stale_contract = copy.deepcopy(completed)
+        stale_contract["contract_fingerprint"] = "b" * 64
+        self.assertFalse(tool_smoke._runtime_evidence_record_valid(stale_contract))
+
+        for failure_class in tool_smoke.ACCEPTANCE_DIAGNOSTIC_CLASSES:
+            failed = tool_smoke._runtime_evidence_record({
+                "status": "error",
+                "execution": "attempted",
+                "diagnostic": {"version": tool_smoke.ACCEPTANCE_DIAGNOSTIC_VERSION, "class": failure_class},
+                "processes_remaining": 0,
+                "temp_cleaned": True,
+                "source_overwritten": False,
+            })
+            self.assertTrue(tool_smoke._runtime_evidence_record_valid(failed))
+            self.assertFalse(tool_smoke.runtime_evidence_passed(failed))
+        for status in ("blocked", "not_run"):
+            not_run = tool_smoke._runtime_evidence_record({"status": status, "execution": "not_run"})
+            self.assertTrue(tool_smoke._runtime_evidence_record_valid(not_run))
+            self.assertFalse(tool_smoke.runtime_evidence_passed(not_run))
+        with TemporaryDirectory() as directory:
+            legacy_state = Path(directory) / "tool_smoke_v3.local.json"
+            with patch.object(tool_smoke, "STATE_PATH", legacy_state):
+                tool_smoke.record_completed("legacy_tool")
+                self.assertTrue(tool_smoke.passed("legacy_tool"))
+
+    def test_runtime_evidence_finalizer_writes_only_after_cleanup_and_reader_is_read_only(self) -> None:
+        from src.services import tool_smoke
+
+        with TemporaryDirectory() as directory:
+            parent = Path(directory)
+            task_root = parent / "task-root"
+            ffmpeg = parent / "ffmpeg.exe"
+            ffprobe = parent / "ffprobe.exe"
+            ffmpeg.write_bytes(b"fixture")
+            ffprobe.write_bytes(b"fixture")
+            observations: list[tuple[bool, dict]] = []
+
+            def writer(record: dict) -> bool:
+                observations.append((task_root.exists(), record))
+                return True
+
+            with (
+                patch.object(tool_smoke, "_approval_guard", return_value=(True, "ok")),
+                patch("src.modules.media_editor.backend.adapter._paths", return_value=(ffmpeg, ffprobe)),
+                patch.object(tool_smoke, "_run_cpu_pipeline", side_effect=tool_smoke.AcceptanceFailure("logo_overlay_failed")),
+                patch.object(tool_smoke, "_write_runtime_evidence", side_effect=writer) as persist,
+                patch.object(tool_smoke, "RUNTIME_EVIDENCE_STATE_PATH", parent / "runtime-evidence.json"),
+            ):
+                result = tool_smoke.run_cpu_media_acceptance(opt_in=True, approval_path=parent / "approval.json", task_root=task_root, repo_root=parent)
+            self.assertEqual(result["failure_code"], "logo_overlay_failed")
+            persist.assert_called_once()
+            self.assertEqual(observations[0][0], False)
+            with patch.object(tool_smoke, "_write_runtime_evidence", side_effect=AssertionError("reader must not write")) as writer_mock, patch.object(tool_smoke.subprocess, "run", side_effect=AssertionError("reader must not run git")) as run_mock:
+                projection = tool_smoke.runtime_evidence_projection(path=parent / "missing.json")
+            writer_mock.assert_not_called()
+            run_mock.assert_not_called()
+            self.assertEqual(projection["execution"], "not_run")
 
     def test_bounds_and_truthful_unavailable_result_never_echo_paths(self) -> None:
         from src.services import tool_smoke
