@@ -330,10 +330,22 @@ def _classify_logo_overlay_failure(task_root: Path) -> dict[str, str]:
     unknown = {"version": ACCEPTANCE_DIAGNOSTIC_VERSION, "class": "unknown"}
     try:
         root = task_root.resolve()
-        logs = (root / "logs").resolve()
-        log_path = (logs / "ffmpeg_logo_overlay.log").resolve()
+        logs = root / "logs"
+        workers = logs / "workers"
+        expected_logs = root / "logs"
+        expected_workers = expected_logs / "workers"
+        if logs.is_symlink() or workers.is_symlink():
+            return unknown
+        logs = logs.resolve()
+        workers = workers.resolve()
+        if logs != expected_logs or workers != expected_workers:
+            return unknown
+        log_path = (workers / "ffmpeg_logo_overlay_acceptance_cpu_media.log")
+        if log_path.is_symlink():
+            return unknown
+        log_path = log_path.resolve()
         log_path.relative_to(root)
-        if log_path.parent != logs or not log_path.is_file():
+        if log_path.parent != expected_workers or not log_path.is_file():
             return unknown
         with log_path.open("rb") as stream:
             stream.seek(0, os.SEEK_END)

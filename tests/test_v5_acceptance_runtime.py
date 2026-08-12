@@ -285,7 +285,11 @@ class AcceptanceRuntimeTests(unittest.TestCase):
         self.assertEqual(set(tool_smoke.ACCEPTANCE_DIAGNOSTIC_CLASSES), set(fixtures) | {"unknown"})
         with TemporaryDirectory() as directory:
             task_root = Path(directory)
-            log_path = task_root / "logs" / "ffmpeg_logo_overlay.log"
+            old_log_path = task_root / "logs" / "ffmpeg_logo_overlay.log"
+            old_log_path.parent.mkdir()
+            old_log_path.write_bytes(fixtures["filter_graph"])
+            self.assertEqual(tool_smoke._classify_logo_overlay_failure(task_root)["class"], "unknown")
+            log_path = task_root / "logs" / "workers" / "ffmpeg_logo_overlay_acceptance_cpu_media.log"
             log_path.parent.mkdir()
             for expected, content in fixtures.items():
                 log_path.write_bytes(content)
@@ -299,8 +303,8 @@ class AcceptanceRuntimeTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             task_root = Path(directory)
             self.assertEqual(tool_smoke._classify_logo_overlay_failure(task_root), unknown)
-            log_path = task_root / "logs" / "ffmpeg_logo_overlay.log"
-            log_path.parent.mkdir()
+            log_path = task_root / "logs" / "workers" / "ffmpeg_logo_overlay_acceptance_cpu_media.log"
+            log_path.parent.mkdir(parents=True)
             log_path.write_bytes(b"safe fixture")
             with patch.object(Path, "open", side_effect=OSError("synthetic unreadable log")):
                 self.assertEqual(tool_smoke._classify_logo_overlay_failure(task_root), unknown)
@@ -321,7 +325,7 @@ class AcceptanceRuntimeTests(unittest.TestCase):
             task_root = parent / "failure-root"
 
             def fail_logo_overlay(root: Path, _ffmpeg: Path, _owner: object) -> None:
-                log_path = root / "logs" / "ffmpeg_logo_overlay.log"
+                log_path = root / "logs" / "workers" / "ffmpeg_logo_overlay_acceptance_cpu_media.log"
                 log_path.parent.mkdir(parents=True, exist_ok=True)
                 log_path.write_text(f"{sentinel}\nError reinitializing filters!\n", encoding="utf-8")
                 raise tool_smoke.AcceptanceFailure("logo_overlay_failed")
