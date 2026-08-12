@@ -366,7 +366,8 @@ def _project_lifecycle(value: object, fallback_state: str) -> dict[str, Any]:
     """Keep a finite lifecycle projection and stop history after a terminal."""
 
     source = value if isinstance(value, Mapping) else {}
-    state = source.get("state") if source.get("state") in _LIFECYCLE_STATES else fallback_state
+    raw_state = source.get("state")
+    state = raw_state if isinstance(raw_state, str) and raw_state in _LIFECYCLE_STATES else fallback_state
     raw_history = source.get("history")
     history = [item for item in raw_history if isinstance(item, str) and item in _LIFECYCLE_STATES] if isinstance(raw_history, list) else []
     history = history[:32]
@@ -452,6 +453,7 @@ def _project_artifacts(value: object) -> list[dict[str, Any]]:
             or isinstance(provenance.get("attempt"), bool)
             or not isinstance(provenance.get("attempt"), int)
             or not 1 <= provenance["attempt"] <= 10_000
+            or not isinstance(provenance.get("status"), str)
             or provenance.get("status") not in _LIFECYCLE_STATES
         ):
             projected.append(_artifact_unavailable_projection(artifact_id))

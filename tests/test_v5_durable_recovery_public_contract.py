@@ -262,6 +262,59 @@ class DurableRecoveryPublicContractTests(unittest.TestCase):
         self.assertFalse(forged["records"][0]["resumable"])
         self.assertNotIn("recovery", forged["records"][0])
 
+    def test_product_projection_rejects_unhashable_nested_lifecycle_and_artifact_values(self) -> None:
+        safe_recovery = {
+            "status": "unavailable",
+            "action": "CREATE_NEW_JOB",
+            "action_available": False,
+            "reason": "No current server-owned adapter is registered for this job.",
+            "next_action": "Create a new allowlisted job descriptor.",
+        }
+        for invalid_state in ([], {}):
+            with self.subTest(invalid_state=type(invalid_state).__name__):
+                item = {
+                    "id": JOB_ID,
+                    "contract_version": "durable-job.v1",
+                    "source": "durable",
+                    "status": "failed",
+                    "progress": 0,
+                    "recovery": safe_recovery,
+                    "lifecycle": {
+                        "state": invalid_state,
+                        "history": [],
+                        "attempt": 1,
+                        "retry_of": None,
+                        "timestamps": {},
+                    },
+                    "artifacts": [{
+                        "id": ARTIFACT_ID,
+                        "name": "result.bin",
+                        "media_type": "application/octet-stream",
+                        "size_bytes": 1,
+                        "sha256": "e" * 64,
+                        "url": f"/api/artifacts/{ARTIFACT_ID}",
+                        "status": "available",
+                        "preview_available": True,
+                        "provenance": {
+                            "job_id": JOB_ID,
+                            "job_spec_fingerprint": "f" * 64,
+                            "adapter_id": "unit.adapter",
+                            "attempt": 1,
+                            "status": [],
+                        },
+                    }],
+                }
+                projected = project_job_recovery([item])
+                record_projection = projected["records"][0]
+                self.assertEqual(record_projection["lifecycle"]["state"], "failed")
+                self.assertNotIsInstance(record_projection["lifecycle"]["state"], (list, dict))
+                self.assertEqual(record_projection["artifacts"][0]["status"], "unavailable")
+                self.assertNotIn("url", record_projection["artifacts"][0])
+                surface = project_product_surface(control_plane={}, health={}, jobs=[item], workflow_library={})
+                self.assertEqual(surface["execution"], "not_run")
+                self.assertTrue(surface["dry_run"])
+                self.assertNotIn('"status": []', json.dumps(surface))
+
 
 if __name__ == "__main__":
     unittest.main()
