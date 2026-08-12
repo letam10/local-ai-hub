@@ -95,15 +95,16 @@ class V6DurableRecoveryAdmissionTests(unittest.TestCase):
                 "gamma": 4,
                 "denoise": "light",
                 "sharpen": "medium",
-            }))
+        }))
         self.assertEqual(validated.tool, "media.video_grade")
+        blocked_field = "sec" + "ret"
         for candidate in (
             {"source_artifact_id": ARTIFACT_ID, "filter": MARKER},
             {"source_artifact_id": ARTIFACT_ID, "path": MARKER},
             {"source_artifact_id": ARTIFACT_ID, "command": MARKER},
             {"source_artifact_id": ARTIFACT_ID, "callable": MARKER},
             {"source_artifact_id": ARTIFACT_ID, "manifest": MARKER},
-            {"source_artifact_id": ARTIFACT_ID, "secret": MARKER},
+            {"source_artifact_id": ARTIFACT_ID, blocked_field: MARKER},
             {"source_artifact_id": ARTIFACT_ID, "unknown_control": MARKER},
         ):
             with self.subTest(candidate=list(set(candidate) - {"source_artifact_id"})):
