@@ -15,7 +15,7 @@ from tests import v5_acceptance_ui_fixture as fixture
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RAW_PATH_OR_SECRET = re.compile(r"(?i)([a-z]:[\\/]|\\\\|(?:file|data):|api[_-]?key|password|secret|token)\s*[:=]")
+UNSAFE_DISPLAY_PATTERN = re.compile(r"(?i)([a-z]:[\\/]|\\\\|(?:file|data):|api[_-]?key|password|secret|token)\s*[:=]")
 
 
 class V5JobRecoveryArtifactUiTests(unittest.TestCase):
@@ -91,7 +91,7 @@ process.stdout.write(html);
         self.assertEqual({item["status"] for item in recovery["records"]}, {"running", "failed", "interrupted", "unavailable", "completed"})
         self.assertEqual(sum(item["source"] == "durable" for item in recovery["records"]), 1)
         self.assertFalse(next(item for item in recovery["records"] if item["source"] == "durable")["resumable"])
-        self.assertNotRegex(json.dumps(payload), RAW_PATH_OR_SECRET)
+        self.assertNotRegex(json.dumps(payload), UNSAFE_DISPLAY_PATTERN)
 
         status, _headers, _body = self._request(f"/jobs/{fixture.HOT_FAILED_ID}/resume", method="POST")
         self.assertEqual(status, 200)
@@ -120,7 +120,7 @@ process.stdout.write(html);
         self.assertIn('data-route="jobs" data-recovery-focus="attention"', html)
         self.assertIn('aria-controls="jobs-page"', html)
         self.assertNotIn("[object Object]", html)
-        self.assertNotRegex(html, RAW_PATH_OR_SECRET)
+        self.assertNotRegex(html, UNSAFE_DISPLAY_PATTERN)
 
     def test_jobs_render_source_lifecycle_artifacts_and_exact_resume_gating(self) -> None:
         html = self._render("jobs", self._state())
@@ -136,7 +136,7 @@ process.stdout.write(html);
         self.assertIn("Lifecycle", html)
         self.assertIn('data-job-action-status role="status"', html)
         self.assertNotIn("[object Object]", html)
-        self.assertNotRegex(html, RAW_PATH_OR_SECRET)
+        self.assertNotRegex(html, UNSAFE_DISPLAY_PATTERN)
 
     def test_duplicate_canonical_records_are_deterministically_deduped(self) -> None:
         state = self._state()
