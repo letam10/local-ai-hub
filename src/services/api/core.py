@@ -13,7 +13,12 @@ from typing import Any
 from src.services.artifact_store import resolve
 from src.shared.version import PRODUCT_VERSION
 from src.services.job_manager.manager import JobContext, job_manager
-from src.services.tool_smoke import passed as smoke_passed, runtime_evidence_passed, runtime_evidence_projection
+from src.services.tool_smoke import (
+    passed as smoke_passed,
+    runtime_evidence_operation_scope,
+    runtime_evidence_passed,
+    runtime_evidence_projection,
+)
 
 from .config import BASE_DIR, component, components, hub_config, module_manager_config
 from .gpu import gpu_policy, query_gpu
@@ -284,6 +289,7 @@ def capability_control_plane(*, hardware: dict[str, Any] | None = None, sources:
         "registry": registry,
         "module_manager": plan,
         "runtime_evidence": runtime_evidence_projection(),
+        "media_operation_scope": runtime_evidence_operation_scope(),
     }
 
 
@@ -292,20 +298,19 @@ def _tool_readiness(tool: str, statuses: dict[str, dict[str, Any]]) -> dict[str,
     component_item = statuses.get(component_id, {})
     component_status = str(component_item.get("component_status") or "missing")
     tool_status, reason = TOOL_CAPABILITIES[tool]
+    operation_scope = runtime_evidence_operation_scope() if tool == "run_media_operation" else None
     if component_status not in READY_COMPONENT_STATUSES and tool_status not in {"operational"}:
         tool_status = "unavailable"
         reason = f"{component_item.get('name', component_id)} đang ở trạng thái {component_status}; worker không thể nhận job."
     elif tool_status == "partial" and tool in SMOKE_ELIGIBLE_TOOLS and smoke_passed(tool):
         tool_status = "operational"
         reason = "Đã có một direct job bounded hoàn tất trên máy này; trạng thái được lưu cục bộ, không chứa đường dẫn hoặc dữ liệu input."
-    if tool_status == "partial" and tool == "run_media_operation" and runtime_evidence_passed():
-        tool_status = "operational"
-        reason = "Bounded media acceptance evidence matches the approved source and contract; no path or runtime detail is exposed."
     return {
         "component": component_id,
         "component_status": component_status,
         "tool_status": tool_status,
         "reason": reason,
+        "operation_scope": operation_scope,
         "action": TOOL_ACTIONS.get(tool, "Kiểm tra trạng thái backend rồi thử lại trong Jobs."),
     }
 
@@ -315,7 +320,7 @@ def tool_catalog(component_items: list[dict[str, Any]] | None = None) -> list[di
     tools = []
     for name, component_id in TOOL_COMPONENTS.items():
         readiness = _tool_readiness(name, statuses)
-        tools.append({
+        item = {
             "name": name,
             "component": component_id,
             "component_status": readiness["component_status"],
@@ -324,7 +329,10 @@ def tool_catalog(component_items: list[dict[str, Any]] | None = None) -> list[di
             "description": f"Allowlisted Local AI Hub workflow backed by {component_id}.",
             "reason": readiness["reason"],
             "action": readiness["action"],
-        })
+        }
+        if readiness.get("operation_scope") is not None:
+            item["operation_scope"] = readiness["operation_scope"]
+        tools.append(item)
     tools.extend([
         {"name": "get_health", "component": "local_ai_api", "component_status": "running", "tool_status": "operational", "status": "operational", "description": "Return Hub health.", "reason": "Loopback control-plane route.", "action": "Mở Dashboard để xem health, disk và job summary."},
         {"name": "list_models", "component": "local_ai_api", "component_status": "running", "tool_status": "operational", "status": "operational", "description": "Return safe model inventory.", "reason": "Loopback control-plane route.", "action": "Mở Models & Storage và quét lại khi cần."},

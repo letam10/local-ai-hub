@@ -49,6 +49,11 @@ DURABLE_JOBS_PATH = CONFIG_ROOT / "durable_jobs.v5.json"
 _RUNTIME_EVIDENCE_CLASSES = frozenset({
     "filter_graph", "image_decode", "stream_mapping", "encoder_or_mux", "filesystem", "timeout", "unknown",
 })
+_RUNTIME_EVIDENCE_OPERATIONS = ("video_grade", "logo_overlay", "encode")
+_RUNTIME_OPERATION_SCOPE_SCHEMA_VERSION = "runtime-operation-scope.v1"
+_RUNTIME_EVIDENCE_STATUSES = frozenset({"partial", "unavailable", "operational"})
+_RUNTIME_EVIDENCE_OUTCOMES = frozenset({"completed", "error", "blocked", "not_run"})
+_RUNTIME_EVIDENCE_EXECUTIONS = frozenset({"completed", "attempted", "not_run"})
 _RECOVERY_KEYS = frozenset({"status", "action", "action_available", "reason", "next_action"})
 _RECOVERY_REASONS = frozenset({
     RECOVERY_REASON_INVALID,
@@ -83,6 +88,7 @@ def _runtime_evidence_fallback() -> dict[str, Any]:
     return {
         "schema_version": "runtime-evidence-projection.v1",
         "subject": "media_overlay_cpu_acceptance",
+        "operations": list(_RUNTIME_EVIDENCE_OPERATIONS),
         "status": "unavailable",
         "outcome": "not_run",
         "execution": "not_run",
@@ -102,8 +108,32 @@ def project_runtime_evidence(value: object) -> dict[str, Any]:
 
     if not isinstance(value, Mapping) or value.get("subject") != "media_overlay_cpu_acceptance":
         return _runtime_evidence_fallback()
+    schema_version = value.get("schema_version")
+    if schema_version is not None and schema_version != "runtime-evidence-projection.v1":
+        return _runtime_evidence_fallback()
+    status = value.get("status")
+    outcome = value.get("outcome")
+    execution = value.get("execution")
+    if (
+        type(status) is not str
+        or status not in _RUNTIME_EVIDENCE_STATUSES
+        or type(outcome) is not str
+        or outcome not in _RUNTIME_EVIDENCE_OUTCOMES
+        or type(execution) is not str
+        or execution not in _RUNTIME_EVIDENCE_EXECUTIONS
+    ):
+        return _runtime_evidence_fallback()
     cleanup = value.get("cleanup")
-    cleanup_ok = isinstance(cleanup, Mapping) and cleanup.get("processes_remaining") == 0 and cleanup.get("temp_cleaned") is True
+    if (
+        not isinstance(cleanup, Mapping)
+        or set(cleanup) != {"processes_remaining", "temp_cleaned"}
+        or type(cleanup.get("processes_remaining")) is not int
+        or isinstance(cleanup.get("processes_remaining"), bool)
+        or cleanup.get("processes_remaining") < 0
+        or type(cleanup.get("temp_cleaned")) is not bool
+    ):
+        return _runtime_evidence_fallback()
+    cleanup_ok = cleanup["processes_remaining"] == 0 and cleanup["temp_cleaned"] is True
     safe_cleanup = {"processes_remaining": 0 if cleanup_ok else 1, "temp_cleaned": cleanup_ok}
     source_overwrite_checked = value.get("source_overwrite_checked")
     source_overwritten = value.get("source_overwritten")
@@ -112,20 +142,29 @@ def project_runtime_evidence(value: object) -> dict[str, Any]:
     elif source_overwrite_checked is False and source_overwritten is None:
         safe_overwrite = (False, None)
     else:
-        safe_overwrite = None
+        return _runtime_evidence_fallback()
     failure_class = value.get("failure_class")
+    if failure_class is not None and (type(failure_class) is not str or failure_class not in _RUNTIME_EVIDENCE_CLASSES):
+        return _runtime_evidence_fallback()
+    invocation_count = value.get("invocation_count")
+    artifact_published = value.get("artifact_published")
+    if type(invocation_count) is not int or isinstance(invocation_count, bool) or invocation_count not in {0, 1}:
+        return _runtime_evidence_fallback()
+    if type(artifact_published) is not bool:
+        return _runtime_evidence_fallback()
     if (
-        value.get("status") in {"partial", "unavailable"}
-        and value.get("outcome") == "error"
-        and value.get("execution") == "attempted"
-        and value.get("invocation_count") == 1
+        status in {"partial", "unavailable"}
+        and outcome == "error"
+        and execution == "attempted"
+        and invocation_count == 1
         and failure_class in _RUNTIME_EVIDENCE_CLASSES
-        and value.get("artifact_published") is False
+        and artifact_published is False
         and safe_overwrite is not None
     ):
         return {
             "schema_version": "runtime-evidence-projection.v1",
             "subject": "media_overlay_cpu_acceptance",
+            "operations": list(_RUNTIME_EVIDENCE_OPERATIONS),
             "status": "unavailable",
             "outcome": "error",
             "execution": "attempted",
@@ -139,15 +178,15 @@ def project_runtime_evidence(value: object) -> dict[str, Any]:
             "next_action": "Keep media operations partial; request a new exact-source approval before any future attempt.",
         }
     if (
-        value.get("status") in {"partial", "unavailable"}
-        and value.get("outcome") in {"blocked", "not_run"}
-        and value.get("execution") == "not_run"
-        and value.get("invocation_count") == 0
-        and value.get("failure_class") is None
-        and value.get("artifact_published") is False
+        status in {"partial", "unavailable"}
+        and outcome in {"blocked", "not_run"}
+        and execution == "not_run"
+        and invocation_count == 0
+        and failure_class is None
+        and artifact_published is False
         and safe_overwrite is not None
     ):
-        if value.get("outcome") == "blocked":
+        if outcome == "blocked":
             reason = "The bounded media acceptance was blocked before execution."
             next_action = "Keep media operations partial; obtain a fresh exact-source approval before any attempt."
         else:
@@ -156,8 +195,9 @@ def project_runtime_evidence(value: object) -> dict[str, Any]:
         return {
             "schema_version": "runtime-evidence-projection.v1",
             "subject": "media_overlay_cpu_acceptance",
+            "operations": list(_RUNTIME_EVIDENCE_OPERATIONS),
             "status": "unavailable",
-            "outcome": value.get("outcome"),
+            "outcome": outcome,
             "execution": "not_run",
             "failure_class": None,
             "invocation_count": 0,
@@ -169,18 +209,19 @@ def project_runtime_evidence(value: object) -> dict[str, Any]:
             "next_action": next_action,
         }
     if (
-        value.get("status") == "operational"
-        and value.get("outcome") == "completed"
-        and value.get("execution") == "completed"
-        and value.get("invocation_count") == 1
-        and value.get("failure_class") is None
+        status == "operational"
+        and outcome == "completed"
+        and execution == "completed"
+        and invocation_count == 1
+        and failure_class is None
         and cleanup_ok
-        and value.get("artifact_published") is True
+        and artifact_published is True
         and safe_overwrite == (True, False)
     ):
         return {
             "schema_version": "runtime-evidence-projection.v1",
             "subject": "media_overlay_cpu_acceptance",
+            "operations": list(_RUNTIME_EVIDENCE_OPERATIONS),
             "status": "operational",
             "outcome": "completed",
             "execution": "completed",
@@ -194,6 +235,76 @@ def project_runtime_evidence(value: object) -> dict[str, Any]:
             "next_action": "Use the existing allowlisted media operations with opaque artifacts.",
         }
     return _runtime_evidence_fallback()
+
+
+def _runtime_operation_scope_fallback() -> dict[str, Any]:
+    return {
+        "schema_version": _RUNTIME_OPERATION_SCOPE_SCHEMA_VERSION,
+        "subject": "media_overlay_cpu_acceptance",
+        "status": "unavailable",
+        "execution": "not_run",
+        "evidence_verified": False,
+        "operations": list(_RUNTIME_EVIDENCE_OPERATIONS),
+        "available_operations": [],
+        "operation_status": {operation: "partial" for operation in _RUNTIME_EVIDENCE_OPERATIONS},
+        "reason": "No completed exact evidence is available for the listed media operations.",
+        "next_action": "Keep the listed operations and all other media tools partial until separately evidenced.",
+    }
+
+
+def project_media_operation_scope(value: object) -> dict[str, Any]:
+    """Sanitize the fixed operation-scoped evidence for the product surface."""
+
+    if not isinstance(value, Mapping) or value.get("subject") != "media_overlay_cpu_acceptance":
+        return _runtime_operation_scope_fallback()
+    if value.get("schema_version") != _RUNTIME_OPERATION_SCOPE_SCHEMA_VERSION:
+        return _runtime_operation_scope_fallback()
+    operations = value.get("operations")
+    available = value.get("available_operations")
+    operation_status = value.get("operation_status")
+    evidence_verified = value.get("evidence_verified")
+    status = value.get("status")
+    execution = value.get("execution")
+    if (
+        type(evidence_verified) is not bool
+        or type(status) is not str
+        or type(execution) is not str
+        or not isinstance(operations, list)
+        or operations != list(_RUNTIME_EVIDENCE_OPERATIONS)
+        or not isinstance(available, list)
+        or not isinstance(operation_status, Mapping)
+        or set(operation_status) != set(_RUNTIME_EVIDENCE_OPERATIONS)
+        or any(type(item) is not str or item not in {"partial", "operational"} for item in operation_status.values())
+    ):
+        return _runtime_operation_scope_fallback()
+    if evidence_verified:
+        if (
+            status != "operational"
+            or execution != "completed"
+            or available != list(_RUNTIME_EVIDENCE_OPERATIONS)
+            or any(operation_status.get(operation) != "operational" for operation in _RUNTIME_EVIDENCE_OPERATIONS)
+        ):
+            return _runtime_operation_scope_fallback()
+        return {
+            "schema_version": _RUNTIME_OPERATION_SCOPE_SCHEMA_VERSION,
+            "subject": "media_overlay_cpu_acceptance",
+            "status": "operational",
+            "execution": "completed",
+            "evidence_verified": True,
+            "operations": list(_RUNTIME_EVIDENCE_OPERATIONS),
+            "available_operations": list(_RUNTIME_EVIDENCE_OPERATIONS),
+            "operation_status": {operation: "operational" for operation in _RUNTIME_EVIDENCE_OPERATIONS},
+            "reason": "A completed exact evidence record covers only the listed media operations.",
+            "next_action": "Use only the listed operations with opaque artifacts; keep all other media tools partial.",
+        }
+    if (
+        status == "operational"
+        or execution != "not_run"
+        or available
+        or any(operation_status.get(operation) != "partial" for operation in _RUNTIME_EVIDENCE_OPERATIONS)
+    ):
+        return _runtime_operation_scope_fallback()
+    return _runtime_operation_scope_fallback()
 
 
 def _volume_numbers(value: Mapping[str, Any]) -> tuple[int, int, int] | None:
@@ -736,6 +847,7 @@ def project_product_surface(
             "next_action": _text(plan.get("next_action"), "Review the plan before any separately authorized operation."),
             "modules": project_capability_modules(control),
             "runtime_evidence": project_runtime_evidence(control.get("runtime_evidence")),
+            "media_operation_scope": project_media_operation_scope(control.get("media_operation_scope")),
         },
         "jobs": recovery,
         "workflow_library": library,
@@ -752,6 +864,7 @@ __all__ = [
     "project_capability_modules",
     "project_job_recovery",
     "project_product_surface",
+    "project_media_operation_scope",
     "project_runtime_evidence",
     "project_storage_projection",
     "project_workflow_library",

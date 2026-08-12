@@ -13,6 +13,8 @@ import math
 import re
 from typing import Any, Iterable
 
+from src.services.tool_smoke import runtime_evidence_operation_scope
+
 
 GRAPH_SCHEMA_VERSION = 1
 PORT_TYPES = ("IMAGE", "MASK", "VIDEO", "AUDIO", "TEXT", "NUMBER", "BOOLEAN", "MODEL", "METADATA")
@@ -457,6 +459,80 @@ def _safe_encoder_snapshot(value: object) -> dict[str, Any]:
     return result
 
 
+_MEDIA_OPERATION_SCOPE = ("video_grade", "logo_overlay", "encode")
+
+
+def _safe_operation_scope() -> dict[str, Any]:
+    fallback = {
+        "schema_version": "runtime-operation-scope.v1",
+        "subject": "media_overlay_cpu_acceptance",
+        "status": "unavailable",
+        "execution": "not_run",
+        "evidence_verified": False,
+        "operations": list(_MEDIA_OPERATION_SCOPE),
+        "available_operations": [],
+        "operation_status": {operation: "partial" for operation in _MEDIA_OPERATION_SCOPE},
+        "reason": "No completed exact evidence is available for the listed media operations.",
+        "next_action": "Keep the listed operations and all other media tools partial until separately evidenced.",
+    }
+    try:
+        value = runtime_evidence_operation_scope()
+    except Exception:  # pragma: no cover - optional local state may be malformed
+        return fallback
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != "runtime-operation-scope.v1"
+        or value.get("subject") != "media_overlay_cpu_acceptance"
+        or value.get("operations") != list(_MEDIA_OPERATION_SCOPE)
+        or not isinstance(value.get("available_operations"), list)
+        or not isinstance(value.get("operation_status"), dict)
+        or set(value["operation_status"]) != set(_MEDIA_OPERATION_SCOPE)
+        or any(type(item) is not str or item not in {"partial", "operational"} for item in value["operation_status"].values())
+        or type(value.get("evidence_verified")) is not bool
+        or type(value.get("status")) is not str
+        or type(value.get("execution")) is not str
+    ):
+        return fallback
+    if value["evidence_verified"]:
+        if (
+            value["status"] != "operational"
+            or value["execution"] != "completed"
+            or value["available_operations"] != list(_MEDIA_OPERATION_SCOPE)
+            or any(value["operation_status"].get(operation) != "operational" for operation in _MEDIA_OPERATION_SCOPE)
+        ):
+            return fallback
+    elif (
+        value["status"] == "operational"
+        or value["execution"] != "not_run"
+        or value["available_operations"]
+        or any(value["operation_status"].get(operation) != "partial" for operation in _MEDIA_OPERATION_SCOPE)
+    ):
+        return fallback
+    return {
+        "schema_version": "runtime-operation-scope.v1",
+        "subject": "media_overlay_cpu_acceptance",
+        "status": "operational" if value["evidence_verified"] else "unavailable",
+        "execution": "completed" if value["evidence_verified"] else "not_run",
+        "evidence_verified": value["evidence_verified"],
+        "operations": list(_MEDIA_OPERATION_SCOPE),
+        "available_operations": list(_MEDIA_OPERATION_SCOPE) if value["evidence_verified"] else [],
+        "operation_status": {
+            operation: "operational" if value["evidence_verified"] else "partial"
+            for operation in _MEDIA_OPERATION_SCOPE
+        },
+        "reason": (
+            "A completed exact evidence record covers only the listed media operations."
+            if value["evidence_verified"]
+            else "No completed exact evidence is available for the listed media operations."
+        ),
+        "next_action": (
+            "Use only the listed operations with opaque artifacts; keep all other media tools partial."
+            if value["evidence_verified"]
+            else "Keep the listed operations and all other media tools partial until separately evidenced."
+        ),
+    }
+
+
 def registry_payload(scope: str | None = None) -> dict[str, Any]:
     """Return the offline palette plus a cached FFmpeg capability snapshot."""
 
@@ -469,18 +545,31 @@ def registry_payload(scope: str | None = None) -> dict[str, Any]:
     except Exception:  # pragma: no cover - optional runtime may be absent
         capabilities = _safe_encoder_snapshot({"status": "unavailable", "execution": "not_run", "available": False, "reason": "Cached encoder snapshot is unavailable."})
     definitions = list(definitions_for_scope(scope))
-    counts = {status: sum(1 for item in definitions if item.status == status) for status in ("operational", "partial", "unavailable")}
+    operation_scope = _safe_operation_scope()
+    projected_nodes = []
+    for item in definitions:
+        projected = item.public()
+        if operation_scope["operation_status"].get(item.type) == "operational":
+            projected["status"] = "operational"
+            projected["availability"] = {
+                "status": "operational",
+                "reason": "This exact operation has a completed server-owned bounded evidence record.",
+                "action": "Use opaque artifacts and the existing allowlisted Node Studio runner.",
+            }
+        projected_nodes.append(projected)
+    counts = {status: sum(1 for item in projected_nodes if item["status"] == status) for status in ("operational", "partial", "unavailable")}
     return {
         "status": "completed",
         "contract_version": "node-studio.v2",
         "schema_version": GRAPH_SCHEMA_VERSION,
         "port_types": list(PORT_TYPES),
         "scope": scope or "all",
-        "nodes": [item.public() for item in definitions],
+        "nodes": projected_nodes,
         "availability": {
             "counts": counts,
             "honest_statuses": ["operational", "partial", "unavailable"],
             "rule": "Node partial/unavailable không được coi là đã chạy nếu chưa có bounded smoke.",
         },
         "encoder_capabilities": capabilities,
+        "operation_scope": operation_scope,
     }

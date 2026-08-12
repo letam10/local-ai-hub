@@ -514,6 +514,42 @@ class AcceptanceRuntimeTests(unittest.TestCase):
             self.assertEqual(missing["outcome"], "not_run")
             self.assertEqual(missing["reason"], "No bounded media acceptance evidence is available.")
 
+    def test_runtime_evidence_operation_scope_is_exact_and_completed_only(self) -> None:
+        from src.services import tool_smoke
+
+        completed = tool_smoke._runtime_evidence_record({
+            "status": "completed",
+            "execution": "completed",
+            "artifacts": {"encoded": {"id": "artifact_" + "a" * 32, "size_bytes": 10, "sha256": "a" * 64}},
+            "processes_remaining": 0,
+            "temp_cleaned": True,
+            "source_overwritten": False,
+        })
+        scope = tool_smoke.runtime_evidence_operation_scope(completed)
+        self.assertEqual(scope["schema_version"], "runtime-operation-scope.v1")
+        self.assertTrue(scope["evidence_verified"])
+        self.assertEqual(scope["operations"], ["video_grade", "logo_overlay", "encode"])
+        self.assertEqual(scope["available_operations"], scope["operations"])
+        self.assertEqual(set(scope["operation_status"].values()), {"operational"})
+
+        failed = tool_smoke._runtime_evidence_record({
+            "status": "error",
+            "execution": "attempted",
+            "diagnostic": {"version": tool_smoke.ACCEPTANCE_DIAGNOSTIC_VERSION, "class": "unknown"},
+            "processes_remaining": 0,
+            "temp_cleaned": True,
+            "source_overwritten": False,
+        })
+        unavailable = tool_smoke.runtime_evidence_operation_scope(failed)
+        self.assertFalse(unavailable["evidence_verified"])
+        self.assertEqual(unavailable["available_operations"], [])
+        self.assertEqual(set(unavailable["operation_status"].values()), {"partial"})
+
+        stale = copy.deepcopy(completed)
+        stale["operations"] = ["video_grade"]
+        self.assertFalse(tool_smoke.runtime_evidence_passed(stale))
+        self.assertFalse(tool_smoke.runtime_evidence_operation_scope(stale)["evidence_verified"])
+
     def test_runtime_evidence_finalizer_writes_only_after_cleanup_and_reader_is_read_only(self) -> None:
         from src.services import tool_smoke
 
