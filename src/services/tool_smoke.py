@@ -40,6 +40,17 @@ ACCEPTANCE_INPUT_MAX_BYTES = 1 * 1024 * 1024
 ACCEPTANCE_OVERLAY_MAX_BYTES = 128 * 1024
 ACCEPTANCE_OUTPUT_MAX_BYTES = 4 * 1024 * 1024
 ACCEPTANCE_OPERATIONS = ["video_grade", "logo_overlay", "encode"]
+ACCEPTANCE_DIAGNOSTIC_VERSION = "logo_overlay_failure.v1"
+ACCEPTANCE_DIAGNOSTIC_TAIL_BYTES = 4096
+ACCEPTANCE_DIAGNOSTIC_CLASSES = (
+    "filter_graph",
+    "image_decode",
+    "stream_mapping",
+    "encoder_or_mux",
+    "filesystem",
+    "timeout",
+    "unknown",
+)
 ACCEPTANCE_PROHIBITED = [
     "GPU launch",
     "model/provider/SAM2/AnimeSR/RIFE execution",
@@ -51,6 +62,15 @@ ACCEPTANCE_PROHIBITED = [
     "driver/CUDA/config changes",
     "broad process termination",
 ]
+
+_ACCEPTANCE_DIAGNOSTIC_PATTERNS = (
+    ("filter_graph", ("error reinitializing filters", "failed to configure output pad", "no such filter", "error while filtering")),
+    ("image_decode", ("error while decoding image", "failed to decode image", "invalid png", "png: crc error", "could not decode image")),
+    ("stream_mapping", ("stream map", "matches no streams", "cannot map stream", "option map")),
+    ("encoder_or_mux", ("unknown encoder", "encoder not found", "could not find tag for codec", "muxer does not support", "error writing trailer", "could not write header")),
+    ("filesystem", ("no such file or directory", "permission denied", "access is denied", "cannot open output file", "failed to open output")),
+    ("timeout", ("timed out", "timeout", "killed by timeout")),
+)
 
 
 class AcceptanceFailure(RuntimeError):
@@ -304,6 +324,31 @@ def _register_output(path: Path, *, media_type: str, maximum_bytes: int, artifac
     return _artifact_evidence(artifact, maximum_bytes=maximum_bytes)
 
 
+def _classify_logo_overlay_failure(task_root: Path) -> dict[str, str]:
+    """Return only a versioned safe class from the exact task-owned log tail."""
+
+    unknown = {"version": ACCEPTANCE_DIAGNOSTIC_VERSION, "class": "unknown"}
+    try:
+        root = task_root.resolve()
+        logs = (root / "logs").resolve()
+        log_path = (logs / "ffmpeg_logo_overlay.log").resolve()
+        log_path.relative_to(root)
+        if log_path.parent != logs or not log_path.is_file():
+            return unknown
+        with log_path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - ACCEPTANCE_DIAGNOSTIC_TAIL_BYTES), os.SEEK_SET)
+            tail = stream.read(ACCEPTANCE_DIAGNOSTIC_TAIL_BYTES)
+    except (OSError, ValueError, RuntimeError):
+        return unknown
+    text = tail.decode("utf-8", errors="replace").lower()
+    for class_name, patterns in _ACCEPTANCE_DIAGNOSTIC_PATTERNS:
+        if any(pattern in text for pattern in patterns):
+            return {"version": ACCEPTANCE_DIAGNOSTIC_VERSION, "class": class_name}
+    return unknown
+
+
 def _run_cpu_pipeline(task_root: Path, ffmpeg: Path, owner: _AcceptanceOwner) -> dict[str, Any]:
     from PIL import Image
 
@@ -487,13 +532,17 @@ def run_cpu_media_acceptance(*, opt_in: bool | None = None, approval_path: Path 
         if owner is not None:
             owner.stop_all()
             lifecycle = owner.lifecycle()
+        diagnostic = _classify_logo_overlay_failure(root) if exc.code == "logo_overlay_failed" else None
         if created and root.exists():
             try:
                 shutil.rmtree(root)
             except OSError:
                 pass
         cleaned = created and not root.exists()
-        return {"status": "unavailable" if exc.unavailable else "error", "execution": "attempted", "failure_code": exc.code, "reason": "CPU acceptance pipeline did not complete.", "process_lifecycle": lifecycle, "processes_remaining": 0 if owner is None or owner.clean() else 1, "temp_cleaned": cleaned}
+        result = {"status": "unavailable" if exc.unavailable else "error", "execution": "attempted", "failure_code": exc.code, "reason": "CPU acceptance pipeline did not complete.", "process_lifecycle": lifecycle, "processes_remaining": 0 if owner is None or owner.clean() else 1, "temp_cleaned": cleaned}
+        if diagnostic is not None:
+            result["diagnostic"] = diagnostic
+        return result
     except (OSError, subprocess.SubprocessError, ValueError):
         if owner is not None:
             owner.stop_all()

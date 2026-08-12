@@ -271,6 +271,84 @@ class AcceptanceRuntimeTests(unittest.TestCase):
             self.assertTrue(failure["temp_cleaned"])
             self.assertFalse(failure_root.exists())
 
+    def test_logo_overlay_diagnostic_classes_are_versioned_and_allowlisted(self) -> None:
+        from src.services import tool_smoke
+
+        fixtures = {
+            "filter_graph": b"Error reinitializing filters!",
+            "image_decode": b"Failed to decode image",
+            "stream_mapping": b"Stream map '0:1' matches no streams.",
+            "encoder_or_mux": b"Unknown encoder 'fixture'.",
+            "filesystem": b"No such file or directory",
+            "timeout": b"Operation timed out",
+        }
+        self.assertEqual(set(tool_smoke.ACCEPTANCE_DIAGNOSTIC_CLASSES), set(fixtures) | {"unknown"})
+        with TemporaryDirectory() as directory:
+            task_root = Path(directory)
+            log_path = task_root / "logs" / "ffmpeg_logo_overlay.log"
+            log_path.parent.mkdir()
+            for expected, content in fixtures.items():
+                log_path.write_bytes(content)
+                result = tool_smoke._classify_logo_overlay_failure(task_root)
+                self.assertEqual(result, {"version": tool_smoke.ACCEPTANCE_DIAGNOSTIC_VERSION, "class": expected})
+
+    def test_logo_overlay_diagnostic_unknown_missing_unreadable_and_tail_bounded(self) -> None:
+        from src.services import tool_smoke
+
+        unknown = {"version": tool_smoke.ACCEPTANCE_DIAGNOSTIC_VERSION, "class": "unknown"}
+        with TemporaryDirectory() as directory:
+            task_root = Path(directory)
+            self.assertEqual(tool_smoke._classify_logo_overlay_failure(task_root), unknown)
+            log_path = task_root / "logs" / "ffmpeg_logo_overlay.log"
+            log_path.parent.mkdir()
+            log_path.write_bytes(b"safe fixture")
+            with patch.object(Path, "open", side_effect=OSError("synthetic unreadable log")):
+                self.assertEqual(tool_smoke._classify_logo_overlay_failure(task_root), unknown)
+            log_path.write_bytes(b"Error reinitializing filters!" + b"x" * (tool_smoke.ACCEPTANCE_DIAGNOSTIC_TAIL_BYTES + 8))
+            self.assertEqual(tool_smoke._classify_logo_overlay_failure(task_root), unknown)
+
+    def test_logo_overlay_failure_projection_is_redacted_and_cleans_before_return(self) -> None:
+        from src.services import tool_smoke
+
+        sentinel = "".join(("C:", "/", "private", "/", "diagnostic-secret"))
+        with TemporaryDirectory() as directory:
+            parent = Path(directory)
+            ffmpeg = parent / "ffmpeg.exe"
+            ffprobe = parent / "ffprobe.exe"
+            ffmpeg.write_bytes(b"fixture")
+            ffprobe.write_bytes(b"fixture")
+            approval = parent / "approval.json"
+            task_root = parent / "failure-root"
+
+            def fail_logo_overlay(root: Path, _ffmpeg: Path, _owner: object) -> None:
+                log_path = root / "logs" / "ffmpeg_logo_overlay.log"
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text(f"{sentinel}\nError reinitializing filters!\n", encoding="utf-8")
+                raise tool_smoke.AcceptanceFailure("logo_overlay_failed")
+
+            with (
+                patch.object(tool_smoke, "_approval_guard", return_value=(True, "ok")),
+                patch("src.modules.media_editor.backend.adapter._paths", return_value=(ffmpeg, ffprobe)),
+                patch.object(tool_smoke, "_run_cpu_pipeline", side_effect=fail_logo_overlay),
+            ):
+                result = tool_smoke.run_cpu_media_acceptance(opt_in=True, approval_path=approval, task_root=task_root, repo_root=parent)
+            self.assertEqual(result["failure_code"], "logo_overlay_failed")
+            self.assertEqual(result["diagnostic"], {"version": tool_smoke.ACCEPTANCE_DIAGNOSTIC_VERSION, "class": "filter_graph"})
+            self.assertTrue(result["temp_cleaned"])
+            self.assertEqual(result["processes_remaining"], 0)
+            self.assertFalse(task_root.exists())
+            self.assertNotIn(sentinel, json.dumps(result, ensure_ascii=False))
+
+            non_logo_root = parent / "non-logo-failure-root"
+            with (
+                patch.object(tool_smoke, "_approval_guard", return_value=(True, "ok")),
+                patch("src.modules.media_editor.backend.adapter._paths", return_value=(ffmpeg, ffprobe)),
+                patch.object(tool_smoke, "_run_cpu_pipeline", side_effect=tool_smoke.AcceptanceFailure("video_grade_failed")),
+            ):
+                non_logo = tool_smoke.run_cpu_media_acceptance(opt_in=True, approval_path=approval, task_root=non_logo_root, repo_root=parent)
+            self.assertNotIn("diagnostic", non_logo)
+            self.assertFalse(non_logo_root.exists())
+
     def test_bounds_and_truthful_unavailable_result_never_echo_paths(self) -> None:
         from src.services import tool_smoke
 
