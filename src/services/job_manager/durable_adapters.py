@@ -92,9 +92,7 @@ def validate_media_video_grade_spec(value: object, *, resolve_input: bool = True
         or descriptor.adapter_id != MEDIA_VIDEO_GRADE_ADAPTER_ID
         or descriptor.operation != MEDIA_VIDEO_GRADE_OPERATION
         or descriptor.reconstructable is not True
-        or resources["cpu_slots"] != MEDIA_VIDEO_GRADE_RESOURCES["cpu_slots"]
-        or resources["gpu_slots"] != MEDIA_VIDEO_GRADE_RESOURCES["gpu_slots"]
-        or resources["exclusive_group"] is not None
+        or resources != MEDIA_VIDEO_GRADE_RESOURCES
     ):
         raise _contract_error("UNSUPPORTED_MEDIA_JOB")
     arguments = descriptor.arguments

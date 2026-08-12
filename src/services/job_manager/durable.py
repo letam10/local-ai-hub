@@ -8,14 +8,12 @@ future V5-D integration change.
 
 from __future__ import annotations
 
-import hashlib
 import re
 import threading
 import time
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from src.services.api.jobs import DurableJobStore, DurableStoreHealthError
@@ -847,104 +845,15 @@ class DurableWorkEngine:
         self.store.flush()
         return {"interrupted": reconciled, "unavailable": unavailable}
 
-    def persist_managed_output(self, job_id: str, output_path: Path) -> dict[str, Any] | None:
-        """Attach one completed managed output using a bounded chunked digest.
+    def persist_managed_output(self, _job_id: str, _output_path: object) -> None:
+        """Defer output publication until a cross-store atomic API exists.
 
-        This hook is intentionally narrower than ``persist_output``: it only
-        accepts the fixed V6 video-grade output name/media type, only after a
-        durable record is completed, and never buffers the file in memory.
+        Registering an artifact and linking it to the durable record are two
+        different stores.  This package intentionally performs neither step
+        so a failed linkage can never leave an orphaned public artifact.
         """
 
-        if not isinstance(job_id, str) or not _JOB_ID.fullmatch(job_id) or not isinstance(output_path, Path):
-            return None
-        try:
-            candidate = output_path.resolve()
-            candidate.relative_to(artifact_store.OUTPUT_ROOT.resolve())
-            initial = candidate.stat()
-        except (OSError, ValueError):
-            return None
-        if (
-            not candidate.is_file()
-            or not candidate.name.startswith(f"hub-job-{job_id[-8:]}-")
-            or initial.st_size < 0
-            or initial.st_size > artifact_store.MAX_JOB_OUTPUT_BYTES
-        ):
-            return None
-        with self._lock:
-            record = self.store.get(job_id)
-            if record is None or record.get("status") != "completed":
-                return None
-            try:
-                spec = validate_job_spec(record.get("job_spec"))
-            except JobContractError:
-                return None
-            if (
-                spec.descriptor.adapter_id != "media.video_grade.v1"
-                or record.get("job_spec_fingerprint") != spec.fingerprint
-                or record.get("descriptor_summary") != spec.descriptor.summary()
-            ):
-                return None
-            fingerprint = record.get("job_spec_fingerprint")
-            attempt = record.get("attempt")
-            if (
-                not isinstance(fingerprint, str)
-                or not _FINGERPRINT.fullmatch(fingerprint)
-                or isinstance(attempt, bool)
-                or not isinstance(attempt, int)
-                or not 1 <= attempt <= 10_000
-            ):
-                return None
-            provenance = {
-                "job_id": job_id,
-                "job_spec_fingerprint": fingerprint,
-                "adapter_id": spec.descriptor.adapter_id,
-                "attempt": attempt,
-                "status": "completed",
-            }
-        digest = hashlib.sha256()
-        try:
-            with candidate.open("rb") as handle:
-                while True:
-                    chunk = handle.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    digest.update(chunk)
-            final = candidate.stat()
-        except OSError:
-            return None
-        if final.st_size != initial.st_size:
-            return None
-        try:
-            artifact = artifact_store.register_path(
-                candidate,
-                name="video_grade.mp4",
-                media_type="video/mp4",
-                sha256=digest.hexdigest(),
-                provenance=provenance,
-            )
-        except Exception:
-            return None
-        if (
-            not isinstance(artifact, dict)
-            or not is_artifact_id(artifact.get("id"))
-            or artifact.get("media_type") != "video/mp4"
-            or artifact.get("name") != "video_grade.mp4"
-            or artifact.get("size_bytes") != final.st_size
-            or artifact.get("sha256") != digest.hexdigest()
-            or artifact.get("url") != f"/api/artifacts/{artifact.get('id')}"
-            or artifact.get("provenance") != provenance
-        ):
-            return None
-        with self._lock:
-            current = self.store.get(job_id)
-            if current is None or current.get("status") != "completed":
-                return None
-            existing = current.get("artifacts") if isinstance(current.get("artifacts"), list) else []
-            artifact_ids = [item for item in existing if is_artifact_id(item)]
-            if artifact["id"] not in artifact_ids:
-                artifact_ids.append(artifact["id"])
-            self._update_locked(job_id, {"artifacts": artifact_ids})
-        return detached_json(artifact)
+        return None
 
     def persist_output(
         self,

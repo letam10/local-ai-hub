@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import tempfile
 import unittest
@@ -35,8 +34,8 @@ def video_spec(*, arguments: dict[str, object] | None = None, adapter_id: str = 
             "resources": {
                 "cpu_slots": 1,
                 "gpu_slots": 0,
-                "ram_mb": 64,
-                "disk_mb": 8,
+                "ram_mb": 0,
+                "disk_mb": 0,
                 "exclusive_group": None,
             },
         },
@@ -114,6 +113,22 @@ class V6DurableRecoveryAdmissionTests(unittest.TestCase):
         for malformed in ([], {}, "bad"):
             with self.assertRaises(JobContractError):
                 validate_media_video_grade_spec(video_spec(arguments={"source_artifact_id": ARTIFACT_ID, "brightness": malformed}), resolve_input=False)
+
+    def test_resource_policy_enforces_all_fixed_fields_before_resolution_or_write(self) -> None:
+        for field in ("ram_mb", "disk_mb"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary) / "durable.json"
+                candidate = video_spec()
+                candidate["descriptor"]["resources"][field] = 1  # type: ignore[index]
+                with patch(
+                    "src.services.job_manager.durable_adapters.artifact_store.resolve",
+                    side_effect=AssertionError("resource rejection must precede artifact resolution"),
+                ):
+                    with self.assertRaises(JobContractError):
+                        validate_media_video_grade_spec(candidate, resolve_input=False)
+                    result = v5_productization.admit_durable_job(candidate, state)
+                self.assertEqual(result["status"], "invalid")
+                self.assertFalse(state.exists())
 
     def test_admission_accepts_one_new_job_without_execution_or_public_echo(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, self._artifact_reads():
@@ -206,52 +221,7 @@ class V6DurableRecoveryAdmissionTests(unittest.TestCase):
             self.assertEqual(stale["recovery"]["action"], "CREATE_NEW_JOB")
             self.assertNotIn("artifact_" + "c" * 32, json.dumps(stale))
 
-    def test_managed_output_is_chunked_completed_only_and_provenance_checked(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary, self._artifact_reads():
-            root = Path(temporary)
-            state = root / "durable.json"
-            output_root = root / "output"
-            index = root / "artifacts.json"
-            with patch.object(artifact_store, "OUTPUT_ROOT", output_root), patch.object(artifact_store, "INDEX_PATH", index):
-                accepted = v5_productization.admit_durable_job(video_spec(), state)
-                job_id = accepted["job"]["id"]
-                store = DurableJobStore(state)
-                store.update(job_id, {"status": "completed", "state_history": ["queued", "completed"], "finished_at": "2026-08-12T00:00:00+00:00"})
-                registry = build_production_registry()
-                engine = DurableWorkEngine(store, registry, gpu_slots=0)
-                output_root.mkdir(parents=True, exist_ok=True)
-                payload = b"tiny managed video fixture"
-                output = output_root / f"hub-job-{job_id[-8:]}-fixture.bin"
-                output.write_bytes(payload)
-                original_read_bytes = Path.read_bytes
-
-                def forbid_output_read_bytes(path: Path) -> bytes:
-                    if path.resolve() == output.resolve():
-                        raise AssertionError("managed output must hash in chunks")
-                    return original_read_bytes(path)
-
-                with patch.object(Path, "read_bytes", new=forbid_output_read_bytes):
-                    artifact = engine.persist_managed_output(job_id, output)
-                self.assertIsNotNone(artifact)
-                self.assertEqual(artifact["name"], "video_grade.mp4")
-                self.assertEqual(artifact["media_type"], "video/mp4")
-                self.assertEqual(artifact["sha256"], hashlib.sha256(payload).hexdigest())
-                self.assertNotIn("path", json.dumps(artifact))
-                public = engine.get(job_id)
-                self.assertEqual(public["artifacts"][0]["status"], "available")
-                self.assertTrue(public["artifacts"][0]["url"].startswith("/api/artifacts/artifact_"))
-                engine.close()
-
-                failed = v5_productization.admit_durable_job(video_spec(), state)
-                failed_id = failed["job"]["id"]
-                failed_store = DurableJobStore(state)
-                failed_store.update(failed_id, {"status": "failed", "state_history": ["queued", "failed"]})
-                failed_engine = DurableWorkEngine(failed_store, registry, gpu_slots=0)
-                self.assertIsNone(failed_engine.persist_managed_output(failed_id, output))
-                self.assertEqual(failed_engine.get(failed_id)["artifacts"], [])
-                failed_engine.close()
-
-    def test_managed_output_outside_root_or_mismatched_registration_has_no_preview(self) -> None:
+    def test_managed_output_publication_is_deferred_without_artifact_or_url(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, self._artifact_reads():
             root = Path(temporary)
             state = root / "durable.json"
@@ -263,24 +233,21 @@ class V6DurableRecoveryAdmissionTests(unittest.TestCase):
                 store = DurableJobStore(state)
                 store.update(job_id, {"status": "completed", "state_history": ["queued", "completed"]})
                 engine = DurableWorkEngine(store, build_production_registry(), gpu_slots=0)
-                outside = root / f"hub-job-{job_id[-8:]}-outside.bin"
-                outside.write_bytes(b"outside")
-                self.assertIsNone(engine.persist_managed_output(job_id, outside))
                 output_root.mkdir(parents=True, exist_ok=True)
-                managed = output_root / f"hub-job-{job_id[-8:]}-managed.bin"
-                managed.write_bytes(b"managed")
-                mismatched = {
-                    "id": "artifact_" + "d" * 32,
-                    "name": "video_grade.mp4",
-                    "media_type": "video/mp4",
-                    "size_bytes": 7,
-                    "sha256": hashlib.sha256(b"managed").hexdigest(),
-                    "url": "/api/artifacts/artifact_" + "d" * 32,
-                    "provenance": {"job_id": job_id, "job_spec_fingerprint": "f" * 64, "adapter_id": MEDIA_VIDEO_GRADE_ADAPTER_ID, "attempt": 1, "status": "completed"},
-                }
-                with patch.object(artifact_store, "register_path", return_value=mismatched):
-                    self.assertIsNone(engine.persist_managed_output(job_id, managed))
-                self.assertEqual(engine.get(job_id)["artifacts"], [])
+                output = output_root / f"hub-job-{job_id[-8:]}-fixture.bin"
+                output.write_bytes(b"tiny managed video fixture")
+                with (
+                    patch.object(artifact_store, "register_path", side_effect=AssertionError("deferred output must not register")) as register_path,
+                    patch.object(store, "update", side_effect=AssertionError("deferred output must not update durable state")) as update,
+                ):
+                    result = engine.persist_managed_output(job_id, output)
+                self.assertIsNone(result)
+                register_path.assert_not_called()
+                update.assert_not_called()
+                self.assertFalse(index.exists())
+                public = engine.get(job_id)
+                self.assertEqual(public["artifacts"], [])
+                self.assertNotIn("url", json.dumps(public["artifacts"]))
                 engine.close()
 
 
