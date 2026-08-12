@@ -288,6 +288,107 @@ const readinessSnapshot = (state) => {
     resourceSnapshot: Object.keys(control).length > 0 ? "current server capability snapshot" : "not published",
   };
 };
+const MEDIA_EVIDENCE_OPERATIONS = Object.freeze(["video_grade", "logo_overlay", "encode"]);
+const MEDIA_EVIDENCE_LABELS = Object.freeze({ video_grade: "Video grade", logo_overlay: "Logo overlay", encode: "Encode" });
+const MEDIA_EVIDENCE_OUTCOME_LABELS = Object.freeze({ completed: "Completed", error: "Error", blocked: "Blocked", not_run: "Not run" });
+const MEDIA_EVIDENCE_EXECUTION_LABELS = Object.freeze({ completed: "Completed", attempted: "Attempted", not_run: "Not run" });
+const unsafeMediaEvidenceText = /(?:[a-z]:[\\/]|\\\\|(?:^|\s)\/(?:etc|tmp|var|home)(?:[\\/]|$)|(?:file|data|https?):|(?:api[_-]?key|password|secret|token)\s*[:=]|\b(?:cmd|powershell|bash|ffmpeg|python|callable|manifest|command)\b)/i;
+const isMediaEvidenceRecord = (value) => Boolean(value && typeof value === "object" && !Array.isArray(value));
+const exactMediaOperationList = (value) => Array.isArray(value) && value.length === MEDIA_EVIDENCE_OPERATIONS.length && value.every((item, index) => item === MEDIA_EVIDENCE_OPERATIONS[index]);
+const safeMediaEvidenceText = (value) => {
+  if (typeof value !== "string") return null;
+  const candidate = value.trim().slice(0, 240);
+  return candidate && !unsafeMediaEvidenceText.test(candidate) ? candidate : null;
+};
+const mediaEvidenceFallback = () => ({
+  status: "unavailable",
+  outcome: "not_run",
+  execution: "not_run",
+  evidenceVerified: false,
+  artifactPublished: false,
+  invocationCount: 0,
+  failureClass: "",
+  cleanup: { processesRemaining: 0, tempCleaned: true },
+  sourceOverwriteChecked: false,
+  sourceOverwritten: null,
+  availableOperations: [],
+  reason: "No safe server-owned media evidence is available in this snapshot.",
+  nextAction: "Keep media operations partial until exact server evidence is published.",
+  operations: MEDIA_EVIDENCE_OPERATIONS.map((id) => ({ id, label: MEDIA_EVIDENCE_LABELS[id], status: "partial", reason: "This exact operation is not verified in the server snapshot.", nextAction: "Keep this operation partial until separately evidenced." })),
+  genericStatus: "partial",
+  genericReason: "Generic media actions are not covered by the three exact evidence rows.",
+  genericNextAction: "Use only the published evidence rows; no generic media execution is claimed.",
+});
+const normalizeRuntimeMediaEvidence = (value) => {
+  if (!isMediaEvidenceRecord(value) || (value.schema_version !== undefined && value.schema_version !== "runtime-evidence-projection.v1") || value.subject !== "media_overlay_cpu_acceptance" || !exactMediaOperationList(value.operations)) return null;
+  const status = ["operational", "partial", "unavailable"].includes(value.status) ? value.status : "";
+  const outcome = Object.prototype.hasOwnProperty.call(MEDIA_EVIDENCE_OUTCOME_LABELS, value.outcome) ? value.outcome : "";
+  const execution = Object.prototype.hasOwnProperty.call(MEDIA_EVIDENCE_EXECUTION_LABELS, value.execution) ? value.execution : "";
+  const cleanup = value.cleanup;
+  if (!status || !outcome || !execution || !isMediaEvidenceRecord(cleanup) || Object.keys(cleanup).some((key) => !["processes_remaining", "temp_cleaned"].includes(key)) || !Number.isInteger(cleanup.processes_remaining) || cleanup.processes_remaining < 0 || typeof cleanup.temp_cleaned !== "boolean") return null;
+  if (typeof value.source_overwrite_checked !== "boolean" || (value.source_overwrite_checked && typeof value.source_overwritten !== "boolean") || (!value.source_overwrite_checked && value.source_overwritten !== null)) return null;
+  if (!Number.isInteger(value.invocation_count) || ![0, 1].includes(value.invocation_count) || typeof value.artifact_published !== "boolean") return null;
+  if (value.failure_class !== null && (typeof value.failure_class !== "string" || !/^[a-z][a-z0-9_-]{0,39}$/.test(value.failure_class))) return null;
+  const reason = safeMediaEvidenceText(value.reason);
+  const nextAction = safeMediaEvidenceText(value.next_action);
+  if (!reason || !nextAction) return null;
+  const exactCompleted = status === "operational" && outcome === "completed" && execution === "completed" && value.invocation_count === 1 && value.failure_class === null && cleanup.processes_remaining === 0 && cleanup.temp_cleaned === true && value.artifact_published === true && value.source_overwrite_checked === true && value.source_overwritten === false;
+  const boundedError = ["partial", "unavailable"].includes(status) && outcome === "error" && execution === "attempted" && value.invocation_count === 1 && typeof value.failure_class === "string" && value.artifact_published === false;
+  const notRun = ["partial", "unavailable"].includes(status) && ["blocked", "not_run"].includes(outcome) && execution === "not_run" && value.invocation_count === 0 && value.failure_class === null && value.artifact_published === false;
+  if (!exactCompleted && !boundedError && !notRun) return null;
+  return { status: exactCompleted ? "operational" : "unavailable", outcome, execution, evidenceVerified: exactCompleted, artifactPublished: value.artifact_published, invocationCount: value.invocation_count, failureClass: value.failure_class || "", cleanup: { processesRemaining: cleanup.processes_remaining, tempCleaned: cleanup.temp_cleaned }, sourceOverwriteChecked: value.source_overwrite_checked, sourceOverwritten: value.source_overwritten, reason, nextAction };
+};
+const normalizeMediaOperationScope = (value) => {
+  if (!isMediaEvidenceRecord(value) || value.subject !== "media_overlay_cpu_acceptance" || value.schema_version !== "runtime-operation-scope.v1" || !exactMediaOperationList(value.operations) || !Array.isArray(value.available_operations) || !isMediaEvidenceRecord(value.operation_status) || Object.keys(value.operation_status).sort().join("|") !== MEDIA_EVIDENCE_OPERATIONS.slice().sort().join("|") || !MEDIA_EVIDENCE_OPERATIONS.every((id) => ["partial", "operational"].includes(value.operation_status[id]))) return null;
+  const reason = safeMediaEvidenceText(value.reason);
+  const nextAction = safeMediaEvidenceText(value.next_action);
+  if (!reason || !nextAction || typeof value.evidence_verified !== "boolean") return null;
+  const exactCompleted = value.evidence_verified === true && value.status === "operational" && value.execution === "completed" && exactMediaOperationList(value.available_operations) && MEDIA_EVIDENCE_OPERATIONS.every((id) => value.operation_status[id] === "operational");
+  const safeUnavailable = value.evidence_verified === false && value.status === "unavailable" && value.execution === "not_run" && value.available_operations.length === 0 && MEDIA_EVIDENCE_OPERATIONS.every((id) => value.operation_status[id] === "partial");
+  return exactCompleted || safeUnavailable ? { evidenceVerified: exactCompleted, availableOperations: exactCompleted ? MEDIA_EVIDENCE_OPERATIONS.slice() : [], operationStatus: { ...value.operation_status }, reason, nextAction } : null;
+};
+export const mediaCapabilityEvidence = (state) => {
+  const source = state && typeof state === "object" ? state : {};
+  const productization = source.productization && typeof source.productization === "object" ? source.productization : {};
+  const productCapabilities = productization.capabilities && typeof productization.capabilities === "object" && !Array.isArray(productization.capabilities) ? productization.capabilities : null;
+  const capabilitySnapshot = productCapabilities || (source.capabilities && typeof source.capabilities === "object" && !Array.isArray(source.capabilities) ? source.capabilities : {});
+  const runtimeEvidence = normalizeRuntimeMediaEvidence(capabilitySnapshot.runtime_evidence);
+  const operationScope = normalizeMediaOperationScope(capabilitySnapshot.media_operation_scope);
+  if (!runtimeEvidence || !operationScope || runtimeEvidence.evidenceVerified !== operationScope.evidenceVerified) return mediaEvidenceFallback();
+  const verified = runtimeEvidence.evidenceVerified && operationScope.evidenceVerified;
+  const genericReason = "Generic media actions are not covered by the three exact evidence rows.";
+  const genericNextAction = "Use only the published evidence rows; no generic media execution is claimed.";
+  return {
+    ...runtimeEvidence,
+    evidenceVerified: verified,
+    availableOperations: verified ? MEDIA_EVIDENCE_OPERATIONS.slice() : [],
+    reason: verified ? operationScope.reason : runtimeEvidence.reason,
+    nextAction: verified ? operationScope.nextAction : runtimeEvidence.nextAction,
+    operations: MEDIA_EVIDENCE_OPERATIONS.map((id) => ({
+      id,
+      label: MEDIA_EVIDENCE_LABELS[id],
+      status: verified ? operationScope.operationStatus[id] : "partial",
+      reason: verified ? operationScope.reason : runtimeEvidence.reason,
+      nextAction: verified ? operationScope.nextAction : runtimeEvidence.nextAction,
+    })),
+    genericStatus: "partial",
+    genericReason,
+    genericNextAction,
+  };
+};
+const mediaEvidencePanel = (state, variant = "compact") => {
+  const evidence = mediaCapabilityEvidence(state);
+  const detail = variant !== "compact";
+  const action = variant === "compact"
+    ? `<button class="button button--compact" type="button" data-readiness-route="settings"><strong>Review detailed evidence</strong><span class="row-meta">Open server snapshot in Settings</span></button>`
+    : variant === "settings"
+      ? `<button class="button button--compact" type="button" data-route="media"><strong>Open Media / Node Studio</strong><span class="row-meta">View exact operation scope</span></button>`
+      : "";
+  const operationRows = evidence.operations.map((item) => `<article class="media-evidence-row" data-media-operation="${escapeHtml(item.id)}" data-operation-status="${escapeHtml(item.status)}"><div><strong>${escapeHtml(item.label)}</strong><span>${escapeHtml(item.reason)}</span></div>${statusPill(item.status, readinessStatusLabel(item.status))}<p><strong>Next action</strong> ${escapeHtml(item.nextAction)}</p></article>`).join("");
+  const cleanupLabel = evidence.cleanup.processesRemaining === 0 && evidence.cleanup.tempCleaned ? "Clean" : "Needs review";
+  const overwriteLabel = evidence.sourceOverwriteChecked ? (evidence.sourceOverwritten ? "Overwrite detected" : "Source preserved") : "Not checked";
+  return `<section class="media-evidence card card--flat" aria-labelledby="media-evidence-title-${escapeHtml(variant)}" data-media-evidence data-media-evidence-status="${escapeHtml(evidence.status)}" data-media-evidence-outcome="${escapeHtml(evidence.outcome)}" data-media-evidence-execution="${escapeHtml(evidence.execution)}" data-media-evidence-verified="${String(evidence.evidenceVerified)}"><div class="card-title-row"><div><span class="eyebrow">MEDIA CAPABILITY EVIDENCE</span><h2 id="media-evidence-title-${escapeHtml(variant)}">Exact media operation scope</h2><p>Server snapshot only; the UI does not execute media operations.</p></div>${statusPill(evidence.status, readinessStatusLabel(evidence.status))}</div><div class="media-evidence-summary"><div><span>Outcome</span><strong>${escapeHtml(MEDIA_EVIDENCE_OUTCOME_LABELS[evidence.outcome] || "Not run")}</strong></div><div><span>Execution</span><strong>${escapeHtml(MEDIA_EVIDENCE_EXECUTION_LABELS[evidence.execution] || "Not run")}</strong></div><div><span>Cleanup</span><strong>${escapeHtml(cleanupLabel)}</strong></div><div><span>Source overwrite</span><strong>${escapeHtml(overwriteLabel)}</strong></div></div><div class="media-evidence-guidance" role="status"><div><span>Reason</span><p>${escapeHtml(evidence.reason)}</p></div><div><span>Next action</span><p>${escapeHtml(evidence.nextAction)}</p></div></div><div class="media-evidence-list" role="list">${operationRows}</div>${detail ? `<div class="media-evidence-generic" data-media-generic-status="${escapeHtml(evidence.genericStatus)}"><strong>Generic Media actions remain ${escapeHtml(readinessStatusLabel(evidence.genericStatus))}</strong><p>${escapeHtml(evidence.genericReason)}</p><p>${escapeHtml(evidence.genericNextAction)}</p></div>` : ""}<div class="media-evidence-actions">${action}</div></section>`;
+};
 const JOB_STATUS_RANK = Object.freeze({
   failed: 0,
   unavailable: 0,
@@ -630,6 +731,7 @@ function renderDashboard(state) {
       <div class="dashboard-storage-grid">${storageHtml}</div>
       ${storageWarning}
     </section>
+    ${mediaEvidencePanel(source, "compact")}
     <section class="job-recovery-card card" aria-labelledby="dashboard-recovery-title" data-recovery-source="${escapeHtml(jobRecovery.source)}" data-recovery-status="${escapeHtml(jobRecovery.status)}">
       <div class="card-title-row"><div><span class="eyebrow">JOB RECOVERY</span><h2 id="dashboard-recovery-title">Recovery attention</h2><p>${escapeHtml(jobRecovery.reason)}</p></div>${statusPill(jobRecovery.status, readinessStatusLabel(jobRecovery.status))}</div>
       <div class="job-recovery-counts" aria-label="Job recovery counts">
@@ -821,10 +923,19 @@ function renderImage(state) {
 
 function renderMedia(state) {
   const item = component(state, "ffmpeg");
-  return heading("MEDIA", "Trình biên tập media", "FFmpeg/FFprobe chạy bằng danh sách lệnh cho phép ở chế độ ẩn, không có ô shell và không ghi đè media nguồn.", statusPill(tool(state, "run_media_operation").tool_status || item.component_status || "missing")) + workspaceState("Video Transform / Export", tool(state, "run_media_operation"), "Chọn artifact, operation allowlist và kiểm tra output; video smoke deferred khi GPU đang bận.") + videoWorkflowRail(state) + `
+  const genericTool = tool(state, "run_media_operation");
+  const mediaEvidence = mediaCapabilityEvidence(state);
+  const genericContract = {
+    ...genericTool,
+    tool_status: "partial",
+    status: "partial",
+    reason: "Generic media actions are not covered by the three exact server evidence rows.",
+    action: "Use the exact evidence summary first; this UI does not claim generic media execution.",
+  };
+  return heading("MEDIA", "Media workspace", "Media operation state is shown from the server snapshot before any separately authorized work.", statusPill("partial", "Partial")) + mediaEvidencePanel(state, "media") + workspaceState("Generic Media action", genericContract, "Review the exact operation scope; no generic action is enabled from this snapshot.") + videoWorkflowRail(state) + `
     <div class="workspace-grid workspace-grid--two">
-      ${card("Thao tác video và ảnh", `<form data-job-form data-tool="run_media_operation" class="stack">${file("Media đầu vào chính", "asset_id", "audio/*,video/*,image/*")}${files("Đầu vào bổ sung (ghép / chuỗi ảnh)", "input_asset_ids", "video/*,image/*")}${file("Audio hoặc phụ đề thứ hai", "secondary_asset_id", "audio/*,.srt,.ass")}${field("Thao tác", `<select name="operation"><option value="probe">Đọc metadata</option><option value="trim">Cắt đầu/cuối</option><option value="concat">Ghép video</option><option value="resize">Đổi kích thước video</option><option value="crop">Cắt khung video</option><option value="rotate">Xoay video</option><option value="fps">FPS</option><option value="transcode">Chuyển mã</option><option value="extract_audio">Tách audio</option><option value="replace_audio">Thay audio</option><option value="mux">Mux audio/video</option><option value="burn_subtitle">Chèn phụ đề</option><option value="extract_frames">Tách frame</option><option value="image_sequence_video">Chuỗi ảnh → video</option><option value="image_resize">Đổi kích thước ảnh</option><option value="image_crop">Cắt khung ảnh</option><option value="image_rotate">Xoay ảnh</option><option value="image_flip">Lật ảnh</option><option value="image_convert">Đổi định dạng ảnh</option><option value="image_compress">Nén ảnh</option></select>`)}<div class="form-grid">${field("Bắt đầu", `<input name="start" type="number" min="0" step="0.1" value="0" />`)}${field("Kết thúc", `<input name="end" type="number" min="0.1" step="0.1" value="5" />`)}${field("Chiều rộng", `<input name="width" type="number" min="2" value="1280" />`)}${field("Chiều cao", `<input name="height" type="number" min="-2" value="-2" />`)}${field("FPS", `<input name="fps" type="number" min="1" value="30" />`)}${field("Xoay", `<select name="degrees"><option value="90">90°</option><option value="180">180°</option><option value="270">270°</option></select>`)}${field("Lật", `<select name="axis"><option value="horizontal">Ngang</option><option value="vertical">Dọc</option></select>`)}${field("Định dạng ảnh", `<select name="format"><option value="png">PNG</option><option value="jpg">JPG</option><option value="webp">WEBP</option></select>`)}</div><div class="form-actions">${button("Chạy FFmpeg", "button--primary")}</div>${formResult("media-result")}</form>`)}
-      ${card("An toàn thao tác", `<ul class="notice-list"><li>Kết quả tạo trong vùng Output/Media của Hub.</li><li>Đọc metadata là read-only; tác vụ ghi file đi qua Job Manager.</li><li>Ghép video và chuỗi ảnh chỉ nhận artifact đã tải lên Hub, rồi tạo manifest Temp ngắn hạn; không nhận raw shell/path list.</li></ul><div class="tag-list"><span class="tag">Cắt</span><span class="tag">Ghép</span><span class="tag">Crop</span><span class="tag">Xoay</span><span class="tag">Mux</span><span class="tag">Chèn phụ đề</span><span class="tag">Frames</span></div>`, "", "card--flat")}
+      ${card("Generic video and image actions", `<form data-job-form data-tool="run_media_operation" data-media-generic-action="explanatory" data-media-generic-status="partial" class="stack" aria-describedby="media-generic-guidance">${file("Primary media input", "asset_id", "audio/*,video/*,image/*")}${files("Additional inputs", "input_asset_ids", "video/*,image/*")}${file("Secondary audio or subtitle", "secondary_asset_id", "audio/*,.srt,.ass")}${field("Operation", `<select name="operation"><option value="probe">Read metadata</option><option value="trim">Trim</option><option value="concat">Concat</option><option value="resize">Resize</option><option value="crop">Crop</option><option value="rotate">Rotate</option><option value="fps">FPS</option><option value="transcode">Transcode</option><option value="extract_audio">Extract audio</option><option value="replace_audio">Replace audio</option><option value="mux">Mux audio/video</option><option value="burn_subtitle">Burn subtitle</option><option value="extract_frames">Extract frames</option><option value="image_sequence_video">Image sequence to video</option><option value="image_resize">Image resize</option><option value="image_crop">Image crop</option><option value="image_rotate">Image rotate</option><option value="image_flip">Image flip</option><option value="image_convert">Image convert</option><option value="image_compress">Image compress</option></select>`)}<div class="form-grid">${field("Start", `<input name="start" type="number" min="0" step="0.1" value="0" />`)}${field("End", `<input name="end" type="number" min="0.1" step="0.1" value="5" />`)}${field("Width", `<input name="width" type="number" min="2" value="1280" />`)}${field("Height", `<input name="height" type="number" min="-2" value="-2" />`)}${field("FPS", `<input name="fps" type="number" min="1" value="30" />`)}${field("Rotation", `<select name="degrees"><option value="90">90</option><option value="180">180</option><option value="270">270</option></select>`)}${field("Flip", `<select name="axis"><option value="horizontal">Horizontal</option><option value="vertical">Vertical</option></select>`)}${field("Image format", `<select name="format"><option value="png">PNG</option><option value="jpg">JPG</option><option value="webp">WEBP</option></select>`)}</div><div id="media-generic-guidance" class="callout callout--warning" role="status"><strong>Generic media remains Partial.</strong><span>${escapeHtml(mediaEvidence.genericReason)} ${escapeHtml(mediaEvidence.genericNextAction)}</span></div><div class="form-actions"><button class="button" type="submit" disabled data-media-generic-action="explanatory">Execution unavailable from this snapshot</button></div>${formResult("media-result")}</form>`) }
+      ${card("Media safety boundary", `<ul class="notice-list"><li>Only exact server-owned evidence can be operational.</li><li>Generic actions remain explanatory and cannot submit a runtime request here.</li><li>Artifact previews use opaque Hub URLs and native metadata/range transport.</li></ul>`, "", "card--flat")}
     </div>`;
 }
 
@@ -1002,6 +1113,7 @@ function renderSettings(state) {
       </section>
       <section class="readiness-modules card" aria-labelledby="readiness-modules-title"><div class="card-title-row"><div><span class="eyebrow">MODULE EVIDENCE</span><h2 id="readiness-modules-title">Safe module projection</h2><p>Rows are limited to server-projected id, provider, component, status, version, reason and next action.</p></div><span class="tag">${escapeHtml(String(snapshot.modules.length))} rows</span></div><div class="readiness-module-list" role="list">${readinessModuleDetails(snapshot.modules)}</div></section>
       <div class="workspace-grid workspace-grid--two readiness-detail-grid">${readinessResourceDetails(snapshot.resourcePlan)}${readinessStorageDetails(snapshot.volumes)}</div>
+      ${mediaEvidencePanel(state, "settings")}
     </section>
     <div class="workspace-grid workspace-grid--two">
       ${card("Appearance & startup", `<div class="row-list"><div class="row-item"><span>Start maximized</span><strong>${settings.start_maximized ? "Bật" : "Tắt"}</strong></div><div class="row-item"><span>Minimum window</span><strong>${escapeHtml(settings.minimum_width || 1280)} × ${escapeHtml(settings.minimum_height || 720)}</strong></div><div class="row-item"><span>Theme</span><button class="button button--compact" type="button" data-cycle-theme>Đổi theme</button></div></div>`)}
