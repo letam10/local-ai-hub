@@ -5,6 +5,17 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
+
+
+EXIT_OK = 0
+EXIT_REFUSAL = 2
+
+
+if __package__ in {None, ""}:
+    _repo_root = Path(__file__).resolve().parents[1]
+    if str(_repo_root) not in sys.path:
+        sys.path.insert(0, str(_repo_root))
 
 from src.shared.canonical_git_integrity import inspect_canonical, preflight_canonical
 
@@ -24,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
             "dirty": False,
         }
     print(json.dumps(result, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
-    return 0 if result.get("ok") is True else 2
+    return EXIT_OK if result.get("ok") is True else EXIT_REFUSAL
 
 
 if __name__ == "__main__":

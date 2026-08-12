@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -9,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from scripts import canonical_git_guard as cli
 from src.shared import canonical_git_integrity as guard
 
 
@@ -26,7 +29,7 @@ class CanonicalGitIntegrityTests(unittest.TestCase):
         self.admin = self.common / "worktrees" / self.target.name
         self.admin.mkdir(parents=True)
         (self.target / ".git").write_text(f"gitdir: {self.admin}\n", encoding="utf-8")
-        self.snapshot = root / "Reports" / "canonical_git_integrity.local.json"
+        self.snapshot = self.canonical / "Reports" / "canonical_git_integrity.local.json"
         self.snapshot.parent.mkdir()
         self._reset_git_outputs()
         self.root_patch = patch.object(guard, "CANONICAL_ROOT", self.canonical)
@@ -70,6 +73,49 @@ class CanonicalGitIntegrityTests(unittest.TestCase):
         if Path(root).resolve() == self.target.resolve():
             return self.target_outputs.get(args, guard._GitResult(1))
         return guard._GitResult(1)
+
+    def _run_cli_subprocess(self, operation: str, *, dirty: bool = False) -> subprocess.CompletedProcess[str]:
+        code = r'''
+import runpy
+import sys
+from pathlib import Path
+from src.shared import canonical_git_integrity as guard
+
+root = Path(sys.argv[1])
+(root / "Reports").mkdir(parents=True, exist_ok=True)
+dirty = sys.argv[3] == "dirty"
+
+def ok(value=""):
+    return guard._GitResult(0, (value + "\n").encode("utf-8"), b"")
+
+outputs = {
+    ("rev-parse", "--show-toplevel"): ok(str(root)),
+    ("rev-parse", "--git-dir"): ok(".git"),
+    ("rev-parse", "--git-common-dir"): ok(".git"),
+    ("rev-parse", "--verify", "HEAD^{commit}"): ok("a" * 40),
+    ("symbolic-ref", "--quiet", "--short", "HEAD"): ok("feature/local-ai-hub-v6"),
+    ("config", "--get-all", "remote.origin.url"): ok("https://github.com/letam10/local-ai-hub.git"),
+    ("config", "--get-all", "remote.origin.pushurl"): guard._GitResult(1),
+    ("status", "--porcelain=v1", "--untracked-files=all"): ok("hidden-marker.txt" if dirty else ""),
+}
+
+def fake_run(_root, args):
+    return outputs.get(args, guard._GitResult(1))
+
+guard.CANONICAL_ROOT = root
+guard.FORENSIC_SNAPSHOT_PATH = root / "Reports" / "canonical_git_integrity.local.json"
+guard._run_git = fake_run
+sys.argv = ["scripts/canonical_git_guard.py", sys.argv[2]]
+runpy.run_module("scripts.canonical_git_guard", run_name="__main__")
+'''
+        repo_root = Path(__file__).resolve().parents[1]
+        return subprocess.run(
+            [sys.executable, "-B", "-c", code, str(self.canonical), operation, "dirty" if dirty else "clean"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
     def _lease(self, *, target: Path | None = None, common: Path | None = None, base: str = "a" * 40) -> guard.OwnedTemporaryWorktree | None:
         return guard.issue_owned_temporary_worktree(
@@ -192,6 +238,49 @@ class CanonicalGitIntegrityTests(unittest.TestCase):
             oversized = self.real_run_git(self.canonical, ("status", "--porcelain=v1", "--untracked-files=all"))
             self.assertEqual(oversized.code, guard.CODE_GIT_OUTPUT_OVERSIZE)
             self.assertNotIn("x" * 100, json.dumps(oversized.__dict__, default=str))
+
+    def test_direct_root_cli_help_bootstrap_is_runnable(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            [sys.executable, "-B", "scripts/canonical_git_guard.py", "--help"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, cli.EXIT_OK)
+        self.assertIn("usage:", result.stdout.lower())
+        self.assertNotIn("ModuleNotFoundError", result.stderr)
+
+    def test_cli_inspect_and_preflight_subprocesses_are_sanitized(self) -> None:
+        for operation in ("inspect", "preflight"):
+            with self.subTest(operation=operation):
+                result = self._run_cli_subprocess(operation)
+                self.assertEqual(result.returncode, cli.EXIT_OK)
+                projection = json.loads(result.stdout)
+                self.assertEqual(projection["operation_code"], guard.CODE_OK)
+                self.assertTrue(projection["ok"])
+                self.assertNotIn(str(self.canonical), result.stdout)
+                self.assertNotIn("github.com", result.stdout)
+                if operation == "preflight":
+                    self.assertTrue(self.snapshot.exists())
+                    snapshot = json.loads(self.snapshot.read_text(encoding="utf-8"))
+                    self.assertEqual(snapshot["canonical_path"], guard.CANONICAL_POLICY_PATH)
+                    self.assertNotIn(str(self.canonical), json.dumps(snapshot))
+
+    def test_cli_dirty_inspect_and_preflight_use_finite_refusal_exit(self) -> None:
+        for operation in ("inspect", "preflight"):
+            with self.subTest(operation=operation):
+                result = self._run_cli_subprocess(operation, dirty=True)
+                self.assertEqual(result.returncode, cli.EXIT_REFUSAL)
+                projection = json.loads(result.stdout)
+                self.assertEqual(projection["operation_code"], guard.CODE_WORKTREE_DIRTY)
+                self.assertFalse(projection["ok"])
+                self.assertTrue(projection["dirty"])
+                self.assertNotIn("hidden-marker", result.stdout)
+                if operation == "preflight":
+                    snapshot = json.loads(self.snapshot.read_text(encoding="utf-8"))
+                    self.assertEqual(snapshot["events"][-1]["outcome"], "preservation_required")
 
     def test_forensic_writer_is_atomic_bounded_rolling_and_sanitized(self) -> None:
         event = guard._event_from_result(guard.inspect_canonical())

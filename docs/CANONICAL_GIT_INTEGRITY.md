@@ -9,9 +9,13 @@ push, process termination, or any other mutation.
 
 ## Canonical preflight
 
-`python scripts/canonical_git_guard.py inspect` prints only a fixed sanitized
-projection. `preflight` performs the same checks and appends one bounded event
-to the ignored local `Reports/canonical_git_integrity.local.json` snapshot.
+`python -B scripts/canonical_git_guard.py inspect` prints only a fixed
+sanitized projection. `preflight` performs the same checks and appends one
+bounded event to the ignored local `Reports/canonical_git_integrity.local.json`
+snapshot. Both commands use a finite exit contract: `0` means `ok=true`; `2`
+means a sanitized refusal, including dirty canonical state
+(`CANONICAL_PRESERVATION_REQUIRED`) or forensic-writer failure. No command
+invokes cleanup or changes Git state.
 The snapshot is versioned, atomic, limited to 32 events, and contains only
 the fixed canonical policy path, finite event type/operation/outcome/target
 kind, fingerprints, a timestamp, an operation code, and a dirty boolean.
