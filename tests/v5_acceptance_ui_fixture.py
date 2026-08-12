@@ -158,7 +158,62 @@ JOBS = [{
     "result": {"artifacts": _artifact_records},
 }]
 HEALTH = {"status": "healthy", "version": "5.0.0-fixture", "disk": {"free_bytes": 80 * _GIB}, "gpu": {"status": "unavailable"}, "active_jobs": 0}
-PRODUCTIZATION = {"status": "partial", "execution": "not_run", "dry_run": True, "storage": STORAGE, "warnings": [{"id": "volume-c", "status": "partial", "reason": "C: is below the low-space threshold."}, {"id": "volume-d", "status": "unavailable", "reason": "D: statistics are unavailable."}]}
+CAPABILITY_MODULES = [
+    {"id": "image-engine", "provider": "fixture.provider", "component": "image", "status": "operational", "version": "1.0", "reason": "Bounded static evidence is present.", "next_action": "Keep any runtime request separately authorized."},
+    {"id": "mask-engine", "provider": "fixture.provider", "component": "mask", "status": "partial", "version": "1.0", "reason": "The fixture has no runtime worker proof.", "next_action": "Review the worker contract before runtime work."},
+    {"id": "video-engine", "provider": "fixture.provider", "component": "video", "status": "unavailable", "version": None, "reason": "No video provider is available in this fixture.", "next_action": "Keep video work unavailable until separately authorized evidence exists."},
+    {"id": "future-engine", "provider": "fixture.provider", "component": "future", "status": "not_published", "version": None, "reason": "No verified publication is present.", "next_action": "Publish a reviewed descriptor before a future plan."},
+    {"id": "voice-engine", "provider": "fixture.provider", "component": "voice", "status": "not_run", "version": None, "reason": "No runtime probe was requested.", "next_action": "Do not infer execution from this snapshot."},
+]
+RESOURCE_PLAN = {
+    "status": "partial",
+    "execution": "not_run",
+    "dry_run": True,
+    "mode": "parallel",
+    "target_gpu": {"vendor": "nvidia", "device_class": "discrete", "model": "Fixture GPU", "vram_mb": 8192, "unknown_object": {"visible_if_bad": "DO_NOT_RENDER_UNKNOWN"}},
+    "physical": [
+        {"id": "image-engine", "status": "available", "gpu": "gpu-fixture-1", "physical_fit": True, "unknown_object": {"visible_if_bad": "DO_NOT_RENDER_UNKNOWN"}},
+        {"id": "video-engine", "status": "unavailable", "gpu": None, "physical_fit": False},
+    ],
+    "concurrent": [{"id": "image-engine", "status": "available", "gpu": "gpu-fixture-1", "concurrent_fit": True}],
+    "errors": [{"code": "gpu_capacity", "module": "video-engine", "unknown_object": {"visible_if_bad": "DO_NOT_RENDER_UNKNOWN"}}],
+    "actions": ["Keep video-engine unavailable until a compatible resource is separately authorized."],
+    "unknown_object": {"visible_if_bad": "DO_NOT_RENDER_UNKNOWN"},
+}
+CAPABILITIES = {
+    "status": "partial",
+    "schema_version": "capability-control-plane.v1",
+    "execution": "not_run",
+    "dry_run": True,
+    "registry": {"status": "partial", "records": []},
+    "module_manager": {
+        "status": "partial",
+        "execution": "not_run",
+        "dry_run": True,
+        "reason": "Fixture Module Manager emits a read-only plan.",
+        "next_action": "Review the plan; no install, repair or uninstall action is available.",
+        "actions": ["Keep video-engine unavailable until a compatible resource is separately authorized."],
+        "errors": [{"code": "gpu_capacity", "module": "video-engine", "unknown_object": {"visible_if_bad": "DO_NOT_RENDER_UNKNOWN"}}],
+        "resource_plan": RESOURCE_PLAN,
+        "unknown_object": {"visible_if_bad": "DO_NOT_RENDER_UNKNOWN"},
+    },
+}
+PRODUCTIZATION = {
+    "status": "partial",
+    "execution": "not_run",
+    "dry_run": True,
+    "readiness": {"status": "partial", "reason": "The server snapshot mixes usable and incomplete module evidence.", "next_action": "Review each module and resource constraint before any separately authorized runtime work."},
+    "capabilities": {
+        "status": "partial",
+        "registry_status": "partial",
+        "module_plan_status": "partial",
+        "reason": "Module preflight is server-owned static metadata.",
+        "next_action": "Review the plan; no install, repair or uninstall action is available.",
+        "modules": CAPABILITY_MODULES,
+    },
+    "storage": STORAGE,
+    "warnings": [{"id": "volume-c", "status": "partial", "reason": "C: is below the low-space threshold."}, {"id": "volume-d", "status": "unavailable", "reason": "D: statistics are unavailable."}, {"id": "resource", "status": "partial", "reason": "Resource fit is dry-run evidence only."}],
+}
 BOOTSTRAP = {
     "status": "completed",
     "health": HEALTH,
@@ -169,7 +224,7 @@ BOOTSTRAP = {
     "tools": [],
     "settings": {"minimum_width": 1280, "minimum_height": 720, "model_load_policy": "on_demand", "max_heavy_gpu_jobs": 1},
     "lifecycle": {"comfyui": {"status": "partial", "reason": "Not started by the acceptance fixture.", "action": "No runtime action is available."}},
-    "capabilities": {"status": "partial", "registry": {"status": "partial", "records": []}},
+    "capabilities": CAPABILITIES,
     "productization": PRODUCTIZATION,
     "storage": STORAGE,
     "workflow_library": {"status": "partial", "library_revision": 0, "workflows": [], "recovery": {"status": "ready", "reason": "Fixture library is read-only metadata.", "action": "Use local draft controls."}},
@@ -255,7 +310,7 @@ class AcceptanceHandler(BaseHTTPRequestHandler):
         if path == "/api/durable-jobs":
             return {"status": "completed", "records": [], "execution": "not_run", "dry_run": True}
         if path == "/api/capabilities":
-            return {"status": "partial", "registry": {"status": "partial", "records": []}}
+            return CAPABILITIES
         if path == "/api/workflow-library":
             return BOOTSTRAP["workflow_library"]
         if path in {"/api/storage", "/api/storage/scan"}:

@@ -48,6 +48,19 @@ class V5AcceptanceUiTests(unittest.TestCase):
         self.assertEqual(d_volume["availability"], "unknown")
         self.assertNotRegex(json.dumps(payload), r"(?i)([a-z]:[\\/]|api[_-]?key|password|secret|token)")
 
+    def test_fixture_readiness_projection_preserves_statuses_and_safe_constraints(self) -> None:
+        status, _headers, body = self._request("/api/bootstrap")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        modules = payload["productization"]["capabilities"]["modules"]
+        self.assertEqual({item["status"] for item in modules}, {"operational", "partial", "unavailable", "not_published", "not_run"})
+        self.assertEqual(payload["productization"]["execution"], "not_run")
+        self.assertTrue(payload["productization"]["dry_run"])
+        resource_plan = payload["capabilities"]["module_manager"]["resource_plan"]
+        self.assertEqual(set(resource_plan) & {"status", "mode", "target_gpu", "physical", "concurrent", "errors", "actions"}, {"status", "mode", "target_gpu", "physical", "concurrent", "errors", "actions"})
+        self.assertIn("unknown_object", resource_plan)
+        self.assertNotRegex(json.dumps(payload), r"(?i)([a-z]:[\\/]|api[_-]?key|password|secret|token)\s*[:=]")
+
     def test_artifact_http_fixture_supports_bounded_range_contract(self) -> None:
         artifact_id = "artifact_" + "1" * 32
         status, headers, body = self._request(f"/api/artifacts/{artifact_id}", method="HEAD")
@@ -95,8 +108,12 @@ class V5AcceptanceUiTests(unittest.TestCase):
         self.assertIn("data-artifact-meta", pages)
         self.assertIn("data-artifact-provenance", pages)
         self.assertIn("data-artifact-mask", pages)
-        self.assertIn('available ? formatGb(volume[key]) : "\\u2014"', pages)
+        self.assertIn('available ? formatGb(volume[`${key}Bytes`]) : "\\u2014"', pages)
         self.assertNotIn("}: review storage before new writes.", pages)
+        self.assertIn('not_published: "Not published"', pages)
+        self.assertIn('not_run: "Not run"', pages)
+        self.assertIn('ready: "Ready"', pages)
+        self.assertIn('clean: "Clean"', pages)
 
 
 if __name__ == "__main__":

@@ -513,7 +513,7 @@ const refreshFast = async ({ quiet = false } = {}) => {
   else failed = true;
   if (durableJobs.status === "fulfilled") state.durableJobs = durableJobs.value?.records || [];
   else failed = true;
-  if (["dashboard", "jobs"].includes(routeId())) render(); else updateTopbar();
+  if (["dashboard", "settings", "jobs"].includes(routeId())) render(); else updateTopbar();
   if (failed && state.apiStatus === "ready") state.apiStatus = "degraded";
   if (failed && !quiet) showToast("API đang khởi động hoặc một snapshot nhanh chưa sẵn sàng.", "warning");
 };
@@ -932,8 +932,8 @@ document.addEventListener("click", async (event) => {
   const preview = event.target.closest("[data-preview-artifact]");
   if (preview) { showArtifactPreview(preview); return; }
   if (event.target.closest("[data-refresh-api]")) { await initialize(); return; }
-  const route = event.target.closest("[data-route]");
-  if (route) { closeMobileSidebar(); window.location.hash = `#/${route.dataset.route}`; return; }
+  const route = event.target.closest("[data-route], [data-readiness-route]");
+  if (route) { closeMobileSidebar(); window.location.hash = `#/${route.dataset.route || route.dataset.readinessRoute}`; return; }
   if (event.target.closest("[data-refresh-creative]")) {
     try { await refreshCreative(); showToast("Đã làm mới Creative Workspace."); }
     catch (error) { showToast(error.message, "error"); }
