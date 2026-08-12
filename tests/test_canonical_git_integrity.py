@@ -74,7 +74,13 @@ class CanonicalGitIntegrityTests(unittest.TestCase):
             return self.target_outputs.get(args, guard._GitResult(1))
         return guard._GitResult(1)
 
-    def _run_cli_subprocess(self, operation: str, *, dirty: bool = False) -> subprocess.CompletedProcess[str]:
+    def _run_cli_subprocess(
+        self,
+        operation: str,
+        *,
+        dirty: bool = False,
+        writer_failure: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
         code = r'''
 import runpy
 import sys
@@ -84,6 +90,7 @@ from src.shared import canonical_git_integrity as guard
 root = Path(sys.argv[1])
 (root / "Reports").mkdir(parents=True, exist_ok=True)
 dirty = sys.argv[3] == "dirty"
+writer_failure = sys.argv[4] == "writer-failure"
 
 def ok(value=""):
     return guard._GitResult(0, (value + "\n").encode("utf-8"), b"")
@@ -105,12 +112,23 @@ def fake_run(_root, args):
 guard.CANONICAL_ROOT = root
 guard.FORENSIC_SNAPSHOT_PATH = root / "Reports" / "canonical_git_integrity.local.json"
 guard._run_git = fake_run
+if writer_failure:
+    guard.write_forensic_snapshot = lambda _event: False
 sys.argv = ["scripts/canonical_git_guard.py", sys.argv[2]]
-runpy.run_module("scripts.canonical_git_guard", run_name="__main__")
+runpy.run_path(str(Path.cwd() / "scripts" / "canonical_git_guard.py"), run_name="__main__")
 '''
         repo_root = Path(__file__).resolve().parents[1]
         return subprocess.run(
-            [sys.executable, "-B", "-c", code, str(self.canonical), operation, "dirty" if dirty else "clean"],
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                code,
+                str(self.canonical),
+                operation,
+                "dirty" if dirty else "clean",
+                "writer-failure" if writer_failure else "normal",
+            ],
             cwd=repo_root,
             capture_output=True,
             text=True,
@@ -281,6 +299,13 @@ runpy.run_module("scripts.canonical_git_guard", run_name="__main__")
                 if operation == "preflight":
                     snapshot = json.loads(self.snapshot.read_text(encoding="utf-8"))
                     self.assertEqual(snapshot["events"][-1]["outcome"], "preservation_required")
+
+        failed = self._run_cli_subprocess("preflight", writer_failure=True)
+        self.assertEqual(failed.returncode, cli.EXIT_REFUSAL)
+        projection = json.loads(failed.stdout)
+        self.assertEqual(projection["operation_code"], guard.CODE_SNAPSHOT_WRITE_FAILED)
+        self.assertFalse(projection["ok"])
+        self.assertNotIn(str(self.canonical), failed.stdout)
 
     def test_forensic_writer_is_atomic_bounded_rolling_and_sanitized(self) -> None:
         event = guard._event_from_result(guard.inspect_canonical())
