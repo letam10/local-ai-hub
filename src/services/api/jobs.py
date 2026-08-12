@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 import uuid
@@ -33,9 +34,26 @@ RETRYABLE_STATUSES = frozenset({"failed", "cancelled", "unavailable"})
 ACTIVE_STATUSES = frozenset({"queued", "starting", "running", "cancelling"})
 ARCHIVE_MAX_FILES = 30
 ARCHIVE_ROTATE_BYTES = 16 * 1024 * 1024
+_MANAGED_JOB_ID = re.compile(r"jobv5_[a-f0-9]{32}")
+_MANAGED_ARTIFACT_ID = re.compile(r"artifact_[a-f0-9]{32}")
+_MANAGED_TRANSACTION_ID = re.compile(r"artifact_tx_[a-f0-9]{32}")
+_MANAGED_FINGERPRINT = re.compile(r"[a-f0-9]{64}")
+_MANAGED_ADAPTER_ID = re.compile(r"[a-z][a-z0-9_.-]{0,63}")
+_MANAGED_DESCRIPTOR_SUMMARY = {
+    "adapter_id": "media.video_grade.v1",
+    "operation": "run",
+    "reconstructable": True,
+    "resources": {"cpu_slots": 1, "gpu_slots": 0, "ram_mb": 0, "disk_mb": 0, "exclusive_group": None},
+}
 
 _lock = threading.RLock()
 _jobs: dict[str, dict[str, Any]] = {}
+
+
+def _detached_json(value: Any) -> Any:
+    """Return a JSON-detached copy without importing the job-manager package."""
+
+    return json.loads(json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False))
 
 
 def _now() -> str:
@@ -635,6 +653,149 @@ class DurableJobStore:
             # A delayed progress update remains private staging data until the
             # atomic write succeeds; callers never receive it as durable.
             return self._copy(committed) if committed is not None else result
+
+    @staticmethod
+    def _managed_link(value: object) -> dict[str, Any] | None:
+        if type(value) is not dict or set(value) != {"artifact_id", "transaction_id", "provenance"}:
+            return None
+        artifact_id = value.get("artifact_id")
+        transaction_id = value.get("transaction_id")
+        provenance = value.get("provenance")
+        if (
+            not isinstance(artifact_id, str)
+            or not _MANAGED_ARTIFACT_ID.fullmatch(artifact_id)
+            or not isinstance(transaction_id, str)
+            or not _MANAGED_TRANSACTION_ID.fullmatch(transaction_id)
+            or type(provenance) is not dict
+            or set(provenance) != {"job_id", "job_spec_fingerprint", "adapter_id", "attempt", "status"}
+        ):
+            return None
+        if (
+            not isinstance(provenance.get("job_id"), str)
+            or not _MANAGED_JOB_ID.fullmatch(provenance["job_id"])
+            or not isinstance(provenance.get("job_spec_fingerprint"), str)
+            or not _MANAGED_FINGERPRINT.fullmatch(provenance["job_spec_fingerprint"])
+            or not isinstance(provenance.get("adapter_id"), str)
+            or not _MANAGED_ADAPTER_ID.fullmatch(provenance["adapter_id"])
+            or provenance.get("adapter_id") != "media.video_grade.v1"
+            or isinstance(provenance.get("attempt"), bool)
+            or not isinstance(provenance.get("attempt"), int)
+            or not 1 <= provenance["attempt"] <= 10_000
+            or provenance.get("status") != "completed"
+        ):
+            return None
+        return {
+            "artifact_id": artifact_id,
+            "transaction_id": transaction_id,
+            "provenance": {
+                "job_id": provenance["job_id"],
+                "job_spec_fingerprint": provenance["job_spec_fingerprint"],
+                "adapter_id": provenance["adapter_id"],
+                "attempt": provenance["attempt"],
+                "status": "completed",
+            },
+        }
+
+    def commit_managed_artifact(
+        self,
+        job_id: str,
+        artifact_id: str,
+        transaction_id: str,
+        provenance: dict[str, Any],
+    ) -> dict[str, Any]:
+        """CAS-link one exact hidden artifact to an unchanged completed job."""
+
+        link = self._managed_link({
+            "artifact_id": artifact_id,
+            "transaction_id": transaction_id,
+            "provenance": provenance,
+        })
+        if (
+            not isinstance(job_id, str)
+            or not _MANAGED_JOB_ID.fullmatch(job_id)
+            or link is None
+            or link["provenance"]["job_id"] != job_id
+        ):
+            raise DurableStoreHealthError("DURABLE_ARTIFACT_INVALID", "Create a new managed output after server validation.")
+        with self._lock:
+            self._check_health_locked()
+            candidate = self._copy(self._pending_records if self._pending_records is not None else self._records)
+            record = candidate.get(job_id)
+            if not isinstance(record, dict) or record.get("id") != job_id or record.get("status") != "completed":
+                raise DurableStoreHealthError("DURABLE_ARTIFACT_UNAVAILABLE", "Create a new managed output after the job is completed.")
+            if (
+                record.get("job_spec_fingerprint") != link["provenance"]["job_spec_fingerprint"]
+                or not isinstance(record.get("job_spec_fingerprint"), str)
+                or not _MANAGED_FINGERPRINT.fullmatch(record["job_spec_fingerprint"])
+                or record.get("descriptor_summary") != _MANAGED_DESCRIPTOR_SUMMARY
+                or record.get("attempt") != link["provenance"]["attempt"]
+            ):
+                raise DurableStoreHealthError("DURABLE_ARTIFACT_CONFLICT", "Create a new managed output after server validation.")
+            artifacts = record.get("artifacts")
+            if type(artifacts) is not list or any(not isinstance(item, str) or not _MANAGED_ARTIFACT_ID.fullmatch(item) for item in artifacts):
+                raise DurableStoreHealthError("DURABLE_ARTIFACT_CONFLICT", "Create a new managed output after server validation.")
+            existing_value = record.get("managed_artifact")
+            existing = self._managed_link(existing_value) if existing_value is not None else None
+            if existing_value is not None and existing is None:
+                raise DurableStoreHealthError("DURABLE_ARTIFACT_CONFLICT", "Create a new managed output after server validation.")
+            if existing is not None:
+                if existing == link and link["artifact_id"] in artifacts:
+                    return _detached_json(existing)
+                raise DurableStoreHealthError("DURABLE_ARTIFACT_CONFLICT", "Create a new managed output after server validation.")
+            if artifacts:
+                raise DurableStoreHealthError("DURABLE_ARTIFACT_CONFLICT", "Create a new managed output after server validation.")
+            record["managed_artifact"] = link
+            record["artifacts"] = [link["artifact_id"]]
+            try:
+                committed = self._write_snapshot_locked(candidate)
+            except DurableStoreHealthError as exc:
+                raise self._fail_locked(exc) from None
+            except Exception as exc:
+                raise self._fail_locked(exc) from None
+            self._records = committed
+            self._pending_records = None
+            return _detached_json(link)
+
+    def get_managed_artifact_link(self, job_id: str) -> dict[str, Any] | None:
+        if not isinstance(job_id, str) or not _MANAGED_JOB_ID.fullmatch(job_id):
+            return None
+        with self._lock:
+            self._check_health_locked()
+            record = self._records.get(job_id)
+            link = self._managed_link(record.get("managed_artifact")) if isinstance(record, dict) else None
+            return _detached_json(link) if link is not None else None
+
+    def remove_managed_artifact_link(self, job_id: str, artifact_id: str, transaction_id: str) -> bool:
+        """Remove only an exact managed link during fail-closed reconciliation."""
+
+        if (
+            not isinstance(job_id, str)
+            or not _MANAGED_JOB_ID.fullmatch(job_id)
+            or not isinstance(artifact_id, str)
+            or not _MANAGED_ARTIFACT_ID.fullmatch(artifact_id)
+            or not isinstance(transaction_id, str)
+            or not _MANAGED_TRANSACTION_ID.fullmatch(transaction_id)
+        ):
+            return False
+        with self._lock:
+            self._check_health_locked()
+            candidate = self._copy(self._pending_records if self._pending_records is not None else self._records)
+            record = candidate.get(job_id)
+            link = self._managed_link(record.get("managed_artifact")) if isinstance(record, dict) else None
+            if link is None or link["artifact_id"] != artifact_id or link["transaction_id"] != transaction_id:
+                return False
+            record.pop("managed_artifact", None)
+            artifacts = record.get("artifacts") if isinstance(record.get("artifacts"), list) else []
+            record["artifacts"] = [item for item in artifacts if item != artifact_id]
+            try:
+                committed = self._write_snapshot_locked(candidate)
+            except DurableStoreHealthError as exc:
+                raise self._fail_locked(exc) from None
+            except Exception as exc:
+                raise self._fail_locked(exc) from None
+            self._records = committed
+            self._pending_records = None
+            return True
 
     def flush(self) -> None:
         with self._lock:

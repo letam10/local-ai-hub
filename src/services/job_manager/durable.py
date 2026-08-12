@@ -8,12 +8,14 @@ future V5-D integration change.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
 import time
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from src.services.api.jobs import DurableJobStore, DurableStoreHealthError
@@ -73,6 +75,10 @@ _ALLOWED_TRANSITIONS = {
     "interrupted": frozenset(),
 }
 
+
+def _is_terminal_state(value: object) -> bool:
+    return isinstance(value, str) and value in TERMINAL_JOB_STATES
+
 Adapter = Callable[[ExecutionDescriptor, "DurableJobContext"], dict[str, Any]]
 
 
@@ -104,6 +110,57 @@ def _current_adapter_input_valid(spec: JobSpec) -> bool:
     except Exception:
         return False
     return True
+
+
+def _managed_output_context(record: object) -> tuple[dict[str, Any], Path] | None:
+    """Revalidate one completed V6 media job before touching output stores."""
+
+    if not isinstance(record, dict) or record.get("status") != "completed":
+        return None
+    try:
+        spec = validate_job_spec(record.get("job_spec"))
+    except JobContractError:
+        return None
+    if (
+        spec.descriptor.adapter_id != "media.video_grade.v1"
+        or record.get("job_spec_fingerprint") != spec.fingerprint
+        or record.get("descriptor_summary") != spec.descriptor.summary()
+        or not _current_adapter_input_valid(spec)
+    ):
+        return None
+    fingerprint = record.get("job_spec_fingerprint")
+    attempt = record.get("attempt")
+    job_id = record.get("id")
+    if (
+        not isinstance(job_id, str)
+        or not _JOB_ID.fullmatch(job_id)
+        or not isinstance(fingerprint, str)
+        or not _FINGERPRINT.fullmatch(fingerprint)
+        or isinstance(attempt, bool)
+        or not isinstance(attempt, int)
+        or not 1 <= attempt <= 10_000
+    ):
+        return None
+    source_artifact_id = spec.descriptor.arguments.get("source_artifact_id")
+    source_path = artifact_store.resolve(source_artifact_id)
+    if source_path is None:
+        return None
+    try:
+        source_path = source_path.resolve()
+        if not artifact_store._allowed(source_path):
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return (
+        {
+            "job_id": job_id,
+            "job_spec_fingerprint": fingerprint,
+            "adapter_id": "media.video_grade.v1",
+            "attempt": attempt,
+            "status": "completed",
+        },
+        source_path,
+    )
 
 
 def public_recovery_decision(record: object, registry: "ServerOwnedAdapterRegistry") -> dict[str, Any]:
@@ -171,18 +228,22 @@ def public_lifecycle(record: object) -> dict[str, Any]:
 
     source = record if isinstance(record, dict) else {}
     raw_current = source.get("status")
-    current = raw_current if isinstance(raw_current, str) and raw_current in JOB_STATES else "unavailable"
+    current_valid = isinstance(raw_current, str) and raw_current in JOB_STATES
+    current = raw_current if current_valid else "unavailable"
     raw_history = source.get("state_history")
     history = [item for item in raw_history if isinstance(item, str) and item in JOB_STATES] if isinstance(raw_history, list) else []
-    history = history[:MAX_STATE_HISTORY]
-    terminal_index = next((index for index, item in enumerate(history) if item in TERMINAL_JOB_STATES), None)
-    if terminal_index is not None:
-        history = history[: terminal_index + 1]
-        current = history[-1]
-    elif current in TERMINAL_JOB_STATES:
-        history.append(current)
-    elif not history or history[-1] != current:
-        history.append(current)
+    if not current_valid:
+        history = ["unavailable"]
+    else:
+        history = history[:MAX_STATE_HISTORY]
+        terminal_index = next((index for index, item in enumerate(history) if item in TERMINAL_JOB_STATES), None)
+        if terminal_index is not None:
+            history = history[: terminal_index + 1]
+            current = history[-1]
+        elif current in TERMINAL_JOB_STATES:
+            history.append(current)
+        elif not history or history[-1] != current:
+            history.append(current)
     history = history[-MAX_STATE_HISTORY:]
     timestamps = {
         key: _safe_timestamp(source.get(key))
@@ -818,7 +879,7 @@ class DurableWorkEngine:
             except JobContractError:
                 with self._lock:
                     current = self.store.get(job_id)
-                    if current is not None and current.get("status") not in TERMINAL_JOB_STATES:
+                    if current is not None and not _is_terminal_state(current.get("status")):
                         self._transition_locked(job_id, "unavailable", reason_code="INVALID_PERSISTED_DESCRIPTOR", action_code="CREATE_NEW_JOB")
                     elif current is not None:
                         self._update_locked(job_id, {"retry_available": False})
@@ -843,17 +904,138 @@ class DurableWorkEngine:
                 else:
                     self._update_locked(job_id, {"retry_available": retry_available})
         self.store.flush()
+        self._reconcile_managed_artifacts()
+        self.store.flush()
         return {"interrupted": reconciled, "unavailable": unavailable}
 
-    def persist_managed_output(self, _job_id: str, _output_path: object) -> None:
-        """Defer output publication until a cross-store atomic API exists.
+    def persist_managed_output(self, job_id: str, output_path: object) -> dict[str, Any] | None:
+        """Stage, CAS-link, then publish one completed managed media output."""
 
-        Registering an artifact and linking it to the durable record are two
-        different stores.  This package intentionally performs neither step
-        so a failed linkage can never leave an orphaned public artifact.
-        """
+        if not isinstance(job_id, str) or not _JOB_ID.fullmatch(job_id) or not isinstance(output_path, Path):
+            return None
+        try:
+            with self._lock:
+                record = self.store.get(job_id)
+                context = _managed_output_context(record)
+                if context is None:
+                    return None
+                provenance, source_path = context
+            if output_path.is_symlink():
+                return None
+            candidate = output_path.resolve()
+            if candidate == source_path:
+                return None
+            candidate.relative_to(artifact_store.OUTPUT_ROOT.resolve())
+            if not candidate.is_file() or not candidate.name.startswith(f"hub-job-{job_id[-8:]}-"):
+                return None
+            initial = candidate.stat()
+            if initial.st_size < 0 or initial.st_size > artifact_store.MAX_JOB_OUTPUT_BYTES:
+                return None
+            digest = hashlib.sha256()
+            copied = 0
+            with candidate.open("rb") as handle:
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    copied += len(chunk)
+                    if copied > artifact_store.MAX_JOB_OUTPUT_BYTES:
+                        return None
+                    digest.update(chunk)
+            final = candidate.stat()
+            if final.st_size != initial.st_size or copied != initial.st_size:
+                return None
+            staged = artifact_store.stage_job_artifact(
+                candidate,
+                job_id=job_id,
+                name="video_grade.mp4",
+                media_type="video/mp4",
+                size_bytes=copied,
+                sha256=digest.hexdigest(),
+                provenance=provenance,
+            )
+            if not isinstance(staged, dict):
+                return None
+            artifact_id = staged.get("id")
+            transaction_id = staged.get("transaction_id")
+            if not isinstance(artifact_id, str) or not isinstance(transaction_id, str):
+                return None
+            try:
+                link = self.store.commit_managed_artifact(job_id, artifact_id, transaction_id, provenance)
+            except Exception:
+                artifact_store.abort_job_artifact(artifact_id, transaction_id)
+                return None
+            if artifact_store._mark_staged_linked(artifact_id, transaction_id, provenance) is None:
+                return None
+            try:
+                current_link = self.store.get_managed_artifact_link(job_id)
+            except Exception:
+                return None
+            if current_link != link:
+                try:
+                    self.store.remove_managed_artifact_link(job_id, artifact_id, transaction_id)
+                except Exception:
+                    pass
+                artifact_store.abort_job_artifact(artifact_id, transaction_id)
+                return None
+            published = artifact_store.publish_staged(artifact_id, transaction_id, provenance)
+            return detached_json(published) if isinstance(published, dict) else None
+        except (OSError, ValueError, JobContractError, DurableStoreHealthError):
+            return None
 
-        return None
+    def _reconcile_managed_artifacts(self) -> None:
+        """Converge staged/linked managed outputs without exposing paths."""
+
+        try:
+            records = self.store.records()
+        except DurableStoreHealthError:
+            return
+        artifact_store.cleanup_managed_orphans()
+        by_job = {
+            record.get("id"): record
+            for record in records
+            if isinstance(record, dict) and isinstance(record.get("id"), str)
+        }
+        for artifact in artifact_store.list_managed_artifacts():
+            artifact_id = artifact.get("id")
+            transaction_id = artifact.get("transaction_id")
+            provenance = artifact.get("provenance")
+            job = by_job.get(provenance.get("job_id")) if isinstance(provenance, dict) else None
+            link = self.store._managed_link(job.get("managed_artifact")) if isinstance(job, dict) else None
+            context = _managed_output_context(job)
+            expected_provenance = context[0] if context is not None else None
+            exact = (
+                link is not None
+                and link.get("artifact_id") == artifact_id
+                and link.get("transaction_id") == transaction_id
+                and link.get("provenance") == provenance
+                and expected_provenance == provenance
+                and isinstance(job, dict)
+                and job.get("status") == "completed"
+            )
+            if exact and isinstance(artifact_id, str) and isinstance(transaction_id, str) and isinstance(provenance, dict):
+                if artifact.get("durable_linked") is not True:
+                    artifact_store._mark_staged_linked(artifact_id, transaction_id, provenance)
+                artifact_store.publish_staged(artifact_id, transaction_id, provenance)
+            elif isinstance(artifact_id, str) and isinstance(transaction_id, str):
+                artifact_store.abort_job_artifact(artifact_id, transaction_id)
+        for job in records:
+            if not isinstance(job, dict):
+                continue
+            link = self.store._managed_link(job.get("managed_artifact"))
+            if link is None:
+                continue
+            artifact = artifact_store.inspect_managed_artifact(link["artifact_id"])
+            if (
+                artifact is None
+                or artifact.get("transaction_id") != link["transaction_id"]
+                or artifact.get("provenance") != link["provenance"]
+                or artifact.get("visibility") == "invalid"
+            ):
+                try:
+                    self.store.remove_managed_artifact_link(job.get("id"), link["artifact_id"], link["transaction_id"])
+                except Exception:
+                    pass
 
     def persist_output(
         self,
@@ -869,6 +1051,20 @@ class DurableWorkEngine:
         with self._lock:
             record = self.store.get(job_id)
             if record is None:
+                return None
+            raw_spec = record.get("job_spec")
+            raw_descriptor = raw_spec.get("descriptor") if isinstance(raw_spec, dict) else None
+            if (
+                record.get("tool") == "media.video_grade"
+                or (isinstance(raw_descriptor, dict) and raw_descriptor.get("adapter_id") == "media.video_grade.v1")
+                or (isinstance(record.get("descriptor_summary"), dict) and record["descriptor_summary"].get("adapter_id") == "media.video_grade.v1")
+            ):
+                return None
+            try:
+                spec = validate_job_spec(record.get("job_spec"))
+            except JobContractError:
+                spec = None
+            if spec is not None and spec.descriptor.adapter_id == "media.video_grade.v1":
                 return None
             provenance = {
                 "job_id": job_id,
