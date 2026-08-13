@@ -272,18 +272,32 @@ def application_records(root: Path = ROOT) -> list[dict[str, Any]]:
     ]
 
 
-def build_registry_descriptors(root: Path = ROOT) -> dict[str, Any]:
-    """Build deterministic, not-run descriptors without reading machine state."""
+def build_registry_descriptors(root: Path | None = None) -> dict[str, Any]:
+    """Build deterministic, not-run descriptors without exposing local paths."""
+
+    root = root or Path("${LOCALAIHUB_ROOT}")
 
     components = []
     for item in component_records(root):
-        components.append({**item, "status": "configured", "runtime_status": "not_run", "execution": "not_run"})
+        components.append({
+            **item,
+            "status": "configured",
+            "runtime_status": "not_run",
+            "execution": "not_run",
+            "recovery_state": "recovered_static",
+        })
     models = []
     for item in model_records(root, verified_at=None):
-        models.append({**item, "availability": "configured", "execution": "not_run"})
+        models.append({**item, "availability": "configured", "execution": "not_run", "recovery_state": "recovered_static"})
     applications = []
     for item in application_records(root):
-        applications.append({**item, "status": "configured", "launch": False, "execution": "not_run"})
+        applications.append({
+            **item,
+            "status": "configured",
+            "launch": False,
+            "execution": "not_run",
+            "recovery_state": "recovered_static",
+        })
     root_text = str(root)
     return {
         "components": components,

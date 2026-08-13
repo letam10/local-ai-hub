@@ -193,13 +193,24 @@ def _safe_text(value: object, fallback: str) -> str:
     if not isinstance(value, str):
         return fallback
     text = value.strip()
-    if not text or re.match(r"^[A-Za-z]:[\\/]", text) or text.startswith("\\\\"):
+    lowered = text.casefold()
+    if (
+        not text
+        or re.match(r"^[A-Za-z]:[\\/]", text)
+        or text.startswith("\\\\")
+        or lowered.startswith(("http://", "https://", "file:"))
+        or any(marker in lowered for marker in ("secret", "bearer ", "cmd.exe", "powershell", "python -c"))
+    ):
         return fallback
     return text
 
 
 def _observed_status(item: dict[str, Any]) -> str:
     configured = _configured_status(item)
+    if item.get("recovery_state") == "recovered_static" or (
+        item.get("runtime_status") == "not_run" and item.get("execution") == "not_run"
+    ):
+        return "unavailable"
     if _port_open(item.get("port")):
         return "running"
     executable = item.get("executable")

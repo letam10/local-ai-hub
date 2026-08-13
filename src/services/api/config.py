@@ -103,6 +103,7 @@ def read_local_config(
         local_exists = False
     if local_exists:
         try:
+            local_path = validate_config_target(config_dir, local_name)
             value = json.loads(local_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             return {
@@ -123,6 +124,7 @@ def read_local_config(
         example_exists = False
     if example_exists:
         try:
+            example_path = validate_config_target(config_dir, example_name)
             value = json.loads(example_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             return {
@@ -178,7 +180,15 @@ def components() -> list[dict[str, Any]]:
 
 
 def models() -> list[dict[str, Any]]:
-    value = load_json("model_registry.json", {})
+    result = read_local_config(
+        "model_registry.json",
+        {},
+        config_dir=CONFIG_DIR,
+        example_name="model_registry.example.json",
+    )
+    if result.get("provenance") != "local":
+        return []
+    value = result.get("value")
     return list(value.get("models", [])) if isinstance(value, dict) else []
 
 
