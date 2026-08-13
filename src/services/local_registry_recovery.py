@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
-from src.services.api.config import CONFIG_DIR, read_local_config
+from src.services.api.config import CONFIG_DIR, read_local_config, validate_config_target
 
 
 SCHEMA_VERSION = "local-registry-recovery.v1"
@@ -110,7 +110,10 @@ def _document_digest(value: Mapping[str, Any]) -> str:
 
 def _bytes_digest(path: Path) -> str | None:
     try:
+        _safe_target(path.parent, path.name)
         return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+    except LocalRegistryError:
+        raise
     except OSError:
         return None
 
@@ -119,7 +122,7 @@ def _is_reparse(path: Path) -> bool:
     try:
         if path.is_symlink():
             return True
-        attributes = getattr(path.stat(), "st_file_attributes", 0)
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
         return bool(attributes & 0x400)
     except OSError:
         return True
@@ -127,7 +130,7 @@ def _is_reparse(path: Path) -> bool:
 
 def _safe_config_dir(config_dir: Path, *, create: bool = False) -> Path:
     candidate = Path(config_dir)
-    if candidate.exists() and _is_reparse(candidate):
+    if (candidate.exists() or candidate.is_symlink()) and _is_reparse(candidate):
         raise LocalRegistryError("reparse_config_root")
     if not candidate.exists():
         if not create:
@@ -139,6 +142,22 @@ def _safe_config_dir(config_dir: Path, *, create: bool = False) -> Path:
         if _is_reparse(candidate):
             raise LocalRegistryError("reparse_config_root")
     return candidate
+
+
+def _safe_target(root: Path, name: str) -> Path:
+    try:
+        return validate_config_target(root, name)
+    except ValueError as exc:
+        raise LocalRegistryError(str(exc)) from exc
+
+
+def _preflight_paths(root: Path) -> dict[str, Path]:
+    """Validate every fixed target and the journal before any write."""
+
+    paths = {name: _safe_target(root, name) for name in TARGETS}
+    paths.update({name: _safe_target(root, name) for name in EXAMPLE_NAMES.values()})
+    paths[JOURNAL_NAME] = _safe_target(root, JOURNAL_NAME)
+    return paths
 
 
 def _safe_value(value: Any, *, key: str = "") -> bool:
@@ -156,7 +175,11 @@ def _safe_value(value: Any, *, key: str = "") -> bool:
 
 
 def _read_target(name: str, config_dir: Path) -> dict[str, Any]:
+    _safe_target(config_dir, name)
+    _safe_target(config_dir, EXAMPLE_NAMES[name])
     result = read_local_config(name, {}, config_dir=config_dir, example_name=EXAMPLE_NAMES[name])
+    if result.get("error") in {"reparse_target", "reparse_config_root", "config_target_outside_root", "invalid_config_target"}:
+        raise LocalRegistryError(str(result["error"]))
     value = result.get("value")
     return {
         "provenance": result.get("provenance", "missing"),
@@ -286,8 +309,20 @@ def plan_registry(*, config_dir: Path = CONFIG_DIR) -> dict[str, Any]:
             "errors": [{"code": exc.code}],
             "targets": [],
         }
-    expected_hashes = {name: _bytes_digest(root / name) for name in TARGETS}
-    candidate_fingerprints = {name: _document_digest(candidates[name]) for name in TARGETS}
+    try:
+        expected_hashes = {name: _bytes_digest(root / name) for name in TARGETS}
+        candidate_fingerprints = {name: _document_digest(candidates[name]) for name in TARGETS}
+    except LocalRegistryError as exc:
+        return {
+            "schema_version": PLAN_SCHEMA_VERSION,
+            "status": "error",
+            "execution": "not_run",
+            "dry_run": True,
+            "apply_allowed": False,
+            "error_count": 1,
+            "errors": [{"code": exc.code}],
+            "targets": [],
+        }
     plan_core = {
         "schema_version": PLAN_SCHEMA_VERSION,
         "targets": list(TARGETS),
@@ -329,16 +364,18 @@ def _valid_plan(plan: Mapping[str, Any]) -> None:
 
 
 def _write_atomic(path: Path, payload: bytes) -> None:
-    if path.exists() and _is_reparse(path):
-        raise LocalRegistryError("reparse_target")
+    _safe_target(path.parent, path.name)
     temporary = path.with_name(f".{path.name}.recovery.tmp")
-    if temporary.exists():
+    _safe_target(path.parent, temporary.name)
+    if temporary.exists() or temporary.is_symlink():
         raise LocalRegistryError("temporary_target_exists")
     try:
         with temporary.open("xb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+        _safe_target(path.parent, path.name)
+        _safe_target(path.parent, temporary.name)
         os.replace(temporary, path)
     except LocalRegistryError:
         raise
@@ -369,6 +406,7 @@ def _apply_payloads(plan: Mapping[str, Any], *, config_dir: Path, resume: bool =
     try:
         _valid_plan(plan)
         root = _safe_config_dir(config_dir, create=True)
+        paths = _preflight_paths(root)
         current_plan = plan_registry(config_dir=root)
         if current_plan.get("candidate_fingerprints") != plan.get("candidate_fingerprints"):
             raise LocalRegistryError("stale_or_invalid_plan")
@@ -379,7 +417,7 @@ def _apply_payloads(plan: Mapping[str, Any], *, config_dir: Path, resume: bool =
         desired_hashes = {name: hashlib.sha256(desired_payloads[name]).hexdigest() for name in TARGETS}
         if any(desired_hashes[name] != plan["candidate_fingerprints"][name] for name in TARGETS):
             raise LocalRegistryError("descriptor_changed")
-        journal_path = root / JOURNAL_NAME
+        journal_path = paths[JOURNAL_NAME]
         if journal_path.exists() and not resume:
             raise LocalRegistryError("journal_pending")
         expected = {name: _bytes_digest(root / name) for name in TARGETS}

@@ -326,14 +326,14 @@ def write_external_records() -> None:
 
 
 def main() -> int:
-    from src.services.local_registry_recovery import apply_plan, plan_registry
+    from src.services.local_registry_recovery import inspect_registry, plan_registry
 
+    snapshot = inspect_registry()
     plan = plan_registry()
-    result = apply_plan(plan)
-    if result.get("status") != "applied":
-        print("Local registry recovery did not apply.")
+    if snapshot.get("status") == "error" or plan.get("status") == "error":
+        print("Local registry recovery is inspect/plan-only and unavailable.")
         return 1
-    print("Local registry descriptors were written with runtime execution not_run.")
+    print("Local registry recovery is inspect/plan-only; no machine configuration was written.")
     return 0
 
 

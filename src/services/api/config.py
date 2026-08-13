@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,40 @@ def _fingerprint(value: Any) -> str | None:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _is_reparse(path: Path) -> bool:
+    """Inspect a path without following a symlink/junction target."""
+
+    try:
+        if path.is_symlink():
+            return True
+        attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+        return bool(attributes & 0x400)
+    except OSError:
+        return True
+
+
+def validate_config_target(config_dir: Path, name: str) -> Path:
+    """Validate one bounded config target before any read, hash, or write."""
+
+    root = Path(config_dir)
+    if (root.exists() or root.is_symlink()) and _is_reparse(root):
+        raise ValueError("reparse_config_root")
+    if Path(name).name != name or name in {"", ".", ".."}:
+        raise ValueError("invalid_config_target")
+    try:
+        root_resolved = root.resolve(strict=False)
+        candidate = root / name
+        candidate_parent = candidate.parent.resolve(strict=False)
+    except OSError as exc:
+        raise ValueError("config_root_unavailable") from exc
+    if candidate_parent != root_resolved:
+        raise ValueError("config_target_outside_root")
+    if candidate.exists() or candidate.is_symlink():
+        if _is_reparse(candidate):
+            raise ValueError("reparse_target")
+    return candidate
+
+
 def read_local_config(
     name: str,
     default: Any,
@@ -47,8 +82,21 @@ def read_local_config(
     tracked example can never silently become live machine state.
     """
 
-    local_path = config_dir / name
-    example_path = config_dir / (example_name or _example_name(name))
+    local_name = name
+    example_name = example_name or _example_name(name)
+    try:
+        local_path = validate_config_target(config_dir, local_name)
+        example_path = validate_config_target(config_dir, example_name)
+    except ValueError as exc:
+        code = str(exc)
+        provenance = "malformed_local" if code in {"reparse_config_root", "invalid_config_target", "config_target_outside_root", "reparse_target"} else "malformed_example"
+        return {
+            "value": default,
+            "provenance": provenance,
+            "present": True,
+            "fingerprint": None,
+            "error": code,
+        }
     try:
         local_exists = local_path.is_file()
     except OSError:

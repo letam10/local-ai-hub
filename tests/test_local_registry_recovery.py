@@ -128,6 +128,50 @@ class LocalRegistryRecoveryTests(unittest.TestCase):
             self.assertEqual(snapshot["status"], "unavailable")
             self.assertEqual(snapshot["errors"][0]["code"], "reparse_config_root")
 
+    def test_reparse_target_is_rejected_before_read_or_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            clean_plan = recovery.plan_registry(config_dir=directory)
+            sentinel = b"preserve-this-target"
+            target = directory / "components.json"
+            target.write_bytes(sentinel)
+
+            def target_reparse(path: Path) -> bool:
+                return path.name == "components.json"
+
+            with patch.object(config, "_is_reparse", side_effect=target_reparse):
+                snapshot = recovery.inspect_registry(config_dir=directory)
+                self.assertEqual(snapshot["status"], "unavailable")
+                self.assertEqual(snapshot["errors"][0]["code"], "reparse_target")
+                plan = recovery.plan_registry(config_dir=directory)
+                self.assertEqual(plan["status"], "error")
+                result = recovery.apply_plan(clean_plan, config_dir=directory)
+                self.assertEqual(result["errors"][0]["code"], "reparse_target")
+                self.assertEqual(target.read_bytes(), sentinel)
+                self.assertFalse((directory / recovery.JOURNAL_NAME).exists())
+
+    def test_default_script_entrypoint_is_inspect_plan_only(self) -> None:
+        from scripts import refresh_managed_registry
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "Config"
+            directory.mkdir()
+            inspect = recovery.inspect_registry
+            plan = recovery.plan_registry
+
+            with patch.object(
+                recovery,
+                "inspect_registry",
+                side_effect=lambda: inspect(config_dir=directory),
+            ), patch.object(
+                recovery,
+                "plan_registry",
+                side_effect=lambda: plan(config_dir=directory),
+            ), patch.object(recovery, "apply_plan", side_effect=AssertionError("default entrypoint must not apply")):
+                self.assertEqual(refresh_managed_registry.main(), 0)
+
+            self.assertEqual(list(directory.iterdir()), [])
+
     def test_writer_failure_leaves_bounded_journal_and_resume_is_safe(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

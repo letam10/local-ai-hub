@@ -42,6 +42,11 @@ plans, duplicate IDs, unknown fields, secret-like values, hash races, and
 journal/writer failures fail closed. Unknown existing local records are never
 silently replaced.
 
+The default `scripts/refresh_managed_registry.py` entrypoint is inspect/plan-only
+and never applies a machine-local plan. Any later apply operation requires a
+separately authorized caller and must use the fixed-target API under its own
+disk-safety and validation boundary.
+
 This package intentionally does not apply to the real machine-local
 `Config/` tree. Any later machine recovery requires a separately authorized
 plan, disk-safety review, and bounded validation. Until then, capability and
