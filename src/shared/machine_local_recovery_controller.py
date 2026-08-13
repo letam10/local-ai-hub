@@ -1,9 +1,8 @@
-"""Static manager-parent controller boundary for local recovery preflight.
+"""Manager-parent-only static recovery controller boundary.
 
-This module owns no Config writer and no recovery engine.  Its child-pipe
-protocol is an authenticated, bounded framing contract for a future manager
-process; every public preflight projection remains blocked/not_run in this
-package.
+The only transport in this module is a parent-created multiprocessing pipe
+used by a spawned synthetic child.  Direct CLI use remains a fixed no-op.
+There is no Config writer, apply/resume path, or operational readiness result.
 """
 
 from __future__ import annotations
@@ -11,38 +10,61 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import multiprocessing
 import secrets
+import stat
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from src.shared import canonical_git_integrity
 from src.shared import machine_local_recovery_executor as executor
 
 
-SCHEMA_VERSION = "machine-recovery-controller.v1"
-FRAME_SCHEMA = "manager-child-pipe.v1"
+SCHEMA_VERSION = "machine-recovery-controller.v2"
+FRAME_SCHEMA = "manager-child-pipe.v2"
 EXPECTED_CANONICAL_HEAD = "ca998106fe2319da6b41fe1c73c6df834d65b2c8"
 EXPECTED_CANONICAL_TREE = "0d6852a20d78701b948cedcd0f970b4d3bb5e27c8"
+EXPECTED_CONTROLLER_HEAD = "de12ff153750756ab9e49375750ea3398293943a"
+EXPECTED_CONTROLLER_TREE = "dde8f44e7ac4959295651cd4eee68e6f51d0f9f3"
 EXPECTED_MANIFEST_DIGEST = "4436315c32f76d469ca86095adb1c8fab968f285347fc0b0395e035c4e037936"
 EXPECTED_GUARD_CODE = "CANONICAL_PRESERVATION_REQUIRED"
-EXPECTED_CONSUMER_COUNT = 4
 TARGETS = executor.TARGETS
+CONSUMER_FILES = executor.CONSUMER_FILES
 FRAME_KINDS = frozenset({"challenge", "response", "ack", "close", "error"})
 PAYLOAD_STATUSES = frozenset({"ack", "close", "not_run"})
 MAX_FRAME_BYTES = 8192
-SESSION_TTL_SECONDS = 30
-MAX_CLOCK_SKEW_SECONDS = 2
+SESSION_TTL_SECONDS = 10
+MAX_CLOCK_SKEW_SECONDS = 1
 _PIPE_MARKER = object()
 
 
 class ControllerError(ValueError):
-    """Finite protocol or binding refusal."""
-
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+@dataclass(frozen=True)
+class _MeasuredBinding:
+    controller_head: str
+    controller_tree: str
+    controller_module_sha256: str
+    controller_script_sha256: str
+    executor_head: str
+    executor_tree: str
+    executor_module_sha256: str
+    executor_script_sha256: str
+    canonical_head: str
+    canonical_tree: str
+    preservation_digest: str
+    consumer_bindings_digest: str
+    plan_fingerprint: str
+
+    def fingerprint(self) -> str:
+        return _digest({key: getattr(self, key) for key in self.__dataclass_fields__})
 
 
 def _canonical(value: Any) -> bytes:
@@ -53,86 +75,130 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical(value)).hexdigest()
 
 
-def _hex_digest(value: object, length: int = 64) -> bool:
-    return isinstance(value, str) and len(value) == length and all(char in "0123456789abcdef" for char in value)
+def _hex(value: object, lengths: tuple[int, ...] = (64,)) -> bool:
+    return isinstance(value, str) and len(value) in lengths and all(char in "0123456789abcdef" for char in value)
 
 
-@dataclass(frozen=True)
-class SessionBinding:
-    controller_head: str
-    controller_tree: str
-    controller_script_sha256: str
-    executor_head: str
-    executor_tree: str
-    executor_script_sha256: str
-    canonical_head: str
-    canonical_tree: str
-    preservation_digest: str
-    consumer_bindings_digest: str
-    plan_fingerprint: str
-    target_names: tuple[str, ...]
-
-    @classmethod
-    def from_mapping(cls, value: Mapping[str, Any]) -> "SessionBinding":
-        fields = (
-            "controller_head", "controller_tree", "controller_script_sha256",
-            "executor_head", "executor_tree", "executor_script_sha256",
-            "canonical_head", "canonical_tree", "preservation_digest",
-            "consumer_bindings_digest", "plan_fingerprint", "target_names",
-        )
-        if not isinstance(value, Mapping) or set(value) != set(fields):
-            raise ControllerError("binding_shape_invalid")
-        if any(
-            not (
-                _hex_digest(value[field], 40)
-                or (field.endswith("_tree") and _hex_digest(value[field], 41))
-            )
-            if field.endswith("_head") or field.endswith("_tree")
-            else not _hex_digest(value[field], 64)
-            for field in fields
-            if field != "target_names"
-        ):
-            raise ControllerError("binding_digest_invalid")
-        if not isinstance(value["target_names"], (list, tuple)) or tuple(value["target_names"]) != TARGETS:
-            raise ControllerError("target_set_mismatch")
-        if value["canonical_head"] != EXPECTED_CANONICAL_HEAD or value["canonical_tree"] != EXPECTED_CANONICAL_TREE:
-            raise ControllerError("canonical_binding_mismatch")
-        if value["preservation_digest"] != EXPECTED_MANIFEST_DIGEST:
-            raise ControllerError("preservation_manifest_mismatch")
-        normalized = {field: value[field] for field in fields}
-        normalized["target_names"] = tuple(normalized["target_names"])
-        return cls(**normalized)
-
-    def fingerprint(self) -> str:
-        return _digest({field: getattr(self, field) for field in self.__dataclass_fields__})
+def _safe_child(root: Path, relative: str) -> Path:
+    if not isinstance(relative, str) or not relative or "\\" in relative or relative.startswith(("/", "~")) or ":" in relative or ".." in Path(relative).parts:
+        raise ControllerError("relative_path_invalid")
+    path = root / relative
+    current = root
+    for part in Path(relative).parts:
+        current = current / part
+        try:
+            item = current.lstat()
+        except FileNotFoundError:
+            break
+        if stat.S_ISLNK(item.st_mode) or getattr(item, "st_file_attributes", 0) & 0x400:
+            raise ControllerError("reparse_target")
+    return path
 
 
-class ParentPipe:
-    """Opaque marker for the manager-owned inherited child pipe."""
-
-    def __init__(self, marker: object) -> None:
-        self._marker = marker
-
-
-def open_parent_pipe() -> ParentPipe:
-    return ParentPipe(_PIPE_MARKER)
-
-
-def _frame_mac(key: bytes, body: Mapping[str, Any], binding_digest: str, transcript: str) -> str:
-    signed = _canonical({"body": body, "binding": binding_digest, "transcript": transcript})
-    return hmac.new(key, signed, hashlib.sha256).hexdigest()
+def _git_identity(root: Path) -> tuple[str, str]:
+    values = []
+    for args in (("rev-parse", "HEAD"), ("rev-parse", "HEAD^{tree}")):
+        result = subprocess.run(["git", *args], cwd=root, check=False, capture_output=True, text=True, timeout=3)
+        if result.returncode != 0 or len(result.stdout.strip()) > 128:
+            raise ControllerError("git_identity_unavailable")
+        values.append(result.stdout.strip())
+    return values[0], values[1]
 
 
-def _validate_payload(payload: object) -> dict[str, Any]:
-    if not isinstance(payload, Mapping):
+def _hash_file(root: Path, relative: str) -> str:
+    path = _safe_child(root, relative)
+    try:
+        item = path.lstat()
+        if stat.S_ISLNK(item.st_mode) or getattr(item, "st_file_attributes", 0) & 0x400 or not stat.S_ISREG(item.st_mode):
+            raise ControllerError("reparse_target")
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except ControllerError:
+        raise
+    except OSError as exc:
+        raise ControllerError("binding_file_unavailable") from exc
+
+
+def _measure_manifest(root: Path, rows: Sequence[Mapping[str, Any]]) -> str:
+    if not isinstance(rows, Sequence) or len(rows) != executor.MANIFEST_COUNT:
+        raise ControllerError("preservation_manifest_count")
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ControllerError("preservation_manifest_shape")
+        relative = row.get("relative_path")
+        if relative in seen:
+            raise ControllerError("preservation_manifest_duplicate")
+        path = _safe_child(root, relative)
+        try:
+            item = path.lstat()
+            if stat.S_ISLNK(item.st_mode) or getattr(item, "st_file_attributes", 0) & 0x400 or not stat.S_ISREG(item.st_mode):
+                raise ControllerError("preservation_manifest_reparse")
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except ControllerError:
+            raise
+        except OSError as exc:
+            raise ControllerError("preservation_manifest_unavailable") from exc
+        if row.get("size") != item.st_size or row.get("sha256") != digest:
+            raise ControllerError("preservation_manifest_drift")
+        normalized.append({"relative_path": relative, "sha256": digest, "size": item.st_size})
+        seen.add(relative)
+    normalized.sort(key=lambda value: value["relative_path"])
+    digest = _digest(normalized)
+    if digest != EXPECTED_MANIFEST_DIGEST:
+        raise ControllerError("preservation_manifest_mismatch")
+    return digest
+
+
+def _measure_binding(root: Path, rows: Sequence[Mapping[str, Any]], plan_fingerprint: str) -> _MeasuredBinding:
+    if not _hex(plan_fingerprint):
+        raise ControllerError("plan_fingerprint_invalid")
+    head, tree = _git_identity(root)
+    if head != EXPECTED_CONTROLLER_HEAD or tree != EXPECTED_CONTROLLER_TREE:
+        raise ControllerError("controller_identity_mismatch")
+    controller_module = "src/shared/machine_local_recovery_controller.py"
+    controller_script = "scripts/manager_machine_local_recovery_controller.py"
+    executor_module = "src/shared/machine_local_recovery_executor.py"
+    executor_script = "scripts/manager_machine_local_recovery_executor.py"
+    consumer_rows = []
+    for relative in CONSUMER_FILES:
+        path = _safe_child(root, relative)
+        consumer_rows.append({"relative_path": relative, "sha256": _hash_file(root, relative), "size": path.stat().st_size})
+    consumer_digest = _digest(consumer_rows)
+    preservation_digest = _measure_manifest(root, rows)
+    return _MeasuredBinding(
+        controller_head=head,
+        controller_tree=tree,
+        controller_module_sha256=_hash_file(root, controller_module),
+        controller_script_sha256=_hash_file(root, controller_script),
+        executor_head=head,
+        executor_tree=tree,
+        executor_module_sha256=_hash_file(root, executor_module),
+        executor_script_sha256=_hash_file(root, executor_script),
+        canonical_head=EXPECTED_CANONICAL_HEAD,
+        canonical_tree=EXPECTED_CANONICAL_TREE,
+        preservation_digest=preservation_digest,
+        consumer_bindings_digest=consumer_digest,
+        plan_fingerprint=plan_fingerprint,
+    )
+
+
+def _payload(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
         raise ControllerError("frame_payload_invalid")
     try:
-        keys = set(payload)
+        keys = set(value)
     except (TypeError, ValueError):
         raise ControllerError("frame_payload_invalid")
-    if keys not in (set(), {"status"}) or (keys == {"status"} and payload.get("status") not in PAYLOAD_STATUSES):
+    if keys not in (set(), {"status"}) or (keys == {"status"} and value.get("status") not in PAYLOAD_STATUSES):
         raise ControllerError("frame_payload_invalid")
-    return dict(payload)
+    return dict(value)
+
+
+def _frame(body: Mapping[str, Any], key: bytes, binding: str, transcript: str) -> dict[str, Any]:
+    value = dict(body)
+    value["mac"] = hmac.new(key, _canonical({"body": value, "binding": binding, "transcript": transcript}), hashlib.sha256).hexdigest()
+    return value
 
 
 def _validate_frame(frame: object) -> dict[str, Any]:
@@ -147,170 +213,175 @@ def _validate_frame(frame: object) -> dict[str, Any]:
         raise ControllerError("frame_schema_invalid")
     if not isinstance(frame.get("seq"), int) or frame["seq"] < 0 or not isinstance(frame.get("nonce"), str) or len(frame["nonce"]) != 32:
         raise ControllerError("frame_sequence_invalid")
-    payload = _validate_payload(frame.get("payload"))
     if frame.get("kind") not in FRAME_KINDS or not isinstance(frame.get("mac"), str) or len(frame["mac"]) != 64:
         raise ControllerError("frame_enum_invalid")
+    value = dict(frame)
+    value["payload"] = _payload(frame.get("payload"))
     try:
-        frame_size = len(_canonical(frame))
+        if len(_canonical(value)) > MAX_FRAME_BYTES:
+            raise ControllerError("frame_oversize")
     except (TypeError, ValueError):
         raise ControllerError("frame_shape_invalid")
-    if frame_size > MAX_FRAME_BYTES:
-        raise ControllerError("frame_oversize")
-    value = dict(frame)
-    value["payload"] = payload
     return value
-
-
-class ChildPipeEndpoint:
-    """The only object that can construct a response for a live session."""
-
-    def __init__(self, session_id: str, key: bytes, binding_digest: str) -> None:
-        self._session_id = session_id
-        self._key = key
-        self._binding_digest = binding_digest
-
-    def frame(self, *, kind: str = "response", seq: int = 0, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        if kind not in FRAME_KINDS or not isinstance(seq, int) or seq < 0:
-            raise ControllerError("frame_enum_invalid")
-        safe_payload = _validate_payload(payload or {})
-        body = {
-            "schema": FRAME_SCHEMA,
-            "session_id": self._session_id,
-            "seq": seq,
-            "nonce": secrets.token_hex(16),
-            "kind": kind,
-            "payload": safe_payload,
-        }
-        body["mac"] = _frame_mac(self._key, body, self._binding_digest, "")
-        return body
-
-
-class ParentSession:
-    """Short-lived authenticated protocol state; no execution capability."""
-
-    def __init__(self, binding: SessionBinding, pipe: ParentPipe, *, clock: Callable[[], float] = time.time) -> None:
-        if not isinstance(pipe, ParentPipe) or pipe._marker is not _PIPE_MARKER:
-            raise ControllerError("parent_pipe_required")
-        self._binding = binding
-        self._binding_digest = binding.fingerprint()
-        self._pipe = pipe
-        self._session_id = secrets.token_hex(16)
-        self._key = secrets.token_bytes(32)
-        self._created = clock()
-        self._clock = clock
-        self._expected_seq = 0
-        self._seen_nonces: set[str] = set()
-        self._transcript = ""
-
-    def challenge(self) -> dict[str, Any]:
-        return self._make_frame("challenge", {})
-
-    def child_endpoint(self) -> ChildPipeEndpoint:
-        return ChildPipeEndpoint(self._session_id, self._key, self._binding_digest)
-
-    def _make_frame(self, kind: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        body = {
-            "schema": FRAME_SCHEMA,
-            "session_id": self._session_id,
-            "seq": self._expected_seq,
-            "nonce": secrets.token_hex(16),
-            "kind": kind,
-            "payload": dict(payload),
-        }
-        body["mac"] = _frame_mac(self._key, body, self._binding_digest, self._transcript)
-        return body
-
-    def receive(self, frame: object, pipe: ParentPipe) -> dict[str, Any]:
-        if pipe is not self._pipe or not isinstance(pipe, ParentPipe) or pipe._marker is not _PIPE_MARKER:
-            return _blocked("parent_pipe_required")
-        if self._clock() > self._created + SESSION_TTL_SECONDS + MAX_CLOCK_SKEW_SECONDS:
-            return _blocked("session_expired")
-        try:
-            value = _validate_frame(frame)
-            if value["session_id"] != self._session_id or value["seq"] != self._expected_seq:
-                raise ControllerError("sequence_or_session_mismatch")
-            if value["nonce"] in self._seen_nonces:
-                raise ControllerError("nonce_replay")
-            supplied = value.pop("mac")
-            expected = _frame_mac(self._key, value, self._binding_digest, self._transcript)
-            if not hmac.compare_digest(supplied, expected):
-                raise ControllerError("frame_auth_invalid")
-            if value["kind"] not in {"response", "ack", "close"}:
-                raise ControllerError("frame_kind_invalid")
-            self._seen_nonces.add(value["nonce"])
-            self._transcript = _digest({"prior": self._transcript, "frame": value})
-            self._expected_seq += 1
-            return {"status": "accepted", "execution": "not_run", "dry_run": True}
-        except ControllerError as exc:
-            return _blocked(exc.code)
 
 
 def _blocked(reason: str) -> dict[str, Any]:
     return {"status": "apply_blocked", "execution": "not_run", "dry_run": True, "apply_allowed": False, "reason": reason, "next_action": "manager_controller_required"}
 
 
-def inspect_plan_projection(
+def _child_entry(connection: Any, session_id: str, key: bytes, binding_digest: str, wait_seconds: float = SESSION_TTL_SECONDS) -> None:
+    """Spawn target; the connection is the only inherited authority."""
+
+    try:
+        if not connection.poll(wait_seconds):
+            return
+        frame = _validate_frame(connection.recv())
+        if frame["session_id"] != session_id or frame["seq"] != 0 or frame["kind"] != "challenge":
+            return
+        supplied = frame.pop("mac")
+        expected = _frame(frame, key, binding_digest, "")["mac"]
+        if not hmac.compare_digest(supplied, expected):
+            return
+        response = {
+            "schema": FRAME_SCHEMA,
+            "session_id": session_id,
+            "seq": 1,
+            "nonce": secrets.token_hex(16),
+            "kind": "response",
+            "payload": {"status": "ack"},
+        }
+        connection.send(_frame(response, key, binding_digest, _digest(frame)))
+    except (ControllerError, EOFError, OSError):
+        return
+    finally:
+        try:
+            connection.close()
+        except OSError:
+            pass
+
+
+def _run_child_session(binding: _MeasuredBinding, timeout: float = 3.0, fault: str | None = None) -> str:
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe(duplex=True)
+    session_id = secrets.token_hex(16)
+    key = secrets.token_bytes(32)
+    digest = binding.fingerprint()
+    child_wait = max(timeout * 2, 0.2) if fault == "timeout" else SESSION_TTL_SECONDS
+    process = context.Process(target=_child_entry, args=(child, session_id, key, digest, child_wait), daemon=True)
+    process.start()
+    child.close()
+    challenge = {
+        "schema": FRAME_SCHEMA,
+        "session_id": session_id,
+        "seq": 0,
+        "nonce": secrets.token_hex(16),
+        "kind": "challenge",
+        "payload": {},
+    }
+    try:
+        challenge_frame = _frame(challenge, key, digest, "")
+        challenge_transcript = _digest(challenge)
+        if fault == "tamper":
+            challenge_frame["mac"] = "0" * 64
+        if fault == "disconnect":
+            parent.close()
+            return "child_disconnected"
+        parent.send(challenge_frame)
+        if not parent.poll(timeout):
+            return "child_timeout"
+        response = _validate_frame(parent.recv())
+        supplied = response.pop("mac")
+        expected = _frame(response, key, digest, challenge_transcript)["mac"]
+        if not hmac.compare_digest(supplied, expected) or response["session_id"] != session_id or response["seq"] != 1 or response["kind"] != "response" or response["nonce"] == challenge["nonce"]:
+            return "frame_auth_invalid"
+        return "accepted"
+    except (ControllerError, EOFError, OSError):
+        return "child_protocol_refused"
+    finally:
+        try:
+            parent.close()
+        except OSError:
+            pass
+        process.join(timeout=max(timeout, SESSION_TTL_SECONDS + MAX_CLOCK_SKEW_SECONDS + 1))
+
+
+def _hub_state(probe: Callable[[], Mapping[str, Any]] | None) -> tuple[bool, str]:
+    if probe is None:
+        return False, "active_hub_probe_required"
+    try:
+        value = probe()
+    except Exception:
+        return False, "active_hub_probe_failed"
+    if not isinstance(value, Mapping) or value.get("known") is not True or not isinstance(value.get("active"), bool):
+        return False, "active_hub_probe_unknown"
+    return value["active"], ""
+
+
+def run_parent_preflight(
     *,
-    canonical_state: Mapping[str, Any],
-    snapshot: Mapping[str, Any],
-    binding: SessionBinding,
-    plan_fingerprint: str,
-    active_hub: bool,
-) -> dict[str, Any]:
-    """Return sanitized no-write evidence; never an apply-ready projection."""
-
-    blockers: list[str] = []
-    if canonical_state.get("code") != EXPECTED_GUARD_CODE or canonical_state.get("dirty") is not True:
-        blockers.append("canonical_preservation_guard_required")
-    if active_hub:
-        blockers.append("active_hub")
-    if snapshot.get("status") != "available":
-        blockers.append("snapshot_unavailable")
-    if snapshot.get("canonical_head") != EXPECTED_CANONICAL_HEAD or snapshot.get("canonical_tree") != EXPECTED_CANONICAL_TREE:
-        blockers.append("canonical_identity_mismatch")
-    if snapshot.get("preservation_digest") != EXPECTED_MANIFEST_DIGEST or snapshot.get("preservation_count") != executor.MANIFEST_COUNT:
-        blockers.append("preservation_manifest_mismatch")
-    consumer = snapshot.get("consumer_digest")
-    if not _hex_digest(consumer) or consumer != binding.consumer_bindings_digest or snapshot.get("consumer_count") != EXPECTED_CONSUMER_COUNT:
-        blockers.append("consumer_binding_mismatch")
-    if binding.plan_fingerprint != plan_fingerprint:
-        blockers.append("plan_binding_mismatch")
-    if not isinstance(snapshot.get("targets"), list) or {row.get("target") for row in snapshot["targets"] if isinstance(row, Mapping)} != set(TARGETS):
-        blockers.append("target_set_mismatch")
-    reason = blockers[0] if blockers else "manager_controller_required"
-    return _blocked(reason)
-
-
-def collect_static_projection(
-    *,
+    private_root: Path,
     canonical_root: Path,
     config_root: Path,
-    preservation_manifest: list[Mapping[str, Any]],
-    consumer_hashes: Mapping[str, Mapping[str, Any]],
+    preservation_manifest: Sequence[Mapping[str, Any]],
+    plan_fingerprint: str,
+    hub_probe: Callable[[], Mapping[str, Any]] | None,
     canonical_integrity_reader: Callable[[], Mapping[str, Any]] = canonical_git_integrity.inspect_canonical,
     git_runner: Callable[..., str] | None = None,
 ) -> dict[str, Any]:
-    """Use only inspect_canonical and bounded executor inspection."""
+    """Collect bounded parent evidence, run the child handshake, and block apply."""
 
-    guard = canonical_integrity_reader()
-    if not isinstance(guard, Mapping):
-        return _blocked("canonical_guard_invalid")
-    snapshot = executor.inspect(canonical_root=canonical_root, config_root=config_root, preservation_manifest=preservation_manifest, consumer_hashes=consumer_hashes, git_runner=git_runner)
-    if isinstance(snapshot, Mapping):
-        snapshot = {**snapshot, "consumer_count": len(consumer_hashes)}
-    safe_snapshot = {
-        "status": snapshot.get("status") if isinstance(snapshot, Mapping) and snapshot.get("status") in {"available", "unavailable"} else "unavailable",
-        "canonical_identity_valid": isinstance(snapshot, Mapping) and snapshot.get("canonical_head") == EXPECTED_CANONICAL_HEAD and snapshot.get("canonical_tree") == EXPECTED_CANONICAL_TREE,
-        "preservation_manifest_valid": isinstance(snapshot, Mapping) and snapshot.get("preservation_digest") == EXPECTED_MANIFEST_DIGEST and snapshot.get("preservation_count") == executor.MANIFEST_COUNT,
-        "consumer_bindings_count": len(consumer_hashes),
-        "fixed_target_count": len(TARGETS),
-    }
-    return {"guard": {"code": guard.get("code") if guard.get("code") == EXPECTED_GUARD_CODE else "guard_unavailable", "dirty": guard.get("dirty") is True}, "snapshot": safe_snapshot}
+    try:
+        binding = _measure_binding(private_root, preservation_manifest, plan_fingerprint)
+        guard = canonical_integrity_reader()
+        if not isinstance(guard, Mapping):
+            return _blocked("canonical_guard_invalid")
+        consumer_hashes = {}
+        for relative in CONSUMER_FILES:
+            path = _safe_child(private_root, relative)
+            consumer_hashes[relative] = {"sha256": _hash_file(private_root, relative), "size": path.stat().st_size}
+        snapshot = executor.inspect(canonical_root=canonical_root, config_root=config_root, preservation_manifest=preservation_manifest, consumer_hashes=consumer_hashes, git_runner=git_runner)
+        planned = executor.plan(snapshot, executor_head=binding.executor_head, executor_tree=binding.executor_tree, executor_script_sha256=binding.executor_script_sha256)
+        active, hub_error = _hub_state(hub_probe)
+        blockers: list[str] = []
+        if guard.get("operation_code") != EXPECTED_GUARD_CODE or guard.get("dirty") is not True:
+            blockers.append("canonical_preservation_guard_required")
+        if hub_error:
+            blockers.append(hub_error)
+        elif active:
+            blockers.append("active_hub")
+        if snapshot.get("status") != "available":
+            blockers.append("snapshot_unavailable")
+        if snapshot.get("canonical_head") != EXPECTED_CANONICAL_HEAD or snapshot.get("canonical_tree") != EXPECTED_CANONICAL_TREE:
+            blockers.append("canonical_identity_mismatch")
+        if snapshot.get("preservation_digest") != EXPECTED_MANIFEST_DIGEST or snapshot.get("preservation_count") != executor.MANIFEST_COUNT:
+            blockers.append("preservation_manifest_mismatch")
+        if snapshot.get("consumer_digest") != binding.consumer_bindings_digest:
+            blockers.append("source_consumer_mismatch")
+        if snapshot.get("consumer_count", len(CONSUMER_FILES)) != len(CONSUMER_FILES):
+            blockers.append("consumer_binding_count_mismatch")
+        if planned.get("status") != "planned":
+            blockers.append("plan_unavailable")
+        elif planned.get("plan_fingerprint") != binding.plan_fingerprint or planned.get("plan_fingerprint") != plan_fingerprint:
+            blockers.append("plan_binding_mismatch")
+        if not isinstance(snapshot.get("targets"), list) or {row.get("target") for row in snapshot["targets"] if isinstance(row, Mapping)} != set(TARGETS):
+            blockers.append("target_set_mismatch")
+        transport = _run_child_session(binding)
+        if transport != "accepted":
+            blockers.append("child_transport_" + transport)
+        return _blocked(blockers[0] if blockers else "manager_controller_required")
+    except ControllerError as exc:
+        return _blocked(exc.code)
+    except (OSError, ValueError, TypeError):
+        return _blocked("controller_evidence_unavailable")
 
 
-__all__ = [
-    "EXPECTED_CANONICAL_HEAD", "EXPECTED_CANONICAL_TREE", "EXPECTED_MANIFEST_DIGEST",
-    "EXPECTED_GUARD_CODE", "TARGETS", "SessionBinding", "ParentPipe", "ParentSession",
-    "ChildPipeEndpoint", "ControllerError", "collect_static_projection", "inspect_plan_projection",
-    "open_parent_pipe",
-]
+def main() -> int:
+    print("manager_recovery_controller_noop: authenticated parent pipe required; execution not_run")
+    return 0
+
+
+__all__ = ["run_parent_preflight", "ControllerError", "EXPECTED_CANONICAL_HEAD", "EXPECTED_CANONICAL_TREE", "EXPECTED_MANIFEST_DIGEST", "TARGETS"]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

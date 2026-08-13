@@ -7,9 +7,11 @@ It never writes Config, a journal, a forensic snapshot, or any recovery state.
 
 ## Parent-child protocol
 
-The internal protocol is an anonymous inherited-child-pipe framing contract for
-a future manager process. The parent creates a fresh random session identifier
-and key, binds the session to controller/executor identity hashes, the pinned
+The internal protocol is an anonymous inherited-child-pipe framing contract.
+The parent creates an OS anonymous pipe and spawns a synthetic child process;
+there is no public in-process session constructor. The parent creates a fresh
+random session identifier and key, binds the session to the locally measured
+private-clone controller/executor head/tree and module/script hashes, the pinned
 canonical head/tree, the exact 34-entry preservation digest, four consumer
 bindings, fixed Config target names, and the plan fingerprint. Frames are
 bounded canonical JSON with a strict schema/kind/payload enum, HMAC
@@ -22,8 +24,9 @@ session. Session internals are not returned as readiness or recovery data.
 ## Static preflight boundary
 
 The controller may use `inspect_canonical()` and bounded executor inspection in
-synthetic manager fixtures. It never calls the snapshot-writing preflight
-helper and never writes the canonical forensic snapshot. Only the fixed 34 preservation entries
+synthetic manager fixtures. It reads the guard's `operation_code` field and
+never calls the snapshot-writing preflight helper or writes the canonical
+forensic snapshot. Only the fixed 34 preservation entries
 and four Config leaves are delegated to the read-only executor checks.
 
 Every `inspect_plan_projection` result is `apply_blocked`, `execution:
