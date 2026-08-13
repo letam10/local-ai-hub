@@ -74,6 +74,7 @@ class ExecutionAuthorization:
 
     public: Mapping[str, Any]
     _seal: object
+    _fingerprint: str
 
 
 def _canonical(value: Any) -> bytes:
@@ -406,13 +407,20 @@ def issue_authorization(plan_value: Mapping[str, Any], *, manager_issuer: object
         "expires_at": now + ttl_seconds,
         "retry": False,
     }
-    return ExecutionAuthorization(public=public, _seal=_ISSUER_SEAL)
+    return ExecutionAuthorization(public=public, _seal=_ISSUER_SEAL, _fingerprint=_digest(public))
 
 
 def _consume_authorization(capability: ExecutionAuthorization, task_root: Path) -> None:
     if not isinstance(capability, ExecutionAuthorization) or capability._seal is not _ISSUER_SEAL:
         raise RecoveryError("authorization_seal_invalid")
     public = capability.public
+    try:
+        if _digest(public) != capability._fingerprint:
+            raise RecoveryError("authorization_binding_mismatch")
+    except RecoveryError:
+        raise
+    except (TypeError, ValueError):
+        raise RecoveryError("authorization_shape_invalid")
     now = int(time.time())
     if public.get("schema_version") != SCHEMA_VERSION or public.get("phase") != "preflight" or public.get("retry") is not False:
         raise RecoveryError("authorization_shape_invalid")

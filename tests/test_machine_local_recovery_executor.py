@@ -177,6 +177,12 @@ class MachineRecoveryExecutorTests(ExecutorFixture):
             executor.issue_authorization(self.planned(), manager_issuer=object())
         self.assertEqual(raised.exception.code, "manager_issuer_required")
 
+    def test_mutated_public_capability_is_rejected(self) -> None:
+        capability = self.authorization()
+        capability.public["canonical_head"] = "forged"
+        result = executor.preflight(self.planned(), capability, task_root=self.task, guard_code=executor.EXPECTED_DIRTY_GUARD, guard_dirty=True, active_hub=False, owned_processes=0, lock_held=False, free_bytes=executor.MIN_DISK_MARGIN)
+        self.assertEqual(result["error"], "authorization_binding_mismatch")
+
     def test_authorization_expiry_and_replay_are_bounded(self) -> None:
         capability = self.authorization()
         with patch.object(executor.time, "time", return_value=capability.public["expires_at"]):
