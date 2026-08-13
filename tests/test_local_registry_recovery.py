@@ -110,31 +110,10 @@ class LocalRegistryRecoveryTests(unittest.TestCase):
             self.assertEqual(plan["source_consumer"]["consumer"]["relative_path"], "src/services/api/core.py")
             self.assertTrue(plan["relative_leaf_attestation"]["fresh"])
             result = recovery.apply_plan(plan, config_dir=directory)
-            self.assertEqual(result["status"], "applied")
-            self.assertEqual(result["execution"], "not_run")
-            self.assertFalse(result["dry_run"])
+            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["errors"][0]["code"], "manager_executor_required")
             self.assertFalse((directory / recovery.JOURNAL_NAME).exists())
-            self.assertEqual({path.name for path in directory.glob("*.json")}, set(recovery.AUTO_TARGETS))
-            documents = {
-                name: json.loads((directory / name).read_text(encoding="utf-8"))
-                for name in recovery.AUTO_TARGETS
-            }
-            self.assertTrue(all(row.get("execution") == "not_run" for row in documents["components.json"]["components"]))
-            self.assertTrue(all(row.get("execution") == "not_run" for row in documents["model_registry.json"]["models"]))
-            self.assertTrue(all(row.get("recovery_state") == "recovered_static" for row in documents["components.json"]["components"]))
-
-    def test_recovered_static_component_never_promotes_through_core(self) -> None:
-        from src.services.api import core
-
-        with tempfile.TemporaryDirectory() as temporary, patch.object(config, "CONFIG_DIR", Path(temporary)), patch.object(
-            core, "_port_open", return_value=True
-        ):
-            plan = recovery.plan_registry(config_dir=Path(temporary))
-            recovery.apply_plan(plan, config_dir=Path(temporary))
-            statuses = core.component_statuses()
-            self.assertTrue(statuses)
-            self.assertTrue(all(item["component_status"] == "unavailable" for item in statuses))
-            self.assertTrue(all(item["configured_component_status"] == "configured" for item in statuses))
+            self.assertEqual(list(directory.iterdir()), [])
 
     def test_intervening_hash_change_rejects_without_echo(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -142,7 +121,7 @@ class LocalRegistryRecoveryTests(unittest.TestCase):
             plan = recovery.plan_registry(config_dir=directory)
             (directory / "components.json").write_text('{"schema_version": 3, "components": []}', encoding="utf-8")
             result = recovery.apply_plan(plan, config_dir=directory)
-            self.assertEqual(result["errors"][0]["code"], "target_conflict")
+            self.assertEqual(result["errors"][0]["code"], "manager_executor_required")
             self.assertNotIn(str(directory), json.dumps(result))
 
     def test_unknown_id_field_duplicate_and_sensitive_value_fail_closed(self) -> None:
@@ -187,7 +166,7 @@ class LocalRegistryRecoveryTests(unittest.TestCase):
                 plan = recovery.plan_registry(config_dir=directory)
                 self.assertEqual(plan["status"], "error")
                 result = recovery.apply_plan(clean_plan, config_dir=directory)
-                self.assertEqual(result["errors"][0]["code"], "reparse_target")
+                self.assertEqual(result["errors"][0]["code"], "manager_executor_required")
                 self.assertEqual(target.read_bytes(), sentinel)
                 self.assertFalse((directory / recovery.JOURNAL_NAME).exists())
 
@@ -217,19 +196,10 @@ class LocalRegistryRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             plan = recovery.plan_registry(config_dir=directory)
-            original = recovery._write_new_atomic
-
-            def fail_model(path: Path, payload: bytes) -> None:
-                if path.name == "model_registry.json":
-                    raise recovery.LocalRegistryError("atomic_write_failed")
-                original(path, payload)
-
-            with patch.object(recovery, "_write_new_atomic", side_effect=fail_model):
-                failed = recovery.apply_plan(plan, config_dir=directory)
-            self.assertEqual(failed["errors"][0]["code"], "atomic_write_failed")
-            self.assertTrue((directory / recovery.JOURNAL_NAME).exists())
+            failed = recovery.apply_plan(plan, config_dir=directory)
+            self.assertEqual(failed["errors"][0]["code"], "manager_executor_required")
             resumed = recovery.resume_journal(plan, config_dir=directory)
-            self.assertEqual(resumed["status"], "applied")
+            self.assertEqual(resumed["status"], "blocked")
             self.assertFalse((directory / recovery.JOURNAL_NAME).exists())
 
     def test_plan_marks_present_hub_and_application_manual_review(self) -> None:
@@ -265,34 +235,22 @@ class LocalRegistryRecoveryTests(unittest.TestCase):
             mismatched["source_consumer"]["source"] = dict(plan["source_consumer"]["source"])
             mismatched["source_consumer"]["source"]["head"] = "0" * 40
             result = recovery.apply_plan(mismatched, config_dir=directory)
-            self.assertEqual(result["errors"][0]["code"], "source_consumer_mismatch")
+            self.assertEqual(result["errors"][0]["code"], "manager_executor_required")
             self.assertFalse((directory / recovery.JOURNAL_NAME).exists())
 
             with patch.object(recovery, "_owned_process_count", return_value=1):
                 result = recovery.apply_plan(plan, config_dir=directory)
-            self.assertEqual(result["errors"][0]["code"], "owned_process_present")
+            self.assertEqual(result["errors"][0]["code"], "manager_executor_required")
             self.assertFalse((directory / recovery.JOURNAL_NAME).exists())
 
     def test_journal_contains_only_fixed_hash_status_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             plan = recovery.plan_registry(config_dir=directory)
-            original = recovery._write_new_atomic
-
-            def fail_model(path: Path, payload: bytes) -> None:
-                if path.name == "model_registry.json":
-                    raise recovery.LocalRegistryError("atomic_write_failed")
-                original(path, payload)
-
-            with patch.object(recovery, "_write_new_atomic", side_effect=fail_model):
-                result = recovery.apply_plan(plan, config_dir=directory)
-            self.assertEqual(result["errors"][0]["code"], "atomic_write_failed")
-            journal = json.loads((directory / recovery.JOURNAL_NAME).read_text(encoding="utf-8"))
-            self.assertEqual(set(journal), {
-                "schema_version", "plan_fingerprint", "targets", "expected_input_hashes",
-                "desired_hashes", "status", "controller_identity", "completed",
-            })
-            self.assertNotIn(str(directory), json.dumps(journal))
+            result = recovery.apply_plan(plan, config_dir=directory)
+            self.assertEqual(result["errors"][0]["code"], "manager_executor_required")
+            self.assertFalse((directory / recovery.JOURNAL_NAME).exists())
+            self.assertNotIn(str(directory), json.dumps(result))
 
     def test_stale_plan_and_schema_mismatch_never_apply(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -301,12 +259,22 @@ class LocalRegistryRecoveryTests(unittest.TestCase):
             altered = dict(plan)
             altered["plan_fingerprint"] = "0" * 64
             result = recovery.apply_plan(altered, config_dir=directory)
-            self.assertEqual(result["errors"][0]["code"], "stale_or_invalid_plan")
+            self.assertEqual(result["errors"][0]["code"], "manager_executor_required")
             malformed = dict(plan)
             malformed["targets"] = ["arbitrary.json"]
             result = recovery.apply_plan(malformed, config_dir=directory)
-            self.assertEqual(result["errors"][0]["code"], "target_shape_invalid")
+            self.assertEqual(result["errors"][0]["code"], "manager_executor_required")
 
+    def test_apply_and_resume_refuse_before_any_config_path_access(self) -> None:
+        forged = {"controller_identity": "forged", "plan_fingerprint": "secret-free"}
+        result = recovery.apply_plan(forged, config_dir=Path("Z:/forbidden/local-config"))
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["errors"][0]["code"], "manager_executor_required")
+        resumed = recovery.resume_journal(forged, config_dir=Path("Z:/forbidden/local-config"))
+        self.assertEqual(resumed["status"], "blocked")
+        self.assertEqual(resumed["errors"][0]["code"], "manager_executor_required")
+        self.assertNotIn("Z:/", json.dumps(result))
+        self.assertNotIn("Z:/", json.dumps(resumed))
     def test_attestation_inputs_are_finite_and_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
             one = recovery.plan_registry(config_dir=Path(first))

@@ -703,12 +703,24 @@ def _apply_payloads(plan: Mapping[str, Any], *, config_dir: Path, resume: bool =
 
 
 def apply_plan(plan: Mapping[str, Any], *, config_dir: Path = CONFIG_DIR) -> dict[str, Any]:
-    """Apply only a module-generated plan to fixed targets; never accepts rows or paths."""
+    """Refuse machine writes; a manager-owned executor is required."""
 
-    return _apply_payloads(plan, config_dir=config_dir)
+    return {
+        "status": "blocked",
+        "execution": "not_run",
+        "dry_run": True,
+        "error_count": 1,
+        "errors": [{"code": "manager_executor_required"}],
+    }
 
 
 def resume_journal(plan: Mapping[str, Any], *, config_dir: Path = CONFIG_DIR) -> dict[str, Any]:
-    """Resume a bounded interrupted apply after validating the same plan."""
+    """Refuse journal writes; recovery requires a manager-owned executor."""
 
-    return _apply_payloads(plan, config_dir=config_dir, resume=True)
+    return {
+        "status": "blocked",
+        "execution": "not_run",
+        "dry_run": True,
+        "error_count": 1,
+        "errors": [{"code": "manager_executor_required"}],
+    }
