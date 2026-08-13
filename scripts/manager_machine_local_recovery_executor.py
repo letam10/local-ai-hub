@@ -7,15 +7,18 @@ this script never accepts client rows, paths, commands, or recovery payloads.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from src.shared.machine_local_recovery_executor import (
-    ExecutionAuthorization,
     inspect,
-    issue_authorization,
     plan,
     preflight,
+    ManagerAuthorizationVerifier,
 )
 
 
@@ -36,7 +39,8 @@ def inspect_plan_preflight(
     lock_held: bool,
     free_bytes: int | None,
     git_runner: Callable[..., str] | None = None,
-    manager_issuer: object | None = None,
+    authorization_verifier: ManagerAuthorizationVerifier | None = None,
+    capability: object | None = None,
 ) -> dict[str, Any]:
     """Run the read-only inspect -> plan -> preflight sequence.
 
@@ -60,15 +64,10 @@ def inspect_plan_preflight(
     )
     if planned.get("status") != "planned":
         return {"snapshot": snapshot, "plan": planned, "preflight": {"status": "preflight_blocked", "execution": "not_run", "error": "plan_not_ready"}}
-    if manager_issuer is None:
-        return {"snapshot": snapshot, "plan": planned, "preflight": {"status": "preflight_blocked", "execution": "not_run", "error": "manager_issuer_required"}}
-    try:
-        capability: ExecutionAuthorization = issue_authorization(planned, manager_issuer=manager_issuer)
-    except Exception:
-        return {"snapshot": snapshot, "plan": planned, "preflight": {"status": "preflight_blocked", "execution": "not_run", "error": "authorization_refused"}}
     result = preflight(
         planned,
         capability,
+        authorization_verifier=authorization_verifier,
         task_root=task_root,
         guard_code=guard_code,
         guard_dirty=guard_dirty,

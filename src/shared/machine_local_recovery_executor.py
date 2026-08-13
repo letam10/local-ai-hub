@@ -11,13 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import secrets
 import stat
 import subprocess
-import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 
 SCHEMA_VERSION = "execution-authorization.v1"
@@ -57,7 +54,6 @@ PATH_LIMIT = 180
 MAX_TARGET_BYTES = 1024 * 1024
 MIN_DISK_MARGIN = 64 * 1024 * 1024
 ACTIVE_CLAIMS = frozenset({"running", "installed", "operational", "ready", "launchable", "partial", "available"})
-_ISSUER_SEAL = object()
 
 
 class RecoveryError(ValueError):
@@ -68,13 +64,11 @@ class RecoveryError(ValueError):
         self.code = code
 
 
-@dataclass(frozen=True)
-class ExecutionAuthorization:
-    """Opaque manager-issued capability; private seal is not serializable."""
+class ManagerAuthorizationVerifier(Protocol):
+    """External manager controller contract; this module cannot implement it."""
 
-    public: Mapping[str, Any]
-    _seal: object
-    _fingerprint: str
+    def verify(self, capability: object, *, plan_value: Mapping[str, Any], task_root: Path) -> Mapping[str, Any]:
+        """Verify and one-time-consume an opaque manager capability."""
 
 
 def _canonical(value: Any) -> bytes:
@@ -379,71 +373,51 @@ def plan(snapshot: Mapping[str, Any], *, executor_head: str, executor_tree: str,
     return {**core, "status": "planned", "execution": "not_run", "dry_run": True, "apply_allowed": False, "plan_fingerprint": _digest(core)}
 
 
-def issue_authorization(plan_value: Mapping[str, Any], *, manager_issuer: object, ttl_seconds: int = 300) -> ExecutionAuthorization:
-    """Issue a sealed capability only to the private manager issuer."""
-
-    if manager_issuer is not _ISSUER_SEAL:
-        raise RecoveryError("manager_issuer_required")
-    required = ("executor_head", "executor_tree", "executor_script_sha256", "canonical_head", "canonical_tree", "preservation_digest", "targets", "compatibility", "plan_fingerprint")
-    if not isinstance(plan_value, Mapping) or plan_value.get("status") != "planned" or any(key not in plan_value for key in required) or not isinstance(plan_value.get("plan_fingerprint"), str):
-        raise RecoveryError("plan_not_authorized")
-    if not isinstance(ttl_seconds, int) or not 1 <= ttl_seconds <= 900:
-        raise RecoveryError("expiry_invalid")
-    now = int(time.time())
-    public = {
-        "schema_version": SCHEMA_VERSION,
-        "phase": "preflight",
-        "executor_head": plan_value["executor_head"],
-        "executor_tree": plan_value["executor_tree"],
-        "executor_script_sha256": plan_value["executor_script_sha256"],
-        "canonical_head": plan_value["canonical_head"],
-        "canonical_tree": plan_value["canonical_tree"],
-        "preservation_digest": plan_value["preservation_digest"],
-        "targets": list(TARGETS),
-        "expected_target_hashes": {row["target"]: row.get("expected_sha256") for row in plan_value["targets"]},
-        "plan_fingerprint": plan_value["plan_fingerprint"],
-        "nonce": secrets.token_hex(16),
-        "issued_at": now,
-        "expires_at": now + ttl_seconds,
-        "retry": False,
-    }
-    return ExecutionAuthorization(public=public, _seal=_ISSUER_SEAL, _fingerprint=_digest(public))
+_VERIFIER_REFUSALS = frozenset({
+    "authorization_expired",
+    "authorization_replay",
+    "authorization_binding_mismatch",
+    "authorization_phase_invalid",
+    "authorization_rejected",
+})
 
 
-def _consume_authorization(capability: ExecutionAuthorization, task_root: Path) -> None:
-    if not isinstance(capability, ExecutionAuthorization) or capability._seal is not _ISSUER_SEAL:
-        raise RecoveryError("authorization_seal_invalid")
-    public = capability.public
+def _verify_external_authority(
+    verifier: ManagerAuthorizationVerifier | None,
+    capability: object,
+    plan_value: Mapping[str, Any],
+    task_root: Path,
+) -> str | None:
+    """Ask an external manager verifier before reading any preflight state."""
+
+    if verifier is None:
+        return "authorization_verifier_required"
+    if capability is None or isinstance(capability, Mapping):
+        return "authorization_opaque_required"
+    verify = getattr(verifier, "verify", None)
+    if not callable(verify):
+        return "authorization_verifier_invalid"
     try:
-        if _digest(public) != capability._fingerprint:
-            raise RecoveryError("authorization_binding_mismatch")
-    except RecoveryError:
-        raise
-    except (TypeError, ValueError):
-        raise RecoveryError("authorization_shape_invalid")
-    now = int(time.time())
-    if public.get("schema_version") != SCHEMA_VERSION or public.get("phase") != "preflight" or public.get("retry") is not False:
-        raise RecoveryError("authorization_shape_invalid")
-    expires_at = public.get("expires_at")
-    if not isinstance(expires_at, int) or not isinstance(public.get("nonce"), str) or now >= expires_at:
-        raise RecoveryError("authorization_expired")
-    root = _safe_root(task_root)
-    marker = _safe_child(root, ".execution_authorization." + public["nonce"] + ".consumed")
-    try:
-        with marker.open("xb") as handle:
-            handle.write(b"consumed")
-            handle.flush()
-            os.fsync(handle.fileno())
-    except FileExistsError as exc:
-        raise RecoveryError("authorization_replay") from exc
-    except OSError as exc:
-        raise RecoveryError("authorization_consume_failed") from exc
+        response = verify(capability, plan_value=plan_value, task_root=task_root)
+    except Exception:
+        return "authorization_verifier_failed"
+    if not isinstance(response, Mapping):
+        return "authorization_verifier_invalid"
+    if response.get("status") != "verified":
+        code = response.get("code")
+        return code if isinstance(code, str) and code in _VERIFIER_REFUSALS else "authorization_rejected"
+    if response.get("phase") != "preflight":
+        return "authorization_phase_invalid"
+    if response.get("plan_fingerprint") != plan_value.get("plan_fingerprint"):
+        return "authorization_binding_mismatch"
+    return None
 
 
 def preflight(
     plan_value: Mapping[str, Any],
-    capability: ExecutionAuthorization,
+    capability: object,
     *,
+    authorization_verifier: ManagerAuthorizationVerifier | None,
     task_root: Path,
     guard_code: str,
     guard_dirty: bool,
@@ -452,22 +426,20 @@ def preflight(
     lock_held: bool,
     free_bytes: int | None,
 ) -> dict[str, Any]:
-    """Consume the one-time capability and return a bounded no-write decision."""
+    """Return a bounded no-write decision after external authority verification."""
 
-    try:
-        _consume_authorization(capability, task_root)
-    except RecoveryError as exc:
-        return {"status": "preflight_blocked", "execution": "not_run", "error": exc.code}
+    if not isinstance(plan_value, Mapping):
+        return {"status": "preflight_blocked", "execution": "not_run", "error": "plan_shape_invalid"}
+    authority_error = _verify_external_authority(authorization_verifier, capability, plan_value, task_root)
+    if authority_error is not None:
+        return {"status": "preflight_blocked", "execution": "not_run", "error": authority_error}
     try:
         plan_core = {key: value for key, value in plan_value.items() if key not in {"status", "execution", "dry_run", "apply_allowed", "plan_fingerprint"}}
         plan_fingerprint_valid = _digest(plan_core) == plan_value.get("plan_fingerprint")
     except (AttributeError, TypeError, ValueError):
         plan_fingerprint_valid = False
-    public = capability.public
-    expected_hashes = {row.get("target"): row.get("expected_sha256") for row in plan_value.get("targets", [])} if isinstance(plan_value.get("targets"), list) else {}
     checks = {
-        "plan": plan_fingerprint_valid and plan_value.get("plan_fingerprint") == public.get("plan_fingerprint"),
-        "capability": public.get("canonical_head") == plan_value.get("canonical_head") and public.get("canonical_tree") == plan_value.get("canonical_tree") and public.get("preservation_digest") == plan_value.get("preservation_digest") and public.get("expected_target_hashes") == expected_hashes,
+        "plan": plan_fingerprint_valid,
         "guard": guard_code == EXPECTED_DIRTY_GUARD and guard_dirty is True,
         "hub": active_hub is False,
         "process": owned_processes == 0,

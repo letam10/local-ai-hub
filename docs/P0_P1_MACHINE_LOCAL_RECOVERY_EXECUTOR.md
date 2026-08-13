@@ -28,20 +28,24 @@ or operational.
 
 ## Preflight boundary
 
-`execution-authorization.v1` is a manager-issued, one-time, expiring capability
-bound to the executor identity, canonical head/tree, preservation digest, fixed
-targets, expected target hashes, and plan fingerprint. It is consumed only by
-creating a marker in the manager task root. The preflight result requires the
-expected preservation guard code, a clean active-Hub/process/lock gate, and a
-bounded disk margin. It still returns `apply_allowed: false`.
+`execution-authorization.v1` is an opaque manager-issued, one-time, expiring
+capability bound to the executor identity, canonical head/tree, preservation
+digest, fixed targets, expected target hashes, and plan fingerprint. The
+executor cannot mint, sign, decode, or verify that capability. Instead, a
+separately manager-owned verifier process/child pipe must be injected and must
+consume the capability in the manager task root before returning a finite
+preflight attestation. A valid external attestation is followed by the
+expected preservation guard code, active-Hub/process/lock gate, and bounded
+disk margin checks; the result remains `apply_allowed: false`.
 
 The capability is an accidental-automation boundary, not protection from an
 Administrator or the operating system. Static constants are not proof of
 consumer ownership, private controller identity, a process probe, or a live
-machine guard. A separate manager-owned executor and fresh explicit authority
-would be required before any apply implementation could be considered. This
-package intentionally provides no such implementation and does not authorize
-machine recovery.
+machine guard. The default CLI has no authorization input and returns a
+sanitized inspect-only/no-op result. A separate manager-owned verifier
+process/child pipe and fresh explicit authority would be required before any
+apply implementation could be considered. This package intentionally provides
+no such implementation and does not authorize machine recovery.
 
 ## Verification boundary
 

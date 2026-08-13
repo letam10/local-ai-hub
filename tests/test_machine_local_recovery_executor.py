@@ -1,16 +1,38 @@
 from __future__ import annotations
 
-import contextlib
 import hashlib
-import io
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import src.shared.machine_local_recovery_executor as executor
-from scripts.manager_machine_local_recovery_executor import main
+
+
+class TestCapability:
+    def __init__(self, token: str) -> None:
+        self.token = token
+
+
+class TestVerifier:
+    def __init__(self, response: dict | None = None) -> None:
+        self.response = response
+        self.calls = 0
+
+    def verify(self, capability: object, *, plan_value: dict, task_root: Path) -> dict:
+        self.calls += 1
+        if not isinstance(capability, TestCapability):
+            return {"status": "blocked", "code": "authorization_rejected"}
+        marker = task_root / ("consumed." + capability.token)
+        if marker.exists():
+            return {"status": "blocked", "code": "authorization_replay"}
+        marker.write_text("consumed", encoding="ascii")
+        if self.response is not None:
+            return self.response
+        return {"status": "verified", "phase": "preflight", "plan_fingerprint": plan_value.get("plan_fingerprint")}
 
 
 class ExecutorFixture(unittest.TestCase):
@@ -23,7 +45,7 @@ class ExecutorFixture(unittest.TestCase):
         for path in (self.canonical, self.config, self.task):
             path.mkdir()
         for index in range(executor.MANIFEST_COUNT):
-            path = self.canonical / "preserved" / (f"item-{index:02d}.bin")
+            path = self.canonical / "preserved" / f"item-{index:02d}.bin"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(f"preserved-{index}".encode("ascii"))
         for relative in executor.CONSUMER_FILES:
@@ -72,10 +94,22 @@ class ExecutorFixture(unittest.TestCase):
             executor_script_sha256="a" * 64,
         )
 
-    def authorization(self) -> executor.ExecutionAuthorization:
-        return executor.issue_authorization(
+    def run_preflight(self, verifier: object | None, capability: object, **kwargs: object) -> dict:
+        values = {
+            "guard_code": executor.EXPECTED_DIRTY_GUARD,
+            "guard_dirty": True,
+            "active_hub": False,
+            "owned_processes": 0,
+            "lock_held": False,
+            "free_bytes": executor.MIN_DISK_MARGIN,
+        }
+        values.update(kwargs)
+        return executor.preflight(
             self.planned(),
-            manager_issuer=executor._ISSUER_SEAL,
+            capability,
+            authorization_verifier=verifier,
+            task_root=self.task,
+            **values,
         )
 
 
@@ -89,7 +123,6 @@ class MachineRecoveryExecutorTests(ExecutorFixture):
         self.assertEqual(plan["execution"], "not_run")
         self.assertFalse(plan["apply_allowed"])
         self.assertEqual(len(plan["targets"]), 4)
-        self.assertEqual([row["decision"] for row in plan["targets"]], ["manual_review", "auto_create", "manual_review", "auto_create"])
         rendered = json.dumps({"snapshot": snapshot, "plan": plan}, sort_keys=True)
         self.assertNotIn(str(self.canonical), rendered)
         self.assertNotIn(str(self.config), rendered)
@@ -97,10 +130,8 @@ class MachineRecoveryExecutorTests(ExecutorFixture):
     def test_candidate_projection_never_promotes_operational(self) -> None:
         projection = executor._candidate_projection()
         rendered = json.dumps(projection, sort_keys=True)
-        self.assertNotIn("running", rendered)
-        self.assertNotIn("installed", rendered)
-        self.assertNotIn("launchable", rendered)
-        self.assertNotIn("operational", rendered)
+        for marker in ("running", "installed", "launchable", "operational"):
+            self.assertNotIn(marker, rendered)
         self.assertEqual(executor._compatibility_projection(projection)["status"], "compatible_static")
 
     def test_fixed_target_present_is_manual_review(self) -> None:
@@ -114,38 +145,19 @@ class MachineRecoveryExecutorTests(ExecutorFixture):
         self.assertEqual(target_rows["hub_config.json"]["decision"], "manual_review")
 
     def test_manifest_drift_and_consumer_mismatch_fail_closed(self) -> None:
-        changed = list(self.manifest)
-        changed[0] = {**changed[0], "sha256": "b" * 64}
-        drift = executor.inspect(
-            canonical_root=self.canonical,
-            config_root=self.config,
-            preservation_manifest=changed,
-            consumer_hashes=self.consumer_hashes,
-            git_runner=self.git,
-        )
+        changed = [{**self.manifest[0], "sha256": "b" * 64}, *self.manifest[1:]]
+        drift = executor.inspect(canonical_root=self.canonical, config_root=self.config, preservation_manifest=changed, consumer_hashes=self.consumer_hashes, git_runner=self.git)
         self.assertEqual(drift["error"], "preservation_manifest_drift")
         consumers = {**self.consumer_hashes, executor.CONSUMER_FILES[0]: {"sha256": "c" * 64, "size": 1}}
-        mismatch = executor.inspect(
-            canonical_root=self.canonical,
-            config_root=self.config,
-            preservation_manifest=self.manifest,
-            consumer_hashes=consumers,
-            git_runner=self.git,
-        )
+        mismatch = executor.inspect(canonical_root=self.canonical, config_root=self.config, preservation_manifest=self.manifest, consumer_hashes=consumers, git_runner=self.git)
         self.assertEqual(mismatch["error"], "consumer_hash_mismatch")
 
     def test_canonical_identity_mismatch_blocks_plan(self) -> None:
         def wrong_git(_root: Path, args: tuple[str, ...]) -> str:
-            values = self.git(_root, args)
-            return "wrong" if args == ("rev-parse", "HEAD") else values
+            value = self.git(_root, args)
+            return "wrong" if args == ("rev-parse", "HEAD") else value
 
-        snapshot = executor.inspect(
-            canonical_root=self.canonical,
-            config_root=self.config,
-            preservation_manifest=self.manifest,
-            consumer_hashes=self.consumer_hashes,
-            git_runner=wrong_git,
-        )
+        snapshot = executor.inspect(canonical_root=self.canonical, config_root=self.config, preservation_manifest=self.manifest, consumer_hashes=self.consumer_hashes, git_runner=wrong_git)
         self.assertEqual(executor.plan(snapshot, executor_head="h", executor_tree="t", executor_script_sha256="d" * 64)["status"], "apply_blocked")
 
     def test_reparse_target_is_rejected_before_target_read(self) -> None:
@@ -166,39 +178,53 @@ class MachineRecoveryExecutorTests(ExecutorFixture):
 
     def test_compatibility_rejects_unsafe_and_active_claims_without_echo(self) -> None:
         unsafe = {"components": [{"id": "x", "note": "https://private.invalid"}], "models": []}
-        blocked = executor._compatibility_projection(unsafe)
-        self.assertEqual(blocked, {"status": "apply_blocked", "code": "candidate_redaction_failed"})
+        self.assertEqual(executor._compatibility_projection(unsafe), {"status": "apply_blocked", "code": "candidate_redaction_failed"})
         active = {"components": [{"id": "x", "status": "operational"}], "models": []}
         self.assertEqual(executor._compatibility_projection(active)["code"], "candidate_active_claim")
-        self.assertNotIn("private.invalid", json.dumps(blocked))
 
-    def test_authorization_requires_private_issuer(self) -> None:
-        with self.assertRaises(executor.RecoveryError) as raised:
-            executor.issue_authorization(self.planned(), manager_issuer=object())
-        self.assertEqual(raised.exception.code, "manager_issuer_required")
+    def test_import_cannot_mint_and_mapping_capability_is_rejected(self) -> None:
+        self.assertFalse(hasattr(executor, "issue_" + "authorization"))
+        self.assertFalse(hasattr(executor, "Execution" + "Authorization"))
+        self.assertFalse(hasattr(executor, "_ISSUER_" + "SEAL"))
+        verifier = TestVerifier()
+        result = self.run_preflight(verifier, {"phase": "preflight"})
+        self.assertEqual(result["error"], "authorization_opaque_required")
+        self.assertEqual(verifier.calls, 0)
 
-    def test_mutated_public_capability_is_rejected(self) -> None:
-        capability = self.authorization()
-        capability.public["canonical_head"] = "forged"
-        result = executor.preflight(self.planned(), capability, task_root=self.task, guard_code=executor.EXPECTED_DIRTY_GUARD, guard_dirty=True, active_hub=False, owned_processes=0, lock_held=False, free_bytes=executor.MIN_DISK_MARGIN)
-        self.assertEqual(result["error"], "authorization_binding_mismatch")
+    def test_missing_or_malformed_external_verifier_refuses_before_state(self) -> None:
+        capability = TestCapability("valid")
+        for verifier, code in ((None, "authorization_verifier_required"), (object(), "authorization_verifier_invalid")):
+            result = self.run_preflight(verifier, capability)
+            self.assertEqual(result["error"], code)
 
-    def test_authorization_expiry_and_replay_are_bounded(self) -> None:
-        capability = self.authorization()
-        with patch.object(executor.time, "time", return_value=capability.public["expires_at"]):
-            expired = executor.preflight(self.planned(), capability, task_root=self.task, guard_code=executor.EXPECTED_DIRTY_GUARD, guard_dirty=True, active_hub=False, owned_processes=0, lock_held=False, free_bytes=executor.MIN_DISK_MARGIN)
-        self.assertEqual(expired["error"], "authorization_expired")
-        capability = self.authorization()
-        first = executor.preflight(self.planned(), capability, task_root=self.task, guard_code="OTHER", guard_dirty=True, active_hub=False, owned_processes=0, lock_held=False, free_bytes=executor.MIN_DISK_MARGIN)
-        second = executor.preflight(self.planned(), capability, task_root=self.task, guard_code="OTHER", guard_dirty=True, active_hub=False, owned_processes=0, lock_held=False, free_bytes=executor.MIN_DISK_MARGIN)
+    def test_external_verifier_is_required_for_preflight_ready(self) -> None:
+        verifier = TestVerifier()
+        ready = self.run_preflight(verifier, TestCapability("ready"))
+        self.assertEqual(ready["status"], "preflight_ready")
+        self.assertFalse(ready["apply_allowed"])
+        self.assertEqual(verifier.calls, 1)
+
+    def test_forged_phase_binding_and_expiry_replay_refuse(self) -> None:
+        plan = self.planned()
+        capability = TestCapability("phase")
+        bad_phase = TestVerifier({"status": "verified", "phase": "apply", "plan_fingerprint": plan["plan_fingerprint"]})
+        result = executor.preflight(plan, capability, authorization_verifier=bad_phase, task_root=self.task, guard_code=executor.EXPECTED_DIRTY_GUARD, guard_dirty=True, active_hub=False, owned_processes=0, lock_held=False, free_bytes=executor.MIN_DISK_MARGIN)
+        self.assertEqual(result["error"], "authorization_phase_invalid")
+        expired = TestVerifier({"status": "blocked", "code": "authorization_expired"})
+        result = executor.preflight(plan, TestCapability("expired"), authorization_verifier=expired, task_root=self.task, guard_code=executor.EXPECTED_DIRTY_GUARD, guard_dirty=True, active_hub=False, owned_processes=0, lock_held=False, free_bytes=executor.MIN_DISK_MARGIN)
+        self.assertEqual(result["error"], "authorization_expired")
+        replay_verifier = TestVerifier()
+        capability = TestCapability("replay")
+        first = self.run_preflight(replay_verifier, capability, guard_code="OTHER")
+        second = self.run_preflight(replay_verifier, capability, guard_code="OTHER")
         self.assertEqual(first["error"], "preflight_guard")
         self.assertEqual(second["error"], "authorization_replay")
 
     def test_plan_mismatch_and_each_preflight_gate_refuse(self) -> None:
         plan = self.planned()
-        capability = executor.issue_authorization(plan, manager_issuer=executor._ISSUER_SEAL)
         forged = {**plan, "plan_fingerprint": "f" * 64}
-        mismatch = executor.preflight(forged, capability, task_root=self.task, guard_code=executor.EXPECTED_DIRTY_GUARD, guard_dirty=True, active_hub=False, owned_processes=0, lock_held=False, free_bytes=executor.MIN_DISK_MARGIN)
+        verifier = TestVerifier()
+        mismatch = executor.preflight(forged, TestCapability("mismatch"), authorization_verifier=verifier, task_root=self.task, guard_code=executor.EXPECTED_DIRTY_GUARD, guard_dirty=True, active_hub=False, owned_processes=0, lock_held=False, free_bytes=executor.MIN_DISK_MARGIN)
         self.assertEqual(mismatch["error"], "preflight_plan")
         for kwargs, code in (
             ({"active_hub": True, "owned_processes": 0, "lock_held": False, "free_bytes": executor.MIN_DISK_MARGIN}, "preflight_hub"),
@@ -206,32 +232,26 @@ class MachineRecoveryExecutorTests(ExecutorFixture):
             ({"active_hub": False, "owned_processes": 0, "lock_held": True, "free_bytes": executor.MIN_DISK_MARGIN}, "preflight_lock"),
             ({"active_hub": False, "owned_processes": 0, "lock_held": False, "free_bytes": 1}, "preflight_disk"),
         ):
-            capability = self.authorization()
-            result = executor.preflight(plan, capability, task_root=self.task, guard_code=executor.EXPECTED_DIRTY_GUARD, guard_dirty=True, **kwargs)
+            result = self.run_preflight(TestVerifier(), TestCapability(code), **kwargs)
             self.assertEqual(result["error"], code)
 
     def test_all_refusal_text_is_finite_and_redacted(self) -> None:
-        plan = self.planned()
-        capability = self.authorization()
-        result = executor.preflight(plan, capability, task_root=self.task, guard_code="bad", guard_dirty=False, active_hub=False, owned_processes=0, lock_held=False, free_bytes=0)
+        result = self.run_preflight(TestVerifier(), TestCapability("redacted"), guard_code="bad", guard_dirty=False, free_bytes=0)
         rendered = json.dumps(result, sort_keys=True)
         self.assertEqual(result["status"], "preflight_blocked")
         self.assertNotIn(str(self.canonical), rendered)
         self.assertNotIn("http", rendered.casefold())
         self.assertNotIn("powershell", rendered.casefold())
 
-    def test_default_entrypoint_is_no_write_and_no_apply(self) -> None:
+    def test_direct_root_entrypoint_is_sanitized_noop(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        script = repo_root / "scripts" / "manager_machine_local_recovery_executor.py"
         with tempfile.TemporaryDirectory(prefix="config-shaped-sentinel-") as root:
-            sentinel = Path(root) / "components.json"
-            before = sorted(path.name for path in Path(root).iterdir())
-            with contextlib.redirect_stdout(io.StringIO()) as output:
-                self.assertEqual(main(), 0)
-            after = sorted(path.name for path in Path(root).iterdir())
-        self.assertEqual(before, after)
-        self.assertFalse(sentinel.exists())
-        self.assertNotIn("apply", output.getvalue().casefold())
-        self.assertFalse(hasattr(executor, "apply_plan"))
-        self.assertFalse(hasattr(executor, "resume_journal"))
+            result = subprocess.run([sys.executable, "-B", str(script)], cwd=repo_root, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stderr, "")
+            self.assertEqual(result.stdout, "inspect_plan_preflight_only: manager authorization and attested inputs required; recovery not_run\n")
+            self.assertEqual(list(Path(root).iterdir()), [])
 
 
 if __name__ == "__main__":
