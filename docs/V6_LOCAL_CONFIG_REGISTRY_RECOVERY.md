@@ -24,16 +24,15 @@ reparse/junction condition remain manual review.
 
 ## Apply boundary
 
-The default refresh script is inspect/plan-only. The explicit recovery API is
-still static/offline and accepts only its own plan. Before a journal or target
-write it rechecks source/consumer binding, private controller identity, the
-preservation guard/isolation boundary, fixed target and journal containment,
-reparse state, target hashes, zero owned-process count, and a bounded disk
-margin. Journal records contain only fixed target names, hashes and status.
+The default refresh script is inspect/plan-only. `apply_plan()` and
+`resume_journal()` are deliberately disabled in this static package and return
+`manager_executor_required` without reading, creating, replacing, or deleting
+any Config target or journal. A separately authorized manager-owned executor
+must provide real source/consumer, P0 guard, controller identity, process and
+disk attestations before any future machine-local write is even considered.
 
-Writes are same-directory flush/fsync/atomic replacements and only converge
-forward from originally absent files. A conflict stops and retains the journal;
-there is no backup, delete, reset, restore-overwrite, or rollback-copy path.
+The static package therefore has no write, backup, delete, reset,
+restore-overwrite, rollback-copy, or journal-convergence capability.
 
 Recovered descriptors carry `recovered_static`, `configured`, and
 `execution: not_run`; the core capability projection maps them to unavailable
