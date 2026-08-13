@@ -18,7 +18,6 @@ from src.shared.machine_local_recovery_executor import (
     inspect,
     plan,
     preflight,
-    ManagerAuthorizationVerifier,
 )
 
 
@@ -39,7 +38,7 @@ def inspect_plan_preflight(
     lock_held: bool,
     free_bytes: int | None,
     git_runner: Callable[..., str] | None = None,
-    authorization_verifier: ManagerAuthorizationVerifier | None = None,
+    authorization_verifier: object | None = None,
     capability: object | None = None,
 ) -> dict[str, Any]:
     """Run the read-only inspect -> plan -> preflight sequence.

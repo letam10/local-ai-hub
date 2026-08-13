@@ -14,7 +14,7 @@ import os
 import stat
 import subprocess
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 SCHEMA_VERSION = "execution-authorization.v1"
@@ -62,13 +62,6 @@ class RecoveryError(ValueError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
-
-
-class ManagerAuthorizationVerifier(Protocol):
-    """External manager controller contract; this module cannot implement it."""
-
-    def verify(self, capability: object, *, plan_value: Mapping[str, Any], task_root: Path) -> Mapping[str, Any]:
-        """Verify and one-time-consume an opaque manager capability."""
 
 
 def _canonical(value: Any) -> bytes:
@@ -373,51 +366,11 @@ def plan(snapshot: Mapping[str, Any], *, executor_head: str, executor_tree: str,
     return {**core, "status": "planned", "execution": "not_run", "dry_run": True, "apply_allowed": False, "plan_fingerprint": _digest(core)}
 
 
-_VERIFIER_REFUSALS = frozenset({
-    "authorization_expired",
-    "authorization_replay",
-    "authorization_binding_mismatch",
-    "authorization_phase_invalid",
-    "authorization_rejected",
-})
-
-
-def _verify_external_authority(
-    verifier: ManagerAuthorizationVerifier | None,
-    capability: object,
-    plan_value: Mapping[str, Any],
-    task_root: Path,
-) -> str | None:
-    """Ask an external manager verifier before reading any preflight state."""
-
-    if verifier is None:
-        return "authorization_verifier_required"
-    if capability is None or isinstance(capability, Mapping):
-        return "authorization_opaque_required"
-    verify = getattr(verifier, "verify", None)
-    if not callable(verify):
-        return "authorization_verifier_invalid"
-    try:
-        response = verify(capability, plan_value=plan_value, task_root=task_root)
-    except Exception:
-        return "authorization_verifier_failed"
-    if not isinstance(response, Mapping):
-        return "authorization_verifier_invalid"
-    if response.get("status") != "verified":
-        code = response.get("code")
-        return code if isinstance(code, str) and code in _VERIFIER_REFUSALS else "authorization_rejected"
-    if response.get("phase") != "preflight":
-        return "authorization_phase_invalid"
-    if response.get("plan_fingerprint") != plan_value.get("plan_fingerprint"):
-        return "authorization_binding_mismatch"
-    return None
-
-
 def preflight(
     plan_value: Mapping[str, Any],
     capability: object,
     *,
-    authorization_verifier: ManagerAuthorizationVerifier | None,
+    authorization_verifier: object | None,
     task_root: Path,
     guard_code: str,
     guard_dirty: bool,
@@ -426,28 +379,15 @@ def preflight(
     lock_held: bool,
     free_bytes: int | None,
 ) -> dict[str, Any]:
-    """Return a bounded no-write decision after external authority verification."""
+    """Refuse every preflight until a separately delivered controller exists."""
 
-    if not isinstance(plan_value, Mapping):
-        return {"status": "preflight_blocked", "execution": "not_run", "error": "plan_shape_invalid"}
-    authority_error = _verify_external_authority(authorization_verifier, capability, plan_value, task_root)
-    if authority_error is not None:
-        return {"status": "preflight_blocked", "execution": "not_run", "error": authority_error}
-    try:
-        plan_core = {key: value for key, value in plan_value.items() if key not in {"status", "execution", "dry_run", "apply_allowed", "plan_fingerprint"}}
-        plan_fingerprint_valid = _digest(plan_core) == plan_value.get("plan_fingerprint")
-    except (AttributeError, TypeError, ValueError):
-        plan_fingerprint_valid = False
-    checks = {
-        "plan": plan_fingerprint_valid,
-        "guard": guard_code == EXPECTED_DIRTY_GUARD and guard_dirty is True,
-        "hub": active_hub is False,
-        "process": owned_processes == 0,
-        "lock": lock_held is False,
-        "disk": isinstance(free_bytes, int) and free_bytes >= MIN_DISK_MARGIN,
-        "compatibility": plan_value.get("compatibility", {}).get("status") == "compatible_static",
+    # Deliberately inspect none of the arguments. A future authenticated
+    # manager controller must own verification and execution outside this
+    # library; import-only callers can never obtain a ready-state result here.
+    return {
+        "status": "preflight_blocked",
+        "execution": "not_run",
+        "dry_run": True,
+        "apply_allowed": False,
+        "error": "manager_controller_required",
     }
-    if not all(checks.values()):
-        failed = next(name for name, passed in checks.items() if not passed)
-        return {"status": "preflight_blocked", "execution": "not_run", "error": f"preflight_{failed}"}
-    return {"status": "preflight_ready", "execution": "not_run", "apply_allowed": False, "checks": checks}

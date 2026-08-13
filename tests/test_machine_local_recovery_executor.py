@@ -17,7 +17,7 @@ class TestCapability:
         self.token = token
 
 
-class TestVerifier:
+class ForgedVerifier:
     def __init__(self, response: dict | None = None) -> None:
         self.response = response
         self.calls = 0
@@ -186,57 +186,57 @@ class MachineRecoveryExecutorTests(ExecutorFixture):
         self.assertFalse(hasattr(executor, "issue_" + "authorization"))
         self.assertFalse(hasattr(executor, "Execution" + "Authorization"))
         self.assertFalse(hasattr(executor, "_ISSUER_" + "SEAL"))
-        verifier = TestVerifier()
+        self.assertFalse(hasattr(executor, "Manager" + "AuthorizationVerifier"))
+        verifier = ForgedVerifier()
         result = self.run_preflight(verifier, {"phase": "preflight"})
-        self.assertEqual(result["error"], "authorization_opaque_required")
+        self.assertEqual(result["error"], "manager_controller_required")
         self.assertEqual(verifier.calls, 0)
 
-    def test_missing_or_malformed_external_verifier_refuses_before_state(self) -> None:
+    def test_no_controller_or_malformed_shapes_refuse_before_state(self) -> None:
         capability = TestCapability("valid")
-        for verifier, code in ((None, "authorization_verifier_required"), (object(), "authorization_verifier_invalid")):
+        for verifier in (None, object(), ForgedVerifier()):
             result = self.run_preflight(verifier, capability)
-            self.assertEqual(result["error"], code)
+            self.assertEqual(result["error"], "manager_controller_required")
 
-    def test_external_verifier_is_required_for_preflight_ready(self) -> None:
-        verifier = TestVerifier()
-        ready = self.run_preflight(verifier, TestCapability("ready"))
-        self.assertEqual(ready["status"], "preflight_ready")
-        self.assertFalse(ready["apply_allowed"])
-        self.assertEqual(verifier.calls, 1)
+    def test_forged_local_verifier_can_never_reach_ready(self) -> None:
+        verifier = ForgedVerifier({"status": "verified", "phase": "preflight", "plan_fingerprint": self.planned()["plan_fingerprint"]})
+        before = sorted(path.relative_to(self.config).as_posix() for path in self.config.rglob("*"))
+        result = self.run_preflight(verifier, TestCapability("ready"))
+        after = sorted(path.relative_to(self.config).as_posix() for path in self.config.rglob("*"))
+        self.assertEqual(result, {"status": "preflight_blocked", "execution": "not_run", "dry_run": True, "apply_allowed": False, "error": "manager_controller_required"})
+        self.assertEqual(verifier.calls, 0)
+        self.assertEqual(before, after)
 
-    def test_forged_phase_binding_and_expiry_replay_refuse(self) -> None:
+    def test_unverifiable_phase_expiry_replay_shapes_refuse(self) -> None:
         plan = self.planned()
         capability = TestCapability("phase")
-        bad_phase = TestVerifier({"status": "verified", "phase": "apply", "plan_fingerprint": plan["plan_fingerprint"]})
-        result = executor.preflight(plan, capability, authorization_verifier=bad_phase, task_root=self.task, guard_code=executor.EXPECTED_DIRTY_GUARD, guard_dirty=True, active_hub=False, owned_processes=0, lock_held=False, free_bytes=executor.MIN_DISK_MARGIN)
-        self.assertEqual(result["error"], "authorization_phase_invalid")
-        expired = TestVerifier({"status": "blocked", "code": "authorization_expired"})
-        result = executor.preflight(plan, TestCapability("expired"), authorization_verifier=expired, task_root=self.task, guard_code=executor.EXPECTED_DIRTY_GUARD, guard_dirty=True, active_hub=False, owned_processes=0, lock_held=False, free_bytes=executor.MIN_DISK_MARGIN)
-        self.assertEqual(result["error"], "authorization_expired")
-        replay_verifier = TestVerifier()
-        capability = TestCapability("replay")
-        first = self.run_preflight(replay_verifier, capability, guard_code="OTHER")
-        second = self.run_preflight(replay_verifier, capability, guard_code="OTHER")
-        self.assertEqual(first["error"], "preflight_guard")
-        self.assertEqual(second["error"], "authorization_replay")
+        for forged in (
+            {"status": "verified", "phase": "apply", "plan_fingerprint": plan["plan_fingerprint"]},
+            {"status": "blocked", "code": "authorization_expired"},
+            {"status": "blocked", "code": "authorization_replay"},
+        ):
+            verifier = ForgedVerifier(forged)
+            result = executor.preflight(plan, capability, authorization_verifier=verifier, task_root=self.task, guard_code=executor.EXPECTED_DIRTY_GUARD, guard_dirty=True, active_hub=False, owned_processes=0, lock_held=False, free_bytes=executor.MIN_DISK_MARGIN)
+            self.assertEqual(result["error"], "manager_controller_required")
+            self.assertEqual(verifier.calls, 0)
 
     def test_plan_mismatch_and_each_preflight_gate_refuse(self) -> None:
         plan = self.planned()
         forged = {**plan, "plan_fingerprint": "f" * 64}
-        verifier = TestVerifier()
+        verifier = ForgedVerifier()
         mismatch = executor.preflight(forged, TestCapability("mismatch"), authorization_verifier=verifier, task_root=self.task, guard_code=executor.EXPECTED_DIRTY_GUARD, guard_dirty=True, active_hub=False, owned_processes=0, lock_held=False, free_bytes=executor.MIN_DISK_MARGIN)
-        self.assertEqual(mismatch["error"], "preflight_plan")
+        self.assertEqual(mismatch["error"], "manager_controller_required")
         for kwargs, code in (
             ({"active_hub": True, "owned_processes": 0, "lock_held": False, "free_bytes": executor.MIN_DISK_MARGIN}, "preflight_hub"),
             ({"active_hub": False, "owned_processes": None, "lock_held": False, "free_bytes": executor.MIN_DISK_MARGIN}, "preflight_process"),
             ({"active_hub": False, "owned_processes": 0, "lock_held": True, "free_bytes": executor.MIN_DISK_MARGIN}, "preflight_lock"),
             ({"active_hub": False, "owned_processes": 0, "lock_held": False, "free_bytes": 1}, "preflight_disk"),
         ):
-            result = self.run_preflight(TestVerifier(), TestCapability(code), **kwargs)
-            self.assertEqual(result["error"], code)
+            result = self.run_preflight(ForgedVerifier(), TestCapability(code), **kwargs)
+            self.assertEqual(result["error"], "manager_controller_required")
 
     def test_all_refusal_text_is_finite_and_redacted(self) -> None:
-        result = self.run_preflight(TestVerifier(), TestCapability("redacted"), guard_code="bad", guard_dirty=False, free_bytes=0)
+        result = self.run_preflight(ForgedVerifier(), TestCapability("redacted"), guard_code="bad", guard_dirty=False, free_bytes=0)
         rendered = json.dumps(result, sort_keys=True)
         self.assertEqual(result["status"], "preflight_blocked")
         self.assertNotIn(str(self.canonical), rendered)
