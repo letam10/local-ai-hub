@@ -11,8 +11,10 @@ provider, model, or media operation operational.
 provenances `local`, `example_template`, `missing`, `malformed_local`, or
 `malformed_example`. The legacy value-only readers remain for compatibility,
 but recovery and launch decisions use the provenance record. Example JSON is
-static documentation only: it cannot make an application launchable or make a
-repair succeed.
+static documentation only: it cannot make an application or component appear
+running/installed, become launchable, or make a repair succeed. Component
+status callers receive records only from an explicitly present local registry;
+example fallback is unavailable.
 
 ## Offline flow
 

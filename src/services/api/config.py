@@ -163,7 +163,17 @@ def module_manager_config() -> dict[str, Any]:
 
 
 def components() -> list[dict[str, Any]]:
-    value = load_json("components.json", {})
+    result = read_local_config(
+        "components.json",
+        {},
+        config_dir=CONFIG_DIR,
+        example_name="components.example.json",
+    )
+    # Component status/launch callers may observe ports and paths.  A tracked
+    # example is documentation, never a live machine registry.
+    if result.get("provenance") != "local":
+        return []
+    value = result.get("value")
     return list(value.get("components", [])) if isinstance(value, dict) else []
 
 

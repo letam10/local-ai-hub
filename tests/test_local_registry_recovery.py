@@ -79,6 +79,26 @@ class LocalRegistryRecoveryTests(unittest.TestCase):
         self.assertTrue(all(item["component_status"] == "unavailable" for item in records))
         self.assertTrue(all(item["launchable"] is False for item in records))
 
+    def test_example_components_cannot_become_running_but_local_components_remain_observable(self) -> None:
+        from src.services.api import core
+
+        with tempfile.TemporaryDirectory() as temporary, patch.object(config, "CONFIG_DIR", Path(temporary)), patch.object(
+            core, "_port_open", return_value=True
+        ):
+            directory = Path(temporary)
+            (directory / "components.example.json").write_bytes(
+                (ROOT / "Config" / "components.example.json").read_bytes()
+            )
+            self.assertEqual(core.component_statuses(), [])
+
+            _write(directory / "components.json", {
+                "schema_version": 3,
+                "components": [{"id": "animesr", "name": "AnimeSR", "port": 43123}],
+            })
+            local_statuses = core.component_statuses()
+            self.assertEqual(len(local_statuses), 1)
+            self.assertEqual(local_statuses[0]["component_status"], "running")
+
     def test_known_only_apply_is_atomic_and_stays_not_run(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
