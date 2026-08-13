@@ -14,7 +14,7 @@ if __package__ in {None, ""}:
 
 
 def main() -> int:
-    print("manager_recovery_controller_noop: authenticated parent pipe required; execution not_run")
+    print("manager_recovery_controller_noop: manager broker required; execution not_run")
     return 0
 
 

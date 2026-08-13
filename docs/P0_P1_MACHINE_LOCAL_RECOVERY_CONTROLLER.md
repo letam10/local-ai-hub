@@ -1,43 +1,46 @@
 # P0/P1 manager recovery controller boundary
 
-This package is a static controller contract only. Its direct CLI accepts no
+This package is a static refusal boundary only. Its direct CLI accepts no
 arguments, tokens, paths, modes, commands, environment authority, or client
-payload. It returns a finite sanitized inspect/plan-only no-op and exits 0.
-It never writes Config, a journal, a forensic snapshot, or any recovery state.
+payload. It returns one finite sanitized no-op and exits 0. It never writes
+Config, a journal, a forensic snapshot, or recovery state.
 
-## Parent-child protocol
+## Current boundary
 
-The internal protocol is an anonymous inherited-child-pipe framing contract.
-The parent creates an OS anonymous pipe and spawns a synthetic child process;
-there is no public in-process session constructor. The parent creates a fresh
-random session identifier and key, binds the session to the locally measured
-private-clone controller/executor head/tree and module/script hashes, the pinned
-canonical head/tree, the exact 34-entry preservation digest, four consumer
-bindings, fixed Config target names, and the plan fingerprint. Frames are
-bounded canonical JSON with a strict schema/kind/payload enum, HMAC
-authentication, expiry, sequence/nonce replay checks and transcript binding.
+Every call to the library preflight entrypoint returns
+`preflight_blocked`, `execution: not_run`, `dry_run: true`,
+`apply_allowed: false`, and `reason: manager_broker_required` before reading
+any path, plan, callback, pipe, authorization object, guard, or resource
+input. There is no parent/child transport, verifier, authority minting,
+listener probe, apply/resume implementation, or ready-state in this package.
+Thus an importer, forged callback, fake pipe, HMAC, or mapping cannot obtain an
+accepted or ready result.
 
-A manual child without the exact inherited parent pipe is refused. No command
-line, environment variable, public socket or client payload can create a
-session. Session internals are not returned as readiness or recovery data.
+The canonical preservation identity remains ca998/tree
+`0d6852a20d78701b948cedcd0f970b4d3bb5e27c8` with the exact 34-entry digest.
+The de12 commit is executor provenance only; it is not a controller checkout
+pin. A future private controller clone must measure its actual candidate
+HEAD/tree and the controller/executor hashes from that same clone, alongside
+the fixed consumer bindings and plan fingerprint.
 
-## Static preflight boundary
+## Future design B (not delivered)
 
-The controller may use `inspect_canonical()` and bounded executor inspection in
-synthetic manager fixtures. It reads the guard's `operation_code` field and
-never calls the snapshot-writing preflight helper or writes the canonical
-forensic snapshot. Only the fixed 34 preservation entries
-and four Config leaves are delegated to the read-only executor checks.
+A separately manager-owned external broker would need to create an anonymous
+inherited child handle, authenticate bounded frames, enforce expiry/nonce and
+replay rules, and own the bounded listener-table observation for fixed port
+8765. It would then provide a sanitized broker projection to a separately
+authorized controller. The broker must bind its measured controller/executor
+identity, the ca998 canonical preservation guard, fixed targets and the exact
+34-entry manifest before any decision.
 
-Every `inspect_plan_projection` result is `apply_blocked`, `execution:
-not_run`, `dry_run: true`, and `apply_allowed: false`. Canonical preservation
-guard failure, source-consumer mismatch, target mismatch, plan mismatch and
-active Hub state are explicit blockers. Raw paths, hashes, file content, URLs,
-commands and credentials are omitted from projections.
+That trust anchor must be a distinct service identity or remote manager
+authority with private signing and replay material inaccessible to the same
+user. A user-scope DPAPI secret, static Python key, or in-memory secret is not
+sufficient. The external manager broker and any machine executor are not
+delivered or authorized by this package.
 
-Most importantly, this library has no verifier, controller authority minting,
-apply/resume implementation or machine executor. A future separately managed
-controller process with an authenticated child-pipe protocol must own any
-authority and ready-state decision. That process is not delivered or
-authorized here. No machine session, Config apply, runtime/model recovery,
-download, server, browser, provider or process action is claimed.
+All future failure, unknown, present-target, active-Hub, source-consumer and
+guard states must remain finite blockers. No path may become an operational,
+installed, running, ready, launchable, or apply-allowed claim merely from a
+static plan. No machine session, Config apply, runtime/model recovery,
+download, server, browser, provider, or process action is claimed here.
