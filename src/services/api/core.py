@@ -399,16 +399,20 @@ def _last_smoke_projection(
 
     expected_component = component_id or str(item.get("id") or "")
     item_evidence = item.get("last_smoke")
-    candidates: list[dict[str, Any]] = []
-    if isinstance(item_evidence, dict):
-        candidates.append(item_evidence)
+    receipt_candidates: list[dict[str, Any]] = []
     for tool, receipt in completion_receipts().items():
         if not isinstance(receipt, dict) or receipt.get("component") != expected_component:
             continue
         if TOOL_COMPONENTS.get(tool) != expected_component or receipt.get("tool") != tool:
             continue
-        candidates.append(receipt)
-    evidence = max(candidates, key=lambda value: str(value.get("recorded_at") or "")) if candidates else None
+        receipt_candidates.append(receipt)
+    # Server-owned local receipts represent the latest direct-job attempt and
+    # therefore supersede any serialized/config-provided last_smoke snapshot,
+    # even if a clock or stale snapshot would sort it differently.
+    if receipt_candidates:
+        evidence = max(receipt_candidates, key=lambda value: str(value.get("recorded_at") or ""))
+    else:
+        evidence = item_evidence if isinstance(item_evidence, dict) else None
     fallback = {
         "status": "not_run",
         "execution": "not_run",
