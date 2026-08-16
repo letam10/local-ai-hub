@@ -60,9 +60,15 @@ def _safe_existing_under(root: Path, candidate: Path) -> bool:
     return checked is not None and checked.resolve(strict=False) == candidate.resolve(strict=False)
 
 
-def _discard_task(path: Path) -> None:
+def _discard_task(hub_root: Path, path: Path) -> None:
     try:
-        if path.name.startswith("rife_") and path.parent.name == "jobs":
+        expected_jobs = _safe_tree(hub_root, Path("Temp") / "jobs")
+        if (
+            expected_jobs is not None
+            and path.name.startswith("rife_")
+            and path.parent.resolve(strict=False) == expected_jobs.resolve(strict=False)
+            and not _is_reparse(path)
+        ):
             shutil.rmtree(path)
     except OSError:
         pass
@@ -150,7 +156,7 @@ def main() -> int:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         target = output_root / f"{source.stem}_RIFE_{target_fps}fps_{stamp}.mp4"
         shutil.move(str(produced), str(target))
-        _discard_task(temp_root)
+        _discard_task(hub_root, temp_root)
         return _emit({"status": "completed", "operation": "frame_interpolate", "backend": "practical_rife", "output": str(target), "target_fps": target_fps, "audio": "preserved" if produced == muxed else "not_present"})
     except subprocess.TimeoutExpired:
         return _emit({"status": "error", "error": "Practical-RIFE vượt quá thời gian bounded của Hub."})

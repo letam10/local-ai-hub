@@ -58,9 +58,15 @@ def _safe_existing_under(root: Path, candidate: Path) -> bool:
     return checked is not None and checked.resolve(strict=False) == candidate.resolve(strict=False)
 
 
-def _discard_task(path: Path) -> None:
+def _discard_task(hub_root: Path, path: Path) -> None:
     try:
-        if path.name.startswith("realesrgan_") and path.parent.name == "jobs":
+        expected_jobs = _safe_tree(hub_root, Path("Temp") / "jobs")
+        if (
+            expected_jobs is not None
+            and path.name.startswith("realesrgan_")
+            and path.parent.resolve(strict=False) == expected_jobs.resolve(strict=False)
+            and not _is_reparse(path)
+        ):
             shutil.rmtree(path)
     except OSError:
         pass
@@ -120,7 +126,7 @@ def main() -> int:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         target = output_root / f"{source.stem}_RealESRGAN_x{scale}_{stamp}.png"
         shutil.move(str(images[-1]), str(target))
-        _discard_task(temp_root)
+        _discard_task(hub_root, temp_root)
         return _emit({"status": "completed", "operation": "image_upscale", "backend": "real_esrgan", "output": str(target), "model": "realesr-animevideov3", "scale": scale})
     except subprocess.TimeoutExpired:
         return _emit({"status": "error", "error": "Real-ESRGAN vượt quá thời gian bounded của Hub."})

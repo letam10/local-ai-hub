@@ -58,9 +58,15 @@ def _safe_existing_under(root: Path, candidate: Path) -> bool:
     return checked is not None and checked.resolve(strict=False) == candidate.resolve(strict=False)
 
 
-def _discard_task(path: Path) -> None:
+def _discard_task(hub_root: Path, path: Path) -> None:
     try:
-        if path.name.startswith("animesr_") and path.parent.name == "jobs":
+        expected_jobs = _safe_tree(hub_root, Path("Temp") / "jobs")
+        if (
+            expected_jobs is not None
+            and path.name.startswith("animesr_")
+            and path.parent.resolve(strict=False) == expected_jobs.resolve(strict=False)
+            and not _is_reparse(path)
+        ):
             shutil.rmtree(path)
     except OSError:
         pass
@@ -144,7 +150,7 @@ def main() -> int:
             })
         target = output_root / f"{source.stem}_AnimeSR_x{scale}_{stamp}.mp4"
         shutil.move(str(videos[-1]), str(target))
-        _discard_task(temp_root)
+        _discard_task(hub_root, temp_root)
         return _emit({
             "status": "completed",
             "operation": "upscale_anime_video",
