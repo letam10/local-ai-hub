@@ -26,10 +26,34 @@ def _component(**extra: object) -> dict[str, object]:
 class CapabilityEvidenceConsistencyTests(unittest.TestCase):
     def test_normal_local_not_run_rows_project_actual_runtime_presence(self) -> None:
         item = _component()
-        with patch.object(core, "_path_exists", return_value=True), patch.object(core, "_port_open", return_value=False):
-            self.assertEqual(core._observed_status(item), "installed")
-        with patch.object(core, "_path_exists", side_effect=[False, True, False]), patch.object(core, "_port_open", return_value=False):
-            self.assertEqual(core._observed_status(item), "partial")
+        self.assertEqual(core._observed_status(item, {
+            "port_open": False,
+            "executable_present": True,
+            "path_present": True,
+            "environment_present": True,
+            "model_required": False,
+            "model_present": False,
+        }), "installed")
+        self.assertEqual(core._observed_status(item, {
+            "port_open": False,
+            "executable_present": False,
+            "path_present": True,
+            "environment_present": False,
+            "model_required": False,
+            "model_present": False,
+        }), "partial")
+
+    def test_model_missing_and_not_installed_never_become_installed_from_runtime_paths(self) -> None:
+        available_runtime = {
+            "port_open": False,
+            "executable_present": True,
+            "path_present": True,
+            "environment_present": True,
+            "model_required": True,
+            "model_present": False,
+        }
+        self.assertEqual(core._observed_status(_component(model="required-model"), available_runtime), "partial")
+        self.assertEqual(core._observed_status(_component(status="not_installed"), available_runtime), "not_installed")
 
     def test_recovered_static_remains_unavailable_even_when_leaves_exist(self) -> None:
         item = _component(recovery_state="recovered_static")

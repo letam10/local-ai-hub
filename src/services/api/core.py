@@ -232,6 +232,8 @@ def _runtime_observation(item: dict[str, Any]) -> dict[str, bool]:
         "executable_present": _path_exists(item.get("executable")),
         "path_present": _path_exists(item.get("path")),
         "environment_present": _path_exists(item.get("environment")),
+        "model_required": isinstance(item.get("model"), str) and bool(str(item.get("model")).strip()),
+        "model_present": _path_exists(item.get("model")),
     }
 
 
@@ -244,7 +246,7 @@ def _runtime_fingerprint(item: dict[str, Any], observation: dict[str, bool]) -> 
         "recovered_static": item.get("recovery_state") == "recovered_static",
         "observation": {
             key: bool(observation.get(key))
-            for key in ("port_open", "executable_present", "path_present", "environment_present")
+            for key in ("port_open", "executable_present", "path_present", "environment_present", "model_required", "model_present")
         },
     }
     encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -263,10 +265,12 @@ def _observed_status(item: dict[str, Any], observation: dict[str, bool] | None =
     executable_exists = current["executable_present"]
     environment_exists = current["environment_present"]
     has_runtime = executable_exists or current["path_present"]
-    if configured == "not_installed" and not executable_exists and not environment_exists:
+    if configured == "not_installed":
         return "not_installed"
     if configured == "planned" and not has_runtime:
         return "planned"
+    if current.get("model_required") and not current.get("model_present"):
+        return "partial" if has_runtime or environment_exists else "missing"
     if has_runtime:
         if item.get("environment") and not environment_exists:
             return "partial"

@@ -9,6 +9,11 @@ the current presence of its declared runtime, environment, and loopback port:
 it may be `installed`, `partial`, or missing, but is never operational merely
 because a Config row exists.
 
+An explicit `status: not_installed` remains `not_installed` even when a
+runtime leaf exists.  If a row declares a model leaf and that leaf is absent,
+the component is at most `partial`; a runtime directory cannot stand in for a
+missing required model.
+
 Each public component projection contains only path-free evidence:
 
 - `current_readiness` mirrors the current local leaf observation;
