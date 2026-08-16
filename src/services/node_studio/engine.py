@@ -611,7 +611,18 @@ def _run_node(definition: NodeDefinition, data: dict[str, Any], inputs: dict[str
             raise NodeFailure(str(result.get("error") or result.get("reason") or "AnimeSR không hoàn tất."), status=str(result.get("status") or "failed"))
         return {"video": _artifact_from_path(result["output"])}
     if runner == "realesrgan":
-        raise NodeFailure("Real-ESRGAN vẫn partial: chưa có CLI contract Hub được smoke bounded.", status="unavailable")
+        image = _input_artifact(inputs, "image")
+        result = execute_tool(
+            "run_media_operation",
+            {"operation": "image_upscale", "backend": "real_esrgan", "path": str(image.path), **data},
+            context,
+        )
+        if result.get("status") != "completed":
+            raise NodeFailure(str(result.get("error") or result.get("reason") or "Real-ESRGAN không hoàn tất."), status=str(result.get("status") or "failed"))
+        output_value = result.get("output")
+        if not isinstance(output_value, str) or not output_value:
+            raise NodeFailure("Real-ESRGAN không trả IMAGE output hợp lệ.")
+        return {"image": _artifact_from_path(output_value), "metadata": {"backend": "real_esrgan"}}
     raise NodeFailure("Node runner không có trong allowlist.")
 
 

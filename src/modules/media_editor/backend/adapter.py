@@ -627,7 +627,16 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
     if operation not in VIDEO_OPS | IMAGE_OPS:
         return {"status": "error", "error": "Media operation không nằm trong allowlist."}
     if operation == "frame_interpolate" and str(payload.get("backend") or "ffmpeg_minterpolate") == "practical_rife":
-        return unavailable("practical_rife", "Practical-RIFE chưa có CLI contract Hub được smoke; chọn FFmpeg minterpolate fallback để chạy bounded.")
+        from src.modules.practical_rife.backend.adapter import run_practical_rife
+
+        # ``source`` was already resolved by the server/API artifact boundary.
+        # The RIFE adapter selects its runtime, model leaf, FFmpeg and FFprobe
+        # itself; no browser-supplied executable or path is forwarded.
+        return run_practical_rife({"path": str(source), **payload}, context)
+    if operation == "image_upscale" and str(payload.get("backend") or "ffmpeg_scale") == "real_esrgan":
+        from src.modules.real_esrgan.backend.adapter import run_realesrgan
+
+        return run_realesrgan({"path": str(source), **payload}, context)
     if operation in {"concat", "image_sequence_video"}:
         sources = [source, *_additional_sources(payload)]
         unique_sources: list[Path] = []

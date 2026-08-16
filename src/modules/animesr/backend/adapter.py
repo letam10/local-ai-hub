@@ -63,13 +63,21 @@ def run_animesr(payload: dict[str, Any], context: ProcessOwner | None = None) ->
     source = Path(os.path.expandvars(str(payload.get("path", "")))).expanduser()
     if not source.is_file():
         return {"status": "error", "error": "Không tìm thấy video AnimeSR đầu vào."}
-    ffmpeg_home = configured_path("ffmpeg", "path", "FFMPEG_HOME")
+    ffmpeg = configured_path("ffmpeg", "executable", "FFMPEG_PATH")
+    if ffmpeg is None:
+        home = configured_path("ffmpeg", "path", "FFMPEG_HOME")
+        ffmpeg = home / "ffmpeg.exe" if home else None
+    if ffmpeg is None or not ffmpeg.is_file():
+        return unavailable("ffmpeg", "Không tìm thấy FFmpeg canonical của Hub cho AnimeSR.")
     request = {
         **payload,
         "path": str(source),
         "runtime": str(runtime),
         "output_root": str(OUTPUT_ROOT / "AnimeSR"),
-        "ffmpeg_home": str(ffmpeg_home) if ffmpeg_home else "",
+        # AnimeSR's checked-in inference script reads this exact environment
+        # variable.  Passing the canonical executable avoids an ambient PATH
+        # lookup without modifying the installed runtime.
+        "ffmpeg": str(ffmpeg),
     }
     return run_json_worker(
         [str(python), str(WORKER)],
