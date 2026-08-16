@@ -113,6 +113,156 @@ class VideoRuntimeContractTests(unittest.TestCase):
             self.assertEqual(payload["status"], "error")
             launch.assert_not_called()
 
+    def test_animesr_worker_rejects_external_source_before_launch_or_write(self) -> None:
+        from src.modules.animesr.backend import worker
+
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as external_directory:
+            root = Path(directory)
+            runtime = root / "runtime"
+            script = runtime / "scripts" / "inference_animesr_video.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("# fixture", encoding="utf-8")
+            source = Path(external_directory) / "input.mp4"
+            source.write_bytes(b"external video")
+            ffmpeg = runtime / "tools" / "ffmpeg.exe"
+            ffmpeg.parent.mkdir(parents=True)
+            ffmpeg.write_bytes(b"tool")
+            model_path = root / "Models" / "Video" / "AnimeSR" / "AnimeSR_v2.pth"
+            model_path.parent.mkdir(parents=True)
+            model_path.write_bytes(b"model")
+            output_root = root / "Output" / "AnimeSR"
+            request = {
+                "runtime": str(runtime),
+                "path": str(source),
+                "output_root": str(output_root),
+                "ffmpeg": str(ffmpeg),
+                "model_id": "animesr-v2",
+                "model": "AnimeSR_v2",
+                "model_path": str(model_path),
+                "expname": "animesr_v2",
+                "scale": 2,
+            }
+            old_hub_root = os.environ.get("LOCALAIHUB_ROOT")
+            os.environ["LOCALAIHUB_ROOT"] = str(root)
+            try:
+                with patch.object(worker, "run_hidden") as launch:
+                    code, payload = self._run_worker(worker, request, launch)
+            finally:
+                if old_hub_root is None:
+                    os.environ.pop("LOCALAIHUB_ROOT", None)
+                else:
+                    os.environ["LOCALAIHUB_ROOT"] = old_hub_root
+            self.assertEqual(code, 2)
+            self.assertEqual(payload["status"], "error")
+            launch.assert_not_called()
+            self.assertFalse(output_root.exists())
+            self.assertFalse((root / "Temp" / "jobs").exists())
+
+    def test_animesr_worker_rejects_reparse_source_before_launch_or_write(self) -> None:
+        from src.modules.animesr.backend import worker
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / "runtime"
+            script = runtime / "scripts" / "inference_animesr_video.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("# fixture", encoding="utf-8")
+            real_source = root / "real-input.mp4"
+            real_source.write_bytes(b"video")
+            source = root / "Temp" / "uploads" / "input.mp4"
+            source.parent.mkdir(parents=True)
+            try:
+                source.symlink_to(real_source)
+            except OSError as exc:
+                self.skipTest(f"symlink fixture unavailable: {exc}")
+            ffmpeg = runtime / "tools" / "ffmpeg.exe"
+            ffmpeg.parent.mkdir(parents=True)
+            ffmpeg.write_bytes(b"tool")
+            model_path = root / "Models" / "Video" / "AnimeSR" / "AnimeSR_v2.pth"
+            model_path.parent.mkdir(parents=True)
+            model_path.write_bytes(b"model")
+            output_root = root / "Output" / "AnimeSR"
+            request = {
+                "runtime": str(runtime),
+                "path": str(source),
+                "output_root": str(output_root),
+                "ffmpeg": str(ffmpeg),
+                "model_id": "animesr-v2",
+                "model": "AnimeSR_v2",
+                "model_path": str(model_path),
+                "expname": "animesr_v2",
+                "scale": 2,
+            }
+            old_hub_root = os.environ.get("LOCALAIHUB_ROOT")
+            os.environ["LOCALAIHUB_ROOT"] = str(root)
+            try:
+                with patch.object(worker, "run_hidden") as launch:
+                    code, payload = self._run_worker(worker, request, launch)
+            finally:
+                if old_hub_root is None:
+                    os.environ.pop("LOCALAIHUB_ROOT", None)
+                else:
+                    os.environ["LOCALAIHUB_ROOT"] = old_hub_root
+            self.assertEqual(code, 2)
+            self.assertEqual(payload["status"], "error")
+            launch.assert_not_called()
+            self.assertFalse(output_root.exists())
+            self.assertFalse((root / "Temp" / "jobs").exists())
+
+    def test_animesr_worker_rejects_reparse_script_before_launch_or_write(self) -> None:
+        from src.modules.animesr.backend import worker
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / "runtime"
+            real_scripts = root / "outside-scripts"
+            real_scripts.mkdir()
+            real_script = real_scripts / "inference_animesr_video.py"
+            real_script.write_text("# external fixture", encoding="utf-8")
+            scripts = runtime / "scripts"
+            scripts.mkdir(parents=True)
+            script = scripts / "inference_animesr_video.py"
+            try:
+                script.symlink_to(real_script)
+            except OSError as exc:
+                self.skipTest(f"symlink fixture unavailable: {exc}")
+            source = root / "Temp" / "uploads" / "input.mp4"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"video")
+            ffmpeg = runtime / "tools" / "ffmpeg.exe"
+            ffmpeg.parent.mkdir(parents=True)
+            ffmpeg.write_bytes(b"tool")
+            model_path = root / "Models" / "Video" / "AnimeSR" / "AnimeSR_v2.pth"
+            model_path.parent.mkdir(parents=True)
+            model_path.write_bytes(b"model")
+            output_root = root / "Output" / "AnimeSR"
+            request = {
+                "runtime": str(runtime),
+                "path": str(source),
+                "output_root": str(output_root),
+                "ffmpeg": str(ffmpeg),
+                "model_id": "animesr-v2",
+                "model": "AnimeSR_v2",
+                "model_path": str(model_path),
+                "expname": "animesr_v2",
+                "scale": 2,
+            }
+            old_hub_root = os.environ.get("LOCALAIHUB_ROOT")
+            os.environ["LOCALAIHUB_ROOT"] = str(root)
+            try:
+                with patch.object(worker, "run_hidden") as launch:
+                    code, payload = self._run_worker(worker, request, launch)
+            finally:
+                if old_hub_root is None:
+                    os.environ.pop("LOCALAIHUB_ROOT", None)
+                else:
+                    os.environ["LOCALAIHUB_ROOT"] = old_hub_root
+            self.assertEqual(code, 2)
+            self.assertEqual(payload["status"], "error")
+            launch.assert_not_called()
+            self.assertFalse(output_root.exists())
+            self.assertFalse((root / "Temp" / "jobs").exists())
+
     def test_animesr_adapter_rejects_models_reparse_alias(self) -> None:
         from src.modules.animesr.backend import adapter
 
