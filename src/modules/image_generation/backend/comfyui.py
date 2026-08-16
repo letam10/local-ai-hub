@@ -23,7 +23,7 @@ from typing import Any
 from src.services.api.config import component, hub_config
 from src.services.job_manager.manager import JobContext
 from src.services.process_manager.managed import background_processes
-from src.shared.paths.registry import OUTPUT_ROOT, ROOT
+from src.shared.paths.registry import OUTPUT_ROOT, ROOT, TEMP_ROOT
 from src.shared.utils.adapter_common import configured_path, local_root, unavailable
 
 
@@ -160,6 +160,44 @@ def _safe_relative_file(root: Path, *parts: str) -> Path | None:
             return None
         current = parent
     return resolved if resolved.is_file() else None
+
+
+def _safe_input_image(value: object) -> Path | None:
+    """Resolve one existing Hub artifact leaf without following reparses.
+
+    Core resolves opaque artifact IDs before this adapter runs.  The adapter
+    still independently constrains that resulting path to the fixed Hub
+    artifact roots so a direct internal caller cannot make ComfyUI read a
+    workstation file.  This check deliberately happens before backend start.
+    """
+
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        candidate = Path(value)
+        lexical_candidate = Path(os.path.abspath(str(candidate)))
+    except (OSError, ValueError):
+        return None
+    for root in (OUTPUT_ROOT, TEMP_ROOT / "uploads", ROOT / "Archive"):
+        try:
+            if not root.is_dir() or _is_reparse(root):
+                continue
+            lexical_root = Path(os.path.abspath(str(root)))
+            relative = lexical_candidate.relative_to(lexical_root)
+            current = lexical_root
+            for part in relative.parts:
+                current = current / part
+                if not current.exists() or _is_reparse(current):
+                    break
+            else:
+                resolved_root = root.resolve(strict=True)
+                resolved = lexical_candidate.resolve(strict=True)
+                resolved.relative_to(resolved_root)
+                if resolved.is_file() and not _is_reparse(resolved):
+                    return resolved
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return None
 
 
 def _studio_root(engine: str) -> Path | None:
@@ -456,9 +494,10 @@ def _workflow(engine: str, request: dict[str, Any]) -> tuple[dict[str, Any] | No
     contract = _ENGINE_WORKFLOWS.get(engine)
     if contract is None:
         return None, "image_engine_not_allowed"
-    image_path = request.get("input_image")
-    has_input = isinstance(image_path, str) and Path(image_path).is_file()
-    if image_path is not None and not has_input:
+    requested_input = request.get("input_image")
+    image_path = _safe_input_image(requested_input) if requested_input is not None else None
+    has_input = image_path is not None
+    if requested_input is not None and not has_input:
         return None, "image_input_unavailable"
     path = _workflow_path(engine, has_input)
     if path is None:
@@ -513,8 +552,8 @@ def _bind_input_image(workflow: dict[str, Any], engine: str, image_path: object)
     image_binding = contract.get("input_image") if contract is not None else None
     if not isinstance(image_binding, tuple) or len(image_binding) != 2:
         return "image_input_workflow_unavailable"
-    path = Path(str(image_path))
-    if not path.is_file() or _is_reparse(path):
+    path = _safe_input_image(image_path)
+    if path is None:
         return "image_input_unavailable"
     uploaded, error = _upload_input_image(path)
     if not uploaded:
