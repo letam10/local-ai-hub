@@ -16,6 +16,7 @@ from src.services.artifact_store import resolve
 from src.shared.version import PRODUCT_VERSION
 from src.services.job_manager.manager import JobContext, job_manager
 from src.services.tool_smoke import (
+    completion_receipts,
     passed as smoke_passed,
     runtime_evidence_operation_scope,
     runtime_evidence_passed,
@@ -253,6 +254,28 @@ def _runtime_fingerprint(item: dict[str, Any], observation: dict[str, bool]) -> 
     return hashlib.sha256(encoded).hexdigest()
 
 
+def runtime_evidence_binding(tool: str) -> dict[str, str] | None:
+    """Return the current path-free component binding for one tool.
+
+    Job completion calls this read-only observation after the worker returns.
+    It repeats the same local Config/leaf observation used by the component
+    projection, but never probes a provider or executes a runtime.
+    """
+
+    component_id = TOOL_COMPONENTS.get(tool)
+    if not component_id:
+        return None
+    for item in components():
+        if not isinstance(item, dict) or str(item.get("id") or "") != component_id:
+            continue
+        observation = _runtime_observation(item)
+        fingerprint = _runtime_fingerprint(item, observation)
+        if re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None:
+            return None
+        return {"component": component_id, "runtime_fingerprint": fingerprint}
+    return None
+
+
 def _observed_status(item: dict[str, Any], observation: dict[str, bool] | None = None) -> str:
     """Project local leaf presence without promoting a configured row to a smoke."""
 
@@ -292,31 +315,55 @@ def _parsed_smoke_time(value: object) -> datetime | None:
     return parsed if parsed.tzinfo is not None else None
 
 
-def _last_smoke_projection(item: dict[str, Any], runtime_fingerprint: str, *, now: datetime | None = None) -> dict[str, Any]:
+def _last_smoke_projection(
+    item: dict[str, Any],
+    runtime_fingerprint: str,
+    *,
+    component_id: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     """Fail closed unless a bounded smoke names this exact current runtime."""
 
-    evidence = item.get("last_smoke")
+    expected_component = component_id or str(item.get("id") or "")
+    item_evidence = item.get("last_smoke")
+    evidence = item_evidence
+    if not isinstance(evidence, dict):
+        candidates = []
+        for tool, receipt in completion_receipts().items():
+            if not isinstance(receipt, dict) or receipt.get("component") != expected_component:
+                continue
+            if TOOL_COMPONENTS.get(tool) != expected_component or receipt.get("tool") != tool:
+                continue
+            candidates.append(receipt)
+        if candidates:
+            evidence = max(candidates, key=lambda value: str(value.get("recorded_at") or ""))
     fallback = {
         "status": "not_run",
         "execution": "not_run",
         "fresh": False,
         "runtime_fingerprint_match": False,
     }
-    if not isinstance(evidence, dict) or set(evidence) != _COMPONENT_RUNTIME_EVIDENCE_KEYS:
+    if not isinstance(evidence, dict):
         return fallback
+    if isinstance(item_evidence, dict) and set(item_evidence) != _COMPONENT_RUNTIME_EVIDENCE_KEYS:
+        return fallback
+    if evidence.get("component") not in {None, expected_component}:
+        return fallback
+    normalized = {key: evidence.get(key) for key in _COMPONENT_RUNTIME_EVIDENCE_KEYS}
     if (
-        evidence.get("schema_version") != COMPONENT_RUNTIME_EVIDENCE_SCHEMA
-        or not isinstance(evidence.get("tool"), str)
-        or evidence.get("tool") not in TOOL_COMPONENTS
-        or evidence.get("outcome") not in {"completed", "failed"}
-        or evidence.get("execution") not in {"completed", "attempted"}
-        or (evidence.get("outcome") == "completed" and evidence.get("execution") != "completed")
-        or (evidence.get("outcome") == "failed" and evidence.get("execution") != "attempted")
-        or not isinstance(evidence.get("runtime_fingerprint"), str)
-        or re.fullmatch(r"[0-9a-f]{64}", evidence["runtime_fingerprint"]) is None
+        normalized.get("schema_version") != COMPONENT_RUNTIME_EVIDENCE_SCHEMA
+        or not isinstance(normalized.get("tool"), str)
+        or normalized.get("tool") not in TOOL_COMPONENTS
+        or TOOL_COMPONENTS.get(normalized["tool"]) != expected_component
+        or normalized.get("outcome") not in {"completed", "failed"}
+        or normalized.get("execution") not in {"completed", "attempted"}
+        or (normalized.get("outcome") == "completed" and normalized.get("execution") != "completed")
+        or (normalized.get("outcome") == "failed" and normalized.get("execution") != "attempted")
+        or not isinstance(normalized.get("runtime_fingerprint"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", normalized["runtime_fingerprint"]) is None
     ):
         return fallback
-    recorded_at = _parsed_smoke_time(evidence.get("recorded_at"))
+    recorded_at = _parsed_smoke_time(normalized.get("recorded_at"))
     reference = now or datetime.now(timezone.utc)
     if reference.tzinfo is None:
         reference = reference.replace(tzinfo=timezone.utc)
@@ -324,13 +371,13 @@ def _last_smoke_projection(item: dict[str, Any], runtime_fingerprint: str, *, no
         recorded_at is not None
         and timedelta(0) <= reference - recorded_at <= COMPONENT_RUNTIME_EVIDENCE_MAX_AGE
     )
-    fingerprint_matches = evidence["runtime_fingerprint"] == runtime_fingerprint
+    fingerprint_matches = normalized["runtime_fingerprint"] == runtime_fingerprint
     return {
-        "status": evidence["outcome"],
-        "execution": evidence["execution"],
+        "status": normalized["outcome"],
+        "execution": normalized["execution"],
         "fresh": fresh,
         "runtime_fingerprint_match": fingerprint_matches,
-        "tool": evidence["tool"],
+        "tool": normalized["tool"],
     }
 
 
@@ -353,7 +400,7 @@ def component_statuses() -> list[dict[str, Any]]:
         observation = _runtime_observation(item)
         observed = _observed_status(item, observation)
         fingerprint = _runtime_fingerprint(item, observation)
-        last_smoke = _last_smoke_projection(item, fingerprint)
+        last_smoke = _last_smoke_projection(item, fingerprint, component_id=str(item.get("id") or ""))
         result.append({
             "id": item.get("id"),
             "name": item.get("name") or item.get("id"),

@@ -80,7 +80,12 @@ def _adapter_id(record: dict[str, Any]) -> str:
 
 
 def _output_candidates(value: object) -> list[Path]:
-    """Extract only worker-declared output fields; never inspect arbitrary data."""
+    """Extract bounded worker output fields; never inspect arbitrary data.
+
+    ComfyUI uses ``outputs`` for paths copied from prompt history, while older
+    direct workers use ``output`` or ``files``.  Every candidate still passes
+    through the artifact store's Hub-root containment and provenance checks.
+    """
 
     if not isinstance(value, dict):
         return []
@@ -91,6 +96,11 @@ def _output_candidates(value: object) -> list[Path]:
     files = value.get("files")
     if isinstance(files, list):
         for item in files[:64]:
+            if isinstance(item, (str, Path)) and str(item):
+                candidates.append(Path(str(item)))
+    outputs = value.get("outputs")
+    if isinstance(outputs, list):
+        for item in outputs[:64]:
             if isinstance(item, (str, Path)) and str(item):
                 candidates.append(Path(str(item)))
     return candidates
@@ -134,9 +144,10 @@ def _publish_result(result: object, record: dict[str, Any]) -> tuple[dict[str, A
     if status != "completed":
         return safe, None
 
-    files = result.get("files")
-    if isinstance(files, list) and len(files) > 64:
-        return {"status": "failed", "error": "Worker tạo quá nhiều output cho một job."}, "output_count"
+    for output_field in ("files", "outputs"):
+        declared = result.get(output_field)
+        if isinstance(declared, list) and len(declared) > 64:
+            return {"status": "failed", "error": "Worker tạo quá nhiều output cho một job."}, "output_count"
     candidates = _output_candidates(result)
     if len(candidates) > 64:
         return {"status": "failed", "error": "Worker tạo quá nhiều output cho một job."}, "output_count"

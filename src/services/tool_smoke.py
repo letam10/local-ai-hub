@@ -26,6 +26,11 @@ from src.shared.paths.registry import CONFIG_ROOT
 STATE_PATH = CONFIG_ROOT / "tool_smoke_v3.local.json"
 _LOCK = threading.RLock()
 
+# Local completion receipts become component evidence only when the API core
+# can bind them to the current component/runtime fingerprint.  This receipt is
+# intentionally path-free and never represents a runtime probe by itself.
+COMPONENT_RUNTIME_EVIDENCE_SCHEMA = "component-runtime-evidence.v1"
+
 ACCEPTANCE_OPT_IN_ENV = "LOCALAIHUB_RUN_ACCEPTANCE_RUNTIME"
 ACCEPTANCE_APPROVAL_ENV = "LOCALAIHUB_ACCEPTANCE_APPROVAL_PATH"
 ACCEPTANCE_TEMP_ENV = "LOCALAIHUB_ACCEPTANCE_TEMP_ROOT"
@@ -1021,21 +1026,61 @@ def _load() -> dict[str, dict[str, Any]]:
     return value if isinstance(value, dict) else {}
 
 
+def _current_component_binding(tool: str) -> dict[str, str] | None:
+    """Read a current non-sensitive component binding at job completion."""
+
+    try:
+        from src.services.api.core import runtime_evidence_binding
+
+        binding = runtime_evidence_binding(tool)
+    except Exception:
+        return None
+    if not isinstance(binding, dict):
+        return None
+    component = binding.get("component")
+    fingerprint = binding.get("runtime_fingerprint")
+    if not isinstance(component, str) or not component:
+        return None
+    if not isinstance(fingerprint, str) or len(fingerprint) != 64 or any(char not in "0123456789abcdef" for char in fingerprint):
+        return None
+    return {"component": component, "runtime_fingerprint": fingerprint}
+
+
 def record_completed(tool: str) -> None:
-    """Persist the outcome of one completed direct job without private data."""
+    """Persist one bounded completion receipt with an optional live binding."""
 
     if not tool:
         return
+    binding = _current_component_binding(tool)
     with _LOCK:
         state = _load()
-        state[tool] = {
+        receipt: dict[str, Any] = {
+            "schema_version": COMPONENT_RUNTIME_EVIDENCE_SCHEMA,
+            "tool": str(tool),
             "status": "completed",
+            "outcome": "completed",
+            "execution": "completed",
             "recorded_at": datetime.now(timezone.utc).isoformat(),
             "evidence": "bounded_direct_job",
         }
+        if binding is not None:
+            receipt.update(binding)
+        state[tool] = receipt
         temporary = STATE_PATH.with_suffix(".tmp")
         temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         temporary.replace(STATE_PATH)
+
+
+def completion_receipts() -> dict[str, dict[str, Any]]:
+    """Return local completion receipts for the read-only capability bridge."""
+
+    with _LOCK:
+        value = _load()
+    return {
+        str(tool): dict(receipt)
+        for tool, receipt in value.items()
+        if isinstance(tool, str) and isinstance(receipt, dict)
+    }
 
 
 def passed(tool: str) -> bool:
