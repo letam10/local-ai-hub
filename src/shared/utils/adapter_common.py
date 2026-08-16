@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from src.services.api.config import BASE_DIR, component, models
+from src.shared.paths.registry import MODEL_ROOT, ROOT
 
 
 _ARTIFACT_ID = re.compile(r"artifact_[a-f0-9]{32}\Z")
@@ -86,6 +87,77 @@ def _registry_path(value: object) -> Path | None:
         return None
 
 
+def _is_reparse(path: Path) -> bool:
+    """Reject links/junctions before a registry leaf is trusted."""
+
+    try:
+        if path.is_symlink():
+            return True
+        return bool(getattr(os.lstat(path), "st_file_attributes", 0) & 0x400)
+    except OSError:
+        return True
+
+
+def _safe_managed_leaf(root: Path, candidate: Path, *, kind: str) -> Path | None:
+    """Resolve one existing canonical leaf without following a reparse path."""
+
+    try:
+        root = Path(root)
+        candidate = Path(candidate)
+        if not root.is_dir() or _is_reparse(root):
+            return None
+        lexical_root = Path(os.path.abspath(str(root)))
+        lexical = Path(os.path.abspath(str(candidate)))
+        relative = lexical.relative_to(lexical_root)
+        current = lexical_root
+        for part in relative.parts:
+            current = current / part
+            if not current.exists() or _is_reparse(current):
+                return None
+        resolved_root = root.resolve(strict=True)
+        resolved = lexical.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+        if _is_reparse(resolved):
+            return None
+        if kind == "file" and not resolved.is_file():
+            return None
+        if kind == "dir" and not resolved.is_dir():
+            return None
+        if kind not in {"file", "dir"} and not (resolved.is_file() or resolved.is_dir()):
+            return None
+        return resolved
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _model_has_payload(path: Path) -> bool:
+    """Use a bounded leaf check so an empty model directory is not usable."""
+
+    if path.is_file():
+        return True
+    if not path.is_dir():
+        return False
+    pending: list[tuple[Path, int]] = [(path, 0)]
+    inspected = 0
+    while pending and inspected < 128:
+        current, depth = pending.pop()
+        try:
+            children = list(current.iterdir())
+        except OSError:
+            return False
+        for child in children[:128 - inspected]:
+            inspected += 1
+            if _is_reparse(child):
+                return False
+            if child.is_file():
+                return True
+            if child.is_dir() and depth < 3:
+                pending.append((child, depth + 1))
+            if inspected >= 128:
+                break
+    return False
+
+
 def registered_runtime(component_id: str, script_name: str, *, executable_field: str = "executable") -> tuple[Path, Path, Path] | None:
     """Bind one worker to the local component registry, never environment input."""
 
@@ -96,7 +168,12 @@ def registered_runtime(component_id: str, script_name: str, *, executable_field:
     executable = _registry_path(item.get(executable_field))
     if service is None or executable is None or Path(script_name).name != script_name:
         return None
-    return executable, service / script_name, service
+    safe_service = _safe_managed_leaf(ROOT, service, kind="dir")
+    safe_executable = _safe_managed_leaf(ROOT, executable, kind="file")
+    safe_helper = _safe_managed_leaf(safe_service, safe_service / script_name, kind="file") if safe_service else None
+    if safe_service is None or safe_executable is None or safe_helper is None:
+        return None
+    return safe_executable, safe_helper, safe_service
 
 
 def registered_model(component_id: str, engine: str) -> tuple[str, Path] | None:
@@ -112,7 +189,9 @@ def registered_model(component_id: str, engine: str) -> tuple[str, Path] | None:
         model_id = item.get("id")
         model_path = _registry_path(item.get("local_path"))
         if isinstance(model_id, str) and _REGISTRY_ID.fullmatch(model_id) and model_path is not None:
-            matches.append((model_id, model_path))
+            safe_model = _safe_managed_leaf(MODEL_ROOT, model_path, kind="any")
+            if safe_model is not None and _model_has_payload(safe_model):
+                matches.append((model_id, safe_model))
     return matches[0] if len(matches) == 1 else None
 
 
@@ -235,6 +314,14 @@ def normalize_worker_result(
                 safe[target_key] = candidate
             elif isinstance(candidate, list) and len(candidate) <= _MAX_WORKER_ITEMS and all(isinstance(item, str) and item for item in candidate):
                 safe[target_key] = list(candidate)
+    if status in {"error", "failed"}:
+        raw_code = str(value.get("code") or "").casefold()
+        error_text = str(value.get("error") or value.get("reason") or "").casefold()
+        if raw_code in {"timeout", "timed_out", "worker_timeout"} or "timeout" in error_text or "vượt quá thời gian" in error_text:
+            safe["code"] = "worker_timeout"
+            safe["execution"] = "timed_out"
+            safe["reason"] = "Worker vượt quá thời gian bounded của adapter."
+            safe["next_action"] = "Kiểm tra environment/model và thử lại một job bounded sau khi xác nhận tài nguyên rảnh."
     return safe
 
 
@@ -263,11 +350,18 @@ def describe(component_id: str) -> dict[str, Any]:
     }
 
 
-def unavailable(component_id: str, reason: str) -> dict[str, Any]:
+def unavailable(
+    component_id: str,
+    reason: str,
+    *,
+    code: str = "dependency_unavailable",
+    next_action: str = "Kiểm tra registry component/model và helper worker rồi chạy lại bounded smoke.",
+) -> dict[str, Any]:
     return {
         "status": "unavailable",
         "component": component_id,
         "execution": "not_run",
+        "code": code,
         "reason": _safe_text(reason),
-        "next_action": "Kiểm tra registry component/model và helper worker rồi chạy lại bounded smoke.",
+        "next_action": _safe_text(next_action),
     }
