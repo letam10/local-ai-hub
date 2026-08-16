@@ -6,6 +6,11 @@ import { translateText } from "./i18n.js";
 // read from `state` continue through escapeHtml() unchanged.
 const uiText = (value) => translateText(String(value ?? ""));
 const uiTextHtml = (value) => escapeHtml(uiText(value));
+// Generic render helpers must not infer that their arguments are static.  A
+// card title, field label, or metric detail can come from the server snapshot
+// or a user-authored creative record.  Those values are escaped only; fixed
+// copy opts into uiTextHtml at the call site.
+const dynamicTextHtml = (value) => escapeHtml(String(value ?? ""));
 
 export const NAVIGATION = [
   { group: "TỔNG QUAN", items: [["dashboard", "Dashboard", "◫"], ["airi", "AIRI", "◌"]] },
@@ -98,9 +103,10 @@ const readinessStatusLabel = (value) => {
   const normalized = readinessStatus(value);
   return READINESS_STATUS_LABELS[normalized] || formatStatus(normalized);
 };
-const statusPill = (status, label) => {
+const statusPill = (status) => {
   const normalized = uiStatus(status);
-  return `<span class="status-pill" data-status="${escapeHtml(normalized)}">${uiTextHtml(label || READINESS_STATUS_LABELS[normalized] || formatStatus(normalized))}</span>`;
+  const label = READINESS_STATUS_LABELS[normalized] || formatStatus(normalized);
+  return `<span class="status-pill" data-status="${escapeHtml(normalized)}">${uiTextHtml(label)}</span>`;
 };
 const unsafeUiText = /(?:[a-z]:[\\/]|\\\\|(?:^|\s)\/(?:etc|tmp|var|home)(?:[\\/]|$)|(?:file|data):|(?:api[_-]?key|password|secret|token)\s*[:=])/i;
 const safeUiText = (value, fallback = "") => {
@@ -531,7 +537,9 @@ const readinessStorageDetails = (volumes) => `<section class="readiness-storage 
 const heading = (eyebrow, title, description, actions = "") => `
   <header class="page-heading"><div class="heading-copy"><div class="eyebrow" data-i18n="${escapeHtml(eyebrow)}">${uiTextHtml(eyebrow)}</div><h1 data-i18n="${escapeHtml(title)}">${uiTextHtml(title)}</h1><p data-i18n="${escapeHtml(description)}">${uiTextHtml(description)}</p></div><div class="heading-actions">${actions}</div></header>`;
 const card = (title, content, action = "", extra = "") => `<section class="card ${extra}"><div class="card-title-row"><h2>${uiTextHtml(title)}</h2>${action}</div>${content}</section>`;
+const cardDynamic = (title, content, action = "", extra = "") => `<section class="card ${extra}"><div class="card-title-row"><h2>${dynamicTextHtml(title)}</h2>${action}</div>${content}</section>`;
 const field = (label, control, extra = "") => `<label class="field ${extra}"><span>${uiTextHtml(label)}</span>${control}</label>`;
+const fieldDynamic = (label, control, extra = "") => `<label class="field ${extra}"><span>${dynamicTextHtml(label)}</span>${control}</label>`;
 const file = (label, key, accept = "") => field(label, `<input type="file" data-asset-key="${escapeHtml(key)}" ${accept ? `accept="${escapeHtml(accept)}"` : ""} /><div class="file-preview" data-file-preview aria-live="polite"></div>`);
 const files = (label, key, accept = "") => field(label, `<input type="file" data-asset-key="${escapeHtml(key)}" multiple ${accept ? `accept="${escapeHtml(accept)}"` : ""} /><div class="file-preview" data-file-preview aria-live="polite"></div>`);
 const button = (text, extra = "") => `<button class="button ${extra}" type="submit">${uiTextHtml(text)}</button>`;
@@ -540,7 +548,7 @@ const workspaceState = (label, item = {}, fallbackAction = "Kiểm tra backend r
   const status = item.tool_status || item.status || item.component_status || "missing";
   const reason = item.reason || "Chưa có snapshot readiness cho backend này.";
   const action = item.action || fallbackAction;
-  return `<section class="workspace-state" data-status="${escapeHtml(status)}" aria-live="polite"><div class="workspace-state__head"><div><span class="eyebrow" data-i18n="BACKEND CONTRACT">${uiTextHtml("BACKEND CONTRACT")}</span><h2 data-i18n="${escapeHtml(label)}">${uiTextHtml(label)}</h2></div>${statusPill(status)}</div><p>${escapeHtml(reason)}</p><div class="workspace-state__action"><strong data-i18n="Bước tiếp theo">${uiTextHtml("Bước tiếp theo")}</strong><span>${escapeHtml(action)}</span></div></section>`;
+  return `<section class="workspace-state" data-status="${escapeHtml(status)}" aria-live="polite"><div class="workspace-state__head"><div><span class="eyebrow" data-i18n="BACKEND CONTRACT">${uiTextHtml("BACKEND CONTRACT")}</span><h2>${dynamicTextHtml(label)}</h2></div>${statusPill(status)}</div><p>${escapeHtml(reason)}</p><div class="workspace-state__action"><strong data-i18n="Bước tiếp theo">${uiTextHtml("Bước tiếp theo")}</strong><span>${escapeHtml(action)}</span></div></section>`;
 };
 const workflowLibraryState = (item = {}) => {
   const status = String(item.status || "partial");
@@ -646,7 +654,8 @@ function renderDashboard(state) {
   const control = source.capabilities && typeof source.capabilities === "object" ? source.capabilities : {};
   const readiness = readinessView.status !== "unknown" ? readinessView.status : readinessStatus(control.status || health.status);
   const activeJobs = jobRecovery.counts.active;
-  const metric = (label, value, detail) => `<article class="metric-card"><span data-i18n="${escapeHtml(label)}">${uiTextHtml(label)}</span><strong>${escapeHtml(value)}</strong><small data-i18n="${escapeHtml(detail)}">${uiTextHtml(detail)}</small></article>`;
+  const metricStatic = (label, value, detail) => `<article class="metric-card"><span data-i18n="${escapeHtml(label)}">${uiTextHtml(label)}</span><strong>${escapeHtml(value)}</strong><small data-i18n="${escapeHtml(detail)}">${uiTextHtml(detail)}</small></article>`;
+  const metricSnapshot = (label, value, detail) => `<article class="metric-card"><span data-i18n="${escapeHtml(label)}">${uiTextHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail)}</small></article>`;
   const statusRank = { error: 0, unavailable: 0, missing: 0, not_published: 0, partial: 1, not_run: 1, planned: 2, starting: 3, installed: 4, operational: 5, healthy: 5, ready: 5, clean: 5 };
   const rankOf = (status) => Object.prototype.hasOwnProperty.call(statusRank, status) ? statusRank[status] : 3;
   const productCapabilities = productization.capabilities && typeof productization.capabilities === "object" ? productization.capabilities : {};
@@ -727,11 +736,11 @@ function renderDashboard(state) {
     </section>
     ${workflowLibraryHtml}
     <section class="dashboard-metric-grid" aria-label="Readiness metrics">
-      ${metric("Hub API", formatStatus(readiness), "Static readiness snapshot")}
-      ${metric("Module plan", formatStatus(planStatus), "Preflight is read-only; install/download is not_run")}
-      ${metric("GPU", gpuValue, gpuDetail)}
-      ${metric("Ổ đĩa", diskValue, "Dung lượng trống")}
-      ${metric("Jobs hoạt động", String(activeJobs), `${jobs.length} bản ghi trong queue`)}
+      ${metricStatic("Hub API", formatStatus(readiness), "Static readiness snapshot")}
+      ${metricStatic("Module plan", formatStatus(planStatus), "Preflight is read-only; install/download is not_run")}
+      ${metricSnapshot("GPU", gpuValue, gpuDetail)}
+      ${metricStatic("Ổ đĩa", diskValue, "Dung lượng trống")}
+      ${metricSnapshot("Jobs hoạt động", String(activeJobs), `${jobs.length} bản ghi trong queue`)}
     </section>
     <section class="dashboard-storage card" aria-labelledby="dashboard-storage-title" data-storage-status="${escapeHtml(storageStatus)}" data-execution="${escapeHtml(storageExecution)}">
       <div class="card-title-row"><div><span class="eyebrow" data-i18n="STORAGE PROJECTION">${uiTextHtml("STORAGE PROJECTION")}</span><h2 id="dashboard-storage-title" data-i18n="C:/ & D:/ dung lượng">${uiTextHtml("C:/ & D:/ dung lượng")}</h2><p class="small"><span data-i18n="Server-owned, allowlisted volume snapshot">${uiTextHtml("Server-owned, allowlisted volume snapshot")}</span> · <span data-i18n="execution:">${uiTextHtml("execution:")}</span> ${escapeHtml(storageExecution)}</p></div>${statusPill(storageStatus, formatStatus(storageStatus))}</div>
@@ -742,10 +751,10 @@ function renderDashboard(state) {
     <section class="job-recovery-card card" aria-labelledby="dashboard-recovery-title" data-recovery-source="${escapeHtml(jobRecovery.source)}" data-recovery-status="${escapeHtml(jobRecovery.status)}">
       <div class="card-title-row"><div><span class="eyebrow" data-i18n="JOB RECOVERY">${uiTextHtml("JOB RECOVERY")}</span><h2 id="dashboard-recovery-title" data-i18n="Recovery attention">${uiTextHtml("Recovery attention")}</h2><p>${escapeHtml(jobRecovery.reason)}</p></div>${statusPill(jobRecovery.status, readinessStatusLabel(jobRecovery.status))}</div>
       <div class="job-recovery-counts" aria-label="Job recovery counts">
-        <div data-recovery-count="active"><span>Active</span><strong>${escapeHtml(String(jobRecovery.counts.active))}</strong></div>
-        <div data-recovery-count="attention"><span>Attention</span><strong>${escapeHtml(String(jobRecovery.counts.attention))}</strong></div>
-        <div data-recovery-count="interrupted"><span>Interrupted</span><strong>${escapeHtml(String(jobRecovery.counts.interrupted))}</strong></div>
-        <div data-recovery-count="recoverable"><span>Recoverable</span><strong>${escapeHtml(String(jobRecovery.counts.recoverable))}</strong></div>
+        <div data-i18n-container="Active" data-recovery-count="active"><span>Active</span><strong>${escapeHtml(String(jobRecovery.counts.active))}</strong></div>
+        <div data-i18n-container="Attention" data-recovery-count="attention"><span>Attention</span><strong>${escapeHtml(String(jobRecovery.counts.attention))}</strong></div>
+        <div data-i18n-container="Interrupted" data-recovery-count="interrupted"><span>Interrupted</span><strong>${escapeHtml(String(jobRecovery.counts.interrupted))}</strong></div>
+        <div data-i18n-container="Recoverable" data-recovery-count="recoverable"><span>Recoverable</span><strong>${escapeHtml(String(jobRecovery.counts.recoverable))}</strong></div>
       </div>
       <div class="job-recovery-guidance"><span data-i18n="Next action">${uiTextHtml("Next action")}</span><p>${escapeHtml(jobRecovery.nextAction)}</p></div>
       <button class="button button--compact" type="button" data-route="jobs" data-recovery-focus="${jobRecovery.counts.attention ? "attention" : "all"}" aria-controls="jobs-page" data-i18n="Open focused Jobs">${uiTextHtml("Open focused Jobs")}</button>
@@ -1010,7 +1019,7 @@ const renderCreativeAssets = (state) => {
     ${card("Collections", `<form class="stack" data-creative-form="create-collection">${field("Tên collection", `<input name="title" required maxlength="100" placeholder="Ví dụ: Hero candidates" />`)}${field("Tags", `<input name="tags" placeholder="portrait, final" />`)}<div class="form-actions">${button("Tạo collection")}</div><div class="form-result" role="status"></div></form><div class="creative-collection-list">${collections.map((collection) => `<span class="tag">${escapeHtml(collection.title)} · ${escapeHtml(collection.asset_count)}</span>`).join("") || "<span class=\"muted small\">Chưa có collection.</span>"}</div>`, "", "card--flat")}
   </div>
   <section class="asset-contact-sheet" aria-label="Asset contact sheet">${assets.map((asset) => `<div class="asset-library-card">${assetThumb(asset)}<div class="asset-contact-sheet__actions"><button class="button button--compact" type="button" data-asset-favorite="${escapeHtml(asset.id)}" data-next-favorite="${asset.favorite ? "false" : "true"}">${asset.favorite ? "Bỏ favorite" : "Favorite"}</button>${String(asset.media_type || "").startsWith("image/") ? `<button class="button button--compact" type="button" data-open-image-mask-studio="${escapeHtml(asset.id)}">Chỉnh sửa & Mask</button>` : ""}${selected && !projectAssets.some((item) => item.id === asset.id) ? `<button class="button button--compact" type="button" data-attach-asset="${escapeHtml(asset.id)}">Thêm vào project</button>` : ""}</div><form class="asset-tag-form" data-creative-form="asset-tags" data-asset-id="${escapeHtml(asset.id)}">${field("Tags", `<input name="tags" value="${escapeHtml((asset.tags || []).join(", "))}" aria-label="Tags for ${escapeHtml(asset.name || asset.id)}" />`)}<button class="button button--compact" type="submit">Lưu tag</button></form>${collections.length ? `<form class="asset-tag-form" data-creative-form="asset-collection" data-asset-id="${escapeHtml(asset.id)}">${field("Collection", `<select name="collection_id" aria-label="Collection for ${escapeHtml(asset.name || asset.id)}">${collections.map((collection) => `<option value="${escapeHtml(collection.id)}">${escapeHtml(collection.title)}</option>`).join("")}</select>`)}<button class="button button--compact" type="submit">Thêm collection</button></form>` : ""}</div>`).join("") || `<div class="empty-state"><strong>Không có asset phù hợp</strong><span>Upload hoặc chạy workflow hiện có để Hub đăng ký artifact, rồi quay lại đây để gắn metadata non-destructive.</span></div>`}</section>
-  ${selected ? card(`Asset của ${selected.title}`, `<div class="asset-contact-sheet asset-contact-sheet--compact">${projectAssets.map((asset) => assetThumb(asset)).join("") || `<div class="empty-state compact">Project chưa tham chiếu asset Hub nào.</div>`}</div>`, "", "card--wide") : ""}`;
+  ${selected ? cardDynamic(`Asset của ${selected.title}`, `<div class="asset-contact-sheet asset-contact-sheet--compact">${projectAssets.map((asset) => assetThumb(asset)).join("") || `<div class="empty-state compact">Project chưa tham chiếu asset Hub nào.</div>`}</div>`, "", "card--wide") : ""}`;
 };
 
 const renderCreativeRecipes = (state) => {
@@ -1022,7 +1031,7 @@ const renderCreativeRecipes = (state) => {
     ${card("Tạo prompt & recipe", `<form class="stack" data-creative-form="create-recipe">${field("Tên recipe", `<input name="title" required maxlength="120" placeholder="Ví dụ: Cinematic portrait" />`)}${field("Prompt template", `<textarea name="prompt_template" rows="4" placeholder="A {{subject}} in a studio…"></textarea>`)}${field("Variables", `<input name="variables" placeholder="subject|Chủ thể|person|required; mood|Mood|warm" />`)}${field("Style block", `<textarea name="style_block" rows="2" placeholder="cinematic editorial lighting"></textarea>`)}${field("Negative block", `<textarea name="negative_block" rows="2" placeholder="blur, watermark"></textarea>`)}<div class="form-grid">${field("Model", `<input name="model" value="flux" />`)}${field("Seed", `<input name="seed" type="number" min="0" value="42" />`)}${field("Width", `<input name="width" type="number" min="256" value="768" />`)}${field("Height", `<input name="height" type="number" min="256" value="768" />`)}${field("Steps", `<input name="steps" type="number" min="1" value="20" />`)}</div>${field("Workflow preset", `<input name="workflow_preset" placeholder="Optional tracked preset ID" />`)}${field("Gắn project", `<select name="project_id">${projectOptions(projects, selectedId, "Không gắn project")}</select>`)}${field("Tags", `<input name="tags" placeholder="portrait, social" />`)}<div class="form-actions">${button("Lưu recipe", "button--primary")}</div><div class="form-result" role="status"></div><p class="small">Variable syntax: <code>name|Nhãn|default|required</code>. Settings được validate là JSON an toàn trước khi lưu.</p></form>`) }
     ${card("Recipe Pack", `<p class="small">Export chỉ chứa recipe/version/settings an toàn; không có model, output cá nhân, secret hoặc đường dẫn máy.</p><div class="form-actions"><button class="button" type="button" data-export-recipe-pack>Export toàn bộ recipe</button></div><details class="advanced"><summary>Import Recipe Pack</summary><form class="stack creative-inline-form" data-creative-form="import-recipe-pack">${field("Conflict", `<select name="conflict"><option value="copy">Copy an toàn</option><option value="skip">Bỏ qua ID trùng</option><option value="replace">Thay thế ID trùng</option></select>`)}${field("Pack JSON", `<textarea name="pack" required rows="9" placeholder='{"contract_version":"creative-recipe-pack.v1",…}'></textarea>`)}<div class="form-actions">${button("Validate & import")}</div><div class="form-result" role="status"></div></form></details>`, "", "card--flat")}
   </div>
-  <section class="creative-recipe-grid" aria-label="Recipe library">${recipes.map((recipe) => `<article class="creative-recipe-card"><div class="split"><div><span class="eyebrow">RECIPE · v${escapeHtml(recipe.version)}</span><h2>${escapeHtml(recipe.title)}</h2></div><span class="tag">${escapeHtml(recipe.model)}</span></div><p>${escapeHtml(recipe.prompt_template || "Không có prompt template.")}</p>${recipe.style_block ? `<p class="small"><strong>Style:</strong> ${escapeHtml(recipe.style_block)}</p>` : ""}${recipe.negative_block ? `<p class="small"><strong>Negative:</strong> ${escapeHtml(recipe.negative_block)}</p>` : ""}<div class="tag-list">${(recipe.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}${(recipe.variables || []).map((variable) => `<span class="tag">${escapeHtml(variable.name)}</span>`).join("")}</div><form class="stack creative-inline-form" data-creative-form="apply-recipe" data-recipe-id="${escapeHtml(recipe.id)}">${(recipe.variables || []).map((variable) => field(variable.label || variable.name, `<input name="variable_${escapeHtml(variable.name)}" value="${escapeHtml(variable.default || "")}" ${variable.required ? "required" : ""} />`)).join("")}${field("Đích áp dụng", `<select name="target"><option value="quick">Image AI Quick</option><option value="nodes">Image Hub Nodes</option></select>`)}<div class="form-actions">${button("Áp dụng recipe")}</div><div class="form-result" role="status"></div></form></article>`).join("") || `<div class="empty-state"><strong>Chưa có recipe</strong><span>Tạo recipe để dùng lại prompt, style, negative, seed, model và settings trên Quick hoặc Node Studio.</span></div>`}</section>`;
+  <section class="creative-recipe-grid" aria-label="Recipe library">${recipes.map((recipe) => `<article class="creative-recipe-card"><div class="split"><div><span class="eyebrow">RECIPE · v${escapeHtml(recipe.version)}</span><h2>${escapeHtml(recipe.title)}</h2></div><span class="tag">${escapeHtml(recipe.model)}</span></div><p>${escapeHtml(recipe.prompt_template || "Không có prompt template.")}</p>${recipe.style_block ? `<p class="small"><strong>Style:</strong> ${escapeHtml(recipe.style_block)}</p>` : ""}${recipe.negative_block ? `<p class="small"><strong>Negative:</strong> ${escapeHtml(recipe.negative_block)}</p>` : ""}<div class="tag-list">${(recipe.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}${(recipe.variables || []).map((variable) => `<span class="tag">${escapeHtml(variable.name)}</span>`).join("")}</div><form class="stack creative-inline-form" data-creative-form="apply-recipe" data-recipe-id="${escapeHtml(recipe.id)}">${(recipe.variables || []).map((variable) => fieldDynamic(variable.label || variable.name, `<input name="variable_${escapeHtml(variable.name)}" value="${escapeHtml(variable.default || "")}" ${variable.required ? "required" : ""} />`)).join("")}${field("Đích áp dụng", `<select name="target"><option value="quick">Image AI Quick</option><option value="nodes">Image Hub Nodes</option></select>`)}<div class="form-actions">${button("Áp dụng recipe")}</div><div class="form-result" role="status"></div></form></article>`).join("") || `<div class="empty-state"><strong>Chưa có recipe</strong><span>Tạo recipe để dùng lại prompt, style, negative, seed, model và settings trên Quick hoặc Node Studio.</span></div>`}</section>`;
 };
 
 const renderCreativeCompare = (state) => {

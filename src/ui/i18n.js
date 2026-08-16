@@ -265,15 +265,8 @@ export const localizeDocument = (root = document, language = currentLanguage()) 
   // its first fixed child.  The numeric/server-owned sibling is never touched.
   nodes("[data-i18n-container]").forEach((node) => {
     const source = node.getAttribute("data-i18n-container");
-    const target = node.querySelector?.("[data-i18n-slot]") || node.firstElementChild;
+    const target = node.querySelector?.("[data-i18n-slot]") || node.firstElementChild || node;
     if (source !== null && target) target.textContent = translateText(source, language);
-  });
-  // Recovery count cards have a stable semantic hook and a numeric sibling;
-  // translate only their first label span so the existing count markup and
-  // server-projected number remain untouched.
-  nodes("[data-recovery-count]").forEach((node) => {
-    const target = node.querySelector?.(":scope > span");
-    if (target) target.textContent = translateText(target.textContent, language);
   });
   [
     ["data-i18n-aria-label", "aria-label"],
