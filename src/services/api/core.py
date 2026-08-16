@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import socket
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -66,9 +68,26 @@ SMOKE_ELIGIBLE_TOOLS = {
     "clone_voice",
     "convert_voice",
     "upscale_anime_video",
+    "probe_media",
     "generate_flux",
     "generate_qwen_image",
 }
+
+# A component may expose that its leaves are present without promoting the
+# corresponding tool.  Operational is reserved for one recent, bounded smoke
+# record that names the tool and matches the current non-sensitive runtime
+# fingerprint.  The fingerprint only represents boolean leaf observations;
+# it never includes workstation paths, commands, models, or input/output data.
+COMPONENT_RUNTIME_EVIDENCE_SCHEMA = "component-runtime-evidence.v1"
+COMPONENT_RUNTIME_EVIDENCE_MAX_AGE = timedelta(days=1)
+_COMPONENT_RUNTIME_EVIDENCE_KEYS = frozenset({
+    "schema_version",
+    "tool",
+    "outcome",
+    "execution",
+    "recorded_at",
+    "runtime_fingerprint",
+})
 
 # Desktop shutdown must close submission admission and recheck the durable
 # queue under one server-owned lock.  The desktop never races a new job into
@@ -205,37 +224,132 @@ def _safe_text(value: object, fallback: str) -> str:
     return text
 
 
-def _observed_status(item: dict[str, Any]) -> str:
+def _runtime_observation(item: dict[str, Any]) -> dict[str, bool]:
+    """Read only the component's local leaf presence without projecting paths."""
+
+    return {
+        "port_open": _port_open(item.get("port")),
+        "executable_present": _path_exists(item.get("executable")),
+        "path_present": _path_exists(item.get("path")),
+        "environment_present": _path_exists(item.get("environment")),
+    }
+
+
+def _runtime_fingerprint(item: dict[str, Any], observation: dict[str, bool]) -> str:
+    """Return a stable, path-free digest of the current component leaves."""
+
+    payload = {
+        "id": str(item.get("id") or "")[:128],
+        "configured_status": _configured_status(item),
+        "recovered_static": item.get("recovery_state") == "recovered_static",
+        "observation": {
+            key: bool(observation.get(key))
+            for key in ("port_open", "executable_present", "path_present", "environment_present")
+        },
+    }
+    encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _observed_status(item: dict[str, Any], observation: dict[str, bool] | None = None) -> str:
+    """Project local leaf presence without promoting a configured row to a smoke."""
+
     configured = _configured_status(item)
-    if item.get("recovery_state") == "recovered_static" or (
-        item.get("runtime_status") == "not_run" and item.get("execution") == "not_run"
-    ):
+    if item.get("recovery_state") == "recovered_static":
         return "unavailable"
-    if _port_open(item.get("port")):
+    current = observation if observation is not None else _runtime_observation(item)
+    if current["port_open"]:
         return "running"
-    executable = item.get("executable")
-    path = item.get("path")
-    env = item.get("environment")
-    executable_exists = _path_exists(executable)
-    environment_exists = _path_exists(env)
-    has_runtime = executable_exists or _path_exists(path)
+    executable_exists = current["executable_present"]
+    environment_exists = current["environment_present"]
+    has_runtime = executable_exists or current["path_present"]
     if configured == "not_installed" and not executable_exists and not environment_exists:
         return "not_installed"
     if configured == "planned" and not has_runtime:
-        return "planned" if configured == "planned" else "not_installed"
+        return "planned"
     if has_runtime:
-        if env and not _path_exists(env):
+        if item.get("environment") and not environment_exists:
             return "partial"
         return "installed"
+    if environment_exists:
+        return "partial"
     if configured in {"external_system_app", "external_managed", "reused"}:
         return "partial"
     return "missing"
 
 
+def _parsed_smoke_time(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _last_smoke_projection(item: dict[str, Any], runtime_fingerprint: str, *, now: datetime | None = None) -> dict[str, Any]:
+    """Fail closed unless a bounded smoke names this exact current runtime."""
+
+    evidence = item.get("last_smoke")
+    fallback = {
+        "status": "not_run",
+        "execution": "not_run",
+        "fresh": False,
+        "runtime_fingerprint_match": False,
+    }
+    if not isinstance(evidence, dict) or set(evidence) != _COMPONENT_RUNTIME_EVIDENCE_KEYS:
+        return fallback
+    if (
+        evidence.get("schema_version") != COMPONENT_RUNTIME_EVIDENCE_SCHEMA
+        or not isinstance(evidence.get("tool"), str)
+        or evidence.get("tool") not in TOOL_COMPONENTS
+        or evidence.get("outcome") not in {"completed", "failed"}
+        or evidence.get("execution") not in {"completed", "attempted"}
+        or (evidence.get("outcome") == "completed" and evidence.get("execution") != "completed")
+        or (evidence.get("outcome") == "failed" and evidence.get("execution") != "attempted")
+        or not isinstance(evidence.get("runtime_fingerprint"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", evidence["runtime_fingerprint"]) is None
+    ):
+        return fallback
+    recorded_at = _parsed_smoke_time(evidence.get("recorded_at"))
+    reference = now or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    fresh = bool(
+        recorded_at is not None
+        and timedelta(0) <= reference - recorded_at <= COMPONENT_RUNTIME_EVIDENCE_MAX_AGE
+    )
+    fingerprint_matches = evidence["runtime_fingerprint"] == runtime_fingerprint
+    return {
+        "status": evidence["outcome"],
+        "execution": evidence["execution"],
+        "fresh": fresh,
+        "runtime_fingerprint_match": fingerprint_matches,
+        "tool": evidence["tool"],
+    }
+
+
+def _smoke_is_current_for_tool(item: dict[str, Any], tool: str) -> bool:
+    smoke = item.get("last_smoke")
+    return bool(
+        isinstance(smoke, dict)
+        and smoke.get("tool") == tool
+        and smoke.get("status") == "completed"
+        and smoke.get("execution") == "completed"
+        and smoke.get("fresh") is True
+        and smoke.get("runtime_fingerprint_match") is True
+        and smoke_passed(tool)
+    )
+
+
 def component_statuses() -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for item in components():
-        observed = _observed_status(item)
+        observation = _runtime_observation(item)
+        observed = _observed_status(item, observation)
+        fingerprint = _runtime_fingerprint(item, observation)
+        last_smoke = _last_smoke_projection(item, fingerprint)
         result.append({
             "id": item.get("id"),
             "name": item.get("name") or item.get("id"),
@@ -247,6 +361,9 @@ def component_statuses() -> list[dict[str, Any]]:
             "configured_component_status": _configured_status(item),
             "component_status": observed,
             "status": observed,
+            "current_readiness": observed,
+            "runtime_fingerprint": fingerprint,
+            "last_smoke": last_smoke,
         })
     return result
 
@@ -310,12 +427,16 @@ def _tool_readiness(tool: str, statuses: dict[str, dict[str, Any]]) -> dict[str,
     component_status = str(component_item.get("component_status") or "missing")
     tool_status, reason = TOOL_CAPABILITIES[tool]
     operation_scope = runtime_evidence_operation_scope() if tool == "run_media_operation" else None
-    if component_status not in READY_COMPONENT_STATUSES and tool_status not in {"operational"}:
+    if component_status not in READY_COMPONENT_STATUSES:
         tool_status = "unavailable"
         reason = f"{component_item.get('name', component_id)} đang ở trạng thái {component_status}; worker không thể nhận job."
-    elif tool_status == "partial" and tool in SMOKE_ELIGIBLE_TOOLS and smoke_passed(tool):
-        tool_status = "operational"
-        reason = "Đã có một direct job bounded hoàn tất trên máy này; trạng thái được lưu cục bộ, không chứa đường dẫn hoặc dữ liệu input."
+    elif tool in SMOKE_ELIGIBLE_TOOLS:
+        if _smoke_is_current_for_tool(component_item, tool):
+            tool_status = "operational"
+            reason = "Một bounded smoke gần đây khớp runtime hiện tại đã hoàn tất; evidence cục bộ không chứa đường dẫn hoặc dữ liệu input."
+        elif tool_status == "operational":
+            tool_status = "partial"
+            reason = "Runtime hiện tại cần một bounded smoke mới khớp runtime fingerprint trước khi tool được xem là operational."
     return {
         "component": component_id,
         "component_status": component_status,
