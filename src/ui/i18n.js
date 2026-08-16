@@ -31,6 +31,9 @@ const DICTIONARIES = Object.freeze({
     "Close navigation": "Đóng điều hướng", "Open navigation": "Mở điều hướng", "Expand navigation": "Mở rộng điều hướng",
     "Collapse navigation": "Thu gọn điều hướng", "Reason & next action": "Lý do & hành động tiếp theo",
     "active": "đang hoạt động", "records": "bản ghi", "Refresh snapshot": "Làm mới snapshot",
+    "Language": "Ngôn ngữ", "Ngôn ngữ": "Ngôn ngữ", "Change theme": "Đổi giao diện", "Đổi giao diện": "Đổi giao diện",
+    "Module navigation": "Điều hướng module", "Điều hướng module": "Điều hướng module", "Local AI center": "Trung tâm AI cục bộ", "Trung tâm AI cục bộ": "Trung tâm AI cục bộ",
+    "Loopback only · no CDN": "Chỉ loopback · không CDN", "Chỉ loopback · không CDN": "Chỉ loopback · không CDN",
   }),
   en: Object.freeze({
     "Bảng điều khiển": "Dashboard", "Cài đặt": "Settings", "Tác vụ": "Jobs", "Mô hình & Lưu trữ": "Models & Storage",
@@ -46,6 +49,7 @@ const DICTIONARIES = Object.freeze({
     "Xem bằng chứng do máy chủ sở hữu trước khi chạy runtime.": "Review the server-owned evidence before runtime work.",
     "Đóng điều hướng": "Close navigation", "Mở điều hướng": "Open navigation", "Mở rộng điều hướng": "Expand navigation",
     "Thu gọn điều hướng": "Collapse navigation", "đang hoạt động": "active", "bản ghi": "records", "Làm mới snapshot": "Refresh snapshot",
+    "Ngôn ngữ": "Language", "Đổi giao diện": "Change theme", "Điều hướng module": "Module navigation", "Trung tâm AI cục bộ": "Local AI center", "Chỉ loopback · không CDN": "Loopback only · no CDN",
   }),
   zh: Object.freeze({
     "Dashboard": "控制面板", "Bảng điều khiển": "控制面板", "Settings": "设置", "Cài đặt": "设置", "Jobs": "任务", "Tác vụ": "任务",
@@ -58,6 +62,7 @@ const DICTIONARIES = Object.freeze({
     "Installed": "已安装", "Đã cài": "已安装", "Missing": "缺失", "Thiếu": "缺失", "Failed": "失败", "Thất bại": "失败", "Completed": "已完成", "Hoàn tất": "已完成",
     "Close navigation": "关闭导航", "Đóng điều hướng": "关闭导航", "Open navigation": "打开导航", "Mở điều hướng": "打开导航",
     "Refresh snapshot": "刷新快照", "Làm mới snapshot": "刷新快照", "active": "活动", "đang hoạt động": "活动", "records": "条记录", "bản ghi": "条记录",
+    "Ngôn ngữ": "语言", "Đổi giao diện": "切换主题", "Điều hướng module": "模块导航", "Trung tâm AI cục bộ": "本地 AI 中心", "Chỉ loopback · không CDN": "仅本地回环 · 无 CDN",
   }),
   ja: Object.freeze({
     "Dashboard": "ダッシュボード", "Bảng điều khiển": "ダッシュボード", "Settings": "設定", "Cài đặt": "設定", "Jobs": "ジョブ", "Tác vụ": "ジョブ",
@@ -70,6 +75,7 @@ const DICTIONARIES = Object.freeze({
     "Installed": "インストール済み", "Đã cài": "インストール済み", "Missing": "不足", "Thiếu": "不足", "Failed": "失敗", "Thất bại": "失敗", "Completed": "完了", "Hoàn tất": "完了",
     "Close navigation": "ナビゲーションを閉じる", "Đóng điều hướng": "ナビゲーションを閉じる", "Open navigation": "ナビゲーションを開く", "Mở điều hướng": "ナビゲーションを開く",
     "Refresh snapshot": "スナップショットを更新", "Làm mới snapshot": "スナップショットを更新", "active": "アクティブ", "đang hoạt động": "アクティブ", "records": "件", "bản ghi": "件",
+    "Ngôn ngữ": "言語", "Đổi giao diện": "テーマを切り替える", "Điều hướng module": "モジュールナビゲーション", "Trung tâm AI cục bộ": "ローカル AI センター", "Chỉ loopback · không CDN": "ループバックのみ・CDN なし",
   }),
   ko: Object.freeze({
     "Dashboard": "대시보드", "Bảng điều khiển": "대시보드", "Settings": "설정", "Cài đặt": "설정", "Jobs": "작업", "Tác vụ": "작업",
@@ -82,6 +88,7 @@ const DICTIONARIES = Object.freeze({
     "Installed": "설치됨", "Đã cài": "설치됨", "Missing": "누락", "Thiếu": "누락", "Failed": "실패", "Thất bại": "실패", "Completed": "완료", "Hoàn tất": "완료",
     "Close navigation": "탐색 닫기", "Đóng điều hướng": "탐색 닫기", "Open navigation": "탐색 열기", "Mở điều hướng": "탐색 열기",
     "Refresh snapshot": "스냅샷 새로 고침", "Làm mới snapshot": "스냅샷 새로 고침", "active": "활성", "đang hoạt động": "활성", "records": "개 기록", "bản ghi": "개 기록",
+    "Ngôn ngữ": "언어", "Đổi giao diện": "테마 변경", "Điều hướng module": "모듈 탐색", "Trung tâm AI cục bộ": "로컬 AI 허브", "Chỉ loopback · không CDN": "루프백 전용 · CDN 없음",
   }),
 });
 
@@ -187,14 +194,25 @@ export const translateText = (value, language = currentLanguage()) => {
 };
 
 export const localizeDocument = (root = document, language = currentLanguage()) => {
-  const walker = document.createTreeWalker(root, globalThis.NodeFilter?.SHOW_TEXT ?? 4);
-  const nodes = [];
-  while (walker.nextNode()) nodes.push(walker.currentNode);
-  nodes.forEach((node) => {
-    const parent = node.parentElement;
-    if (!parent || parent.closest("script,style,code,pre,[data-i18n-skip]")) return;
-    const next = translateText(node.nodeValue, language);
-    if (next !== node.nodeValue) node.nodeValue = next;
+  // Only localize fixed markup that explicitly opts in.  Snapshot, job, and
+  // artifact text is server-owned data and must never be traversed or changed
+  // by a client-side dictionary pass.
+  const nodes = (selector) => [
+    ...(root?.matches?.(selector) ? [root] : []),
+    ...(root?.querySelectorAll?.(selector) || []),
+  ];
+  nodes("[data-i18n]").forEach((node) => {
+    const source = node.getAttribute("data-i18n");
+    if (source !== null) node.textContent = translateText(source, language);
+  });
+  [
+    ["data-i18n-aria-label", "aria-label"],
+    ["data-i18n-title", "title"],
+  ].forEach(([sourceAttribute, targetAttribute]) => {
+    nodes(`[${sourceAttribute}]`).forEach((node) => {
+      const source = node.getAttribute(sourceAttribute);
+      if (source !== null) node.setAttribute(targetAttribute, translateText(source, language));
+    });
   });
   return language;
 };

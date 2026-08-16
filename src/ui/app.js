@@ -98,6 +98,7 @@ const workflowLibraryAdapter = createWorkflowLibraryAdapter(null, {
 });
 let routeLoad = null;
 let desktopCloseLayer = null;
+let artifactPreviewOpener = null;
 let disposeImageMaskCanvases = () => {};
 
 const SIDEBAR_PREFERENCE_KEY = "local-ai-hub-sidebar-v1";
@@ -271,7 +272,15 @@ const showToast = (message, kind = "") => {
   window.setTimeout(() => toast.remove(), 5200);
 };
 
-const closeArtifactPreview = () => artifactPreviewLayer?.replaceChildren();
+const closeArtifactPreview = () => {
+  artifactPreviewLayer?.replaceChildren();
+  const opener = artifactPreviewOpener;
+  artifactPreviewOpener = null;
+  const focusTarget = opener && document.contains(opener) && !opener.disabled
+    ? opener
+    : document.querySelector("#main-content");
+  focusTarget?.focus({ preventScroll: true });
+};
 
 const legacyShowArtifactPreview = (button) => {
   if (!artifactPreviewLayer) return;
@@ -356,6 +365,7 @@ const appendArtifactRecord = (body, title, record, keys) => {
 };
 const showArtifactPreview = (button) => {
   if (!artifactPreviewLayer) return;
+  artifactPreviewOpener = button;
   artifactPreviewLayer.replaceChildren();
   const dialog = document.createElement("section");
   dialog.className = "artifact-preview-dialog";
