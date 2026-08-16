@@ -610,6 +610,18 @@ def _unavailable(tool: str, readiness: dict[str, Any], reason: str | None = None
 def _opaque_media_request(tool: str, payload: dict[str, Any]) -> bool:
     """Keep GPU/video workers on opaque artifact identifiers end-to-end."""
 
+    if tool in {
+        "parse_screen",
+        "detect_objects",
+        "ground_objects",
+        "segment_from_text",
+        "ocr_document",
+        "text_to_speech",
+        "design_voice",
+        "clone_voice",
+        "convert_voice",
+    }:
+        return True
     if tool == "upscale_anime_video":
         return True
     if tool != "run_media_operation":
@@ -623,11 +635,38 @@ def _resolve_assets(payload: dict[str, Any], *, tool: str = "") -> tuple[dict[st
     # Public loopback requests use opaque artifact IDs.  Raw workstation paths
     # are never accepted from the browser/API surface; internal composition
     # between already-resolved workers happens below this boundary.
-    raw_path_fields = {"path", "secondary_path", "reference_audio", "source", "target", "input_image", "input_paths"}
+    raw_path_fields = {
+        "path",
+        "secondary_path",
+        "reference_audio",
+        "source",
+        "target",
+        "input_image",
+        "input_paths",
+        "output",
+        "outputs",
+        "files",
+        "command",
+        "executable",
+        "runtime",
+        "model",
+        "model_id",
+    }
     if any(field in payload and payload[field] not in (None, "", []) for field in raw_path_fields):
         return dict(payload), "Dùng artifact ID do Hub tạo thay vì gửi đường dẫn cục bộ."
     value = dict(payload)
     if _opaque_media_request(tool, value):
+        if tool in {"text_to_speech", "design_voice"}:
+            return value, None
+        if tool == "clone_voice":
+            selected = value.get("reference_asset_id")
+            if selected is not None and (not isinstance(selected, str) or not selected):
+                return value, "Artifact input không hợp lệ."
+            return value, None
+        if tool == "convert_voice":
+            if not all(isinstance(value.get(field), str) and value.get(field) for field in ("source_asset_id", "target_asset_id")):
+                return value, "Chọn source và target artifact Hub hợp lệ trước khi chạy worker."
+            return value, None
         source_id = value.get("source_artifact_id")
         asset_id = value.get("asset_id")
         if source_id is not None and asset_id is not None and source_id != asset_id:
@@ -635,7 +674,7 @@ def _resolve_assets(payload: dict[str, Any], *, tool: str = "") -> tuple[dict[st
         selected = source_id if source_id is not None else asset_id
         if not isinstance(selected, str) or not selected:
             return value, "Chọn artifact Hub hợp lệ trước khi chạy worker media."
-        # Do not turn the opaque identifier back into a workstation path.  The
+        # Do not turn the opaque identifier back into a workstation path. The
         # concrete adapter resolves type and containment server-side.
         value["source_artifact_id"] = selected
         value.pop("asset_id", None)
@@ -679,26 +718,20 @@ def _run_operation(tool: str, payload: dict[str, Any], context: JobContext | Non
     if tool == "parse_screen":
         from src.modules.vision.backend.omniparser_adapter import parse
 
-        return parse(str(payload.get("path", "")), float(payload.get("box_threshold", 0.05)), context)
+        return parse(payload, context)
     if tool == "detect_objects":
         from src.modules.vision.backend.rfdetr_adapter import detect
 
-        return detect(str(payload.get("path", "")), float(payload.get("threshold", 0.5)), context)
+        return detect(payload, context)
     if tool == "ground_objects":
         from src.modules.vision.backend.groundingdino_adapter import ground
 
-        return ground(str(payload.get("path", "")), str(payload.get("prompt", "")), float(payload.get("box_threshold", 0.35)), float(payload.get("text_threshold", 0.25)), context)
+        return ground(payload, context)
     if tool == "segment_from_text":
         from src.modules.sam2.backend import adapter as sam2
         from src.modules.vision.backend.groundingdino_adapter import ground
 
-        grounded = ground(
-            str(payload.get("path", "")),
-            str(payload.get("prompt", "")),
-            float(payload.get("box_threshold", 0.35)),
-            float(payload.get("text_threshold", 0.25)),
-            context,
-        )
+        grounded = ground(payload, context)
         if grounded.get("status") != "completed":
             return grounded
         candidates = grounded.get("grounded")
@@ -708,7 +741,13 @@ def _run_operation(tool: str, payload: dict[str, Any], context: JobContext | Non
         if not isinstance(raw_box, list) or len(raw_box) != 4:
             return {"status": "error", "error": "Grounding DINO không trả normalized box hợp lệ."}
         cx, cy, width, height = [float(item) for item in raw_box]
-        return sam2.segment_from_box({**payload, "box": [cx - width / 2, cy - height / 2, cx + width / 2, cy + height / 2], "normalized_box": True}, context)
+        source_id = payload.get("source_artifact_id") or payload.get("asset_id")
+        from src.services.artifact_store import resolve as resolve_artifact
+
+        source_path = resolve_artifact(source_id) if isinstance(source_id, str) else None
+        if source_path is None:
+            return {"status": "error", "error": "Artifact Hub đầu vào không còn tồn tại."}
+        return sam2.segment_from_box({**payload, "path": str(source_path), "box": [cx - width / 2, cy - height / 2, cx + width / 2, cy + height / 2], "normalized_box": True}, context)
     if tool in {"segment_image", "segment_from_box", "segment_from_points", "track_video_object"}:
         from src.modules.sam2.backend import adapter as sam2
 
@@ -722,7 +761,7 @@ def _run_operation(tool: str, payload: dict[str, Any], context: JobContext | Non
     if tool == "ocr_document":
         from src.modules.ocr.backend.adapter import parse
 
-        return parse(str(payload.get("path", "")), context)
+        return parse(payload, context)
     if tool == "transcribe_media":
         from src.modules.whisper.backend.adapter import transcribe
 

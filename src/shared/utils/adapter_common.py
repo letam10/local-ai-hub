@@ -1,10 +1,60 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
-from src.services.api.config import BASE_DIR, component
+from src.services.api.config import BASE_DIR, component, models
+
+
+_ARTIFACT_ID = re.compile(r"artifact_[a-f0-9]{32}\Z")
+_UNRESOLVED_CONFIG = re.compile(r"\$\{[^}]+\}|%[^%]+%")
+_LOCAL_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\)")
+_REGISTRY_ID = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
+_MAX_WORKER_ITEMS = 64
+_MAX_WORKER_TEXT = 600
+
+_WORKER_COMMON_FIELDS = {
+    "operation",
+    "code",
+    "error",
+    "reason",
+    "next_action",
+    "message",
+    "count",
+    "duration_seconds",
+    "language",
+    "speaker",
+    "sample_rate",
+    "segment_count",
+    "device",
+    "width",
+    "height",
+}
+_PATH_RESULT_FIELDS = {
+    "path",
+    "input",
+    "source",
+    "target",
+    "reference_audio",
+    "secondary_path",
+    "input_image",
+    "input_paths",
+    "output",
+    "outputs",
+    "files",
+    "audio",
+    "srt",
+    "preview",
+    "local_path",
+    "output_root",
+    "command",
+    "executable",
+    "runtime",
+    "model",
+    "model_id",
+}
 
 
 def configured_path(
@@ -19,6 +69,162 @@ def configured_path(
     if not value:
         return None
     return Path(os.path.expandvars(value)).expanduser()
+
+
+def _registry_path(value: object) -> Path | None:
+    if not isinstance(value, str) or not value.strip() or _UNRESOLVED_CONFIG.search(value):
+        return None
+    try:
+        return Path(os.path.expandvars(value)).expanduser()
+    except (OSError, ValueError):
+        return None
+
+
+def registered_runtime(component_id: str, script_name: str, *, executable_field: str = "executable") -> tuple[Path, Path, Path] | None:
+    """Bind one worker to the local component registry, never environment input."""
+
+    item = component(component_id)
+    if not isinstance(item, dict) or item.get("id") != component_id:
+        return None
+    service = _registry_path(item.get("path"))
+    executable = _registry_path(item.get(executable_field))
+    if service is None or executable is None or Path(script_name).name != script_name:
+        return None
+    return executable, service / script_name, service
+
+
+def registered_model(component_id: str, engine: str) -> tuple[str, Path] | None:
+    """Return the one fixed engine model declared by the local registry."""
+
+    owner = component(component_id)
+    if not isinstance(owner, dict) or owner.get("id") != component_id:
+        return None
+    matches: list[tuple[str, Path]] = []
+    for item in models():
+        if not isinstance(item, dict) or item.get("engine") != engine:
+            continue
+        model_id = item.get("id")
+        model_path = _registry_path(item.get("local_path"))
+        if isinstance(model_id, str) and _REGISTRY_ID.fullmatch(model_id) and model_path is not None:
+            matches.append((model_id, model_path))
+    return matches[0] if len(matches) == 1 else None
+
+
+def bounded_timeout(value: object, default: float, *, maximum: float) -> float:
+    """Clamp worker timeout without allowing NaN, infinity, or unbounded input."""
+
+    try:
+        candidate = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if candidate != candidate or candidate <= 0 or candidate == float("inf"):
+        return float(default)
+    return min(candidate, float(maximum))
+
+
+def resolve_artifact_input(payload: object, *fields: str) -> tuple[Path | None, str | None]:
+    """Resolve only a Hub opaque artifact ID; raw workstation paths are refused."""
+
+    if not isinstance(payload, dict):
+        return None, "artifact_input_required"
+    if any(field in payload and payload[field] not in (None, "", []) for field in _PATH_RESULT_FIELDS):
+        return None, "raw_input_forbidden"
+    selected: object = None
+    for field in fields:
+        if field in payload:
+            selected = payload.get(field)
+            break
+    if not isinstance(selected, str) or not _ARTIFACT_ID.fullmatch(selected):
+        return None, "artifact_input_required"
+    try:
+        from src.services.artifact_store import resolve
+
+        path = resolve(selected)
+    except Exception:
+        path = None
+    if path is None or not path.is_file():
+        return None, "artifact_input_unavailable"
+    try:
+        if path.is_symlink() or bool(getattr(os.lstat(path), "st_file_attributes", 0) & 0x400):
+            return None, "artifact_input_unavailable"
+    except OSError:
+        return None, "artifact_input_unavailable"
+    return path, None
+
+
+def reject_raw_worker_fields(payload: object) -> str | None:
+    """Reject path, command, executable, model and output fields from callers."""
+
+    if not isinstance(payload, dict):
+        return "invalid_request"
+    if any(field in payload and payload[field] not in (None, "", []) for field in _PATH_RESULT_FIELDS):
+        return "raw_input_forbidden"
+    return None
+
+
+def _safe_text(value: object) -> str:
+    text = str(value or "")
+    text = _LOCAL_PATH.sub("[đường-dẫn-cục-bộ]", text)
+    return text.replace("\x00", "")[:_MAX_WORKER_TEXT]
+
+
+def _safe_metadata(value: object, *, depth: int = 0) -> object | None:
+    if depth > 4:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return max(-1_000_000, min(1_000_000, value))
+    if isinstance(value, float):
+        return value if value == value and abs(value) <= 1_000_000 else None
+    if isinstance(value, str):
+        return _safe_text(value)
+    if isinstance(value, list):
+        return [item for item in (_safe_metadata(item, depth=depth + 1) for item in value[:_MAX_WORKER_ITEMS]) if item is not None]
+    if isinstance(value, dict):
+        result: dict[str, object] = {}
+        for key, item in list(value.items())[:_MAX_WORKER_ITEMS]:
+            name = str(key)
+            if name.lower() in _PATH_RESULT_FIELDS or "path" in name.lower() or "command" in name.lower():
+                continue
+            safe = _safe_metadata(item, depth=depth + 1)
+            if safe is not None:
+                result[name[:80]] = safe
+        return result
+    return None
+
+
+def normalize_worker_result(
+    value: object,
+    *,
+    component_id: str,
+    context: object | None = None,
+    output_fields: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Return bounded metadata; output paths are internal only for JobContext."""
+
+    if not isinstance(value, dict) or value.get("status") not in {"completed", "failed", "unavailable", "cancelled", "error"}:
+        return {"status": "error", "component": component_id, "code": "invalid_worker_result"}
+    status = str(value.get("status"))
+    safe: dict[str, Any] = {"status": status, "component": component_id}
+    for key in _WORKER_COMMON_FIELDS:
+        if key in value:
+            normalized = _safe_metadata(value.get(key))
+            if normalized is not None:
+                safe[key] = normalized
+    for key in ("grounded", "detections", "objects", "boxes", "text", "markdown", "json", "tables", "segments", "artifact"):
+        if key in value:
+            normalized = _safe_metadata(value.get(key))
+            if normalized is not None:
+                safe[key] = normalized
+    if context is not None and status == "completed":
+        for key in output_fields:
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate:
+                safe[key] = candidate
+            elif isinstance(candidate, list) and len(candidate) <= _MAX_WORKER_ITEMS and all(isinstance(item, str) and item for item in candidate):
+                safe[key] = list(candidate)
+    return safe
 
 
 def local_root() -> Path:
@@ -47,4 +253,10 @@ def describe(component_id: str) -> dict[str, Any]:
 
 
 def unavailable(component_id: str, reason: str) -> dict[str, Any]:
-    return {**describe(component_id), "status": "unavailable", "reason": reason}
+    return {
+        "status": "unavailable",
+        "component": component_id,
+        "execution": "not_run",
+        "reason": _safe_text(reason),
+        "next_action": "Kiểm tra registry component/model và helper worker rồi chạy lại bounded smoke.",
+    }
