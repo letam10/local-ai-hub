@@ -45,18 +45,27 @@ def _safe_model_path(candidate: Path) -> bool:
     """Accept only one registry model leaf below the fixed Models root."""
 
     try:
-        root = MODEL_ROOT.resolve(strict=False)
-        resolved = candidate.resolve(strict=True)
-        relative = resolved.relative_to(root)
+        # Check the lexical path and every original ancestor before resolving:
+        # a symlink/junction below Models must never be allowed to redirect a
+        # registry leaf to another location.
+        root = Path(os.path.abspath(str(MODEL_ROOT)))
+        lexical = Path(os.path.abspath(str(candidate)))
+        relative = lexical.relative_to(root)
     except (OSError, ValueError):
         return False
-    current = MODEL_ROOT
-    if _is_reparse(current):
+    if _is_reparse(root):
         return False
+    current = root
     for part in relative.parts:
         current = current / part
         if _is_reparse(current):
             return False
+    try:
+        resolved_root = root.resolve(strict=True)
+        resolved = lexical.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+    except (OSError, ValueError):
+        return False
     return (resolved.is_file() or resolved.is_dir()) and current.resolve(strict=True) == resolved
 
 

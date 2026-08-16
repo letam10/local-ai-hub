@@ -56,11 +56,27 @@ def _safe_tree(root: Path, relative: Path) -> Path | None:
 
 def _safe_existing_under(root: Path, candidate: Path) -> bool:
     try:
-        relative = candidate.resolve(strict=False).relative_to(root.resolve(strict=False))
+        # Inspect the original lexical path first.  Resolving before lstat
+        # would hide a symlink/junction alias under an otherwise safe root.
+        lexical_root = Path(os.path.abspath(str(root)))
+        lexical_candidate = Path(os.path.abspath(str(candidate)))
+        relative = lexical_candidate.relative_to(lexical_root)
     except (OSError, ValueError):
         return False
-    checked = _safe_tree(root, relative)
-    return checked is not None and checked.resolve(strict=False) == candidate.resolve(strict=False)
+    if _is_reparse(lexical_root):
+        return False
+    current = lexical_root
+    for part in relative.parts:
+        current = current / part
+        if _is_reparse(current):
+            return False
+    try:
+        resolved_root = lexical_root.resolve(strict=True)
+        resolved = lexical_candidate.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+    except (OSError, ValueError):
+        return False
+    return resolved == current.resolve(strict=True)
 
 
 def _safe_model_leaf(root: Path, candidate: Path) -> bool:

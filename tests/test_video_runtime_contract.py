@@ -112,6 +112,68 @@ class VideoRuntimeContractTests(unittest.TestCase):
             self.assertEqual(payload["status"], "error")
             launch.assert_not_called()
 
+    def test_animesr_adapter_rejects_models_reparse_alias(self) -> None:
+        from src.modules.animesr.backend import adapter
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_root = root / "Models"
+            model_root.mkdir()
+            real_model = root / "real-model"
+            real_model.mkdir()
+            alias = model_root / "AnimeSR_v2"
+            try:
+                alias.symlink_to(real_model, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symlink fixture unavailable: {exc}")
+            with (
+                patch.object(adapter, "MODEL_ROOT", model_root),
+                patch.object(adapter, "models", return_value=[{"id": "animesr-v2", "engine": "AnimeSR", "local_path": str(alias)}]),
+            ):
+                self.assertIsNone(adapter._selected_model())
+
+    def test_animesr_worker_rejects_models_reparse_alias_before_launch(self) -> None:
+        from src.modules.animesr.backend import worker
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / "runtime"
+            script = runtime / "scripts" / "inference_animesr_video.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("# fixture", encoding="utf-8")
+            source = root / "input.mp4"
+            source.write_bytes(b"video")
+            ffmpeg = runtime / "tools" / "ffmpeg.exe"
+            ffmpeg.parent.mkdir(parents=True)
+            ffmpeg.write_bytes(b"tool")
+            models = root / "Models"
+            models.mkdir()
+            real_model = root / "real-model"
+            real_model.mkdir()
+            alias = models / "AnimeSR_v2"
+            try:
+                alias.symlink_to(real_model, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symlink fixture unavailable: {exc}")
+            output_root = root / "Output" / "AnimeSR"
+            old_hub_root = os.environ.get("LOCALAIHUB_ROOT")
+            os.environ["LOCALAIHUB_ROOT"] = str(root)
+            try:
+                with patch.object(worker, "run_hidden") as launch:
+                    code, payload = self._run_worker(worker, {
+                        "runtime": str(runtime), "path": str(source), "output_root": str(output_root),
+                        "ffmpeg": str(ffmpeg), "model_id": "animesr-v2", "model": "AnimeSR_v2",
+                        "model_path": str(alias), "expname": "animesr_v2", "scale": 2,
+                    }, launch)
+            finally:
+                if old_hub_root is None:
+                    os.environ.pop("LOCALAIHUB_ROOT", None)
+                else:
+                    os.environ["LOCALAIHUB_ROOT"] = old_hub_root
+            self.assertEqual(code, 2)
+            self.assertEqual(payload["status"], "error")
+            launch.assert_not_called()
+
     def test_animesr_adapter_binds_registry_model_to_cli_contract(self) -> None:
         from src.modules.animesr.backend import adapter
 
