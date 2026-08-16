@@ -15,6 +15,12 @@ return a finite `unavailable` / `execution: not_run` result. They do not turn
 into a Python key error, start a backend, submit a prompt, or publish an
 artifact.
 
+An IMAGE input is independently revalidated before backend start and again
+before upload. It must be an existing, non-reparse Hub artifact below the
+fixed `Output`, `Temp/uploads`, or `Archive` roots. An escaped file, a reparse
+ancestor (including `Output`), or a stale leaf returns `image_input_unavailable`
+without starting ComfyUI or reading/uploading the file.
+
 Qwen Image currently has a text-to-image contract only. A supplied IMAGE
 artifact is refused unless a separately reviewed Qwen image-to-image workflow
 contract is added; Hub must not silently discard that input.

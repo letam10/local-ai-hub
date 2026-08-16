@@ -100,11 +100,16 @@ class ComfyImageGenerationContractTests(unittest.TestCase):
     def test_qwen_image_input_refuses_without_starting_or_uploading(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            image = root / "input.png"
+            output = root / "Output"
+            output.mkdir()
+            image = output / "input.png"
             image.write_bytes(b"image")
-            self._write_workflow(root, "qwen_image_2512_t2i_api.json", _qwen_workflow())
+            studio = root / "qwen-studio"
+            self._write_workflow(studio, "qwen_image_2512_t2i_api.json", _qwen_workflow())
             with (
-                patch.object(comfyui, "_studio_root", return_value=root),
+                patch.object(comfyui, "ROOT", root),
+                patch.object(comfyui, "OUTPUT_ROOT", output),
+                patch.object(comfyui, "_studio_root", return_value=studio),
                 patch.object(comfyui, "ensure_running", side_effect=AssertionError("unsupported input must not start ComfyUI")) as start,
                 patch.object(comfyui, "_upload_input_image", side_effect=AssertionError("unsupported input must not upload")) as upload,
             ):
@@ -113,6 +118,36 @@ class ComfyImageGenerationContractTests(unittest.TestCase):
             upload.assert_not_called()
             self.assertEqual(result["status"], "unavailable")
             self.assertIn("image_workflow_unavailable", result["reason"])
+
+    def test_reparse_artifact_input_refuses_before_backend_start_or_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "Output"
+            output.mkdir()
+            image = output / "input.png"
+            image.write_bytes(b"image")
+            studio = root / "flux-studio"
+            self._write_workflow(studio, "flux2_klein_i2i_base_api.json", _flux_workflow(image=True))
+            original_is_reparse = comfyui._is_reparse
+
+            def is_reparse(path: Path) -> bool:
+                return Path(path) == output or original_is_reparse(path)
+
+            with (
+                patch.object(comfyui, "ROOT", root),
+                patch.object(comfyui, "OUTPUT_ROOT", output),
+                patch.object(comfyui, "_studio_root", return_value=studio),
+                patch.object(comfyui, "_is_reparse", side_effect=is_reparse),
+                patch.object(comfyui, "ensure_running", side_effect=AssertionError("reparse artifact must not start ComfyUI")) as start,
+                patch.object(comfyui, "_upload_input_image", side_effect=AssertionError("reparse artifact must not upload")) as upload,
+            ):
+                result = comfyui.generate("flux", {"prompt": "small image", "input_image": str(image)})
+            start.assert_not_called()
+            upload.assert_not_called()
+            self.assertEqual(result["status"], "unavailable")
+            self.assertEqual(result["execution"], "not_run")
+            self.assertIn("image_input_unavailable", result["reason"])
+            self.assertNotIn(str(root), json.dumps(result))
 
     def test_reparse_workflow_path_is_refused_without_backend_start(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
