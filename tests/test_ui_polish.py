@@ -74,6 +74,8 @@ class UiPolishTests(unittest.TestCase):
         self.assertIn("cardDynamic(`Asset của ${selected.title}`", self.pages)
         self.assertIn("fieldDynamic(variable.label || variable.name", self.pages)
         self.assertIn('data-i18n-container="Attention"', self.pages)
+        self.assertIn("const normalized = readinessStatus(status);", self.pages)
+        self.assertIn("READINESS_STATUS_LABELS.unknown", self.pages)
         self.assertNotIn('nodes("[data-recovery-count]").forEach', self.i18n)
 
     def test_artifact_preview_close_restores_opener_or_main_landmark(self) -> None:

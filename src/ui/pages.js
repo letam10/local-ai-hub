@@ -104,8 +104,11 @@ const readinessStatusLabel = (value) => {
   return READINESS_STATUS_LABELS[normalized] || formatStatus(normalized);
 };
 const statusPill = (status) => {
-  const normalized = uiStatus(status);
-  const label = READINESS_STATUS_LABELS[normalized] || formatStatus(normalized);
+  // Snapshot status values are data, not translation keys.  Collapse any
+  // unknown-but-well-shaped value to the fixed Unknown label before it can
+  // reach the translator.
+  const normalized = readinessStatus(status);
+  const label = READINESS_STATUS_LABELS[normalized] || READINESS_STATUS_LABELS.unknown;
   return `<span class="status-pill" data-status="${escapeHtml(normalized)}">${uiTextHtml(label)}</span>`;
 };
 const unsafeUiText = /(?:[a-z]:[\\/]|\\\\|(?:^|\s)\/(?:etc|tmp|var|home)(?:[\\/]|$)|(?:file|data):|(?:api[_-]?key|password|secret|token)\s*[:=])/i;
