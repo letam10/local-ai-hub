@@ -9,8 +9,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src.services.api import core
+from src.services.api import jobs
 from src.modules.vision.backend import omniparser_adapter, rfdetr_adapter
 from src.modules.voice.backend import qwen3_tts_adapter, seed_vc_adapter
+from src.shared.utils.adapter_common import normalize_worker_result
 
 
 def _artifact_id(letter: str = "a") -> str:
@@ -96,6 +98,33 @@ class VisionVoiceAdapterContractTests(unittest.TestCase):
         self.assertEqual(captured["payload"]["model_id"], "qwen3-tts-local")
         self.assertNotIn("C:\\private", json.dumps(result))
         self.assertEqual(result["status"], "completed")
+
+    def test_voice_audio_alias_is_job_provenanced_and_published_as_opaque_artifact(self) -> None:
+        raw_audio = r"D:\\LocalAIHub\\Output\\Audio\\speech.wav"
+        normalized = normalize_worker_result(
+            {"status": "completed", "audio": raw_audio},
+            component_id="qwen3_tts",
+            context=object(),
+            output_fields=("output", "audio", "files", "outputs"),
+        )
+        self.assertEqual(normalized["output"], raw_audio)
+        self.assertNotIn("audio", normalized)
+
+        seen: list[Path] = []
+
+        def register(paths, *, provenance):
+            seen.extend(paths)
+            return [{"id": _artifact_id("c"), "provenance": provenance}]
+
+        record = {"id": "job_20260816_123456_abcd1234", "tool": "text_to_speech"}
+        with patch.object(jobs.artifact_store, "register_worker_outputs", side_effect=register):
+            safe, error = jobs._publish_result(normalized, record)
+
+        self.assertIsNone(error)
+        self.assertEqual(seen, [Path(raw_audio)])
+        self.assertEqual(safe["artifacts"][0]["id"], _artifact_id("c"))
+        self.assertNotIn(raw_audio, json.dumps(safe))
+        self.assertNotIn("audio", safe)
 
     def test_seed_voice_requires_two_opaque_artifacts_and_never_uses_raw_source(self) -> None:
         with patch.object(seed_vc_adapter, "run_json_worker") as worker:

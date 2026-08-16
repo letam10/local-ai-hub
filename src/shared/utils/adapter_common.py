@@ -55,6 +55,12 @@ _PATH_RESULT_FIELDS = {
     "model",
     "model_id",
 }
+_OUTPUT_FIELD_ALIASES = {
+    # Voice workers historically called their Hub-owned output ``audio``.
+    # Normalize that alias before handing the result to Job Manager so it
+    # follows the same opaque artifact publication path as image/video output.
+    "audio": "output",
+}
 
 
 def configured_path(
@@ -220,10 +226,15 @@ def normalize_worker_result(
     if context is not None and status == "completed":
         for key in output_fields:
             candidate = value.get(key)
+            target_key = _OUTPUT_FIELD_ALIASES.get(key, key)
+            # Prefer the canonical output field when a worker supplies both
+            # an output and an alias; never let a later alias overwrite it.
+            if target_key in safe:
+                continue
             if isinstance(candidate, str) and candidate:
-                safe[key] = candidate
+                safe[target_key] = candidate
             elif isinstance(candidate, list) and len(candidate) <= _MAX_WORKER_ITEMS and all(isinstance(item, str) and item for item in candidate):
-                safe[key] = list(candidate)
+                safe[target_key] = list(candidate)
     return safe
 
 
