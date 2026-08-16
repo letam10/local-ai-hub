@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.services import artifact_store
 from src.services.artifact_store import publicize
 
 from .config import BASE_DIR
@@ -40,6 +41,130 @@ _jobs: dict[str, dict[str, Any]] = {}
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_RESULT_SCALAR_KEYS = {
+    "operation",
+    "backend",
+    "model",
+    "audio",
+    "container",
+    "rate_control",
+    "target_fps",
+    "scale",
+    "tool",
+    "reason",
+    "next_action",
+    "error",
+    "message",
+}
+def _job_fingerprint(record: dict[str, Any]) -> str:
+    """Return an opaque legacy-job binding for produced artifact provenance."""
+
+    payload = {
+        "contract_version": "job.v2",
+        "id": str(record.get("id") or ""),
+        "tool": str(record.get("tool") or ""),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _adapter_id(record: dict[str, Any]) -> str:
+    """Keep the provenance adapter identifier bounded and path-free."""
+
+    value = str(record.get("tool") or "hub_job").lower()
+    normalized = "".join(char if char.isalnum() or char in "_.-" else "_" for char in value)
+    if not normalized or not normalized[0].isalpha():
+        normalized = f"hub_{normalized}"
+    return normalized[:64]
+
+
+def _output_candidates(value: object) -> list[Path]:
+    """Extract only worker-declared output fields; never inspect arbitrary data."""
+
+    if not isinstance(value, dict):
+        return []
+    candidates: list[Path] = []
+    output = value.get("output")
+    if isinstance(output, (str, Path)) and str(output):
+        candidates.append(Path(str(output)))
+    files = value.get("files")
+    if isinstance(files, list):
+        for item in files[:64]:
+            if isinstance(item, (str, Path)) and str(item):
+                candidates.append(Path(str(item)))
+    return candidates
+
+
+def _safe_result_scalar(value: object, *, key: str) -> object | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return max(-1_000_000, min(1_000_000, value))
+    if isinstance(value, float):
+        return value if value == value and abs(value) <= 1_000_000 else None
+    if isinstance(value, str):
+        # publicize strips a local path from error/reason text while retaining
+        # ordinary bounded worker guidance.  The result is capped before it
+        # reaches jobs.json or the browser projection.
+        return str(publicize(value, key=key))[:600]
+    return None
+
+
+def _publish_result(result: object, record: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Publish worker outputs as opaque, job-bound artifacts.
+
+    Video/image workers are allowed to return a Hub-owned output path because
+    that path is an internal hand-off only.  It is removed before persistence
+    and replaced by artifact metadata carrying the terminal job provenance.
+    Any path outside the artifact store's managed roots fails closed.
+    """
+
+    if not isinstance(result, dict):
+        return {"status": "failed", "error": "Worker trả về dữ liệu không hợp lệ."}, "invalid_result"
+    status = result.get("status")
+    if status not in {"completed", "failed", "unavailable", "cancelled"}:
+        return {"status": "failed", "error": "Worker trả về trạng thái không hợp lệ."}, "invalid_status"
+    safe: dict[str, Any] = {"status": status}
+    for key in _RESULT_SCALAR_KEYS:
+        if key in result:
+            value = _safe_result_scalar(result.get(key), key=key)
+            if value is not None:
+                safe[key] = value
+    if status != "completed":
+        return safe, None
+
+    files = result.get("files")
+    if isinstance(files, list) and len(files) > 64:
+        return {"status": "failed", "error": "Worker tạo quá nhiều output cho một job."}, "output_count"
+    candidates = _output_candidates(result)
+    if len(candidates) > 64:
+        return {"status": "failed", "error": "Worker tạo quá nhiều output cho một job."}, "output_count"
+    if not candidates:
+        # Metadata-only operations such as probe are valid completions.
+        return safe, None
+    provenance = {
+        "job_id": str(record.get("id") or ""),
+        "job_spec_fingerprint": _job_fingerprint(record),
+        "adapter_id": _adapter_id(record),
+        "attempt": 1,
+        "status": "completed",
+    }
+    artifacts: list[dict[str, Any]] = []
+    for candidate in candidates:
+        try:
+            artifact = artifact_store.register_path(
+                candidate,
+                name=candidate.name,
+                provenance=provenance,
+            )
+        except Exception:
+            artifact = None
+        if not isinstance(artifact, dict) or artifact.get("provenance") != provenance:
+            return {"status": "failed", "error": "Output không thể publish thành artifact Hub hợp lệ."}, "output_publish"
+        artifacts.append(artifact)
+    safe["artifacts"] = artifacts
+    return safe, None
 
 
 class CoalescingWriter:

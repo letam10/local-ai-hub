@@ -1,45 +1,50 @@
-# V6 Video Runtime Integration
+# V6 video runtime integration
 
-This contract connects the existing AnimeSR, Practical-RIFE, and Real-ESRGAN
-installations to Local AI Hub jobs.  It does not mark any of them operational:
-that requires a separately recorded bounded Hub job that produces an artifact.
+This package keeps the AnimeSR, Practical-RIFE, and Real-ESRGAN adapters inside
+the Local AI Hub job boundary. It does not install a runtime, download a model,
+run a GPU smoke, or claim that a configured leaf is operational.
 
-## Boundaries
+## Source and runtime boundary
 
-- AnimeSR uses its configured Python environment and the checked runtime CLI.
-  The worker passes `--netscale 4`, never sends the obsolete
-  `--low-memory-frame-write` flag, and supplies the exact canonical FFmpeg
-  executable through AnimeSR's `ffmpeg_exe_path` setting.
-- Practical-RIFE needs its configured Python environment, the runtime-relative
-  `train_log/RIFEv4.26_0921/flownet.pkl` leaf, and both configured FFmpeg and
-  FFprobe executables.  The upstream script's basename FFmpeg lookup is
-  constrained to a worker environment containing only the canonical tool
-  directory and the Windows command host; it never inherits the interactive
-  process PATH.  Hub remuxes and validates the resulting video with that same
-  configured pair.
-- Real-ESRGAN accepts one server-owned `realesr-animevideov3` model record
-  below `Models`.  The worker always passes that existing local file by
-  `--model_path`, so upstream download behavior is not reachable.
+Each adapter accepts only an opaque Hub artifact identifier. The worker resolves
+that identifier through the server-owned artifact store and rejects raw source
+paths, executable overrides, model paths, and output roots. Runtime and model
+selection comes from the server-owned local registry and fixed canonical roots.
+Practical-RIFE additionally receives explicit FFmpeg and FFprobe paths and
+executes with a constrained lookup path; it never relies on the interactive
+process `PATH`. Worker temporary data is under the task-owned Hub `Temp/jobs`
+root and final outputs are under the corresponding Hub `Output` subdirectory.
 
-AnimeSR, Practical-RIFE, and Real-ESRGAN accept only a typed opaque Hub
-artifact ID.  Public `path`, executable, command, model-path, or output-root
-fields are refused before a worker is launched.  Each worker resolves its
-typed artifact internally, writes a new timestamped result in its Hub-owned
-Output subtree, and returns it to the normal Job Manager/artifact
-publication flow.  Before a worker reads a runtime/tool/model leaf or creates
-an Output/Temp path, it verifies the whole canonical-root chain has no
-symlink/junction/reparse escape.  The workers do not delete media, model
-weights, runtimes, or environments.  They may remove only their own
-successful `Temp/jobs` directory with a matching task prefix.
+Missing environment, runtime, model, FFmpeg/FFprobe pair, or unsafe containment
+is reported as unavailable/error. A standalone worker result is not a
+capability smoke or readiness claim.
 
-## Status and smoke evidence
+## Job → artifact contract
 
-These adapters remain `partial` until a bounded job proves the complete
-pipeline: runtime, selected model, adapter, job, artifact, and preview/output.
-An installed standalone runtime or model file is not evidence of an
-operational Hub capability.  Missing environments, models, FFmpeg/FFprobe, or
-an unsuccessful smoke must remain unavailable or partial with a next action.
+The in-process Hub Job Manager treats a worker result as an internal hand-off.
+Before a terminal result is persisted, completed `output`/`files` values are
+validated by the server-owned artifact store and replaced with opaque artifact
+records. Each published record carries the terminal job ID, a bounded job
+fingerprint, adapter/tool ID, attempt, and completed status. Raw workstation
+paths are not persisted in `jobs.json` or returned by the public job projection.
 
-The source package performs no environment rebuild, model download, GPU work,
-or functional smoke.  Those machine-local actions require their own preflight
-for active jobs and RTX 4060 availability.
+An output outside a Hub-owned artifact root, an invalid worker status, a
+malformed result, or a failed artifact publication makes the job failed with a
+bounded user-facing action. Cancellation wins over a late worker completion, so
+an explicitly cancelled job cannot publish a late output. Metadata-only
+completed results (for example, a read-only probe) remain valid and do not need
+an artifact.
+
+This contract covers the legacy `job_YYYYMMDD_HHMMSS_<hex>` IDs as well as the
+V5 `jobv5_<hex>` lineage format. It does not broaden artifact roots or permit
+client-supplied provenance.
+
+## Verification boundary
+
+Static tests use temporary Hub-shaped fixtures to cover checked worker command
+arguments, explicit tools, raw-path refusal, reparse/containment refusal,
+registry-selected model containment, truthful unavailable results, and the
+adapter → Job Manager → artifact projection. A future bounded functional smoke
+must still check the active-job/GPU policy immediately before running and must
+prove `runtime → model → adapter → job → artifact → preview/output` before a
+tool can be reported operational.

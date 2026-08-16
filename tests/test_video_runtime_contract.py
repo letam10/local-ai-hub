@@ -3,14 +3,22 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 
 class VideoRuntimeContractTests(unittest.TestCase):
+    def _owned_temp_root(self) -> Path:
+        root = Path(__file__).resolve().parents[1] / "Temp" / f"test-video-runtime-{uuid.uuid4().hex}"
+        root.mkdir(parents=True, exist_ok=False)
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        return root
+
     def _run_worker(self, module, request: dict, fake_run):
         stream = SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode("utf-8")))
         with patch.object(module.sys, "stdin", stream), patch.object(module, "run_hidden", side_effect=fake_run):
@@ -233,6 +241,92 @@ class VideoRuntimeContractTests(unittest.TestCase):
                 self.assertIsNone(adapter._selected_model())
         finally:
             outside.unlink(missing_ok=True)
+
+    def test_video_worker_output_is_published_as_job_bound_artifact(self) -> None:
+        """A completed video worker must survive the Hub job/artifact boundary."""
+
+        from src.services import artifact_store
+        from src.services.api import jobs as api_jobs
+        from src.services.job_manager.manager import HubJobManager
+
+        root = self._owned_temp_root()
+        output_root = root / "Output"
+        output_root.mkdir()
+        index_path = root / "Config" / "artifacts.json"
+        target = output_root / "AnimeSR" / "clip_AnimeSR_x2.mp4"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"bounded video output")
+        manager = HubJobManager()
+        try:
+            with (
+                patch.object(api_jobs, "_jobs", {}),
+                patch.object(api_jobs, "_save"),
+                patch.object(artifact_store, "OUTPUT_ROOT", output_root),
+                patch.object(artifact_store, "INDEX_PATH", index_path),
+            ):
+                record = manager.submit(
+                    "upscale_anime_video",
+                    {"source_artifact_id": "artifact_" + "a" * 32},
+                    lambda _payload, _context: {
+                        "status": "completed",
+                        "operation": "upscale_anime_video",
+                        "backend": "animesr",
+                        "output": str(target),
+                    },
+                )
+                idle, remaining = manager.wait_for_idle(5)
+                self.assertTrue(idle, remaining)
+                public = api_jobs.get_job(record["id"])
+                self.assertIsNotNone(public)
+                assert public is not None
+                self.assertEqual(public["status"], "completed")
+                artifacts = public["result"]["artifacts"]
+                self.assertEqual(len(artifacts), 1)
+                artifact = artifacts[0]
+                self.assertRegex(artifact["id"], r"^artifact_[a-f0-9]{32}$")
+                self.assertEqual(artifact["media_type"], "video/mp4")
+                self.assertEqual(artifact["provenance"]["job_id"], record["id"])
+                self.assertEqual(artifact["provenance"]["status"], "completed")
+                self.assertNotIn(str(target), json.dumps(public, ensure_ascii=False))
+                self.assertNotIn("output", public["result"])
+                self.assertEqual(artifact_store.describe(artifact["id"])["provenance"]["adapter_id"], "upscale_anime_video")
+        finally:
+            manager.cancel_all_and_wait(3)
+
+    def test_video_output_outside_hub_fails_closed_without_artifact(self) -> None:
+        from src.services import artifact_store
+        from src.services.api import jobs as api_jobs
+        from src.services.job_manager.manager import HubJobManager
+
+        root = self._owned_temp_root()
+        output_root = root / "Output"
+        output_root.mkdir()
+        outside = root / "not-managed.mp4"
+        outside.write_bytes(b"outside")
+        manager = HubJobManager()
+        try:
+            with (
+                patch.object(api_jobs, "_jobs", {}),
+                patch.object(api_jobs, "_save"),
+                patch.object(artifact_store, "OUTPUT_ROOT", output_root),
+                patch.object(artifact_store, "INDEX_PATH", root / "Config" / "artifacts.json"),
+            ):
+                record = manager.submit(
+                    "run_media_operation",
+                    {"source_artifact_id": "artifact_" + "b" * 32},
+                    lambda _payload, _context: {"status": "completed", "output": str(outside)},
+                )
+                idle, remaining = manager.wait_for_idle(5)
+                self.assertTrue(idle, remaining)
+                public = api_jobs.get_job(record["id"])
+                self.assertIsNotNone(public)
+                assert public is not None
+                self.assertEqual(public["status"], "failed")
+                self.assertEqual(public["result"]["status"], "failed")
+                self.assertNotIn(str(outside), json.dumps(public, ensure_ascii=False))
+                self.assertFalse((root / "Config" / "artifacts.json").exists())
+        finally:
+            manager.cancel_all_and_wait(3)
 
 
 if __name__ == "__main__":

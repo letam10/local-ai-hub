@@ -40,6 +40,7 @@ _LOCK = threading.RLock()
 _SAFE_FILENAME = re.compile(r"[^A-Za-z0-9._() -]+")
 _LOCAL_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\)")
 _LOCAL_PATH_TAIL = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\)[^\r\n]*")
+_JOB_ID = re.compile(r"(?:jobv5_[a-f0-9]{32}|job_[0-9]{8}_[0-9]{6}_[a-f0-9]{8})")
 _PATH_FIELDS = {
     "annotated_image",
     "audio",
@@ -146,7 +147,7 @@ def _safe_provenance(value: Any) -> dict[str, Any]:
     adapter_id = value.get("adapter_id")
     attempt = value.get("attempt")
     status = value.get("status")
-    if not isinstance(job_id, str) or not re.fullmatch(r"jobv5_[a-f0-9]{32}", job_id):
+    if not isinstance(job_id, str) or not _JOB_ID.fullmatch(job_id):
         raise ArtifactWriteError("Artifact provenance is invalid.")
     if not isinstance(fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", fingerprint):
         raise ArtifactWriteError("Artifact provenance is invalid.")
@@ -187,6 +188,13 @@ def register_path(
         index = _load()
         for record in index.values():
             if record.get("path") == str(candidate):
+                # A legacy publicize() call may have registered a path before
+                # the owning job reached its terminal state.  Allow the
+                # server-owned publisher to attach provenance exactly once,
+                # but never replace provenance claimed by another job.
+                if safe_provenance is not None and "provenance" not in record:
+                    record["provenance"] = safe_provenance
+                    _save(index)
                 return _public(record)
         artifact_id = f"artifact_{uuid.uuid4().hex}"
         safe_name = _safe_name(name or candidate.name)

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from src.services.api.jobs import TERMINAL_STATUSES, active_jobs, create_job, get_job_internal, update_job
+from src.services.api.jobs import TERMINAL_STATUSES, _publish_result, active_jobs, create_job, get_job_internal, update_job
 from src.services.process_manager.managed import terminate_owned_process
 from src.services.tool_smoke import record_completed
 
@@ -152,9 +152,27 @@ class HubJobManager:
                 update_job(job_id, status="cancelled", finished_at=_now(), message="Tác vụ đã được hủy trước khi chạy.")
                 return
             update_job(job_id, status="running", progress=5, message="Worker Hub đang chạy nền.")
-            result = runner(payload, context)
+            raw_result = runner(payload, context)
+            record = get_job_internal(job_id) or {"id": job_id, "tool": tool}
+            # A cancellation wins over a late worker completion; do not
+            # publish an output that the user explicitly cancelled.
+            result, publish_error = _publish_result(
+                {"status": "cancelled"} if context.cancelled else raw_result,
+                record,
+            )
             if context.cancelled or result.get("status") == "cancelled":
                 update_job(job_id, status="cancelled", progress=0, finished_at=_now(), result=result, message="Tác vụ đã được hủy.")
+            elif publish_error is not None:
+                update_job(
+                    job_id,
+                    status="failed",
+                    progress=0,
+                    finished_at=_now(),
+                    result=result,
+                    error="Output không được publish thành artifact Hub; job giữ trạng thái failed.",
+                    message="Không thể publish output.",
+                    next_action="Kiểm tra runtime/output contract rồi tạo lại job.",
+                )
             elif result.get("status") == "completed":
                 update_job(job_id, status="completed", progress=100, finished_at=_now(), result=result, message="Hoàn tất.", next_action=result.get("next_action"))
                 record_completed(tool)
