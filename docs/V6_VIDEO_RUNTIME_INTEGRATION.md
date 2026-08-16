@@ -6,14 +6,22 @@ run a GPU smoke, or claim that a configured leaf is operational.
 
 ## Source and runtime boundary
 
-Each adapter accepts only an opaque Hub artifact identifier. The worker resolves
-that identifier through the server-owned artifact store and rejects raw source
-paths, executable overrides, model paths, and output roots. Runtime and model
-selection comes from the server-owned local registry and fixed canonical roots.
+Each adapter accepts only an opaque Hub artifact identifier and resolves it
+through the server-owned artifact store before invoking its internal worker.
+Raw source paths, executable overrides, model paths, and output roots are
+rejected at the adapter boundary. Runtime and model selection comes from the
+server-owned local registry and fixed canonical roots.
+The worker-side defense-in-depth check accepts a resolved input only under
+Hub `Temp/uploads`, `Output`, or `Archive`; an arbitrary direct worker path is
+not a valid artifact input.
 Practical-RIFE additionally receives explicit FFmpeg and FFprobe paths and
 executes with a constrained lookup path; it never relies on the interactive
 process `PATH`. Worker temporary data is under the task-owned Hub `Temp/jobs`
 root and final outputs are under the corresponding Hub `Output` subdirectory.
+Ambient `*_HOME`, `*_ENV`, `FFMPEG_PATH`, and `FFMPEG_HOME` environment
+overrides do not replace registry values. The Practical-RIFE worker accepts
+only the single registry FFmpeg directory containing both `ffmpeg.exe` and
+`ffprobe.exe`; a split pair is unavailable.
 
 Missing environment, runtime, model, FFmpeg/FFprobe pair, or unsafe containment
 is reported as unavailable/error. A standalone worker result is not a
@@ -22,11 +30,13 @@ capability smoke or readiness claim.
 ## Model and backend selection
 
 AnimeSR is bound to the server-owned `animesr-v2` registry record.  The
-adapter accepts only the fixed `AnimeSR_v2` / `animesr_v2` CLI pairing and a
-model leaf contained by the canonical `Models` root; client payloads cannot
+adapter accepts only the fixed `AnimeSR_v2` / `animesr_v2` CLI pairing and the
+canonical `Models/Video/AnimeSR/AnimeSR_v2.pth` leaf; client payloads cannot
 select a model path, model ID, or experiment name (a legacy model label is
 ignored).  A missing, duplicate,
 placeholder, or unsafe registry record blocks the worker before launch.
+Real-ESRGAN applies the same fixed-leaf rule to
+`Models/Video/Real-ESRGAN/realesr-animevideov3.pth`.
 
 The generic `run_media_operation` control-plane entry remains FFmpeg-backed,
 but a selected `frame_interpolate` + `practical_rife` or `image_upscale` +

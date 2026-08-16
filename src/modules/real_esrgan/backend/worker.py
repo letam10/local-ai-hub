@@ -51,11 +51,44 @@ def _safe_tree(root: Path, relative: Path) -> Path | None:
 
 def _safe_existing_under(root: Path, candidate: Path) -> bool:
     try:
-        relative = candidate.resolve(strict=False).relative_to(root.resolve(strict=False))
+        lexical_root = Path(os.path.abspath(str(root)))
+        lexical_candidate = Path(os.path.abspath(str(candidate)))
+        relative = lexical_candidate.relative_to(lexical_root)
     except (OSError, ValueError):
         return False
-    checked = _safe_tree(root, relative)
-    return checked is not None and checked.resolve(strict=False) == candidate.resolve(strict=False)
+    if _is_reparse(lexical_root):
+        return False
+    current = lexical_root
+    for part in relative.parts:
+        current = current / part
+        if _is_reparse(current):
+            return False
+    try:
+        resolved_root = lexical_root.resolve(strict=True)
+        resolved = lexical_candidate.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+    except (OSError, ValueError):
+        return False
+    return resolved == current.resolve(strict=True)
+
+
+def _safe_model_leaf(root: Path, candidate: Path) -> bool:
+    expected = root / Path("Video") / "Real-ESRGAN" / "realesr-animevideov3.pth"
+    return (
+        root.is_dir()
+        and not _is_reparse(root)
+        and os.path.normcase(os.path.abspath(str(candidate))) == os.path.normcase(os.path.abspath(str(expected)))
+        and candidate.is_file()
+        and _safe_existing_under(root, candidate)
+    )
+
+
+def _safe_artifact_input(hub_root: Path, candidate: Path) -> bool:
+    for relative in (Path("Temp") / "uploads", Path("Output"), Path("Archive")):
+        root = _safe_tree(hub_root, relative)
+        if root is not None and _safe_existing_under(root, candidate) and candidate.is_file():
+            return True
+    return False
 
 
 def _discard_task(hub_root: Path, path: Path) -> None:
@@ -94,11 +127,10 @@ def main() -> int:
             or expected_jobs is None
             or not runtime.is_dir()
             or not script.is_file()
-            or not source.is_file()
-            or not model.is_file()
+            or not _safe_artifact_input(hub_root, source)
+            or not _safe_model_leaf(expected_models, model)
             or not _safe_existing_under(hub_root, runtime)
-            or not _inside(runtime, script)
-            or not _safe_existing_under(hub_root, model)
+            or not _safe_existing_under(runtime, script)
             or output_root.resolve(strict=False) != expected_output.resolve(strict=False)
             or temp_root.parent.resolve(strict=False) != expected_jobs.resolve(strict=False)
             or not temp_root.name.startswith("realesrgan_")

@@ -37,14 +37,15 @@ class VideoRuntimeContractTests(unittest.TestCase):
             script = runtime / "scripts" / "inference_animesr_video.py"
             script.parent.mkdir(parents=True)
             script.write_text("# fixture", encoding="utf-8")
-            source = root / "input.mp4"
+            source = root / "Temp" / "uploads" / "input.mp4"
+            source.parent.mkdir(parents=True)
             source.write_bytes(b"video")
             ffmpeg = runtime / "tools" / "ffmpeg.exe"
             ffmpeg.parent.mkdir(parents=True)
             ffmpeg.write_bytes(b"tool")
-            model_path = root / "Models" / "AnimeSR" / "AnimeSR_v2"
-            model_path.mkdir(parents=True)
-            (model_path / "weights.marker").write_bytes(b"model")
+            model_path = root / "Models" / "Video" / "AnimeSR" / "AnimeSR_v2.pth"
+            model_path.parent.mkdir(parents=True)
+            model_path.write_bytes(b"model")
             output_root = root / "Output" / "AnimeSR"
             seen: dict[str, object] = {}
 
@@ -121,7 +122,8 @@ class VideoRuntimeContractTests(unittest.TestCase):
             model_root.mkdir()
             real_model = root / "real-model"
             real_model.mkdir()
-            alias = model_root / "AnimeSR_v2"
+            alias = model_root / "Video" / "AnimeSR" / "AnimeSR_v2.pth"
+            alias.parent.mkdir(parents=True)
             try:
                 alias.symlink_to(real_model, target_is_directory=True)
             except OSError as exc:
@@ -150,7 +152,8 @@ class VideoRuntimeContractTests(unittest.TestCase):
             models.mkdir()
             real_model = root / "real-model"
             real_model.mkdir()
-            alias = models / "AnimeSR_v2"
+            alias = models / "Video" / "AnimeSR" / "AnimeSR_v2.pth"
+            alias.parent.mkdir(parents=True)
             try:
                 alias.symlink_to(real_model, target_is_directory=True)
             except OSError as exc:
@@ -180,29 +183,29 @@ class VideoRuntimeContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             model_root = root / "Models"
-            model_path = model_root / "AnimeSR" / "AnimeSR_v2"
-            model_path.mkdir(parents=True)
-            (model_path / "weights.marker").write_bytes(b"model")
+            model_path = model_root / "Video" / "AnimeSR" / "AnimeSR_v2.pth"
+            model_path.parent.mkdir(parents=True)
+            model_path.write_bytes(b"model")
             runtime = root / "runtime"
             runtime.mkdir()
             environment = root / "Environments" / "animesr"
             python = environment / "Scripts" / "python.exe"
             python.parent.mkdir(parents=True)
             python.write_bytes(b"python")
-            ffmpeg = root / "runtime" / "ffmpeg.exe"
+            ffmpeg = root / "runtime" / "tools" / "ffmpeg" / "ffmpeg.exe"
+            ffmpeg.parent.mkdir(parents=True, exist_ok=True)
             ffmpeg.write_bytes(b"ffmpeg")
-            source = root / "source.mp4"
+            source = root / "Temp" / "uploads" / "source.mp4"
+            source.parent.mkdir(parents=True)
             source.write_bytes(b"video")
             artifact_id = "artifact_" + "1" * 32
             seen: dict[str, object] = {}
 
-            def fake_configured(component: str, field: str, _env: str):
-                if component == "animesr" and field == "path":
-                    return runtime
-                if component == "animesr" and field == "environment":
-                    return environment
-                if component == "ffmpeg" and field == "executable":
-                    return ffmpeg
+            def fake_component(component: str):
+                if component == "animesr":
+                    return {"id": "animesr", "path": str(runtime), "environment": str(environment)}
+                if component == "ffmpeg":
+                    return {"id": "ffmpeg", "path": str(ffmpeg.parent), "executable": str(ffmpeg)}
                 return None
 
             def fake_worker(_command, request, **_kwargs):
@@ -212,7 +215,7 @@ class VideoRuntimeContractTests(unittest.TestCase):
             with (
                 patch.object(adapter, "MODEL_ROOT", model_root),
                 patch.object(adapter, "models", return_value=[{"id": "animesr-v2", "engine": "AnimeSR", "local_path": str(model_path)}]),
-                patch.object(adapter, "configured_path", side_effect=fake_configured),
+                patch.object(adapter, "component", side_effect=fake_component),
                 patch.object(adapter, "resolve", return_value=source),
                 patch.object(adapter, "describe", return_value={"media_type": "video/mp4"}),
                 patch.object(adapter, "run_json_worker", side_effect=fake_worker),
@@ -236,6 +239,64 @@ class VideoRuntimeContractTests(unittest.TestCase):
         self.assertEqual(result["component"], "animesr")
         launch.assert_not_called()
 
+    def test_video_adapters_bind_runtime_from_registry_not_ambient_environment(self) -> None:
+        from src.modules.practical_rife.backend import adapter as rife
+        from src.modules.real_esrgan.backend import adapter as esrgan
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rife_runtime = root / "runtime" / "engines" / "video" / "Practical-RIFE"
+            rife_env = root / "Environments" / "practical_rife"
+            esrgan_runtime = root / "runtime" / "engines" / "video" / "Real-ESRGAN"
+            esrgan_env = root / "Environments" / "real_esrgan"
+            outside = root / "ambient-runtime"
+
+            def registry(component_id: str):
+                return {
+                    "practical_rife": {"id": "practical_rife", "path": str(rife_runtime), "environment": str(rife_env)},
+                    "real_esrgan": {"id": "real_esrgan", "path": str(esrgan_runtime), "environment": str(esrgan_env)},
+                }.get(component_id)
+
+            with patch.object(rife, "component", side_effect=registry), patch.object(esrgan, "component", side_effect=registry), patch.dict(
+                os.environ,
+                {"PRACTICAL_RIFE_HOME": str(outside), "PRACTICAL_RIFE_ENV": str(outside), "REAL_ESRGAN_HOME": str(outside), "REAL_ESRGAN_ENV": str(outside)},
+            ):
+                _rife_python, selected_rife, _rife_model = rife._runtime()
+                _esrgan_python, selected_esrgan = esrgan._runtime()
+
+            self.assertEqual(selected_rife, rife_runtime)
+            self.assertEqual(selected_esrgan, esrgan_runtime)
+            self.assertNotEqual(selected_rife, outside)
+            self.assertNotEqual(selected_esrgan, outside)
+
+    def test_rife_requires_one_registry_ffmpeg_pair(self) -> None:
+        from src.modules.practical_rife.backend import adapter
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "runtime" / "tools" / "ffmpeg"
+            second = root / "other-tools"
+            with patch.object(adapter, "component", side_effect=lambda component_id: {
+                "ffmpeg": {"id": "ffmpeg", "path": str(second), "executable": str(first / "ffmpeg.exe")},
+            }.get(component_id)):
+                ffmpeg, ffprobe = adapter._configured_ffmpeg()
+            self.assertIsNone(ffmpeg)
+            self.assertIsNone(ffprobe)
+
+    def test_real_esrgan_adapter_requires_fixed_model_leaf(self) -> None:
+        from src.modules.real_esrgan.backend import adapter
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_root = root / "Models"
+            wrong = model_root / "Video" / "Real-ESRGAN" / "other.pth"
+            wrong.parent.mkdir(parents=True)
+            wrong.write_bytes(b"model")
+            with patch.object(adapter, "MODEL_ROOT", model_root), patch.object(
+                adapter, "models", return_value=[{"id": "realesr-animevideov3", "engine": "Real-ESRGAN", "local_path": str(wrong)}]
+            ):
+                self.assertIsNone(adapter._selected_model())
+
     def test_rife_worker_constrains_ffmpeg_path_and_uses_ffprobe(self) -> None:
         from src.modules.practical_rife.backend import worker
 
@@ -245,10 +306,11 @@ class VideoRuntimeContractTests(unittest.TestCase):
             (runtime / "train_log" / "RIFEv4.26_0921").mkdir(parents=True)
             (runtime / "inference_video.py").write_text("# fixture", encoding="utf-8")
             (runtime / "train_log" / "RIFEv4.26_0921" / "flownet.pkl").write_bytes(b"model")
-            source = root / "input.mp4"
+            source = root / "Temp" / "uploads" / "input.mp4"
+            source.parent.mkdir(parents=True)
             source.write_bytes(b"video")
-            tools = runtime / "tools"
-            tools.mkdir()
+            tools = runtime / "tools" / "ffmpeg"
+            tools.mkdir(parents=True)
             ffmpeg, ffprobe = tools / "ffmpeg.exe", tools / "ffprobe.exe"
             ffmpeg.write_bytes(b"ffmpeg")
             ffprobe.write_bytes(b"ffprobe")
@@ -409,10 +471,11 @@ class VideoRuntimeContractTests(unittest.TestCase):
             model_dir.mkdir(parents=True)
             (runtime / "inference_video.py").write_text("# fixture", encoding="utf-8")
             (model_dir / "flownet.pkl").write_bytes(b"model")
-            source = root / "input.mp4"
+            source = root / "Temp" / "uploads" / "input.mp4"
+            source.parent.mkdir(parents=True)
             source.write_bytes(b"video")
-            tools = runtime / "tools"
-            tools.mkdir()
+            tools = runtime / "tools" / "ffmpeg"
+            tools.mkdir(parents=True)
             ffmpeg, ffprobe = tools / "ffmpeg.exe", tools / "ffprobe.exe"
             ffmpeg.write_bytes(b"ffmpeg")
             ffprobe.write_bytes(b"ffprobe")
@@ -433,6 +496,50 @@ class VideoRuntimeContractTests(unittest.TestCase):
             launch.assert_not_called()
             self.assertFalse((root / "Output" / "Practical-RIFE").exists())
 
+    def test_rife_reparse_ffmpeg_alias_refuses_before_worker_launch(self) -> None:
+        from src.modules.practical_rife.backend import worker
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / "runtime"
+            model_dir = runtime / "train_log" / "RIFEv4.26_0921"
+            model_dir.mkdir(parents=True)
+            (runtime / "inference_video.py").write_text("# fixture", encoding="utf-8")
+            (model_dir / "flownet.pkl").write_bytes(b"model")
+            source = root / "Temp" / "uploads" / "input.mp4"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"video")
+            tools = runtime / "tools" / "ffmpeg"
+            tools.mkdir(parents=True)
+            real_ffmpeg = root / "real-ffmpeg.exe"
+            real_ffmpeg.write_bytes(b"ffmpeg")
+            ffmpeg = tools / "ffmpeg.exe"
+            try:
+                ffmpeg.symlink_to(real_ffmpeg)
+            except OSError as exc:
+                self.skipTest(f"symlink fixture unavailable: {exc}")
+            ffprobe = tools / "ffprobe.exe"
+            ffprobe.write_bytes(b"ffprobe")
+            request = {
+                "runtime": str(runtime), "path": str(source), "model_dir": str(model_dir),
+                "ffmpeg": str(ffmpeg), "ffprobe": str(ffprobe),
+                "output_root": str(root / "Output" / "Practical-RIFE"),
+                "temp_root": str(root / "Temp" / "jobs" / "rife_fixture"),
+            }
+            old_hub_root = os.environ.get("LOCALAIHUB_ROOT")
+            os.environ["LOCALAIHUB_ROOT"] = str(root)
+            try:
+                with patch.object(worker, "run_hidden") as launch:
+                    code, payload = self._run_worker(worker, request, launch)
+            finally:
+                if old_hub_root is None:
+                    os.environ.pop("LOCALAIHUB_ROOT", None)
+                else:
+                    os.environ["LOCALAIHUB_ROOT"] = old_hub_root
+            self.assertEqual(code, 2)
+            self.assertEqual(payload["status"], "error")
+            launch.assert_not_called()
+
     def test_realesrgan_worker_uses_existing_model_without_download(self) -> None:
         from src.modules.real_esrgan.backend import worker
 
@@ -445,7 +552,8 @@ class VideoRuntimeContractTests(unittest.TestCase):
             models.mkdir(parents=True)
             model = models / "realesr-animevideov3.pth"
             model.write_bytes(b"model")
-            source = root / "input.png"
+            source = root / "Temp" / "uploads" / "input.png"
+            source.parent.mkdir(parents=True)
             source.write_bytes(b"image")
             output_root = root / "Output" / "Real-ESRGAN"
             temp_root = root / "Temp" / "jobs" / "realesrgan_fixture"
@@ -469,6 +577,45 @@ class VideoRuntimeContractTests(unittest.TestCase):
             self.assertEqual(payload["backend"], "real_esrgan")
             self.assertIn("--model_path", seen["command"])
             self.assertIn(str(model), seen["command"])
+
+    def test_realesrgan_worker_rejects_model_alias_before_worker_launch(self) -> None:
+        from src.modules.real_esrgan.backend import worker
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / "runtime" / "engines" / "video" / "Real-ESRGAN"
+            runtime.mkdir(parents=True)
+            (runtime / "inference_realesrgan.py").write_text("# fixture", encoding="utf-8")
+            models = root / "Models" / "Video" / "Real-ESRGAN"
+            models.mkdir(parents=True)
+            real_model = root / "real-model.pth"
+            real_model.write_bytes(b"model")
+            model = models / "realesr-animevideov3.pth"
+            try:
+                model.symlink_to(real_model)
+            except OSError as exc:
+                self.skipTest(f"symlink fixture unavailable: {exc}")
+            source = root / "Temp" / "uploads" / "input.png"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"image")
+            request = {
+                "runtime": str(runtime), "path": str(source), "model_path": str(model),
+                "output_root": str(root / "Output" / "Real-ESRGAN"),
+                "temp_root": str(root / "Temp" / "jobs" / "realesrgan_fixture"),
+            }
+            old_hub_root = os.environ.get("LOCALAIHUB_ROOT")
+            os.environ["LOCALAIHUB_ROOT"] = str(root)
+            try:
+                with patch.object(worker, "run_hidden") as launch:
+                    code, payload = self._run_worker(worker, request, launch)
+            finally:
+                if old_hub_root is None:
+                    os.environ.pop("LOCALAIHUB_ROOT", None)
+                else:
+                    os.environ["LOCALAIHUB_ROOT"] = old_hub_root
+            self.assertEqual(code, 2)
+            self.assertEqual(payload["status"], "error")
+            launch.assert_not_called()
 
     def test_real_esrgan_model_selector_refuses_outside_models_root(self) -> None:
         from src.modules.real_esrgan.backend import adapter

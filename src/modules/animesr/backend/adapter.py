@@ -8,26 +8,38 @@ import re
 from pathlib import Path
 from typing import Any
 
-from src.services.api.config import models
+from src.services.api.config import component, models
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
 from src.services.artifact_store import describe, resolve
 from src.shared.paths.registry import MODEL_ROOT, OUTPUT_ROOT
-from src.shared.utils.adapter_common import configured_path, local_root, unavailable
+from src.shared.utils.adapter_common import local_root, unavailable
 
 
 WORKER = Path(__file__).with_name("worker.py")
 _ARTIFACT_ID = re.compile(r"artifact_[a-f0-9]{32}")
 _MODEL_ID = "animesr-v2"
 _MODEL_SPEC = {"model": "AnimeSR_v2", "expname": "animesr_v2"}
+_MODEL_RELATIVE = Path("Video") / "AnimeSR" / "AnimeSR_v2.pth"
 _UNSAFE_INPUT_FIELDS = {
     "path", "source", "secondary_path", "input_path", "executable", "command",
     "model_path", "output_root", "model_id", "expname",
 }
 
 
+def _registry_path(component_id: str, field: str) -> Path | None:
+    item = component(component_id)
+    value = item.get(field) if isinstance(item, dict) and item.get("id") == component_id else None
+    if not isinstance(value, str) or not value.strip() or value.startswith("${"):
+        return None
+    try:
+        return Path(os.path.expandvars(value)).expanduser()
+    except (OSError, ValueError):
+        return None
+
+
 def _runtime() -> tuple[Path | None, Path | None]:
-    runtime = configured_path("animesr", "path", "ANIMESR_HOME")
-    environment = configured_path("animesr", "environment", "ANIMESR_ENV")
+    runtime = _registry_path("animesr", "path")
+    environment = _registry_path("animesr", "environment")
     python = environment / "Scripts" / "python.exe" if environment else None
     return python, runtime
 
@@ -51,7 +63,10 @@ def _safe_model_path(candidate: Path) -> bool:
         root = Path(os.path.abspath(str(MODEL_ROOT)))
         lexical = Path(os.path.abspath(str(candidate)))
         relative = lexical.relative_to(root)
+        expected = Path(os.path.abspath(str(root / _MODEL_RELATIVE)))
     except (OSError, ValueError):
+        return False
+    if os.path.normcase(str(lexical)) != os.path.normcase(str(expected)):
         return False
     if _is_reparse(root):
         return False
@@ -148,9 +163,9 @@ def run_animesr(payload: dict[str, Any], context: ProcessOwner | None = None) ->
     source = _video_artifact(payload)
     if source is None:
         return {"status": "error", "error": "AnimeSR cần VIDEO artifact do Hub quản lý."}
-    ffmpeg = configured_path("ffmpeg", "executable", "FFMPEG_PATH")
+    ffmpeg = _registry_path("ffmpeg", "executable")
     if ffmpeg is None:
-        home = configured_path("ffmpeg", "path", "FFMPEG_HOME")
+        home = _registry_path("ffmpeg", "path")
         ffmpeg = home / "ffmpeg.exe" if home else None
     if ffmpeg is None or not ffmpeg.is_file():
         return unavailable("ffmpeg", "Không tìm thấy FFmpeg canonical của Hub cho AnimeSR.")
@@ -221,9 +236,9 @@ def queue_upscale(_input_path: str, _output_path: str | None = None) -> dict[str
 def capability() -> dict[str, Any]:
     python, runtime = _runtime()
     model_path = _selected_model()
-    ffmpeg = configured_path("ffmpeg", "executable", "FFMPEG_PATH")
+    ffmpeg = _registry_path("ffmpeg", "executable")
     if ffmpeg is None:
-        home = configured_path("ffmpeg", "path", "FFMPEG_HOME")
+        home = _registry_path("ffmpeg", "path")
         ffmpeg = home / "ffmpeg.exe" if home else None
     return {
         "component": "animesr",
