@@ -67,6 +67,19 @@ def _durable_admission_http_status(payload: object) -> int:
     return {"accepted": 202, "invalid": 400, "unavailable": 503}.get(status, 500)
 
 
+def _shutdown_owned_idle() -> None:
+    """Release idle Comfy-owned resources without breaking API shutdown."""
+
+    try:
+        from src.modules.image_generation.backend.comfyui import shutdown_owned_idle
+
+        shutdown_owned_idle()
+    except Exception:
+        # Shutdown must still flush Jobs and close the listener when the
+        # optional Comfy runtime is unavailable or already stopped.
+        LOG.warning("Comfy idle shutdown was unavailable; continuing API shutdown.")
+
+
 def _workflow_library_payload() -> dict:
     value = _workflow_library_store().list_workflows()
     result = dict(value) if isinstance(value, dict) else {"status": "partial", "workflows": []}
@@ -1070,7 +1083,7 @@ def main() -> int:
     except KeyboardInterrupt:
         LOG.info("Stopping Local AI Hub")
     finally:
-        shutdown_owned_idle()
+        _shutdown_owned_idle()
         flush_jobs()
         server.server_close()
     return 0
