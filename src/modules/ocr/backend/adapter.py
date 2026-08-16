@@ -26,8 +26,12 @@ def parse(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[
     model = registered_model("paddleocr_vl", "PaddleOCR-VL")
     if input_error:
         return {"status": "error", "component": "paddleocr_vl", "code": input_error, "error": "Chọn artifact Hub hợp lệ cho PaddleOCR-VL."}
-    if runtime is None or model is None or not runtime[0].is_file() or not runtime[1].is_file() or not model[1].exists():
-        return unavailable("paddleocr_vl", "PaddleOCR-VL helper environment chưa hoàn chỉnh.")
+    if runtime is None:
+        return unavailable("paddleocr_vl", "PaddleOCR-VL canonical runtime hoặc paddle_cli.py chưa được registry xác nhận.", code="runtime_contract_missing")
+    if model is None:
+        return unavailable("paddleocr_vl", "Tool model PaddleOCR-VL còn thiếu hoặc không có payload local hợp lệ; package này không tải model.", code="tool_model_missing")
+    if not runtime[0].is_file() or not runtime[1].is_file() or not model[1].exists():
+        return unavailable("paddleocr_vl", "PaddleOCR-VL runtime/model leaf không còn tồn tại sau khi registry được đọc.", code="runtime_leaf_missing")
     python, helper, service = runtime
     result = run_json_worker(
         [str(python), str(helper)],
@@ -44,4 +48,15 @@ def parse(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[
 def capability() -> dict[str, Any]:
     runtime = _runtime()
     model = registered_model("paddleocr_vl", "PaddleOCR-VL")
-    return {"component": "paddleocr_vl", "adapter_status": "direct-worker-configured", "runtime_ready": bool(runtime and runtime[1].is_file()), "environment_ready": bool(runtime and runtime[0].is_file()), "model_registry_ready": bool(model and model[1].exists()), "status": "partial"}
+    return {
+        "component": "paddleocr_vl",
+        "adapter_status": "direct-worker-configured",
+        "worker_contract": "paddle_cli.py.v1",
+        "worker_contract_status": "unverified_until_smoke",
+        "runtime_ready": bool(runtime and runtime[1].is_file()),
+        "environment_ready": bool(runtime and runtime[0].is_file()),
+        "model_registry_ready": bool(model and model[1].exists()),
+        "status": "partial",
+        "reason": "PaddleOCR-VL tool model phải tồn tại trong registry local; example/missing model không được nâng capability.",
+        "next_action": "Đặt đúng tool model đã được phê duyệt hoặc giữ unavailable; không tự download trong adapter.",
+    }

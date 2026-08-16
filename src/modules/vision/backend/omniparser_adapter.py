@@ -26,8 +26,12 @@ def parse(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[
     model = registered_model("omniparser", "OmniParser")
     if input_error:
         return {"status": "error", "component": "omniparser", "code": input_error, "error": "Chọn artifact Hub hợp lệ cho OmniParser."}
-    if runtime is None or model is None or not runtime[0].is_file() or not runtime[1].is_file() or not model[1].exists():
-        return unavailable("omniparser", "OmniParser helper environment chưa hoàn chỉnh.")
+    if runtime is None:
+        return unavailable("omniparser", "OmniParser canonical runtime hoặc omni_cli.py chưa được registry xác nhận.", code="runtime_contract_missing")
+    if model is None:
+        return unavailable("omniparser", "OmniParser tool model chưa có local payload hợp lệ trong Models canonical; không tự tải model.", code="tool_model_missing")
+    if not runtime[0].is_file() or not runtime[1].is_file() or not model[1].exists():
+        return unavailable("omniparser", "OmniParser runtime/model leaf không còn tồn tại sau khi registry được đọc.", code="runtime_leaf_missing")
     python, helper, service = runtime
     try:
         threshold = max(0.0, min(1.0, float(payload.get("box_threshold", 0.05))))
@@ -48,4 +52,16 @@ def parse(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[
 def capability() -> dict[str, Any]:
     runtime = _runtime()
     model = registered_model("omniparser", "OmniParser")
-    return {"component": "omniparser", "adapter_status": "direct-worker-configured", "runtime_ready": bool(runtime and runtime[1].is_file()), "environment_ready": bool(runtime and runtime[0].is_file()), "model_registry_ready": bool(model and model[1].exists()), "status": "partial"}
+    return {
+        "component": "omniparser",
+        "adapter_status": "direct-worker-configured",
+        "worker_contract": "omni_cli.py.v1",
+        "worker_contract_status": "unverified_until_smoke",
+        "timeout_seconds": 300,
+        "runtime_ready": bool(runtime and runtime[1].is_file()),
+        "environment_ready": bool(runtime and runtime[0].is_file()),
+        "model_registry_ready": bool(model and model[1].exists()),
+        "status": "partial",
+        "reason": "OmniParser chỉ được nâng khỏi partial sau bounded worker smoke; timeout có mã worker_timeout riêng.",
+        "next_action": "Chạy một ảnh nhỏ qua omni_cli.py với tài nguyên GPU đã kiểm tra.",
+    }

@@ -25,8 +25,12 @@ def detect(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict
     model = registered_model("rfdetr", "RF-DETR")
     if input_error:
         return {"status": "error", "component": "rfdetr", "code": input_error, "error": "Chọn artifact Hub hợp lệ cho RF-DETR."}
-    if runtime is None or model is None or not runtime[0].is_file() or not runtime[1].is_file() or not model[1].exists():
-        return unavailable("rfdetr", "RF-DETR helper environment chưa hoàn chỉnh.")
+    if runtime is None:
+        return unavailable("rfdetr", "RF-DETR canonical runtime hoặc detect_cli.py chưa được registry xác nhận.", code="runtime_contract_missing")
+    if model is None:
+        return unavailable("rfdetr", "RF-DETR tool model chưa có local payload hợp lệ trong Models canonical; không tự tải model.", code="tool_model_missing")
+    if not runtime[0].is_file() or not runtime[1].is_file() or not model[1].exists():
+        return unavailable("rfdetr", "RF-DETR runtime/model leaf không còn tồn tại sau khi registry được đọc.", code="runtime_leaf_missing")
     python, helper, service = runtime
     try:
         threshold = max(0.0, min(1.0, float(payload.get("threshold", 0.5))))
@@ -47,4 +51,16 @@ def detect(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict
 def capability() -> dict[str, Any]:
     runtime = _runtime()
     model = registered_model("rfdetr", "RF-DETR")
-    return {"component": "rfdetr", "adapter_status": "direct-worker-configured", "runtime_ready": bool(runtime and runtime[1].is_file()), "environment_ready": bool(runtime and runtime[0].is_file()), "model_registry_ready": bool(model and model[1].exists()), "status": "partial"}
+    return {
+        "component": "rfdetr",
+        "adapter_status": "direct-worker-configured",
+        "worker_contract": "detect_cli.py.v1",
+        "worker_contract_status": "unverified_until_smoke",
+        "installed_api": "not_imported",
+        "runtime_ready": bool(runtime and runtime[1].is_file()),
+        "environment_ready": bool(runtime and runtime[0].is_file()),
+        "model_registry_ready": bool(model and model[1].exists()),
+        "status": "partial",
+        "reason": "RF-DETR upstream Python API không được suy đoán; Hub chỉ chấp nhận helper detect_cli.py đã bind và vẫn cần smoke.",
+        "next_action": "Xác minh detect_cli.py tương thích RF-DETR bằng một input nhỏ, không benchmark.",
+    }

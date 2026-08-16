@@ -27,8 +27,12 @@ def convert(payload: dict[str, Any], context: ProcessOwner | None = None) -> dic
     model = registered_model("seed_vc", "Seed-VC")
     if raw_error:
         return {"status": "error", "component": "seed_vc", "code": raw_error, "error": "Seed-VC chỉ nhận source/target artifact ID."}
-    if runtime is None or model is None or not runtime[0].is_file() or not runtime[1].is_file() or not model[1].exists():
-        return unavailable("seed_vc", "Seed-VC helper environment chưa hoàn chỉnh.")
+    if runtime is None:
+        return unavailable("seed_vc", "Seed-VC canonical environment hoặc seed_cli.py chưa được registry xác nhận.", code="runtime_contract_missing")
+    if model is None:
+        return unavailable("seed_vc", "Seed-VC weights/tool model còn thiếu hoặc không có payload local hợp lệ; không tự tải model.", code="tool_model_missing")
+    if not runtime[0].is_file() or not runtime[1].is_file() or not model[1].exists():
+        return unavailable("seed_vc", "Seed-VC runtime/model leaf không còn tồn tại sau khi registry được đọc.", code="runtime_leaf_missing")
     source, source_error = resolve_artifact_input(payload, "source_asset_id")
     target, target_error = resolve_artifact_input(payload, "target_asset_id", "reference_asset_id")
     if source_error or target_error:
@@ -51,4 +55,15 @@ def convert(payload: dict[str, Any], context: ProcessOwner | None = None) -> dic
 def capability() -> dict[str, Any]:
     runtime = _runtime()
     model = registered_model("seed_vc", "Seed-VC")
-    return {"component": "seed_vc", "adapter_status": "direct-worker-configured", "runtime_ready": bool(runtime and runtime[1].is_file()), "environment_ready": bool(runtime and runtime[0].is_file()), "model_registry_ready": bool(model and model[1].exists()), "status": "partial"}
+    return {
+        "component": "seed_vc",
+        "adapter_status": "direct-worker-configured",
+        "worker_contract": "seed_cli.py.v1",
+        "worker_contract_status": "unverified_until_smoke",
+        "runtime_ready": bool(runtime and runtime[1].is_file()),
+        "environment_ready": bool(runtime and runtime[0].is_file()),
+        "model_registry_ready": bool(model and model[1].exists()),
+        "status": "partial",
+        "reason": "Seed-VC evidence phải bind đúng canonical environment và weights trước khi smoke; không dùng path từ request.",
+        "next_action": "Xác minh source/target artifact và Seed-VC worker bằng một sample nhỏ.",
+    }

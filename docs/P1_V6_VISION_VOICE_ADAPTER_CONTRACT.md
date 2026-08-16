@@ -19,3 +19,20 @@ Capability records remain `partial` until a separate bounded runtime-to-model-
 to-adapter-to-job smoke writes current evidence. Static registry presence is
 not an operational claim, and this package performs no runtime, provider,
 model, download, GPU or smoke action.
+
+## Phase 4/5 evidence boundary
+
+- OmniParser and Grounding DINO use a fixed 300-second worker bound. A worker
+  timeout is reported with the finite `worker_timeout` / `timed_out` pair so a
+  bounded timeout is not confused with a missing runtime or model.
+- RF-DETR is a `detect_cli.py` worker contract, not an assumption that an
+  installed upstream Python API is compatible. Its capability remains
+  `partial` with `worker_contract_status: unverified_until_smoke` until one
+  bounded detection receipt proves the adapter contract.
+- PaddleOCR-VL requires a non-empty local tool-model payload selected from the
+  local registry. Missing, empty, outside-root, or reparse model leaves return
+  `tool_model_missing` and do not download anything.
+- Seed-VC and Qwen3-TTS require canonical, non-reparse runtime/helper leaves
+  and a non-empty canonical model payload. A missing or invalid leaf is
+  `unavailable` with `execution: not_run`; no request can supply an alternate
+  environment, weight path, or model selector.

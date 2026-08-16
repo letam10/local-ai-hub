@@ -25,8 +25,12 @@ def ground(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict
     model = registered_model("groundingdino", "Grounding DINO")
     if input_error:
         return {"status": "error", "component": "groundingdino", "code": input_error, "error": "Chọn artifact Hub hợp lệ cho Grounding DINO."}
-    if runtime is None or model is None or not runtime[0].is_file() or not runtime[1].is_file() or not model[1].exists():
-        return unavailable("groundingdino", "Grounding DINO helper environment chưa hoàn chỉnh.")
+    if runtime is None:
+        return unavailable("groundingdino", "Grounding DINO canonical runtime hoặc ground_cli.py chưa được registry xác nhận.", code="runtime_contract_missing")
+    if model is None:
+        return unavailable("groundingdino", "Grounding DINO tool model chưa có local payload hợp lệ trong Models canonical; không tự tải model.", code="tool_model_missing")
+    if not runtime[0].is_file() or not runtime[1].is_file() or not model[1].exists():
+        return unavailable("groundingdino", "Grounding DINO runtime/model leaf không còn tồn tại sau khi registry được đọc.", code="runtime_leaf_missing")
     python, helper, service = runtime
     prompt = str(payload.get("prompt") or "").strip()[:300]
     if not prompt:
@@ -54,4 +58,16 @@ def ground(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict
 def capability() -> dict[str, Any]:
     runtime = _runtime()
     model = registered_model("groundingdino", "Grounding DINO")
-    return {"component": "groundingdino", "adapter_status": "direct-worker-configured", "runtime_ready": bool(runtime and runtime[1].is_file()), "environment_ready": bool(runtime and runtime[0].is_file()), "model_registry_ready": bool(model and model[1].exists()), "status": "partial"}
+    return {
+        "component": "groundingdino",
+        "adapter_status": "direct-worker-configured",
+        "worker_contract": "ground_cli.py.v1",
+        "worker_contract_status": "unverified_until_smoke",
+        "timeout_seconds": 300,
+        "runtime_ready": bool(runtime and runtime[1].is_file()),
+        "environment_ready": bool(runtime and runtime[0].is_file()),
+        "model_registry_ready": bool(model and model[1].exists()),
+        "status": "partial",
+        "reason": "Grounding DINO chỉ là evidence partial cho tới khi có bounded boxes smoke.",
+        "next_action": "Chạy một prompt ngắn trên ảnh nhỏ sau khi kiểm tra tài nguyên.",
+    }

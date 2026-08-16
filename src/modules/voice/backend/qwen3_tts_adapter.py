@@ -27,8 +27,12 @@ def synthesize(payload: dict[str, Any], context: ProcessOwner | None = None) -> 
     model = registered_model("qwen3_tts", "Qwen3-TTS")
     if raw_error:
         return {"status": "error", "component": "qwen3_tts", "code": raw_error, "error": "Voice worker chỉ nhận artifact ID và tham số văn bản an toàn."}
-    if runtime is None or model is None or not runtime[0].is_file() or not runtime[1].is_file() or not model[1].exists():
-        return unavailable("qwen3_tts", "Qwen3-TTS helper environment chưa hoàn chỉnh.")
+    if runtime is None:
+        return unavailable("qwen3_tts", "Qwen3-TTS canonical environment hoặc qwen_cli.py chưa được registry xác nhận.", code="runtime_contract_missing")
+    if model is None:
+        return unavailable("qwen3_tts", "Qwen3-TTS tool model còn thiếu hoặc không có payload local hợp lệ; không tự tải model.", code="tool_model_missing")
+    if not runtime[0].is_file() or not runtime[1].is_file() or not model[1].exists():
+        return unavailable("qwen3_tts", "Qwen3-TTS runtime/model leaf không còn tồn tại sau khi registry được đọc.", code="runtime_leaf_missing")
     python, helper, service = runtime
     text = str(payload.get("text") or "").strip()[:2_000]
     if not text:
@@ -58,4 +62,15 @@ def synthesize(payload: dict[str, Any], context: ProcessOwner | None = None) -> 
 def capability() -> dict[str, Any]:
     runtime = _runtime()
     model = registered_model("qwen3_tts", "Qwen3-TTS")
-    return {"component": "qwen3_tts", "adapter_status": "direct-worker-configured", "runtime_ready": bool(runtime and runtime[1].is_file()), "environment_ready": bool(runtime and runtime[0].is_file()), "model_registry_ready": bool(model and model[1].exists()), "status": "partial"}
+    return {
+        "component": "qwen3_tts",
+        "adapter_status": "direct-worker-configured",
+        "worker_contract": "qwen_cli.py.v1",
+        "worker_contract_status": "unverified_until_smoke",
+        "runtime_ready": bool(runtime and runtime[1].is_file()),
+        "environment_ready": bool(runtime and runtime[0].is_file()),
+        "model_registry_ready": bool(model and model[1].exists()),
+        "status": "partial",
+        "reason": "Qwen3-TTS chỉ tạo evidence operational sau bounded audio smoke; model registry không được suy ra từ example.",
+        "next_action": "Xác minh qwen_cli.py và model local bằng một câu ngắn, không cài conversational LLM.",
+    }
