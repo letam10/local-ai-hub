@@ -113,6 +113,93 @@ class CapabilityEvidenceBindingTests(unittest.TestCase):
 
         self.assertEqual(projected["last_smoke"]["status"], "not_run")
 
+    def test_failed_and_unavailable_attempts_supersede_old_completion(self) -> None:
+        component = _component()
+        with tempfile.TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / "tool_smoke.json"
+            with (
+                patch.object(tool_smoke, "STATE_PATH", state_path),
+                patch.object(core, "components", return_value=[component]),
+                patch.object(core, "_path_exists", return_value=True),
+                patch.object(core, "_port_open", return_value=False),
+            ):
+                tool_smoke.record_completed("segment_image")
+                tool_smoke.record_failed("segment_image", failure_code="OUTPUT_MISSING")
+                failed_projection = core.component_statuses()[0]
+                failed_readiness = core._tool_readiness("segment_image", {"sam2": failed_projection})
+                tool_smoke.record_unavailable("segment_image", failure_code="PREFLIGHT_UNAVAILABLE", execution="not_run")
+                unavailable_projection = core.component_statuses()[0]
+                unavailable_readiness = core._tool_readiness("segment_image", {"sam2": unavailable_projection})
+
+        self.assertEqual(failed_projection["last_smoke"]["status"], "failed")
+        self.assertEqual(failed_readiness["tool_status"], "partial")
+        self.assertIn("vô hiệu hóa", failed_readiness["reason"])
+        self.assertNotIn("C:\\", str(failed_projection))
+        self.assertEqual(unavailable_projection["last_smoke"]["status"], "unavailable")
+        self.assertEqual(unavailable_projection["last_smoke"]["execution"], "not_run")
+        self.assertEqual(unavailable_readiness["tool_status"], "partial")
+        self.assertIn("không khả dụng", unavailable_readiness["reason"])
+
+    def test_preflight_unavailable_replaces_prior_evidence(self) -> None:
+        with patch.object(core, "component_statuses", return_value=[]), patch.object(
+            core,
+            "_tool_readiness",
+            return_value={
+                "component": "sam2",
+                "component_status": "missing",
+                "tool_status": "unavailable",
+                "reason": "Backend unavailable.",
+                "action": "Run a bounded smoke later.",
+            },
+        ), patch.object(core, "record_unavailable") as record:
+            status, payload = core.submit_tool("segment_image", {})
+
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["status"], "unavailable")
+        record.assert_called_once_with("segment_image", failure_code="PREFLIGHT_UNAVAILABLE", execution="not_run")
+
+    def test_output_missing_completion_cannot_record_operational_evidence(self) -> None:
+        from src.services.job_manager import manager as manager_module
+
+        updates: list[dict[str, object]] = []
+
+        class InlineThread:
+            def __init__(self, *, target: object, args: tuple[object, ...], **_kwargs: object) -> None:
+                self._target = target
+                self._args = args
+
+            def start(self) -> None:
+                self._target(*self._args)  # type: ignore[operator]
+
+        manager = manager_module.HubJobManager()
+        record = {"id": "job_missing_artifact", "tool": "segment_from_points", "status": "queued"}
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(tool_smoke, "STATE_PATH", Path(temporary) / "tool_smoke.json"),
+            patch.object(manager_module, "create_job", return_value=dict(record)),
+            patch.object(manager_module, "get_job_internal", return_value=dict(record)),
+            patch.object(manager_module, "update_job", side_effect=lambda _job_id, **values: updates.append(values)),
+            patch.object(manager_module.threading, "Thread", InlineThread),
+        ):
+            manager.submit(
+                "segment_from_points",
+                {},
+                lambda _payload, _context: {"status": "completed", "mask": "synthetic", "preview": "synthetic"},
+                heavy=False,
+            )
+            self.assertFalse(tool_smoke.passed("segment_from_points"))
+
+        self.assertTrue(any(item.get("status") == "failed" for item in updates))
+        self.assertFalse(any(item.get("status") == "completed" for item in updates))
+        failed = next(item for item in updates if item.get("status") == "failed")
+        self.assertEqual(failed["result"]["failure_code"], "OUTPUT_MISSING")
+
+    def test_probe_media_is_the_explicit_metadata_only_completion(self) -> None:
+        self.assertFalse(tool_smoke.requires_published_artifact("probe_media"))
+        self.assertTrue(tool_smoke.requires_published_artifact("segment_from_points"))
+        self.assertTrue(tool_smoke.has_published_artifact({"artifacts": [{"id": "artifact_" + "a" * 32}]}))
+        self.assertFalse(tool_smoke.has_published_artifact({"mask": "synthetic", "preview": "synthetic"}))
+
 
 if __name__ == "__main__":
     unittest.main()
