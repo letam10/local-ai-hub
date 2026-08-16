@@ -57,18 +57,25 @@ def _timeout(value: object) -> float:
 def _outputs(root: Path, token: str) -> tuple[Path, Path] | None:
     if not _TOKEN.fullmatch(token):
         return None
-    output_root = root / "Output" / "Speech"
+    output_base = root / "Output"
+    output_root = output_base / "Speech"
     transcript = output_root / f"whisper_{token}.json"
     srt = transcript.with_suffix(".srt")
     try:
+        root_resolved = root.resolve(strict=True)
+        base_resolved = output_base.resolve(strict=True)
         resolved_root = output_root.resolve(strict=True)
         transcript_resolved = transcript.resolve(strict=True)
         srt_resolved = srt.resolve(strict=True)
+        base_resolved.relative_to(root_resolved)
+        resolved_root.relative_to(root_resolved)
         transcript_resolved.relative_to(resolved_root)
         srt_resolved.relative_to(resolved_root)
     except (OSError, RuntimeError, ValueError):
         return None
-    if any(_is_reparse(item) for item in (output_root, transcript, srt)) or not transcript.is_file() or not srt.is_file():
+    if output_base.parent.resolve(strict=False) != root_resolved or output_root.parent.resolve(strict=False) != base_resolved:
+        return None
+    if any(_is_reparse(item) for item in (root, output_base, output_root, transcript, srt)) or not transcript.is_file() or not srt.is_file():
         return None
     return transcript, srt
 

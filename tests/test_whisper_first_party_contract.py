@@ -108,6 +108,26 @@ class WhisperFirstPartyContractTests(unittest.TestCase):
             self.assertEqual(json.loads(stdout.getvalue()), {"status": "error", "code": "tool_model_unavailable"})
             self.assertFalse((root / "Output" / "Speech" / f"whisper_{token}.json").exists())
 
+    def test_worker_refuses_a_reparse_output_parent_before_model_load_or_write(self) -> None:
+        test_case = self
+
+        class ExplosiveModel:
+            def __init__(self, *_args, **_kwargs) -> None:
+                test_case.fail("model load must not happen after output containment refusal")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _model, source = self._root_with_registry(root)
+            (root / "Output").mkdir()
+            token = "e" * 32
+            fake_module = types.SimpleNamespace(WhisperModel=ExplosiveModel)
+            stdout = io.StringIO()
+            with patch.dict(os.environ, {"LOCALAIHUB_ROOT": str(root)}, clear=False), patch.dict(sys.modules, {"faster_whisper": fake_module}), patch.object(self.worker, "_is_reparse", side_effect=lambda path: path.name == "Output"), contextlib.redirect_stdout(stdout):
+                status = self.worker.main(["worker", str(source), token, "0", "5", "cpu", "approved-asr", "auto"])
+            self.assertEqual(status, 2)
+            self.assertEqual(json.loads(stdout.getvalue()), {"status": "error", "code": "output_unavailable"})
+            self.assertFalse((root / "Output" / "Speech").exists())
+
     def test_wrapper_creates_srt_from_worker_segments_without_path_in_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -168,6 +188,20 @@ class WhisperFirstPartyContractTests(unittest.TestCase):
                 public = jobs.public_job({"id": "job_example", "tool": "transcribe_media", "status": "completed", "result": result})
             self.assertEqual(public["result"], {"id": "artifact_safe"})
             self.assertNotIn(str(root), json.dumps(public, ensure_ascii=False))
+
+    def test_adapter_rejects_an_output_parent_reparse(self) -> None:
+        from src.modules.whisper.backend import adapter
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_root = root / "Output" / "Speech"
+            output_root.mkdir(parents=True)
+            token = "f" * 32
+            transcript = output_root / f"whisper_{token}.json"
+            transcript.write_text("{}", encoding="utf-8")
+            transcript.with_suffix(".srt").write_text("1\n", encoding="utf-8")
+            with patch.object(adapter, "_is_reparse", side_effect=lambda path: path.name == "Output"):
+                self.assertIsNone(adapter._outputs(root, token))
 
     def test_core_keeps_whisper_inside_hub_job_submission_and_subtitle_flow(self) -> None:
         core = (ROOT / "src" / "services" / "api" / "core.py").read_text(encoding="utf-8")

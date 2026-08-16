@@ -45,6 +45,34 @@ def _inside(candidate: Path, root: Path) -> bool:
         return False
 
 
+def _output_target(root: Path, token: str) -> tuple[Path, Path] | None:
+    """Validate the complete Hub-owned output chain without following a reparse."""
+
+    if not _TOKEN.fullmatch(token):
+        return None
+    output_base = root / "Output"
+    output_root = output_base / "Speech"
+    output = output_root / f"whisper_{token}.json"
+    try:
+        root_resolved = root.resolve(strict=True)
+        base_resolved = output_base.resolve(strict=False)
+        speech_resolved = output_root.resolve(strict=False)
+        output_parent = output.parent.resolve(strict=False)
+        base_resolved.relative_to(root_resolved)
+        speech_resolved.relative_to(root_resolved)
+        output_parent.relative_to(root_resolved)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if output_base.parent.resolve(strict=False) != root_resolved or output_root.parent.resolve(strict=False) != base_resolved:
+        return None
+    for item in (root, output_base, output_root, output):
+        if (item.exists() or item.is_symlink()) and _is_reparse(item):
+            return None
+    if output.exists() or output.is_symlink():
+        return None
+    return output_root, output
+
+
 def _local_root() -> Path | None:
     value = os.environ.get("LOCALAIHUB_ROOT", "")
     if not value:
@@ -147,10 +175,10 @@ def main(argv: list[str]) -> int:
     model_path = _model_snapshot(root, model_id)
     if model_path is None:
         return _result("error", code="tool_model_unavailable")
-    output_root = root / "Output" / "Speech"
-    output = output_root / f"whisper_{token}.json"
-    if (output_root.exists() and _is_reparse(output_root)) or output.exists() or output.is_symlink():
+    targets = _output_target(root, token)
+    if targets is None:
         return _result("error", code="output_unavailable")
+    output_root, output = targets
     try:
         from faster_whisper import WhisperModel
 
@@ -165,8 +193,10 @@ def main(argv: list[str]) -> int:
         if segments is None:
             return _result("error", code="transcript_invalid")
         output_root.mkdir(parents=True, exist_ok=True)
-        if _is_reparse(output_root):
+        targets = _output_target(root, token)
+        if targets is None:
             return _result("error", code="output_unavailable")
+        _output_root, output = targets
         payload = {
             "schema_version": "localaihub-transcript.v2",
             "language": getattr(info, "language", None) if isinstance(getattr(info, "language", None), str) else None,
