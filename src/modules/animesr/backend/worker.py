@@ -63,6 +63,16 @@ def _safe_existing_under(root: Path, candidate: Path) -> bool:
     return checked is not None and checked.resolve(strict=False) == candidate.resolve(strict=False)
 
 
+def _safe_model_leaf(root: Path, candidate: Path) -> bool:
+    """Require a real model file/directory below the fixed Models root."""
+
+    if not root.is_dir() or _is_reparse(root):
+        return False
+    if not (candidate.is_file() or candidate.is_dir()):
+        return False
+    return _safe_existing_under(root, candidate)
+
+
 def _discard_task(hub_root: Path, path: Path) -> None:
     try:
         expected_jobs = _safe_tree(hub_root, Path("Temp") / "jobs")
@@ -109,7 +119,7 @@ def main() -> int:
             or not (model_path.is_file() or model_path.is_dir())
             or not _safe_existing_under(hub_root, runtime)
             or not _safe_existing_under(hub_root, ffmpeg)
-            or not _safe_existing_under(hub_root, model_path)
+            or not _safe_model_leaf(expected_models, model_path)
             or output_root.resolve(strict=False) != expected_output.resolve(strict=False)
         ):
             return _emit({"status": "error", "error": "AnimeSR runtime hoặc input video không tồn tại."})

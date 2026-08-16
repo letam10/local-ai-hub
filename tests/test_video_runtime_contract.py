@@ -76,6 +76,42 @@ class VideoRuntimeContractTests(unittest.TestCase):
             self.assertEqual(command[command.index("--expname") + 1], "animesr_v2")
             self.assertEqual(seen["environment"]["ffmpeg_exe_path"], str(ffmpeg))
 
+    def test_animesr_worker_rejects_model_leaf_outside_models_root(self) -> None:
+        from src.modules.animesr.backend import worker
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / "runtime"
+            script = runtime / "scripts" / "inference_animesr_video.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("# fixture", encoding="utf-8")
+            source = root / "input.mp4"
+            source.write_bytes(b"video")
+            ffmpeg = runtime / "tools" / "ffmpeg.exe"
+            ffmpeg.parent.mkdir(parents=True)
+            ffmpeg.write_bytes(b"tool")
+            (root / "Models").mkdir()
+            forged_model = root / "runtime" / "forged-model"
+            forged_model.write_bytes(b"not a Models leaf")
+            output_root = root / "Output" / "AnimeSR"
+            old_hub_root = os.environ.get("LOCALAIHUB_ROOT")
+            os.environ["LOCALAIHUB_ROOT"] = str(root)
+            try:
+                with patch.object(worker, "run_hidden") as launch:
+                    code, payload = self._run_worker(worker, {
+                        "runtime": str(runtime), "path": str(source), "output_root": str(output_root),
+                        "ffmpeg": str(ffmpeg), "model_id": "animesr-v2", "model": "AnimeSR_v2",
+                        "model_path": str(forged_model), "expname": "animesr_v2", "scale": 2,
+                    }, launch)
+            finally:
+                if old_hub_root is None:
+                    os.environ.pop("LOCALAIHUB_ROOT", None)
+                else:
+                    os.environ["LOCALAIHUB_ROOT"] = old_hub_root
+            self.assertEqual(code, 2)
+            self.assertEqual(payload["status"], "error")
+            launch.assert_not_called()
+
     def test_animesr_adapter_binds_registry_model_to_cli_contract(self) -> None:
         from src.modules.animesr.backend import adapter
 
