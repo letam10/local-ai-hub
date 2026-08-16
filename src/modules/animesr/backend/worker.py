@@ -16,6 +16,7 @@ from src.services.process_manager.windows import run_hidden
 _MODEL_ID = "animesr-v2"
 _MODEL_NAME = "AnimeSR_v2"
 _EXPNAME = "animesr_v2"
+_MODEL_RELATIVE = Path("Video") / "AnimeSR" / "AnimeSR_v2.pth"
 
 
 def _emit(payload: dict) -> int:
@@ -84,7 +85,10 @@ def _safe_model_leaf(root: Path, candidate: Path) -> bool:
 
     if not root.is_dir() or _is_reparse(root):
         return False
-    if not (candidate.is_file() or candidate.is_dir()):
+    expected = root / _MODEL_RELATIVE
+    if os.path.normcase(os.path.abspath(str(candidate))) != os.path.normcase(os.path.abspath(str(expected))):
+        return False
+    if not candidate.is_file():
         return False
     return _safe_existing_under(root, candidate)
 

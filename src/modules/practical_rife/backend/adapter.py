@@ -8,10 +8,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from src.services.api.config import component
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
 from src.services.artifact_store import describe, resolve
 from src.shared.paths.registry import OUTPUT_ROOT, TEMP_ROOT
-from src.shared.utils.adapter_common import configured_path, local_root, unavailable
+from src.shared.utils.adapter_common import local_root, unavailable
 
 
 WORKER = Path(__file__).with_name("worker.py")
@@ -20,18 +21,50 @@ _ARTIFACT_ID = re.compile(r"artifact_[a-f0-9]{32}")
 _UNSAFE_INPUT_FIELDS = {"path", "source", "secondary_path", "input_path", "executable", "command", "model_path", "output_root"}
 
 
+def _is_reparse(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            return True
+        return bool(getattr(os.lstat(path), "st_file_attributes", 0) & 0x400)
+    except OSError:
+        return True
+
+
+def _registry_path(component_id: str, field: str) -> Path | None:
+    item = component(component_id)
+    value = item.get(field) if isinstance(item, dict) and item.get("id") == component_id else None
+    if not isinstance(value, str) or not value.strip() or value.startswith("${"):
+        return None
+    try:
+        return Path(os.path.expandvars(value)).expanduser()
+    except (OSError, ValueError):
+        return None
+
+
 def _configured_ffmpeg() -> tuple[Path | None, Path | None]:
-    ffmpeg = configured_path("ffmpeg", "executable", "FFMPEG_PATH")
-    home = configured_path("ffmpeg", "path", "FFMPEG_HOME")
+    ffmpeg = _registry_path("ffmpeg", "executable")
+    home = _registry_path("ffmpeg", "path")
+    if home is not None and home.is_file():
+        home = home.parent
+    if ffmpeg is not None and ffmpeg.is_dir():
+        ffmpeg = ffmpeg / "ffmpeg.exe"
     if ffmpeg is None and home is not None:
         ffmpeg = home / "ffmpeg.exe"
+    if home is None and ffmpeg is not None:
+        home = ffmpeg.parent
     ffprobe = home / "ffprobe.exe" if home is not None else None
+    if ffmpeg is not None and ffprobe is not None:
+        try:
+            if ffmpeg.resolve(strict=False).parent != ffprobe.resolve(strict=False).parent:
+                return None, None
+        except OSError:
+            return None, None
     return ffmpeg, ffprobe
 
 
 def _runtime() -> tuple[Path | None, Path | None, Path | None]:
-    runtime = configured_path("practical_rife", "path", "PRACTICAL_RIFE_HOME")
-    environment = configured_path("practical_rife", "environment", "PRACTICAL_RIFE_ENV")
+    runtime = _registry_path("practical_rife", "path")
+    environment = _registry_path("practical_rife", "environment")
     python = environment / "Scripts" / "python.exe" if environment else None
     model_dir = runtime / _MODEL_RELATIVE if runtime else None
     return python, runtime, model_dir
@@ -49,7 +82,7 @@ def _video_artifact(payload: dict[str, Any]) -> Path | None:
     except Exception:
         return None
     media_type = str(metadata.get("media_type") or "") if isinstance(metadata, dict) else ""
-    return source if isinstance(source, Path) and source.is_file() and media_type.startswith("video/") else None
+    return source if isinstance(source, Path) and source.is_file() and media_type.startswith("video/") and not _is_reparse(source) else None
 
 
 def run_practical_rife(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[str, Any]:

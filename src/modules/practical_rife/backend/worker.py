@@ -53,11 +53,33 @@ def _safe_tree(root: Path, relative: Path) -> Path | None:
 
 def _safe_existing_under(root: Path, candidate: Path) -> bool:
     try:
-        relative = candidate.resolve(strict=False).relative_to(root.resolve(strict=False))
+        lexical_root = Path(os.path.abspath(str(root)))
+        lexical_candidate = Path(os.path.abspath(str(candidate)))
+        relative = lexical_candidate.relative_to(lexical_root)
     except (OSError, ValueError):
         return False
-    checked = _safe_tree(root, relative)
-    return checked is not None and checked.resolve(strict=False) == candidate.resolve(strict=False)
+    if _is_reparse(lexical_root):
+        return False
+    current = lexical_root
+    for part in relative.parts:
+        current = current / part
+        if _is_reparse(current):
+            return False
+    try:
+        resolved_root = lexical_root.resolve(strict=True)
+        resolved = lexical_candidate.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+    except (OSError, ValueError):
+        return False
+    return resolved == current.resolve(strict=True)
+
+
+def _safe_artifact_input(hub_root: Path, candidate: Path) -> bool:
+    for relative in (Path("Temp") / "uploads", Path("Output"), Path("Archive")):
+        root = _safe_tree(hub_root, relative)
+        if root is not None and _safe_existing_under(root, candidate) and candidate.is_file():
+            return True
+    return False
 
 
 def _discard_task(hub_root: Path, path: Path) -> None:
@@ -87,24 +109,27 @@ def main() -> int:
         hub_root = Path(os.environ.get("LOCALAIHUB_ROOT", ""))
         script = runtime / "inference_video.py"
         expected_runtime = _safe_tree(hub_root, Path("runtime"))
+        expected_tools = _safe_tree(hub_root, Path("runtime") / "tools" / "ffmpeg")
         expected_output = _safe_tree(hub_root, Path("Output") / "Practical-RIFE")
         expected_jobs = _safe_tree(hub_root, Path("Temp") / "jobs")
         if (
             not hub_root.is_dir()
             or expected_runtime is None
+            or expected_tools is None
             or expected_output is None
             or expected_jobs is None
             or not runtime.is_dir()
             or not script.is_file()
-            or not source.is_file()
+            or not _safe_artifact_input(hub_root, source)
             or not (model_dir / "flownet.pkl").is_file()
             or not ffmpeg.is_file()
             or not ffprobe.is_file()
             or not _safe_existing_under(hub_root, runtime)
-            or not _inside(runtime, script)
-            or not _inside(runtime, model_dir)
-            or not _safe_existing_under(hub_root, ffmpeg)
-            or not _safe_existing_under(hub_root, ffprobe)
+            or not _safe_existing_under(runtime, script)
+            or not _safe_existing_under(runtime, model_dir)
+            or not _safe_existing_under(expected_tools, ffmpeg)
+            or not _safe_existing_under(expected_tools, ffprobe)
+            or ffmpeg.parent.resolve(strict=False) != ffprobe.parent.resolve(strict=False)
             or output_root.resolve(strict=False) != expected_output.resolve(strict=False)
             or temp_root.parent.resolve(strict=False) != expected_jobs.resolve(strict=False)
             or not temp_root.name.startswith("rife_")
