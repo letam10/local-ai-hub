@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -22,14 +23,107 @@ def _request() -> dict[str, Any]:
     return value
 
 
-def _output_root(request: dict[str, Any]) -> Path:
-    root = Path(str(request["output_root"])).expanduser()
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    path = root / f"sam2_{stamp}"
-    path.mkdir(parents=True, exist_ok=False)
-    return path
+def _is_reparse(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            return True
+        return bool(getattr(os.lstat(path), "st_file_attributes", 0) & 0x400)
+    except OSError:
+        return True
 
 
+def _safe_existing_under(root: Path, candidate: Path, *, kind: str) -> Path | None:
+    """Resolve one existing leaf without allowing a reparse traversal."""
+
+    try:
+        lexical_root = Path(os.path.abspath(str(root)))
+        lexical_candidate = Path(os.path.abspath(str(candidate)))
+        relative = lexical_candidate.relative_to(lexical_root)
+        if not lexical_root.is_dir() or _is_reparse(lexical_root):
+            return None
+        current = lexical_root
+        for part in relative.parts:
+            current = current / part
+            if not current.exists() or _is_reparse(current):
+                return None
+        resolved_root = lexical_root.resolve(strict=True)
+        resolved = lexical_candidate.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+        if _is_reparse(resolved):
+            return None
+        if kind == "file" and not resolved.is_file():
+            return None
+        if kind == "dir" and not resolved.is_dir():
+            return None
+        return resolved
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _task_output_root(hub_root: Path) -> Path | None:
+    """Create only a Hub-owned SAM2 child after non-reparse containment checks."""
+
+    output_parent = _safe_existing_under(hub_root, hub_root / "Output", kind="dir")
+    if output_parent is None:
+        return None
+    base = output_parent / "SAM2"
+    try:
+        if base.exists():
+            if _safe_existing_under(output_parent, base, kind="dir") is None:
+                return None
+        else:
+            base.mkdir(exist_ok=False)
+            if _safe_existing_under(output_parent, base, kind="dir") is None:
+                return None
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        path = base / f"sam2_{stamp}"
+        path.mkdir(exist_ok=False)
+        return _safe_existing_under(base, path, kind="dir")
+    except OSError:
+        return None
+
+
+def _discard_task_output(path: Path | None) -> None:
+    """Remove only this worker's un-published, timestamped output directory."""
+
+    if path is None or not path.name.startswith("sam2_"):
+        return
+    try:
+        if path.is_dir() and not _is_reparse(path):
+            shutil.rmtree(path)
+    except OSError:
+        pass
+
+
+def _preflight(request: dict[str, Any]) -> tuple[Path, Path, Path, Path] | None:
+    """Revalidate private adapter hand-off before imports, GPU work, or writes."""
+
+    try:
+        root_value = os.environ.get("LOCALAIHUB_ROOT", "").strip()
+        if not root_value:
+            return None
+        hub_root = Path(root_value).expanduser()
+        if _safe_existing_under(hub_root, hub_root / "runtime", kind="dir") is None:
+            return None
+        runtime = Path(str(request.get("runtime") or "")).expanduser()
+        checkpoint = Path(str(request.get("checkpoint") or "")).expanduser()
+        source = Path(str(request.get("path") or "")).expanduser()
+        safe_runtime = _safe_existing_under(hub_root / "runtime", runtime, kind="dir")
+        safe_checkpoint = _safe_existing_under(safe_runtime, checkpoint, kind="file") if safe_runtime else None
+        output_parent = _safe_existing_under(hub_root, hub_root / "Output", kind="dir")
+        output_base = output_parent / "SAM2" if output_parent is not None else None
+        if output_base is not None and output_base.exists() and _safe_existing_under(output_parent, output_base, kind="dir") is None:
+            return None
+        source_roots = (hub_root / "Temp" / "uploads", hub_root / "Output", hub_root / "Archive")
+        safe_source = next(
+            (resolved for root in source_roots if (resolved := _safe_existing_under(root, source, kind="file")) is not None),
+            None,
+        )
+        if safe_runtime is None or safe_checkpoint is None or safe_source is None or output_parent is None:
+            return None
+        return hub_root.resolve(strict=True), safe_runtime, safe_checkpoint, safe_source
+    except (OSError, RuntimeError, ValueError):
+        return None
 def _points(request: dict[str, Any], width: int, height: int):
     import numpy as np
 
@@ -96,97 +190,114 @@ def _build_predictor(runtime: Path, checkpoint: Path):
 
 
 def _segment(request: dict[str, Any]) -> dict[str, Any]:
+    bound = _preflight(request)
+    if bound is None:
+        return {"status": "error", "code": "sam2_path_contract_invalid", "error": "SAM2 từ chối input hoặc runtime ngoài vùng Hub an toàn."}
+    hub_root, runtime, checkpoint, source = bound
     import numpy as np
     from PIL import Image
 
-    runtime = Path(str(request["runtime"]))
-    checkpoint = Path(str(request["checkpoint"]))
-    source = Path(os.path.expandvars(str(request.get("path", "")))).expanduser()
-    if not source.is_file():
-        return {"status": "error", "error": "Không tìm thấy ảnh đầu vào SAM2."}
     try:
         image = np.asarray(Image.open(source).convert("RGB"))
     except (OSError, ValueError):
-        return {"status": "error", "error": "SAM2 không đọc được ảnh đầu vào."}
-    predictor, device = _build_predictor(runtime, checkpoint)
-    predictor.set_image(image)
-    height, width = image.shape[:2]
-    operation = str(request.get("operation") or "segment_image")
-    if operation == "segment_from_box":
-        masks, scores, _ = predictor.predict(box=_box(request, width, height), multimask_output=True)
-    else:
-        points, labels = _points(request, width, height)
-        masks, scores, _ = predictor.predict(point_coords=points, point_labels=labels, multimask_output=True)
-    index = int(scores.argmax())
-    output = _output_root(request)
-    mask_path, overlay_path = _save_mask(image, masks[index], output)
-    return {
-        "status": "completed",
-        "operation": operation,
-        "mask": str(mask_path),
-        "preview": str(overlay_path),
-        "score": float(scores[index]),
-        "device": device,
-    }
+        return {"status": "error", "code": "input_unreadable", "error": "SAM2 không đọc được ảnh artifact đầu vào."}
+    output: Path | None = None
+    try:
+        predictor, _device = _build_predictor(runtime, checkpoint)
+        predictor.set_image(image)
+        height, width = image.shape[:2]
+        operation = str(request.get("operation") or "segment_image")
+        if operation == "segment_from_box":
+            masks, scores, _ = predictor.predict(box=_box(request, width, height), multimask_output=True)
+        else:
+            points, labels = _points(request, width, height)
+            masks, scores, _ = predictor.predict(point_coords=points, point_labels=labels, multimask_output=True)
+        index = int(scores.argmax())
+        output = _task_output_root(hub_root)
+        if output is None:
+            return {"status": "error", "code": "output_contract_invalid", "error": "SAM2 không thể tạo output Hub an toàn."}
+        mask_path, overlay_path = _save_mask(image, masks[index], output)
+        # Paths are a private worker-to-Job-Manager hand-off.  Job Manager
+        # replaces them with opaque, job-bound artifact records before any
+        # terminal result is persisted or returned to the browser.
+        return {"status": "completed", "operation": operation, "outputs": [str(mask_path), str(overlay_path)]}
+    except Exception:
+        _discard_task_output(output)
+        return {"status": "error", "code": "sam2_execution_failed", "error": "SAM2 không thể hoàn tất segmentation bounded."}
 
 
 def _track(request: dict[str, Any]) -> dict[str, Any]:
+    bound = _preflight(request)
+    if bound is None:
+        return {"status": "error", "code": "sam2_path_contract_invalid", "error": "SAM2 từ chối input hoặc runtime ngoài vùng Hub an toàn."}
+    hub_root, runtime, checkpoint, source = bound
     import cv2
     import numpy as np
     import torch
+    output: Path | None = _task_output_root(hub_root)
+    if output is None:
+        return {"status": "error", "code": "output_contract_invalid", "error": "SAM2 không thể tạo output Hub an toàn."}
+    capture = None
+    writer = None
+    try:
+        sys.path.insert(0, str(runtime))
+        from sam2.build_sam import build_sam2_video_predictor
 
-    runtime = Path(str(request["runtime"]))
-    checkpoint = Path(str(request["checkpoint"]))
-    source = Path(os.path.expandvars(str(request.get("path", "")))).expanduser()
-    if not source.is_file():
-        return {"status": "error", "error": "Không tìm thấy video đầu vào SAM2."}
-    sys.path.insert(0, str(runtime))
-    from sam2.build_sam import build_sam2_video_predictor
-
-    output = _output_root(request)
-    frames = output / "frames"
-    frames.mkdir()
-    capture = cv2.VideoCapture(str(source))
-    fps = capture.get(cv2.CAP_PROP_FPS) or 24.0
-    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-    count = 0
-    while True:
-        ok, frame = capture.read()
-        if not ok:
-            break
-        cv2.imwrite(str(frames / f"{count:06d}.jpg"), frame)
-        count += 1
-    capture.release()
-    if count == 0 or width <= 0 or height <= 0:
-        return {"status": "error", "error": "Không thể trích frame từ video SAM2."}
-    device = "cuda" if torch.cuda.is_available() and os.environ.get("LOCALAIHUB_FORCE_CPU") != "1" else "cpu"
-    predictor = build_sam2_video_predictor("configs/sam2.1/sam2.1_hiera_s.yaml", str(checkpoint), device=device)
-    state = predictor.init_state(video_path=str(frames))
-    points, labels = _points(request, width, height)
-    box = _box(request, width, height)
-    if box is not None:
-        predictor.add_new_points_or_box(state, frame_idx=0, obj_id=1, box=box)
-    else:
-        predictor.add_new_points_or_box(state, frame_idx=0, obj_id=1, points=points, labels=labels)
-    mask_dir = output / "masks"
-    mask_dir.mkdir()
-    writer = cv2.VideoWriter(str(output / "mask_preview.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height), False)
-    written = 0
-    for frame_index, _, logits in predictor.propagate_in_video(state):
-        mask = (logits[0] > 0.0).detach().cpu().numpy().astype(np.uint8) * 255
-        cv2.imwrite(str(mask_dir / f"{frame_index:06d}.png"), mask)
-        writer.write(mask)
-        written += 1
-    writer.release()
-    return {
-        "status": "completed",
-        "operation": "track_video",
-        "video": str(output / "mask_preview.mp4"),
-        "masks": [str(mask_dir / "000000.png")] if written else [],
-        "frame_count": written,
-        "device": device,
-    }
+        frames = output / "frames"
+        frames.mkdir()
+        capture = cv2.VideoCapture(str(source))
+        fps = capture.get(cv2.CAP_PROP_FPS) or 24.0
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        count = 0
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            cv2.imwrite(str(frames / f"{count:06d}.jpg"), frame)
+            count += 1
+        capture.release()
+        capture = None
+        if count == 0 or width <= 0 or height <= 0:
+            _discard_task_output(output)
+            return {"status": "error", "code": "video_unreadable", "error": "SAM2 không thể trích frame từ video artifact."}
+        device = "cuda" if torch.cuda.is_available() and os.environ.get("LOCALAIHUB_FORCE_CPU") != "1" else "cpu"
+        predictor = build_sam2_video_predictor("configs/sam2.1/sam2.1_hiera_s.yaml", str(checkpoint), device=device)
+        state = predictor.init_state(video_path=str(frames))
+        points, labels = _points(request, width, height)
+        box = _box(request, width, height)
+        if box is not None:
+            predictor.add_new_points_or_box(state, frame_idx=0, obj_id=1, box=box)
+        else:
+            predictor.add_new_points_or_box(state, frame_idx=0, obj_id=1, points=points, labels=labels)
+        mask_dir = output / "masks"
+        mask_dir.mkdir()
+        preview = output / "mask_preview.mp4"
+        writer = cv2.VideoWriter(str(preview), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height), False)
+        written = 0
+        first_mask: Path | None = None
+        for frame_index, _, logits in predictor.propagate_in_video(state):
+            mask = (logits[0] > 0.0).detach().cpu().numpy().astype(np.uint8) * 255
+            mask_path = mask_dir / f"{frame_index:06d}.png"
+            cv2.imwrite(str(mask_path), mask)
+            if first_mask is None:
+                first_mask = mask_path
+            writer.write(mask)
+            written += 1
+        writer.release()
+        writer = None
+        if written <= 0 or first_mask is None or not preview.is_file() or not first_mask.is_file():
+            _discard_task_output(output)
+            return {"status": "error", "code": "sam2_output_missing", "error": "SAM2 không tạo đủ output tracking."}
+        return {"status": "completed", "operation": "track_video", "outputs": [str(preview), str(first_mask)]}
+    except Exception:
+        _discard_task_output(output)
+        return {"status": "error", "code": "sam2_execution_failed", "error": "SAM2 không thể hoàn tất tracking bounded."}
+    finally:
+        if capture is not None:
+            capture.release()
+        if writer is not None:
+            writer.release()
 
 
 def main() -> int:
@@ -201,8 +312,8 @@ def main() -> int:
         if operation in {"segment_image", "segment_from_box", "segment_from_points"}:
             return _emit(_segment(request))
         return _emit({"status": "error", "error": "Thao tác SAM2 không được allowlist."})
-    except Exception as exc:
-        return _emit({"status": "error", "error": str(exc)})
+    except Exception:
+        return _emit({"status": "error", "code": "sam2_worker_failed", "error": "SAM2 worker không thể hoàn tất job."})
 
 
 if __name__ == "__main__":

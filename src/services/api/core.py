@@ -741,13 +741,17 @@ def _run_operation(tool: str, payload: dict[str, Any], context: JobContext | Non
         if not isinstance(raw_box, list) or len(raw_box) != 4:
             return {"status": "error", "error": "Grounding DINO không trả normalized box hợp lệ."}
         cx, cy, width, height = [float(item) for item in raw_box]
-        source_id = payload.get("source_artifact_id") or payload.get("asset_id")
-        from src.services.artifact_store import resolve as resolve_artifact
-
-        source_path = resolve_artifact(source_id) if isinstance(source_id, str) else None
-        if source_path is None:
-            return {"status": "error", "error": "Artifact Hub đầu vào không còn tồn tại."}
-        return sam2.segment_from_box({**payload, "path": str(source_path), "box": [cx - width / 2, cy - height / 2, cx + width / 2, cy + height / 2], "normalized_box": True}, context)
+        # Keep the opaque artifact ID through the composed Grounding DINO →
+        # SAM2 hand-off.  The SAM2 adapter resolves and type-checks it inside
+        # its server-owned boundary; no local input path reaches the worker.
+        return sam2.segment_from_box(
+            {
+                **payload,
+                "box": [cx - width / 2, cy - height / 2, cx + width / 2, cy + height / 2],
+                "normalized_box": True,
+            },
+            context,
+        )
     if tool in {"segment_image", "segment_from_box", "segment_from_points", "track_video_object"}:
         from src.modules.sam2.backend import adapter as sam2
 
