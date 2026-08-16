@@ -150,20 +150,18 @@ def _publish_result(result: object, record: dict[str, Any]) -> tuple[dict[str, A
         "attempt": 1,
         "status": "completed",
     }
-    artifacts: list[dict[str, Any]] = []
     for candidate in candidates:
-        try:
-            artifact = artifact_store.register_path(
-                candidate,
-                name=candidate.name,
-                provenance=provenance,
-                output_only=True,
-            )
-        except Exception:
-            artifact = None
-        if not isinstance(artifact, dict) or artifact.get("provenance") != provenance:
+        if not isinstance(candidate, Path):
             return {"status": "failed", "error": "Output không thể publish thành artifact Hub hợp lệ."}, "output_publish"
-        artifacts.append(artifact)
+    try:
+        artifacts = artifact_store.register_worker_outputs(candidates, provenance=provenance)
+    except Exception:
+        artifacts = None
+    if not isinstance(artifacts, list) or not artifacts or any(
+        not isinstance(artifact, dict) or artifact.get("provenance") != provenance
+        for artifact in artifacts
+    ):
+        return {"status": "failed", "error": "Output không thể publish thành artifact Hub hợp lệ."}, "output_publish"
     safe["artifacts"] = artifacts
     return safe, None
 

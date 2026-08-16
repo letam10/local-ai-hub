@@ -25,10 +25,12 @@ The in-process Hub Job Manager treats a worker result as an internal hand-off.
 Before a terminal result is persisted, completed `output`/`files` values are
 validated by the server-owned artifact store and replaced with opaque artifact
 records. Worker publication is Output-only: Hub upload roots are input-owned
-and can never become a completed worker artifact. Each published record carries
-the terminal job ID, a bounded job fingerprint, adapter/tool ID, attempt, and
-completed status. Raw workstation paths are not persisted in `jobs.json` or
-returned by the public job projection.
+and can never become a completed worker artifact. Multiple worker outputs are
+validated as one batch and committed to the artifact index in one save, so a
+mixed managed/unmanaged result cannot publish only its first file. Each
+published record carries the terminal job ID, a bounded job fingerprint,
+adapter/tool ID, attempt, and completed status. Raw workstation paths are not
+persisted in `jobs.json` or returned by the public job projection.
 
 An output outside a Hub-owned artifact root, an invalid worker status, a
 malformed result, or a failed artifact publication makes the job failed with a

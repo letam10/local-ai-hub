@@ -224,6 +224,75 @@ def register_path(
         return _public(record)
 
 
+def register_worker_outputs(
+    paths: list[str | Path],
+    *,
+    provenance: dict[str, Any],
+) -> list[dict[str, Any]] | None:
+    """Publish a completed worker output batch atomically.
+
+    Every candidate is validated as a regular file under ``Output`` before
+    the artifact index is changed.  The single index save prevents a mixed
+    output result from publishing an early artifact before a later candidate
+    is rejected.
+    """
+
+    safe_provenance = _safe_provenance(provenance)
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    for value in paths:
+        candidate = Path(value).expanduser()
+        try:
+            candidate = candidate.resolve()
+        except OSError:
+            return None
+        identity = str(candidate)
+        if (
+            identity in seen
+            or not candidate.is_file()
+            or not _allowed(candidate)
+            or not _under_root(candidate, OUTPUT_ROOT)
+        ):
+            return None
+        seen.add(identity)
+        candidates.append(candidate)
+    if not candidates:
+        return None
+
+    with _LOCK:
+        index = _load()
+        public: list[dict[str, Any]] = []
+        changed = False
+        for candidate in candidates:
+            record = next((item for item in index.values() if item.get("path") == str(candidate)), None)
+            if record is not None:
+                existing_provenance = record.get("provenance")
+                if existing_provenance is not None and existing_provenance != safe_provenance:
+                    return None
+                if existing_provenance is None:
+                    record["provenance"] = safe_provenance
+                    changed = True
+                public.append(_public(record))
+                continue
+            artifact_id = f"artifact_{uuid.uuid4().hex}"
+            safe_name = _safe_name(candidate.name)
+            record = {
+                "id": artifact_id,
+                "path": str(candidate),
+                "name": safe_name,
+                "size_bytes": candidate.stat().st_size,
+                "media_type": normalize_media_type(None, fallback_name=safe_name),
+                "created_at": _now(),
+                "provenance": safe_provenance,
+            }
+            index[artifact_id] = record
+            changed = True
+            public.append(_public(record))
+        if changed:
+            _save(index)
+        return public
+
+
 def _remove_owned_upload(path: Path | None) -> None:
     if path is None:
         return

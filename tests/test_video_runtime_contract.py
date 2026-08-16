@@ -368,6 +368,45 @@ class VideoRuntimeContractTests(unittest.TestCase):
         finally:
             manager.cancel_all_and_wait(3)
 
+    def test_mixed_worker_outputs_publish_atomically(self) -> None:
+        from src.services import artifact_store
+        from src.services.api import jobs as api_jobs
+        from src.services.job_manager.manager import HubJobManager
+
+        root = self._owned_temp_root()
+        output_root = root / "Output"
+        output_root.mkdir()
+        good = output_root / "AnimeSR" / "good.mp4"
+        good.parent.mkdir(parents=True)
+        good.write_bytes(b"good output")
+        unmanaged = root / "unmanaged.mp4"
+        unmanaged.write_bytes(b"unmanaged output")
+        manager = HubJobManager()
+        try:
+            with (
+                patch.object(api_jobs, "_jobs", {}),
+                patch.object(api_jobs, "_save"),
+                patch.object(artifact_store, "OUTPUT_ROOT", output_root),
+                patch.object(artifact_store, "INDEX_PATH", root / "Config" / "artifacts.json"),
+            ):
+                record = manager.submit(
+                    "run_media_operation",
+                    {"source_artifact_id": "artifact_" + "f" * 32},
+                    lambda _payload, _context: {"status": "completed", "output": str(good), "files": [str(unmanaged)]},
+                )
+                idle, remaining = manager.wait_for_idle(5)
+                self.assertTrue(idle, remaining)
+                public = api_jobs.get_job(record["id"])
+                self.assertIsNotNone(public)
+                assert public is not None
+                self.assertEqual(public["status"], "failed")
+                self.assertEqual(public["result"]["status"], "failed")
+                self.assertFalse((root / "Config" / "artifacts.json").exists())
+                self.assertTrue(good.is_file())
+                self.assertTrue(unmanaged.is_file())
+        finally:
+            manager.cancel_all_and_wait(3)
+
     def test_late_cancel_before_publication_leaves_no_artifact(self) -> None:
         from src.services import artifact_store
         from src.services.api import jobs as api_jobs
@@ -434,14 +473,14 @@ class VideoRuntimeContractTests(unittest.TestCase):
                 patch.object(artifact_store, "OUTPUT_ROOT", output_root),
                 patch.object(artifact_store, "INDEX_PATH", root / "Config" / "artifacts.json"),
             ):
-                register = artifact_store.register_path
+                register = artifact_store.register_worker_outputs
 
                 def blocking_register(*args, **kwargs):
                     publication_started.set()
                     self.assertTrue(release_publication.wait(3))
                     return register(*args, **kwargs)
 
-                with patch.object(artifact_store, "register_path", side_effect=blocking_register):
+                with patch.object(artifact_store, "register_worker_outputs", side_effect=blocking_register):
                     record = manager.submit(
                         "frame_interpolate",
                         {"source_artifact_id": "artifact_" + "e" * 32},
