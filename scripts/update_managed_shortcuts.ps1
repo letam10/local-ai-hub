@@ -8,6 +8,13 @@ $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $desktop = [Environment]::GetFolderPath('Desktop')
 $pythonw = Join-Path $root 'Environments\hub\Scripts\pythonw.exe'
+# A machine may use the system Python environment when the optional Hub
+# environment is not provisioned yet.  Prefer pythonw from PATH so the normal
+# desktop entry remains a single GUI window instead of opening a console.
+if (-not (Test-Path -LiteralPath $pythonw -PathType Leaf)) {
+    $systemPythonw = Get-Command pythonw.exe -ErrorAction SilentlyContinue
+    if ($systemPythonw) { $pythonw = $systemPythonw.Source }
+}
 $shortcuts = @(
     @{ locations = @($desktop, $root); name = 'Local AI Hub.lnk'; target = $pythonw; arguments = '-m src.app.main'; working = $root; description = 'Local AI Hub no-console desktop entry' }
 )

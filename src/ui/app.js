@@ -69,6 +69,7 @@ import { disposeNodeStudios, mountNodeStudios } from "./node_studio.js";
 import { mountImageMaskCanvases } from "./image_mask_studio.js";
 import { createWorkflowLibraryAdapter } from "./workflow_library.js";
 import { NAVIGATION, jobRecoverySnapshot, renderPage } from "./pages.js";
+import { currentLanguage, localizeDocument, setLanguage, translateText } from "./i18n.js";
 
 const state = {
   health: {}, capabilities: {}, productization: {}, components: [], tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", apiStatus: "loading", apiError: "",
@@ -83,6 +84,8 @@ const diskMetric = document.querySelector("#disk-metric");
 const gpuMetric = document.querySelector("#gpu-metric");
 const jobSummary = document.querySelector("#job-summary");
 const toastRegion = document.querySelector("#toast-region");
+const snapshotStatus = document.querySelector("#snapshot-status");
+const languageSelect = document.querySelector("#language-select");
 const sidebar = document.querySelector(".sidebar");
 const sidebarToggle = document.querySelector("#sidebar-toggle");
 const artifactPreviewLayer = document.querySelector("#artifact-preview-layer");
@@ -138,6 +141,7 @@ const syncSidebarState = () => {
     sidebar.classList.toggle("is-open", sidebarState.mobileOpen);
     sidebarToggle.setAttribute("aria-expanded", String(sidebarState.mobileOpen));
     sidebarToggle.setAttribute("aria-label", sidebarState.mobileOpen ? "Close navigation" : "Open navigation");
+    sidebarToggle.setAttribute("aria-label", translateText(sidebarToggle.getAttribute("aria-label")));
     return;
   }
   sidebarState.mobileOpen = false;
@@ -145,6 +149,7 @@ const syncSidebarState = () => {
   sidebar.classList.toggle("is-collapsed", sidebarState.desktopCollapsed);
   sidebarToggle.setAttribute("aria-expanded", String(!sidebarState.desktopCollapsed));
   sidebarToggle.setAttribute("aria-label", sidebarState.desktopCollapsed ? "Expand navigation" : "Collapse navigation");
+  sidebarToggle.setAttribute("aria-label", translateText(sidebarToggle.getAttribute("aria-label")));
 };
 
 const persistSidebarPreference = () => {
@@ -423,19 +428,26 @@ const renderNavigation = () => {
   const active = routeId();
   if (!nav) return;
   nav.setAttribute("aria-label", "Module navigation");
+  nav.setAttribute("aria-label", translateText(nav.getAttribute("aria-label")));
   nav.innerHTML = NAVIGATION.map((group, index) => {
     const groupId = `nav-group-${index}`;
     return `
       <section class="nav-group-section" role="group" aria-labelledby="${groupId}">
-        <h2 class="nav-group" id="${groupId}">${escapeHtml(group.group)}</h2>
+        <h2 class="nav-group" id="${groupId}">${escapeHtml(translateText(group.group))}</h2>
         <div class="nav-group-items">
           ${group.items.map(([id, label, icon]) => {
             const current = id === active ? ' aria-current="page"' : "";
-            return `<button class="nav-item ${id === active ? "is-active" : ""}" type="button" data-route="${escapeHtml(id)}" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}"${current}><span class="nav-icon" aria-hidden="true">${escapeHtml(icon)}</span><span class="nav-label">${escapeHtml(label)}</span></button>`;
+            const translatedLabel = translateText(label);
+            return `<button class="nav-item ${id === active ? "is-active" : ""}" type="button" data-route="${escapeHtml(id)}" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}"${current}><span class="nav-icon" aria-hidden="true">${escapeHtml(icon)}</span><span class="nav-label">${escapeHtml(translatedLabel)}</span></button>`;
           }).join("")}
         </div>
       </section>`;
   }).join("");
+  nav.querySelectorAll(".nav-item").forEach((item) => {
+    const label = item.querySelector(".nav-label")?.textContent || "";
+    item.setAttribute("aria-label", label);
+    item.setAttribute("title", label);
+  });
 };
 
 const renderApiState = () => {
@@ -455,13 +467,13 @@ const updateTopbar = () => {
   jobSummary.textContent = `Jobs: ${recovery.counts.active} active · ${recovery.counts.total} records`;
 };
 
-const render = () => {
+const render = ({ focus = false } = {}) => {
   disposeNodeStudios();
   disposeImageMaskCanvases();
   renderNavigation();
   syncSidebarState();
   view.innerHTML = `${renderApiState()}${renderPage(routeId(), state)}`;
-  view.focus({ preventScroll: true });
+  if (focus) view.focus({ preventScroll: true });
   updateTopbar();
   if (view.querySelector("[data-node-studio]")) {
     mountNodeStudios({
@@ -489,6 +501,8 @@ const render = () => {
       onCancel: () => { /* Escape only discards the unsaved pointer draft. */ },
     });
   }
+  if (languageSelect) languageSelect.value = currentLanguage();
+  localizeDocument(document);
 };
 
 const applyBootstrap = (payload) => {
@@ -508,7 +522,7 @@ const applyBootstrap = (payload) => {
   if (payload.workflow_library && typeof payload.workflow_library === "object") state.workflowLibrary = payload.workflow_library;
 };
 
-const refreshFast = async ({ quiet = false } = {}) => {
+const refreshFast = async ({ quiet = false, renderView = true } = {}) => {
   const [health, jobs, capabilities, durableJobs] = await Promise.allSettled([getHealth(), getJobs(), getCapabilities(), getDurableJobs()]);
   let failed = false;
   if (health.status === "fulfilled") state.health = health.value || {};
@@ -519,7 +533,7 @@ const refreshFast = async ({ quiet = false } = {}) => {
   else failed = true;
   if (durableJobs.status === "fulfilled") state.durableJobs = durableJobs.value?.records || [];
   else failed = true;
-  if (["dashboard", "settings", "jobs"].includes(routeId())) render(); else updateTopbar();
+  if (renderView && ["dashboard", "settings", "jobs"].includes(routeId())) render(); else updateTopbar();
   if (failed && state.apiStatus === "ready") state.apiStatus = "degraded";
   if (failed && !quiet) showToast("API đang khởi động hoặc một snapshot nhanh chưa sẵn sàng.", "warning");
 };
@@ -630,7 +644,7 @@ const initialize = async () => {
     const library = await workflowLibraryAdapter.list();
     if (library?.status) state.workflowLibrary = library;
   } catch { /* Keep the explicit partial adapter state. */ }
-  render();
+  render({ focus: true });
   await loadRouteData();
 };
 
@@ -881,6 +895,14 @@ const handleImageMaskForm = async (form) => {
 };
 
 document.addEventListener("change", (event) => {
+  const language = event.target.closest("#language-select");
+  if (language) {
+    setLanguage(language.value);
+    // Reload from the canonical server snapshot so a language change never
+    // translates an already translated text node a second time.
+    window.location.reload();
+    return;
+  }
   const input = event.target.closest("input[type=file][data-asset-key]");
   if (input) renderFilePreview(input);
   const projectSelect = event.target.closest("[data-project-select]");
@@ -938,6 +960,20 @@ document.addEventListener("click", async (event) => {
   const preview = event.target.closest("[data-preview-artifact]");
   if (preview) { showArtifactPreview(preview); return; }
   if (event.target.closest("[data-refresh-api]")) { await initialize(); return; }
+  if (event.target.closest("#refresh-snapshot")) {
+    const button = event.target.closest("#refresh-snapshot");
+    button.disabled = true;
+    if (snapshotStatus) snapshotStatus.textContent = "Đang nhận snapshot mới…";
+    try {
+      await refreshFast({ quiet: false, renderView: true });
+      if (snapshotStatus) snapshotStatus.textContent = "Đã nhận snapshot mới. Chỉ lần làm mới này đã cập nhật dữ liệu.";
+      showToast("Đã làm mới snapshot theo yêu cầu.", "success");
+    } catch (error) {
+      if (snapshotStatus) snapshotStatus.textContent = "Không thể nhận snapshot mới; dữ liệu hiện tại vẫn được giữ.";
+      showToast(error.message || "Không thể làm mới snapshot.", "error");
+    } finally { button.disabled = false; }
+    return;
+  }
   const route = event.target.closest("[data-route], [data-readiness-route]");
   if (route) {
     const nextRoute = route.dataset.route || route.dataset.readinessRoute;
@@ -1284,8 +1320,8 @@ document.addEventListener("keydown", async (event) => {
 });
 
 window.addEventListener("resize", syncSidebarState);
-window.addEventListener("hashchange", async () => { render(); await loadRouteData(); });
+window.addEventListener("hashchange", async () => { render({ focus: true }); await loadRouteData(); });
 syncSidebarState();
 applyTheme(currentTheme());
+setLanguage(currentLanguage());
 initialize();
-window.setInterval(() => refreshFast({ quiet: true }), 2500);
