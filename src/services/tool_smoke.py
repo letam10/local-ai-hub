@@ -2,7 +2,8 @@
 
 The file is deliberately ignored because it represents this machine's observed
 runtime state.  It stores no inputs, output paths, logs, credentials or model
-metadata—only the tool name and when a completed direct job was recorded.
+metadata—only a tool name, bounded outcome, and timestamp for the latest direct
+job attempt.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -30,6 +32,42 @@ _LOCK = threading.RLock()
 # can bind them to the current component/runtime fingerprint.  This receipt is
 # intentionally path-free and never represents a runtime probe by itself.
 COMPONENT_RUNTIME_EVIDENCE_SCHEMA = "component-runtime-evidence.v1"
+
+# Direct smoke jobs that produce a user-visible result must publish at least
+# one opaque Hub artifact before their completion can become capability
+# evidence.  ``probe_media`` is the deliberate metadata-only exception: its
+# completed result is a bounded read-only observation, not a media artifact.
+# Keep this allowlist local to avoid importing the API core back into the
+# evidence writer (the core already imports this module).
+SMOKE_ARTIFACT_REQUIRED_TOOLS = frozenset({
+    "parse_screen",
+    "detect_objects",
+    "ground_objects",
+    "segment_image",
+    "segment_from_box",
+    "segment_from_points",
+    "track_video_object",
+    "ocr_document",
+    "transcribe_media",
+    "create_subtitled_video",
+    "text_to_speech",
+    "design_voice",
+    "clone_voice",
+    "convert_voice",
+    "upscale_anime_video",
+    "generate_flux",
+    "generate_qwen_image",
+})
+
+_SMOKE_FAILURE_CODES = frozenset({
+    "OUTPUT_MISSING",
+    "OUTPUT_PUBLISH_FAILED",
+    "WORKER_FAILED",
+    "WORKER_EXCEPTION",
+    "CANCELLED",
+    "PREFLIGHT_UNAVAILABLE",
+    "BACKEND_UNAVAILABLE",
+})
 
 ACCEPTANCE_OPT_IN_ENV = "LOCALAIHUB_RUN_ACCEPTANCE_RUNTIME"
 ACCEPTANCE_APPROVAL_ENV = "LOCALAIHUB_ACCEPTANCE_APPROVAL_PATH"
@@ -1046,29 +1084,124 @@ def _current_component_binding(tool: str) -> dict[str, str] | None:
     return {"component": component, "runtime_fingerprint": fingerprint}
 
 
-def record_completed(tool: str) -> None:
-    """Persist one bounded completion receipt with an optional live binding."""
+def requires_published_artifact(tool: str) -> bool:
+    """Return whether a smoke-eligible completion needs an opaque artifact."""
 
-    if not tool:
+    return isinstance(tool, str) and tool in SMOKE_ARTIFACT_REQUIRED_TOOLS
+
+
+def has_published_artifact(result: object) -> bool:
+    """Recognize only the bounded artifact shape emitted by ``_publish_result``.
+
+    This deliberately checks the opaque ID rather than paths, URLs, or worker
+    payload fields.  A worker returning a mask/preview scalar without a Hub
+    publication therefore cannot be treated as a successful smoke.
+    """
+
+    if not isinstance(result, dict):
+        return False
+    artifacts = result.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts or len(artifacts) > 64:
+        return False
+    return all(
+        isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and re.fullmatch(r"artifact_[a-f0-9]{32}", item["id"]) is not None
+        for item in artifacts[:64]
+    )
+
+
+def record_outcome(
+    tool: str,
+    *,
+    outcome: str,
+    execution: str,
+    failure_code: str | None = None,
+) -> None:
+    """Replace the prior receipt with one bounded outcome projection.
+
+    A failed, unavailable, cancelled, or output-missing attempt intentionally
+    supersedes an older completion receipt.  Only finite internal codes are
+    persisted; worker text, paths, commands, and input/output details never
+    enter this machine-local evidence file.
+    """
+
+    if not isinstance(tool, str) or not tool:
         return
+    if outcome not in {"completed", "failed", "unavailable"}:
+        return
+    if execution not in {"completed", "attempted", "not_run"}:
+        return
+    if outcome == "completed" and execution != "completed":
+        return
+    if outcome == "failed" and execution != "attempted":
+        return
+    if outcome == "unavailable" and execution not in {"attempted", "not_run"}:
+        return
+    if failure_code is not None and failure_code not in _SMOKE_FAILURE_CODES:
+        failure_code = "WORKER_FAILED"
     binding = _current_component_binding(tool)
     with _LOCK:
         state = _load()
+        if binding is None:
+            # Preserve only the prior opaque binding while replacing its
+            # outcome.  This lets a failed preflight invalidate a previous
+            # success even when the current runtime is too unavailable to
+            # compute a fresh fingerprint; no path or worker detail is copied.
+            previous = state.get(tool)
+            if isinstance(previous, dict):
+                previous_component = previous.get("component")
+                previous_fingerprint = previous.get("runtime_fingerprint")
+                if (
+                    isinstance(previous_component, str)
+                    and re.fullmatch(r"[a-z0-9_.-]{1,64}", previous_component) is not None
+                    and isinstance(previous_fingerprint, str)
+                    and re.fullmatch(r"[0-9a-f]{64}", previous_fingerprint) is not None
+                ):
+                    binding = {
+                        "component": previous_component,
+                        "runtime_fingerprint": previous_fingerprint,
+                    }
         receipt: dict[str, Any] = {
             "schema_version": COMPONENT_RUNTIME_EVIDENCE_SCHEMA,
             "tool": str(tool),
-            "status": "completed",
-            "outcome": "completed",
-            "execution": "completed",
+            "status": outcome,
+            "outcome": outcome,
+            "execution": execution,
             "recorded_at": datetime.now(timezone.utc).isoformat(),
             "evidence": "bounded_direct_job",
         }
+        if failure_code is not None and outcome != "completed":
+            receipt["failure_code"] = failure_code
         if binding is not None:
             receipt.update(binding)
         state[tool] = receipt
         temporary = STATE_PATH.with_suffix(".tmp")
         temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         temporary.replace(STATE_PATH)
+
+
+def record_completed(tool: str) -> None:
+    """Persist one bounded completion receipt with an optional live binding."""
+
+    record_outcome(tool, outcome="completed", execution="completed")
+
+
+def record_failed(tool: str, *, failure_code: str = "WORKER_FAILED") -> None:
+    """Invalidate any previous completion after an attempted smoke failure."""
+
+    record_outcome(tool, outcome="failed", execution="attempted", failure_code=failure_code)
+
+
+def record_unavailable(
+    tool: str,
+    *,
+    failure_code: str = "BACKEND_UNAVAILABLE",
+    execution: str = "attempted",
+) -> None:
+    """Invalidate prior evidence when preflight/backend cannot run the tool."""
+
+    record_outcome(tool, outcome="unavailable", execution=execution, failure_code=failure_code)
 
 
 def completion_receipts() -> dict[str, dict[str, Any]]:

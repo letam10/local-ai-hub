@@ -18,7 +18,13 @@ from typing import Any
 
 from src.services.api.jobs import TERMINAL_STATUSES, _publish_result, active_jobs, create_job, get_job_internal, update_job
 from src.services.process_manager.managed import terminate_owned_process
-from src.services.tool_smoke import record_completed
+from src.services.tool_smoke import (
+    has_published_artifact,
+    record_completed,
+    record_failed,
+    record_unavailable,
+    requires_published_artifact,
+)
 
 
 Runner = Callable[[dict[str, Any], "JobContext"], dict[str, Any]]
@@ -145,10 +151,12 @@ class HubJobManager:
             if heavy:
                 while not acquired:
                     if context.cancelled:
+                        record_failed(tool, failure_code="CANCELLED")
                         update_job(job_id, status="cancelled", finished_at=_now(), message="Tác vụ đã được hủy trước khi chạy.")
                         return
                     acquired = self._heavy_slot.acquire(timeout=0.2)
             if context.cancelled:
+                record_failed(tool, failure_code="CANCELLED")
                 update_job(job_id, status="cancelled", finished_at=_now(), message="Tác vụ đã được hủy trước khi chạy.")
                 return
             update_job(job_id, status="running", progress=5, message="Worker Hub đang chạy nền.")
@@ -164,8 +172,10 @@ class HubJobManager:
                     record,
                 )
                 if context.cancelled or result.get("status") == "cancelled":
+                    record_failed(tool, failure_code="CANCELLED")
                     update_job(job_id, status="cancelled", progress=0, finished_at=_now(), result={"status": "cancelled"}, message="Tác vụ đã được hủy.")
                 elif publish_error is not None:
+                    record_failed(tool, failure_code="OUTPUT_PUBLISH_FAILED")
                     update_job(
                         job_id,
                         status="failed",
@@ -177,9 +187,27 @@ class HubJobManager:
                         next_action="Kiểm tra runtime/output contract rồi tạo lại job.",
                     )
                 elif result.get("status") == "completed":
-                    update_job(job_id, status="completed", progress=100, finished_at=_now(), result=result, message="Hoàn tất.", next_action=result.get("next_action"))
-                    record_completed(tool)
+                    if requires_published_artifact(tool) and not has_published_artifact(result):
+                        record_failed(tool, failure_code="OUTPUT_MISSING")
+                        update_job(
+                            job_id,
+                            status="failed",
+                            progress=0,
+                            finished_at=_now(),
+                            result={
+                                "status": "failed",
+                                "failure_code": "OUTPUT_MISSING",
+                                "error": "Worker completed without a publishable Hub artifact.",
+                            },
+                            error="Job completed without a publishable artifact; capability evidence was not recorded.",
+                            message="Worker không tạo artifact Hub để publish.",
+                            next_action="Kiểm tra output contract rồi tạo lại job.",
+                        )
+                    else:
+                        update_job(job_id, status="completed", progress=100, finished_at=_now(), result=result, message="Hoàn tất.", next_action=result.get("next_action"))
+                        record_completed(tool)
                 elif result.get("status") == "unavailable":
+                    record_unavailable(tool, failure_code="BACKEND_UNAVAILABLE")
                     update_job(
                         job_id,
                         status="unavailable",
@@ -191,8 +219,10 @@ class HubJobManager:
                         next_action=result.get("next_action"),
                     )
                 else:
+                    record_failed(tool, failure_code="WORKER_FAILED")
                     update_job(job_id, status="failed", progress=0, finished_at=_now(), result=result, error=result.get("error") or result.get("reason") or "Worker không hoàn tất.", message="Không thể hoàn tất tác vụ.", next_action=result.get("next_action"))
         except Exception as exc:  # pragma: no cover - guards background threads
+            record_failed(tool, failure_code="WORKER_EXCEPTION")
             update_job(job_id, status="failed", progress=0, finished_at=_now(), error=str(exc), message="Worker Hub gặp lỗi không mong đợi.")
         finally:
             if acquired:

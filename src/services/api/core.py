@@ -18,6 +18,7 @@ from src.services.job_manager.manager import JobContext, job_manager
 from src.services.tool_smoke import (
     completion_receipts,
     passed as smoke_passed,
+    record_unavailable,
     runtime_evidence_operation_scope,
     runtime_evidence_passed,
     runtime_evidence_projection,
@@ -89,6 +90,10 @@ _COMPONENT_RUNTIME_EVIDENCE_KEYS = frozenset({
     "recorded_at",
     "runtime_fingerprint",
 })
+
+SMOKE_FAILURE_REASON = "Lần smoke bounded gần nhất thất bại hoặc không tạo artifact; evidence operational cũ đã bị vô hiệu hóa."
+SMOKE_UNAVAILABLE_REASON = "Lần smoke bounded gần nhất không khả dụng; evidence operational cũ đã bị vô hiệu hóa."
+SMOKE_FAILURE_ACTION = "Kiểm tra backend và artifact output, sau đó chạy lại một smoke bounded."
 
 # Desktop shutdown must close submission admission and recheck the durable
 # queue under one server-owned lock.  The desktop never races a new job into
@@ -394,17 +399,16 @@ def _last_smoke_projection(
 
     expected_component = component_id or str(item.get("id") or "")
     item_evidence = item.get("last_smoke")
-    evidence = item_evidence
-    if not isinstance(evidence, dict):
-        candidates = []
-        for tool, receipt in completion_receipts().items():
-            if not isinstance(receipt, dict) or receipt.get("component") != expected_component:
-                continue
-            if TOOL_COMPONENTS.get(tool) != expected_component or receipt.get("tool") != tool:
-                continue
-            candidates.append(receipt)
-        if candidates:
-            evidence = max(candidates, key=lambda value: str(value.get("recorded_at") or ""))
+    candidates: list[dict[str, Any]] = []
+    if isinstance(item_evidence, dict):
+        candidates.append(item_evidence)
+    for tool, receipt in completion_receipts().items():
+        if not isinstance(receipt, dict) or receipt.get("component") != expected_component:
+            continue
+        if TOOL_COMPONENTS.get(tool) != expected_component or receipt.get("tool") != tool:
+            continue
+        candidates.append(receipt)
+    evidence = max(candidates, key=lambda value: str(value.get("recorded_at") or "")) if candidates else None
     fallback = {
         "status": "not_run",
         "execution": "not_run",
@@ -413,7 +417,7 @@ def _last_smoke_projection(
     }
     if not isinstance(evidence, dict):
         return fallback
-    if isinstance(item_evidence, dict) and set(item_evidence) != _COMPONENT_RUNTIME_EVIDENCE_KEYS:
+    if evidence is item_evidence and set(item_evidence) != _COMPONENT_RUNTIME_EVIDENCE_KEYS:
         return fallback
     if evidence.get("component") not in {None, expected_component}:
         return fallback
@@ -423,10 +427,11 @@ def _last_smoke_projection(
         or not isinstance(normalized.get("tool"), str)
         or normalized.get("tool") not in TOOL_COMPONENTS
         or TOOL_COMPONENTS.get(normalized["tool"]) != expected_component
-        or normalized.get("outcome") not in {"completed", "failed"}
-        or normalized.get("execution") not in {"completed", "attempted"}
+        or normalized.get("outcome") not in {"completed", "failed", "unavailable"}
+        or normalized.get("execution") not in {"completed", "attempted", "not_run"}
         or (normalized.get("outcome") == "completed" and normalized.get("execution") != "completed")
         or (normalized.get("outcome") == "failed" and normalized.get("execution") != "attempted")
+        or (normalized.get("outcome") == "unavailable" and normalized.get("execution") not in {"attempted", "not_run"})
         or not isinstance(normalized.get("runtime_fingerprint"), str)
         or re.fullmatch(r"[0-9a-f]{64}", normalized["runtime_fingerprint"]) is None
     ):
@@ -440,13 +445,18 @@ def _last_smoke_projection(
         and timedelta(0) <= reference - recorded_at <= COMPONENT_RUNTIME_EVIDENCE_MAX_AGE
     )
     fingerprint_matches = normalized["runtime_fingerprint"] == runtime_fingerprint
-    return {
+    projection = {
         "status": normalized["outcome"],
         "execution": normalized["execution"],
         "fresh": fresh,
         "runtime_fingerprint_match": fingerprint_matches,
         "tool": normalized["tool"],
     }
+    if normalized["outcome"] == "failed":
+        projection.update({"reason": SMOKE_FAILURE_REASON, "next_action": SMOKE_FAILURE_ACTION})
+    elif normalized["outcome"] == "unavailable":
+        projection.update({"reason": SMOKE_UNAVAILABLE_REASON, "next_action": SMOKE_FAILURE_ACTION})
+    return projection
 
 
 def _smoke_is_current_for_tool(item: dict[str, Any], tool: str) -> bool:
@@ -550,9 +560,19 @@ def _tool_readiness(tool: str, statuses: dict[str, dict[str, Any]]) -> dict[str,
         tool_status = "unavailable"
         reason = f"{component_item.get('name', component_id)} đang ở trạng thái {component_status}; worker không thể nhận job."
     elif tool in SMOKE_ELIGIBLE_TOOLS:
+        smoke = component_item.get("last_smoke")
+        smoke_status = smoke.get("status") if isinstance(smoke, dict) else None
         if _smoke_is_current_for_tool(component_item, tool):
             tool_status = "operational"
             reason = "Một bounded smoke gần đây khớp runtime hiện tại đã hoàn tất; evidence cục bộ không chứa đường dẫn hoặc dữ liệu input."
+        elif smoke_status == "failed":
+            if tool_status in {"operational", "partial"}:
+                tool_status = "partial"
+            reason = SMOKE_FAILURE_REASON
+        elif smoke_status == "unavailable":
+            if tool_status in {"operational", "partial"}:
+                tool_status = "partial"
+            reason = SMOKE_UNAVAILABLE_REASON
         elif tool_status == "operational":
             tool_status = "partial"
             reason = "Runtime hiện tại cần một bounded smoke mới khớp runtime fingerprint trước khi tool được xem là operational."
@@ -811,6 +831,8 @@ def submit_tool(tool: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]
     statuses = {str(item["id"]): item for item in component_statuses() if item.get("id")}
     readiness = _tool_readiness(tool, statuses)
     if readiness["tool_status"] in {"unavailable", "planned", "error"}:
+        if tool in SMOKE_ELIGIBLE_TOOLS:
+            record_unavailable(tool, failure_code="PREFLIGHT_UNAVAILABLE", execution="not_run")
         return 503, _unavailable(tool, readiness)
     if tool == "run_media_operation" and isinstance(payload, dict):
         backend_readiness = _media_backend_readiness(
@@ -818,6 +840,8 @@ def submit_tool(tool: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]
             backend=str(payload.get("backend") or ""),
         )
         if backend_readiness is not None and not backend_readiness["queue_allowed"]:
+            if tool in SMOKE_ELIGIBLE_TOOLS:
+                record_unavailable(tool, failure_code="PREFLIGHT_UNAVAILABLE", execution="not_run")
             return 503, {
                 "status": "unavailable",
                 "tool": tool,
@@ -831,6 +855,7 @@ def submit_tool(tool: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]
     if tool == "upscale_anime_video":
         backend_readiness = _media_backend_readiness(operation="upscale_anime_video", backend="animesr")
         if backend_readiness is not None and not backend_readiness["queue_allowed"]:
+            record_unavailable(tool, failure_code="PREFLIGHT_UNAVAILABLE", execution="not_run")
             return 503, {
                 "status": "unavailable",
                 "tool": tool,

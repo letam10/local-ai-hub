@@ -25,7 +25,14 @@ Each public component projection contains only path-free evidence:
 A runtime-backed tool can become `operational` only when its legacy bounded-job
 receipt still exists **and** `last_smoke` names that exact tool, completed
 successfully, is no more than 24 hours old, and has an exact current
-`runtime_fingerprint` match.  Missing, malformed, failed, stale, or mismatched
-evidence leaves the tool `partial` or `unavailable`.  This projection reads no
+`runtime_fingerprint` match.  Every failed, cancelled, unavailable, or
+output-missing smoke attempt replaces the older completion receipt with a
+path-free finite outcome, so historic success cannot survive a newer failure.
+For output-producing smoke tools, the Job Manager records completion evidence
+only after at least one opaque Hub artifact has been published.  The sole
+metadata-only exception is `probe_media`, whose completed result is a bounded
+read-only observation rather than a user-visible artifact.  Missing, malformed,
+failed, stale, and mismatched evidence leaves the tool `partial` or
+`unavailable` with a fixed reason and next action.  This projection reads no
 Config, runtime, model, or smoke state beyond the existing server-owned local
 readers and never writes, executes, downloads, or installs anything.
