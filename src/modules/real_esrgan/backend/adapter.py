@@ -133,4 +133,6 @@ def capability() -> dict[str, Any]:
         "runtime_ready": bool(runtime and runtime.is_dir()),
         "environment_ready": bool(python and python.is_file()),
         "model_ready": bool(model and model.is_file()),
+        "worker_ready": WORKER.is_file(),
+        "script_ready": bool(runtime and (runtime / "inference_realesrgan.py").is_file()),
     }
