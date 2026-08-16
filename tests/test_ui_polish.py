@@ -18,6 +18,7 @@ class UiPolishTests(unittest.TestCase):
         cls.app = (UI / "app.js").read_text(encoding="utf-8")
         cls.css = (UI / "styles.css").read_text(encoding="utf-8")
         cls.i18n = (UI / "i18n.js").read_text(encoding="utf-8")
+        cls.pages = (UI / "pages.js").read_text(encoding="utf-8")
 
     def test_snapshot_refresh_is_explicit_and_main_is_not_a_live_region(self) -> None:
         self.assertIn('id="refresh-snapshot"', self.html)
@@ -57,6 +58,14 @@ class UiPolishTests(unittest.TestCase):
         self.assertIn('data-i18n-aria-label="Mở điều hướng"', self.html)
         self.assertIn("const escaped = source.replace", self.i18n)
 
+    def test_rendered_page_templates_mark_fixed_copy_without_touching_snapshots(self) -> None:
+        self.assertIn('import { translateText } from "./i18n.js";', self.pages)
+        self.assertIn("const uiText = (value) => translateText", self.pages)
+        for phrase in ("Reason & next action", "Next action", "Recovery reason", "Module preflight", "Readiness & Module Plan", "Jobs recovery"):
+            self.assertIn(f'data-i18n="{phrase}"', self.pages)
+        self.assertIn("escapeHtml(jobRecovery.reason)", self.pages)
+        self.assertIn("escapeHtml(recovery.reason)", self.pages)
+
     def test_artifact_preview_close_restores_opener_or_main_landmark(self) -> None:
         self.assertIn("artifactPreviewOpener = button;", self.app)
         self.assertIn("const opener = artifactPreviewOpener;", self.app)
@@ -72,6 +81,8 @@ class UiPolishTests(unittest.TestCase):
         self.assertIn('"src.app.main", "uvicorn", "webview"', shortcut_script)
         self.assertIn("MISSING_RUNTIME", shortcut_script)
         self.assertIn("if ($missingRuntime)", shortcut_script)
+        self.assertIn("if (Test-Path -LiteralPath $pythonw -PathType Leaf)", shortcut_script)
+        self.assertIn("Test-HubPythonwFallback -PythonwPath $pythonw", shortcut_script)
 
 
 if __name__ == "__main__":
