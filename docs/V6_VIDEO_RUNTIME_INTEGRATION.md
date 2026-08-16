@@ -21,9 +21,11 @@ that requires a separately recorded bounded Hub job that produces an artifact.
   below `Models`.  The worker always passes that existing local file by
   `--model_path`, so upstream download behavior is not reachable.
 
-All source inputs are resolved internally after the public API's opaque
-artifact boundary.  Each worker writes a new timestamped result in its
-Hub-owned Output subtree and returns it to the normal Job Manager/artifact
+AnimeSR, Practical-RIFE, and Real-ESRGAN accept only a typed opaque Hub
+artifact ID.  Public `path`, executable, command, model-path, or output-root
+fields are refused before a worker is launched.  Each worker resolves its
+typed artifact internally, writes a new timestamped result in its Hub-owned
+Output subtree, and returns it to the normal Job Manager/artifact
 publication flow.  Before a worker reads a runtime/tool/model leaf or creates
 an Output/Temp path, it verifies the whole canonical-root chain has no
 symlink/junction/reparse escape.  The workers do not delete media, model

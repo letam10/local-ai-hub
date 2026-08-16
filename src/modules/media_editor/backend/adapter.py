@@ -24,14 +24,16 @@ VIDEO_OPS = {
     "trim", "cut", "concat", "resize", "crop", "rotate", "fps", "transcode", "video_upscale", "video_grade", "logo_overlay", "audio_loudness", "extract_audio", "replace_audio", "mux", "burn_subtitle", "extract_frames", "image_sequence_video", "frame_interpolate", "encode",
 }
 IMAGE_OPS = {"image_resize", "image_upscale", "image_crop", "image_rotate", "image_flip", "image_convert", "image_compress", "image_levels"}
-_CLOSED_MEDIA_OPERATIONS = {"video_grade", "logo_overlay", "audio_loudness"}
+_CLOSED_MEDIA_OPERATIONS = {"video_grade", "logo_overlay", "audio_loudness", "frame_interpolate", "image_upscale"}
 _UNSAFE_MEDIA_FIELDS = {"command", "commands", "executable", "executable_path", "filter", "filter_complex", "font", "font_path", "overlay_path", "path_override", "secret", "token"}
 _CLOSED_MEDIA_ALLOWED_FIELDS = {
     "video_grade": {"operation", "source_artifact_id", "brightness", "contrast", "saturation", "gamma", "denoise", "sharpen"},
     "logo_overlay": {"operation", "source_artifact_id", "overlay_artifact_id", "position", "opacity"},
     "audio_loudness": {"operation", "source_artifact_id", "target_lufs", "true_peak", "gain_db"},
+    "frame_interpolate": {"operation", "source_artifact_id", "backend", "mode", "target_fps", "half"},
+    "image_upscale": {"operation", "source_artifact_id", "backend", "scale", "tile"},
 }
-_CLOSED_MEDIA_EXPECTED_TYPES = {"video_grade": "video", "logo_overlay": "video", "audio_loudness": "audio"}
+_CLOSED_MEDIA_EXPECTED_TYPES = {"video_grade": "video", "logo_overlay": "video", "audio_loudness": "audio", "frame_interpolate": "video", "image_upscale": "image"}
 _CLOSED_MEDIA_PAYLOAD_ERROR = "Closed media operation payload is invalid."
 _CLOSED_MEDIA_ARTIFACT_ERROR = "Closed media operation artifact is unavailable or has an unsupported type."
 _ENCODER_CACHE_LOCK = threading.RLock()
@@ -632,11 +634,11 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
         # ``source`` was already resolved by the server/API artifact boundary.
         # The RIFE adapter selects its runtime, model leaf, FFmpeg and FFprobe
         # itself; no browser-supplied executable or path is forwarded.
-        return run_practical_rife({"path": str(source), **payload}, context)
+        return run_practical_rife({"source_artifact_id": payload.get("source_artifact_id"), "target_fps": payload.get("target_fps"), "half": payload.get("half")}, context)
     if operation == "image_upscale" and str(payload.get("backend") or "ffmpeg_scale") == "real_esrgan":
         from src.modules.real_esrgan.backend.adapter import run_realesrgan
 
-        return run_realesrgan({"path": str(source), **payload}, context)
+        return run_realesrgan({"source_artifact_id": payload.get("source_artifact_id"), "scale": payload.get("scale"), "tile": payload.get("tile")}, context)
     if operation in {"concat", "image_sequence_video"}:
         sources = [source, *_additional_sources(payload)]
         unique_sources: list[Path] = []

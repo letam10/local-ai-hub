@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
+from src.services.artifact_store import describe, resolve
 from src.shared.paths.registry import OUTPUT_ROOT
 from src.shared.utils.adapter_common import configured_path, local_root, unavailable
 
 
 WORKER = Path(__file__).with_name("worker.py")
+_ARTIFACT_ID = re.compile(r"artifact_[a-f0-9]{32}")
+_UNSAFE_INPUT_FIELDS = {"path", "source", "secondary_path", "input_path", "executable", "command", "model_path", "output_root"}
 
 
 def _runtime() -> tuple[Path | None, Path | None]:
@@ -22,11 +26,26 @@ def _runtime() -> tuple[Path | None, Path | None]:
     return python, runtime
 
 
+def _video_artifact(payload: dict[str, Any]) -> Path | None:
+    if any(payload.get(name) not in (None, "", []) for name in _UNSAFE_INPUT_FIELDS):
+        return None
+    artifact_id = payload.get("source_artifact_id")
+    if not isinstance(artifact_id, str) or not _ARTIFACT_ID.fullmatch(artifact_id):
+        return None
+    try:
+        source = resolve(artifact_id)
+        metadata = describe(artifact_id)
+    except Exception:
+        return None
+    media_type = str(metadata.get("media_type") or "") if isinstance(metadata, dict) else ""
+    return source if isinstance(source, Path) and source.is_file() and media_type.startswith("video/") else None
+
+
 def inspect_video(payload: dict[str, Any]) -> dict[str, Any]:
     """Return a direct worker plan without starting an external desktop GUI."""
 
-    source = Path(os.path.expandvars(str(payload.get("path", "")))).expanduser()
-    if not source.is_file():
+    source = _video_artifact(payload)
+    if source is None:
         return {"status": "error", "error": "Không tìm thấy video AnimeSR đầu vào."}
     return {
         "status": "completed",
@@ -60,20 +79,26 @@ def run_animesr(payload: dict[str, Any], context: ProcessOwner | None = None) ->
     python, runtime = _runtime()
     if python is None or runtime is None or not python.is_file() or not runtime.is_dir() or not WORKER.is_file():
         return unavailable("animesr", "AnimeSR runtime hoặc environment trực tiếp chưa hoàn chỉnh.")
-    source = Path(os.path.expandvars(str(payload.get("path", "")))).expanduser()
-    if not source.is_file():
-        return {"status": "error", "error": "Không tìm thấy video AnimeSR đầu vào."}
+    source = _video_artifact(payload)
+    if source is None:
+        return {"status": "error", "error": "AnimeSR cần VIDEO artifact do Hub quản lý."}
     ffmpeg = configured_path("ffmpeg", "executable", "FFMPEG_PATH")
     if ffmpeg is None:
         home = configured_path("ffmpeg", "path", "FFMPEG_HOME")
         ffmpeg = home / "ffmpeg.exe" if home else None
     if ffmpeg is None or not ffmpeg.is_file():
         return unavailable("ffmpeg", "Không tìm thấy FFmpeg canonical của Hub cho AnimeSR.")
+    try:
+        scale = max(1, min(4, int(payload.get("scale", 2))))
+    except (TypeError, ValueError):
+        scale = 2
     request = {
-        **payload,
         "path": str(source),
         "runtime": str(runtime),
         "output_root": str(OUTPUT_ROOT / "AnimeSR"),
+        "scale": scale,
+        "model": "AnimeSR_v2" if str(payload.get("model") or "AnimeSR_v2") != "AnimeSR_v1-PaperModel" else "AnimeSR_v1-PaperModel",
+        "half": bool(payload.get("half", True)),
         # AnimeSR's checked-in inference script reads this exact environment
         # variable.  Passing the canonical executable avoids an ambient PATH
         # lookup without modifying the installed runtime.
@@ -86,7 +111,7 @@ def run_animesr(payload: dict[str, Any], context: ProcessOwner | None = None) ->
         cwd=runtime,
         env={**os.environ, "PYTHONPATH": str(local_root()), "LOCALAIHUB_ROOT": str(local_root()), "PYTHONIOENCODING": "utf-8"},
         owner=context,
-        timeout_seconds=float(payload.get("timeout_seconds", 3600)),
+        timeout_seconds=3600,
     )
 
 
@@ -118,10 +143,10 @@ def resume(_job_id: str) -> dict[str, Any]:
     return {"status": "completed", "operation": "resume", "message": "Job Manager tạo lại job từ payload đã lưu trong phiên Hub."}
 
 
-def queue_upscale(input_path: str, output_path: str | None = None) -> dict[str, Any]:
-    """Compatibility shim; callers should submit ``run_animesr`` through Job Manager."""
+def queue_upscale(_input_path: str, _output_path: str | None = None) -> dict[str, Any]:
+    """Deprecated raw-path shim; public callers must submit a Hub artifact."""
 
-    return run_animesr({"path": input_path, "requested_output": output_path})
+    return {"status": "unavailable", "reason": "AnimeSR chỉ nhận VIDEO artifact do Hub quản lý."}
 
 
 def capability() -> dict[str, Any]:

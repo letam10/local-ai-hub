@@ -270,6 +270,8 @@ def _run_media(node_type: str, data: dict[str, Any], inputs: dict[str, Any], con
         raise NodeFailure("Media node không nằm trong allowlist.")
     source = _input_artifact(inputs, "image", "video")
     payload = {"operation": operation, "path": str(source.path), **data}
+    if operation == "image_upscale":
+        payload = {"operation": operation, "source_artifact_id": source.artifact_id, **data}
     if node_type == "replace_audio":
         payload["secondary_path"] = str(_input_artifact(inputs, "audio").path)
     if node_type == "subtitle_burn":
@@ -284,7 +286,7 @@ def _run_frame_interpolate(data: dict[str, Any], inputs: dict[str, Any], context
     source = _input_artifact(inputs, "video")
     if str(data.get("mode") or "target_fps") == "off":
         return {"video": source, "metadata": {"interpolation": "off", "reused_source": True}}
-    result = execute_tool("run_media_operation", {"operation": "frame_interpolate", "path": str(source.path), **data}, context)
+    result = execute_tool("run_media_operation", {"operation": "frame_interpolate", "source_artifact_id": source.artifact_id, "backend": data.get("backend", "ffmpeg_minterpolate"), "mode": data.get("mode", "target_fps"), "target_fps": data.get("target_fps", 60), "half": data.get("half", True)}, context)
     output = _media_result(result, expected_output="video")
     output.setdefault("metadata", {}).update({"requested_backend": data.get("backend", "ffmpeg_minterpolate")})
     return output
@@ -351,7 +353,16 @@ def _run_video_upscale(data: dict[str, Any], inputs: dict[str, Any], context: An
     source = _input_artifact(inputs, "video")
     backend = str(data.get("backend") or "ffmpeg_scale")
     if backend == "animesr":
-        result = execute_tool("upscale_anime_video", {"path": str(source.path), **data}, context)
+        result = execute_tool(
+            "upscale_anime_video",
+            {
+                "source_artifact_id": source.artifact_id,
+                "scale": data.get("scale", 2),
+                "model": data.get("model", "AnimeSR_v2"),
+                "half": data.get("half", True),
+            },
+            context,
+        )
         if result.get("status") != "completed":
             raise NodeFailure(
                 str(result.get("error") or result.get("reason") or "AnimeSR video upscale không hoàn tất."),
@@ -606,7 +617,16 @@ def _run_node(definition: NodeDefinition, data: dict[str, Any], inputs: dict[str
         return {"metadata": _public_value(result)}
     if runner == "animesr":
         source = _input_artifact(inputs, "video")
-        result = execute_tool("upscale_anime_video", {"path": str(source.path), **data}, context)
+        result = execute_tool(
+            "upscale_anime_video",
+            {
+                "source_artifact_id": source.artifact_id,
+                "scale": data.get("scale", 2),
+                "model": data.get("model", "AnimeSR_v2"),
+                "half": data.get("half", True),
+            },
+            context,
+        )
         if result.get("status") != "completed":
             raise NodeFailure(str(result.get("error") or result.get("reason") or "AnimeSR không hoàn tất."), status=str(result.get("status") or "failed"))
         return {"video": _artifact_from_path(result["output"])}
@@ -614,7 +634,7 @@ def _run_node(definition: NodeDefinition, data: dict[str, Any], inputs: dict[str
         image = _input_artifact(inputs, "image")
         result = execute_tool(
             "run_media_operation",
-            {"operation": "image_upscale", "backend": "real_esrgan", "path": str(image.path), **data},
+            {"operation": "image_upscale", "backend": "real_esrgan", "source_artifact_id": image.artifact_id, "scale": data.get("scale", 2), "tile": data.get("tile", 0)},
             context,
         )
         if result.get("status") != "completed":

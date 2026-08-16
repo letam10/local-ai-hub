@@ -145,8 +145,7 @@ def main() -> int:
             return _emit({
                 "status": "error",
                 "error": "AnimeSR worker không tạo được video output.",
-                "returncode": result.returncode,
-                "stderr": result.stderr.decode("utf-8", errors="replace")[-5000:],
+                "code": "animesr_output_missing",
             })
         target = output_root / f"{source.stem}_AnimeSR_x{scale}_{stamp}.mp4"
         shutil.move(str(videos[-1]), str(target))
@@ -161,9 +160,9 @@ def main() -> int:
             "realesrgan": "partial" if request.get("use_realesrgan") else "skipped",
         })
     except subprocess.TimeoutExpired:
-        return _emit({"status": "error", "error": "AnimeSR worker vượt quá thời gian cho phép."})
-    except Exception as exc:
-        return _emit({"status": "error", "error": str(exc)})
+        return _emit({"status": "error", "error": "AnimeSR worker vượt quá thời gian cho phép.", "code": "animesr_timeout"})
+    except Exception:
+        return _emit({"status": "error", "error": "AnimeSR worker không thể hoàn tất job.", "code": "animesr_worker_failed"})
 
 
 if __name__ == "__main__":

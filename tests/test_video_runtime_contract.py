@@ -116,16 +116,41 @@ class VideoRuntimeContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "input.mp4"
             source.write_bytes(b"video")
-            with patch("src.modules.practical_rife.backend.adapter.run_practical_rife", return_value={"status": "unavailable", "component": "practical_rife"}) as rife:
-                result = adapter.run_operation({"operation": "frame_interpolate", "backend": "practical_rife", "path": str(source)})
+            artifact_id = "artifact_" + "a" * 32
+            with patch.object(adapter, "resolve", return_value=source), patch.object(adapter, "describe", return_value={"media_type": "video/mp4"}), patch("src.modules.practical_rife.backend.adapter.run_practical_rife", return_value={"status": "unavailable", "component": "practical_rife"}) as rife:
+                result = adapter.run_operation({"operation": "frame_interpolate", "backend": "practical_rife", "source_artifact_id": artifact_id})
             self.assertEqual(result["component"], "practical_rife")
-            self.assertEqual(rife.call_args.args[0]["path"], str(source))
+            self.assertEqual(rife.call_args.args[0]["source_artifact_id"], artifact_id)
             image = Path(directory) / "input.png"
             image.write_bytes(b"png")
-            with patch("src.modules.real_esrgan.backend.adapter.run_realesrgan", return_value={"status": "unavailable", "component": "real_esrgan"}) as esrgan:
-                result = adapter.run_operation({"operation": "image_upscale", "backend": "real_esrgan", "path": str(image)})
+            image_id = "artifact_" + "b" * 32
+            with patch.object(adapter, "resolve", return_value=image), patch.object(adapter, "describe", return_value={"media_type": "image/png"}), patch("src.modules.real_esrgan.backend.adapter.run_realesrgan", return_value={"status": "unavailable", "component": "real_esrgan"}) as esrgan:
+                result = adapter.run_operation({"operation": "image_upscale", "backend": "real_esrgan", "source_artifact_id": image_id})
             self.assertEqual(result["component"], "real_esrgan")
-            self.assertEqual(esrgan.call_args.args[0]["path"], str(image))
+            self.assertEqual(esrgan.call_args.args[0]["source_artifact_id"], image_id)
+
+    def test_public_gpu_media_payloads_reject_raw_paths_before_worker_launch(self) -> None:
+        from src.modules.animesr.backend import adapter as animesr
+        from src.modules.media_editor.backend import adapter as media
+        from src.services.api import core
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.mp4"
+            source.write_bytes(b"video")
+            raw = {"operation": "frame_interpolate", "backend": "practical_rife", "path": str(source)}
+            with patch("src.modules.practical_rife.backend.adapter.run_practical_rife") as rife:
+                result = media.run_operation(raw)
+            self.assertEqual(result["status"], "error")
+            rife.assert_not_called()
+            with patch.object(animesr, "run_json_worker") as launch:
+                result = animesr.run_animesr({"path": str(source), "executable": "not-allowed"})
+            self.assertIn(result["status"], {"error", "unavailable"})
+            self.assertIsNone(animesr._video_artifact({"path": str(source), "executable": "not-allowed"}))
+            launch.assert_not_called()
+            resolved, error = core._resolve_assets({"operation": "image_upscale", "backend": "real_esrgan", "asset_id": "artifact_" + "c" * 32}, tool="run_media_operation")
+            self.assertIsNone(error)
+            self.assertEqual(resolved["source_artifact_id"], "artifact_" + "c" * 32)
+            self.assertNotIn("path", resolved)
 
     def test_rife_reparse_output_parent_refuses_before_worker_launch(self) -> None:
         from src.modules.practical_rife.backend import worker

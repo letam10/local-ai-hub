@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
+from src.services.artifact_store import describe, resolve
 from src.shared.paths.registry import OUTPUT_ROOT, TEMP_ROOT
 from src.shared.utils.adapter_common import configured_path, local_root, unavailable
 
 
 WORKER = Path(__file__).with_name("worker.py")
 _MODEL_RELATIVE = Path("train_log") / "RIFEv4.26_0921"
+_ARTIFACT_ID = re.compile(r"artifact_[a-f0-9]{32}")
+_UNSAFE_INPUT_FIELDS = {"path", "source", "secondary_path", "input_path", "executable", "command", "model_path", "output_root"}
 
 
 def _configured_ffmpeg() -> tuple[Path | None, Path | None]:
@@ -31,6 +35,21 @@ def _runtime() -> tuple[Path | None, Path | None, Path | None]:
     python = environment / "Scripts" / "python.exe" if environment else None
     model_dir = runtime / _MODEL_RELATIVE if runtime else None
     return python, runtime, model_dir
+
+
+def _video_artifact(payload: dict[str, Any]) -> Path | None:
+    if any(payload.get(name) not in (None, "", []) for name in _UNSAFE_INPUT_FIELDS):
+        return None
+    artifact_id = payload.get("source_artifact_id")
+    if not isinstance(artifact_id, str) or not _ARTIFACT_ID.fullmatch(artifact_id):
+        return None
+    try:
+        source = resolve(artifact_id)
+        metadata = describe(artifact_id)
+    except Exception:
+        return None
+    media_type = str(metadata.get("media_type") or "") if isinstance(metadata, dict) else ""
+    return source if isinstance(source, Path) and source.is_file() and media_type.startswith("video/") else None
 
 
 def run_practical_rife(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[str, Any]:
@@ -52,9 +71,9 @@ def run_practical_rife(payload: dict[str, Any], context: ProcessOwner | None = N
         or not WORKER.is_file()
     ):
         return unavailable("practical_rife", "Practical-RIFE cần environment, model và cặp FFmpeg/FFprobe canonical của Hub.")
-    source = Path(os.path.expandvars(str(payload.get("path", "")))).expanduser()
-    if not source.is_file():
-        return {"status": "error", "error": "Không tìm thấy video đầu vào cho Practical-RIFE."}
+    source = _video_artifact(payload)
+    if source is None:
+        return {"status": "error", "error": "Practical-RIFE cần VIDEO artifact do Hub quản lý."}
     try:
         target_fps = max(2, min(120, int(payload.get("target_fps", 48))))
     except (TypeError, ValueError):

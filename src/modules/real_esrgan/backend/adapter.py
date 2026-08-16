@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from src.services.api.config import models
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
+from src.services.artifact_store import describe, resolve
 from src.shared.paths.registry import MODEL_ROOT, OUTPUT_ROOT, TEMP_ROOT
 from src.shared.utils.adapter_common import configured_path, local_root, unavailable
 
 
 WORKER = Path(__file__).with_name("worker.py")
 _MODEL_ID = "realesr-animevideov3"
+_ARTIFACT_ID = re.compile(r"artifact_[a-f0-9]{32}")
+_UNSAFE_INPUT_FIELDS = {"path", "source", "secondary_path", "input_path", "executable", "command", "model_path", "output_root"}
 
 
 def _inside(root: Path, candidate: Path) -> bool:
@@ -70,13 +74,28 @@ def _selected_model() -> Path | None:
     return None
 
 
+def _image_artifact(payload: dict[str, Any]) -> Path | None:
+    if any(payload.get(name) not in (None, "", []) for name in _UNSAFE_INPUT_FIELDS):
+        return None
+    artifact_id = payload.get("source_artifact_id")
+    if not isinstance(artifact_id, str) or not _ARTIFACT_ID.fullmatch(artifact_id):
+        return None
+    try:
+        source = resolve(artifact_id)
+        metadata = describe(artifact_id)
+    except Exception:
+        return None
+    media_type = str(metadata.get("media_type") or "") if isinstance(metadata, dict) else ""
+    return source if isinstance(source, Path) and source.is_file() and media_type.startswith("image/") else None
+
+
 def run_realesrgan(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[str, Any]:
     python, runtime = _runtime()
     model = _selected_model()
     if python is None or runtime is None or model is None or not python.is_file() or not runtime.is_dir() or not (runtime / "inference_realesrgan.py").is_file() or not WORKER.is_file():
         return unavailable("real_esrgan", "Real-ESRGAN cần environment, runtime và tool model local đã được registry xác nhận.")
-    source = Path(os.path.expandvars(str(payload.get("path", "")))).expanduser()
-    if not source.is_file() or source.suffix.casefold() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+    source = _image_artifact(payload)
+    if source is None or source.suffix.casefold() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
         return {"status": "error", "error": "Real-ESRGAN chỉ nhận IMAGE artifact hợp lệ của Hub."}
     try:
         scale = max(1, min(4, int(payload.get("scale", 2))))

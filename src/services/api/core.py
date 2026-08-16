@@ -363,7 +363,19 @@ def _unavailable(tool: str, readiness: dict[str, Any], reason: str | None = None
     }
 
 
-def _resolve_assets(payload: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+def _opaque_media_request(tool: str, payload: dict[str, Any]) -> bool:
+    """Keep GPU/video workers on opaque artifact identifiers end-to-end."""
+
+    if tool == "upscale_anime_video":
+        return True
+    if tool != "run_media_operation":
+        return False
+    operation = str(payload.get("operation") or "")
+    backend = str(payload.get("backend") or "")
+    return operation in {"image_upscale", "frame_interpolate"}
+
+
+def _resolve_assets(payload: dict[str, Any], *, tool: str = "") -> tuple[dict[str, Any], str | None]:
     # Public loopback requests use opaque artifact IDs.  Raw workstation paths
     # are never accepted from the browser/API surface; internal composition
     # between already-resolved workers happens below this boundary.
@@ -371,6 +383,19 @@ def _resolve_assets(payload: dict[str, Any]) -> tuple[dict[str, Any], str | None
     if any(field in payload and payload[field] not in (None, "", []) for field in raw_path_fields):
         return dict(payload), "Dùng artifact ID do Hub tạo thay vì gửi đường dẫn cục bộ."
     value = dict(payload)
+    if _opaque_media_request(tool, value):
+        source_id = value.get("source_artifact_id")
+        asset_id = value.get("asset_id")
+        if source_id is not None and asset_id is not None and source_id != asset_id:
+            return value, "Artifact input không hợp lệ."
+        selected = source_id if source_id is not None else asset_id
+        if not isinstance(selected, str) or not selected:
+            return value, "Chọn artifact Hub hợp lệ trước khi chạy worker media."
+        # Do not turn the opaque identifier back into a workstation path.  The
+        # concrete adapter resolves type and containment server-side.
+        value["source_artifact_id"] = selected
+        value.pop("asset_id", None)
+        return value, None
     fields = {
         "asset_id": "path",
         "input_asset_id": "path",
@@ -504,7 +529,7 @@ def submit_tool(tool: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]
     readiness = _tool_readiness(tool, statuses)
     if readiness["tool_status"] in {"unavailable", "planned", "error"}:
         return 503, _unavailable(tool, readiness)
-    request, error = _resolve_assets(payload)
+    request, error = _resolve_assets(payload, tool=tool)
     if error:
         return 400, {"status": "error", "error": error}
     with _submission_gate:
