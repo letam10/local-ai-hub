@@ -19,6 +19,25 @@ Missing environment, runtime, model, FFmpeg/FFprobe pair, or unsafe containment
 is reported as unavailable/error. A standalone worker result is not a
 capability smoke or readiness claim.
 
+## Model and backend selection
+
+AnimeSR is bound to the server-owned `animesr-v2` registry record.  The
+adapter accepts only the fixed `AnimeSR_v2` / `animesr_v2` CLI pairing and a
+model leaf contained by the canonical `Models` root; client payloads cannot
+select a model path, model ID, or experiment name (a legacy model label is
+ignored).  A missing, duplicate,
+placeholder, or unsafe registry record blocks the worker before launch.
+
+The generic `run_media_operation` control-plane entry remains FFmpeg-backed,
+but a selected `frame_interpolate` + `practical_rife` or `image_upscale` +
+`real_esrgan` request receives a backend-specific static gate.  Missing
+runtime, environment, model/script, worker, or FFmpeg/FFprobe leaves are
+rejected before a Job Manager submission; present leaves remain `partial`
+until a bounded smoke records the complete runtime → model → adapter → job →
+artifact result.  Static leaf presence never becomes `operational` by itself.
+The dedicated `upscale_anime_video` tool applies the same absent-model/runtime
+gate to the AnimeSR registry binding before queueing.
+
 ## Job → artifact contract
 
 The in-process Hub Job Manager treats a worker result as an internal hand-off.

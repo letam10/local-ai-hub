@@ -181,6 +181,74 @@ TOOL_ACTIONS = {
     "generate_qwen_image": "Chọn ảnh input nếu edit; generation smoke hiện deferred nếu ComfyUI/GPU đang bận.",
 }
 
+# ``run_media_operation`` is intentionally generic at the control-plane level,
+# but selected video backends have stronger static prerequisites than FFmpeg
+# alone.  These checks inspect only server-owned registry/runtime leaves; they
+# do not execute a worker or promote a backend to operational.
+_MEDIA_BACKEND_CONTRACTS = {
+    "animesr": {
+        "operation": "upscale_anime_video",
+        "component": "animesr",
+        "label": "AnimeSR",
+        "required": ("runtime_ready", "environment_ready", "model_ready", "ffmpeg_ready", "worker_ready"),
+        "action": "Khôi phục registry model, environment, runtime và FFmpeg canonical của AnimeSR rồi chạy smoke clip ngắn.",
+    },
+    "practical_rife": {
+        "operation": "frame_interpolate",
+        "component": "practical_rife",
+        "label": "Practical-RIFE",
+        "required": ("runtime_ready", "environment_ready", "ffmpeg_ready", "worker_ready"),
+        "action": "Khôi phục đủ runtime, environment, model và cặp FFmpeg/FFprobe của Practical-RIFE rồi chạy smoke clip ngắn.",
+    },
+    "real_esrgan": {
+        "operation": "image_upscale",
+        "component": "real_esrgan",
+        "label": "Real-ESRGAN",
+        "required": ("runtime_ready", "environment_ready", "model_ready", "script_ready", "worker_ready"),
+        "action": "Khôi phục environment, script và model Real-ESRGAN rồi chạy smoke một ảnh nhỏ.",
+    },
+}
+
+
+def _media_backend_status(backend: str) -> dict[str, Any]:
+    contract = _MEDIA_BACKEND_CONTRACTS[backend]
+    try:
+        if backend == "animesr":
+            from src.modules.animesr.backend.adapter import capability
+        elif backend == "practical_rife":
+            from src.modules.practical_rife.backend.adapter import capability
+        else:
+            from src.modules.real_esrgan.backend.adapter import capability
+        observed = capability()
+    except Exception:
+        observed = {}
+    static_ready = isinstance(observed, dict) and all(observed.get(key) is True for key in contract["required"])
+    return {
+        "backend": backend,
+        "component": contract["component"],
+        "component_status": "partial" if static_ready else "missing",
+        "tool_status": "partial" if static_ready else "unavailable",
+        "status": "partial" if static_ready else "unavailable",
+        "queue_allowed": static_ready,
+        "reason": (
+            f"{contract['label']} có đủ leaf tĩnh; vẫn cần bounded smoke trước khi ghi operational."
+            if static_ready
+            else f"{contract['label']} thiếu runtime, environment, model/script, worker hoặc dependency bắt buộc; không xếp hàng job."
+        ),
+        "action": contract["action"],
+    }
+
+
+def _media_backend_readiness(*, operation: str | None = None, backend: str | None = None) -> dict[str, Any] | None:
+    """Return static backend readiness, or the selected backend gate."""
+
+    if operation is not None or backend is not None:
+        contract = _MEDIA_BACKEND_CONTRACTS.get(str(backend or ""))
+        if contract is None or contract["operation"] != str(operation or ""):
+            return None
+        return _media_backend_status(str(backend))
+    return {name: _media_backend_status(name) for name in _MEDIA_BACKEND_CONTRACTS}
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -515,6 +583,10 @@ def tool_catalog(component_items: list[dict[str, Any]] | None = None) -> list[di
         }
         if readiness.get("operation_scope") is not None:
             item["operation_scope"] = readiness["operation_scope"]
+        if name == "run_media_operation":
+            item["backend_readiness"] = _media_backend_readiness()
+        elif name == "upscale_anime_video":
+            item["backend_readiness"] = {"animesr": _media_backend_readiness(operation="upscale_anime_video", backend="animesr")}
         tools.append(item)
     tools.extend([
         {"name": "get_health", "component": "local_ai_api", "component_status": "running", "tool_status": "operational", "status": "operational", "description": "Return Hub health.", "reason": "Loopback control-plane route.", "action": "Mở Dashboard để xem health, disk và job summary."},
@@ -701,6 +773,35 @@ def submit_tool(tool: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]
     readiness = _tool_readiness(tool, statuses)
     if readiness["tool_status"] in {"unavailable", "planned", "error"}:
         return 503, _unavailable(tool, readiness)
+    if tool == "run_media_operation" and isinstance(payload, dict):
+        backend_readiness = _media_backend_readiness(
+            operation=str(payload.get("operation") or ""),
+            backend=str(payload.get("backend") or ""),
+        )
+        if backend_readiness is not None and not backend_readiness["queue_allowed"]:
+            return 503, {
+                "status": "unavailable",
+                "tool": tool,
+                "backend": backend_readiness["backend"],
+                "component": backend_readiness["component"],
+                "component_status": backend_readiness["component_status"],
+                "tool_status": backend_readiness["tool_status"],
+                "reason": backend_readiness["reason"],
+                "action": backend_readiness["action"],
+            }
+    if tool == "upscale_anime_video":
+        backend_readiness = _media_backend_readiness(operation="upscale_anime_video", backend="animesr")
+        if backend_readiness is not None and not backend_readiness["queue_allowed"]:
+            return 503, {
+                "status": "unavailable",
+                "tool": tool,
+                "backend": backend_readiness["backend"],
+                "component": backend_readiness["component"],
+                "component_status": backend_readiness["component_status"],
+                "tool_status": backend_readiness["tool_status"],
+                "reason": backend_readiness["reason"],
+                "action": backend_readiness["action"],
+            }
     request, error = _resolve_assets(payload, tool=tool)
     if error:
         return 400, {"status": "error", "error": error}

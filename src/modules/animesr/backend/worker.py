@@ -13,6 +13,11 @@ from pathlib import Path
 from src.services.process_manager.windows import run_hidden
 
 
+_MODEL_ID = "animesr-v2"
+_MODEL_NAME = "AnimeSR_v2"
+_EXPNAME = "animesr_v2"
+
+
 def _emit(payload: dict) -> int:
     print(json.dumps(payload, ensure_ascii=False))
     return 0 if payload.get("status") == "completed" else 2
@@ -78,21 +83,33 @@ def main() -> int:
         runtime = Path(str(request["runtime"])).expanduser()
         source = Path(os.path.expandvars(str(request.get("path", "")))).expanduser()
         ffmpeg = Path(str(request.get("ffmpeg") or ""))
+        model_path = Path(str(request.get("model_path") or ""))
+        model_id = str(request.get("model_id") or "")
+        model_name = str(request.get("model") or "")
+        expname = str(request.get("expname") or "")
         output_root = Path(str(request["output_root"])).expanduser()
         hub_root = Path(os.environ.get("LOCALAIHUB_ROOT", ""))
         expected_runtime = _safe_tree(hub_root, Path("runtime"))
+        expected_models = _safe_tree(hub_root, Path("Models"))
         expected_output = _safe_tree(hub_root, Path("Output") / "AnimeSR")
         expected_jobs = _safe_tree(hub_root, Path("Temp") / "jobs")
         if (
             not hub_root.is_dir()
             or expected_runtime is None
+            or expected_models is None
             or expected_output is None
             or expected_jobs is None
             or not runtime.is_dir()
+            or not expected_models.is_dir()
             or not source.is_file()
             or not ffmpeg.is_file()
+            or model_id != _MODEL_ID
+            or model_name != _MODEL_NAME
+            or expname != _EXPNAME
+            or not (model_path.is_file() or model_path.is_dir())
             or not _safe_existing_under(hub_root, runtime)
             or not _safe_existing_under(hub_root, ffmpeg)
+            or not _safe_existing_under(hub_root, model_path)
             or output_root.resolve(strict=False) != expected_output.resolve(strict=False)
         ):
             return _emit({"status": "error", "error": "AnimeSR runtime hoặc input video không tồn tại."})
@@ -119,9 +136,9 @@ def main() -> int:
             str(script),
             "-i", str(source),
             "-o", str(temp_root),
-            "-n", str(request.get("model", "AnimeSR_v2")),
+            "-n", _MODEL_NAME,
             "-s", str(scale),
-            "--expname", "animesr_v2",
+            "--expname", _EXPNAME,
             "--netscale", "4",
             "--num_process_per_gpu", "1",
             "--suffix", f"x{scale}",
@@ -155,7 +172,8 @@ def main() -> int:
             "operation": "upscale_anime_video",
             "output": str(target),
             "scale": scale,
-            "model": str(request.get("model", "AnimeSR_v2")),
+            "model_id": _MODEL_ID,
+            "model": _MODEL_NAME,
             "rife": "partial" if request.get("use_rife") else "skipped",
             "realesrgan": "partial" if request.get("use_realesrgan") else "skipped",
         })

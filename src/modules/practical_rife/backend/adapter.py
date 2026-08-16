@@ -110,4 +110,5 @@ def capability() -> dict[str, Any]:
         "runtime_ready": bool(runtime and runtime.is_dir() and model_dir and (model_dir / "flownet.pkl").is_file()),
         "environment_ready": bool(python and python.is_file()),
         "ffmpeg_ready": bool(ffmpeg and ffmpeg.is_file() and ffprobe and ffprobe.is_file()),
+        "worker_ready": WORKER.is_file(),
     }

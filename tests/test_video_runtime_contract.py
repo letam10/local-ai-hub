@@ -42,6 +42,9 @@ class VideoRuntimeContractTests(unittest.TestCase):
             ffmpeg = runtime / "tools" / "ffmpeg.exe"
             ffmpeg.parent.mkdir(parents=True)
             ffmpeg.write_bytes(b"tool")
+            model_path = root / "Models" / "AnimeSR" / "AnimeSR_v2"
+            model_path.mkdir(parents=True)
+            (model_path / "weights.marker").write_bytes(b"model")
             output_root = root / "Output" / "AnimeSR"
             seen: dict[str, object] = {}
 
@@ -58,7 +61,7 @@ class VideoRuntimeContractTests(unittest.TestCase):
             old_hub_root = os.environ.get("LOCALAIHUB_ROOT")
             os.environ["LOCALAIHUB_ROOT"] = str(root)
             try:
-                code, payload = self._run_worker(worker, {"runtime": str(runtime), "path": str(source), "output_root": str(output_root), "ffmpeg": str(ffmpeg), "scale": 2}, fake_run)
+                code, payload = self._run_worker(worker, {"runtime": str(runtime), "path": str(source), "output_root": str(output_root), "ffmpeg": str(ffmpeg), "model_id": "animesr-v2", "model": "AnimeSR_v2", "model_path": str(model_path), "expname": "animesr_v2", "scale": 2}, fake_run)
             finally:
                 if old_hub_root is None:
                     os.environ.pop("LOCALAIHUB_ROOT", None)
@@ -69,7 +72,71 @@ class VideoRuntimeContractTests(unittest.TestCase):
             command = seen["command"]
             self.assertIn("--netscale", command)
             self.assertNotIn("--low-memory-frame-write", command)
+            self.assertEqual(command[command.index("-n") + 1], "AnimeSR_v2")
+            self.assertEqual(command[command.index("--expname") + 1], "animesr_v2")
             self.assertEqual(seen["environment"]["ffmpeg_exe_path"], str(ffmpeg))
+
+    def test_animesr_adapter_binds_registry_model_to_cli_contract(self) -> None:
+        from src.modules.animesr.backend import adapter
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_root = root / "Models"
+            model_path = model_root / "AnimeSR" / "AnimeSR_v2"
+            model_path.mkdir(parents=True)
+            (model_path / "weights.marker").write_bytes(b"model")
+            runtime = root / "runtime"
+            runtime.mkdir()
+            environment = root / "Environments" / "animesr"
+            python = environment / "Scripts" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.write_bytes(b"python")
+            ffmpeg = root / "runtime" / "ffmpeg.exe"
+            ffmpeg.write_bytes(b"ffmpeg")
+            source = root / "source.mp4"
+            source.write_bytes(b"video")
+            artifact_id = "artifact_" + "1" * 32
+            seen: dict[str, object] = {}
+
+            def fake_configured(component: str, field: str, _env: str):
+                if component == "animesr" and field == "path":
+                    return runtime
+                if component == "animesr" and field == "environment":
+                    return environment
+                if component == "ffmpeg" and field == "executable":
+                    return ffmpeg
+                return None
+
+            def fake_worker(_command, request, **_kwargs):
+                seen.update(request)
+                return {"status": "completed", "operation": "upscale_anime_video"}
+
+            with (
+                patch.object(adapter, "MODEL_ROOT", model_root),
+                patch.object(adapter, "models", return_value=[{"id": "animesr-v2", "engine": "AnimeSR", "local_path": str(model_path)}]),
+                patch.object(adapter, "configured_path", side_effect=fake_configured),
+                patch.object(adapter, "resolve", return_value=source),
+                patch.object(adapter, "describe", return_value={"media_type": "video/mp4"}),
+                patch.object(adapter, "run_json_worker", side_effect=fake_worker),
+            ):
+                result = adapter.run_animesr({"source_artifact_id": artifact_id, "model": "AnimeSR_v1-PaperModel", "scale": 2})
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(seen["model_id"], "animesr-v2")
+            self.assertEqual(seen["model"], "AnimeSR_v2")
+            self.assertEqual(seen["expname"], "animesr_v2")
+            self.assertEqual(seen["model_path"], str(model_path))
+
+    def test_animesr_adapter_refuses_missing_registry_model_before_worker(self) -> None:
+        from src.modules.animesr.backend import adapter
+
+        with (
+            patch.object(adapter, "models", return_value=[]),
+            patch.object(adapter, "run_json_worker") as launch,
+        ):
+            result = adapter.run_animesr({"source_artifact_id": "artifact_" + "2" * 32})
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["component"], "animesr")
+        launch.assert_not_called()
 
     def test_rife_worker_constrains_ffmpeg_path_and_uses_ffprobe(self) -> None:
         from src.modules.practical_rife.backend import worker
@@ -160,6 +227,79 @@ class VideoRuntimeContractTests(unittest.TestCase):
             self.assertIsNone(error)
             self.assertEqual(resolved["source_artifact_id"], "artifact_" + "c" * 32)
             self.assertNotIn("path", resolved)
+
+    def test_selected_missing_video_backend_refuses_before_job_queue(self) -> None:
+        from src.services.api import core
+
+        missing = {
+            "backend": "practical_rife",
+            "component": "practical_rife",
+            "component_status": "missing",
+            "tool_status": "unavailable",
+            "status": "unavailable",
+            "queue_allowed": False,
+            "reason": "Practical-RIFE static prerequisites are unavailable.",
+            "action": "Restore the bounded backend leaves.",
+        }
+        with (
+            patch.object(core, "component_statuses", return_value=[{"id": "ffmpeg", "component_status": "installed"}]),
+            patch.object(core, "_media_backend_readiness", return_value=missing),
+            patch.object(core.job_manager, "submit") as submit,
+        ):
+            status, payload = core.submit_tool(
+                "run_media_operation",
+                {"operation": "frame_interpolate", "backend": "practical_rife", "source_artifact_id": "artifact_" + "3" * 32},
+            )
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["status"], "unavailable")
+        self.assertEqual(payload["backend"], "practical_rife")
+        self.assertNotIn("path", json.dumps(payload, ensure_ascii=False))
+        submit.assert_not_called()
+
+    def test_animesr_missing_model_refuses_before_job_queue(self) -> None:
+        from src.services.api import core
+
+        missing = {
+            "backend": "animesr",
+            "component": "animesr",
+            "component_status": "missing",
+            "tool_status": "unavailable",
+            "status": "unavailable",
+            "queue_allowed": False,
+            "reason": "AnimeSR model registry record is unavailable.",
+            "action": "Restore the fixed AnimeSR model record.",
+        }
+        with (
+            patch.object(core, "component_statuses", return_value=[{"id": "animesr", "component_status": "installed"}]),
+            patch.object(core, "_media_backend_readiness", return_value=missing),
+            patch.object(core.job_manager, "submit") as submit,
+        ):
+            status, payload = core.submit_tool("upscale_anime_video", {"source_artifact_id": "artifact_" + "4" * 32})
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["backend"], "animesr")
+        submit.assert_not_called()
+
+    def test_video_backend_readiness_is_static_partial_until_smoke(self) -> None:
+        from src.services.api import core
+
+        with (
+            patch("src.modules.animesr.backend.adapter.capability", return_value={
+                "runtime_ready": True, "environment_ready": True, "model_ready": True,
+                "ffmpeg_ready": True, "worker_ready": True,
+            }),
+            patch("src.modules.practical_rife.backend.adapter.capability", return_value={
+                "runtime_ready": True, "environment_ready": True, "ffmpeg_ready": True, "worker_ready": True,
+            }),
+            patch("src.modules.real_esrgan.backend.adapter.capability", return_value={
+                "runtime_ready": True, "environment_ready": True, "model_ready": True, "script_ready": True, "worker_ready": True,
+            }),
+        ):
+            readiness = core._media_backend_readiness()
+        assert readiness is not None
+        for backend in ("animesr", "practical_rife", "real_esrgan"):
+            self.assertEqual(readiness[backend]["status"], "partial")
+            self.assertTrue(readiness[backend]["queue_allowed"])
+            self.assertNotEqual(readiness[backend]["status"], "operational")
 
     def test_rife_reparse_output_parent_refuses_before_worker_launch(self) -> None:
         from src.modules.practical_rife.backend import worker
