@@ -39,7 +39,11 @@ raise SystemExit(0 if all(importlib.util.find_spec(name) is not None for name in
 # its paired interpreter can resolve the Hub desktop entry dependencies; an
 # arbitrary pythonw.exe must never create a silently broken shortcut.
 $missingRuntime = $false
-if (-not (Test-Path -LiteralPath $pythonw -PathType Leaf)) {
+if (Test-Path -LiteralPath $pythonw -PathType Leaf) {
+    if (-not (Test-HubPythonwFallback -PythonwPath $pythonw -HubRoot $root)) {
+        $missingRuntime = $true
+    }
+} else {
     $systemPythonw = Get-Command pythonw.exe -ErrorAction SilentlyContinue
     if ($systemPythonw -and (Test-HubPythonwFallback -PythonwPath $systemPythonw.Source -HubRoot $root)) {
         $pythonw = $systemPythonw.Source
