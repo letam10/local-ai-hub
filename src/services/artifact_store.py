@@ -118,6 +118,14 @@ def _allowed(path: Path) -> bool:
     return False
 
 
+def _under_root(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def _public(record: dict[str, Any]) -> dict[str, Any]:
     public = {
         "id": record["id"],
@@ -173,6 +181,7 @@ def register_path(
     media_type: str | None = None,
     sha256: str | None = None,
     provenance: dict[str, Any] | None = None,
+    output_only: bool = False,
 ) -> dict[str, Any] | None:
     """Register a Hub-owned file and return its safe public reference."""
 
@@ -181,7 +190,7 @@ def register_path(
         candidate = candidate.resolve()
     except OSError:
         return None
-    if not candidate.is_file() or not _allowed(candidate):
+    if not candidate.is_file() or not _allowed(candidate) or (output_only and not _under_root(candidate, OUTPUT_ROOT)):
         return None
     safe_provenance = _safe_provenance(provenance) if provenance is not None else None
     with _LOCK:

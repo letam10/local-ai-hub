@@ -157,6 +157,7 @@ def _publish_result(result: object, record: dict[str, Any]) -> tuple[dict[str, A
                 candidate,
                 name=candidate.name,
                 provenance=provenance,
+                output_only=True,
             )
         except Exception:
             artifact = None

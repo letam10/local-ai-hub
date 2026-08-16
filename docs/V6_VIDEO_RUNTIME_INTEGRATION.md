@@ -24,16 +24,21 @@ capability smoke or readiness claim.
 The in-process Hub Job Manager treats a worker result as an internal hand-off.
 Before a terminal result is persisted, completed `output`/`files` values are
 validated by the server-owned artifact store and replaced with opaque artifact
-records. Each published record carries the terminal job ID, a bounded job
-fingerprint, adapter/tool ID, attempt, and completed status. Raw workstation
-paths are not persisted in `jobs.json` or returned by the public job projection.
+records. Worker publication is Output-only: Hub upload roots are input-owned
+and can never become a completed worker artifact. Each published record carries
+the terminal job ID, a bounded job fingerprint, adapter/tool ID, attempt, and
+completed status. Raw workstation paths are not persisted in `jobs.json` or
+returned by the public job projection.
 
 An output outside a Hub-owned artifact root, an invalid worker status, a
 malformed result, or a failed artifact publication makes the job failed with a
 bounded user-facing action. Cancellation wins over a late worker completion, so
 an explicitly cancelled job cannot publish a late output. Metadata-only
 completed results (for example, a read-only probe) remain valid and do not need
-an artifact.
+an artifact. The Job Manager serializes cancellation with publication and the
+terminal transition: cancellation before that critical section rejects the
+output, while cancellation arriving inside it waits for a completed or
+cancelled terminal state rather than leaving an unowned artifact.
 
 This contract covers the legacy `job_YYYYMMDD_HHMMSS_<hex>` IDs as well as the
 V5 `jobv5_<hex>` lineage format. It does not broaden artifact roots or permit

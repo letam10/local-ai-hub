@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import unittest
 import uuid
 from pathlib import Path
@@ -326,6 +327,144 @@ class VideoRuntimeContractTests(unittest.TestCase):
                 self.assertNotIn(str(outside), json.dumps(public, ensure_ascii=False))
                 self.assertFalse((root / "Config" / "artifacts.json").exists())
         finally:
+            manager.cancel_all_and_wait(3)
+
+    def test_video_worker_cannot_publish_input_upload_as_completed_output(self) -> None:
+        from src.services import artifact_store
+        from src.services.api import jobs as api_jobs
+        from src.services.job_manager.manager import HubJobManager
+
+        root = self._owned_temp_root()
+        output_root = root / "Output"
+        upload_root = root / "Temp" / "uploads"
+        output_root.mkdir()
+        upload_root.mkdir(parents=True)
+        upload = upload_root / "hub-upload-input.mp4"
+        upload.write_bytes(b"input artifact")
+        manager = HubJobManager()
+        try:
+            with (
+                patch.object(api_jobs, "_jobs", {}),
+                patch.object(api_jobs, "_save"),
+                patch.object(artifact_store, "OUTPUT_ROOT", output_root),
+                patch.object(artifact_store, "UPLOAD_ROOT", upload_root),
+                patch.object(artifact_store, "INDEX_PATH", root / "Config" / "artifacts.json"),
+            ):
+                record = manager.submit(
+                    "upscale_anime_video",
+                    {"source_artifact_id": "artifact_" + "c" * 32},
+                    lambda _payload, _context: {"status": "completed", "output": str(upload)},
+                )
+                idle, remaining = manager.wait_for_idle(5)
+                self.assertTrue(idle, remaining)
+                public = api_jobs.get_job(record["id"])
+                self.assertIsNotNone(public)
+                assert public is not None
+                self.assertEqual(public["status"], "failed")
+                self.assertEqual(public["result"]["status"], "failed")
+                self.assertNotIn(str(upload), json.dumps(public, ensure_ascii=False))
+                self.assertFalse((root / "Config" / "artifacts.json").exists())
+                self.assertTrue(upload.is_file())
+        finally:
+            manager.cancel_all_and_wait(3)
+
+    def test_late_cancel_before_publication_leaves_no_artifact(self) -> None:
+        from src.services import artifact_store
+        from src.services.api import jobs as api_jobs
+        from src.services.job_manager.manager import HubJobManager
+
+        root = self._owned_temp_root()
+        output_root = root / "Output"
+        output_root.mkdir()
+        target = output_root / "AnimeSR" / "late-cancel.mp4"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"late output")
+        runner_ready = threading.Event()
+        release_runner = threading.Event()
+        manager = HubJobManager()
+        try:
+            with (
+                patch.object(api_jobs, "_jobs", {}),
+                patch.object(api_jobs, "_save"),
+                patch.object(artifact_store, "OUTPUT_ROOT", output_root),
+                patch.object(artifact_store, "INDEX_PATH", root / "Config" / "artifacts.json"),
+            ):
+                def runner(_payload, _context):
+                    runner_ready.set()
+                    self.assertTrue(release_runner.wait(3))
+                    return {"status": "completed", "output": str(target)}
+
+                record = manager.submit("upscale_anime_video", {"source_artifact_id": "artifact_" + "d" * 32}, runner)
+                self.assertTrue(runner_ready.wait(3))
+                cancelled, _message = manager.cancel(record["id"])
+                self.assertTrue(cancelled)
+                release_runner.set()
+                idle, remaining = manager.wait_for_idle(5)
+                self.assertTrue(idle, remaining)
+                public = api_jobs.get_job(record["id"])
+                self.assertIsNotNone(public)
+                assert public is not None
+                self.assertEqual(public["status"], "cancelled")
+                self.assertEqual(public["result"]["status"], "cancelled")
+                self.assertNotIn("artifacts", public["result"])
+                self.assertFalse((root / "Config" / "artifacts.json").exists())
+        finally:
+            release_runner.set()
+            manager.cancel_all_and_wait(3)
+
+    def test_cancel_waits_for_publication_and_cannot_regress_completed_job(self) -> None:
+        from src.services import artifact_store
+        from src.services.api import jobs as api_jobs
+        from src.services.job_manager.manager import HubJobManager
+
+        root = self._owned_temp_root()
+        output_root = root / "Output"
+        output_root.mkdir()
+        target = output_root / "RIFE" / "completed.mp4"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"completed output")
+        publication_started = threading.Event()
+        release_publication = threading.Event()
+        cancel_result: list[tuple[bool, str]] = []
+        manager = HubJobManager()
+        try:
+            with (
+                patch.object(api_jobs, "_jobs", {}),
+                patch.object(api_jobs, "_save"),
+                patch.object(artifact_store, "OUTPUT_ROOT", output_root),
+                patch.object(artifact_store, "INDEX_PATH", root / "Config" / "artifacts.json"),
+            ):
+                register = artifact_store.register_path
+
+                def blocking_register(*args, **kwargs):
+                    publication_started.set()
+                    self.assertTrue(release_publication.wait(3))
+                    return register(*args, **kwargs)
+
+                with patch.object(artifact_store, "register_path", side_effect=blocking_register):
+                    record = manager.submit(
+                        "frame_interpolate",
+                        {"source_artifact_id": "artifact_" + "e" * 32},
+                        lambda _payload, _context: {"status": "completed", "output": str(target)},
+                    )
+                    self.assertTrue(publication_started.wait(3))
+                    cancel_thread = threading.Thread(target=lambda: cancel_result.append(manager.cancel(record["id"])), daemon=True)
+                    cancel_thread.start()
+                    self.assertTrue(cancel_thread.is_alive())
+                    release_publication.set()
+                    cancel_thread.join(3)
+                idle, remaining = manager.wait_for_idle(5)
+                self.assertTrue(idle, remaining)
+                self.assertEqual(len(cancel_result), 1)
+                self.assertFalse(cancel_result[0][0])
+                public = api_jobs.get_job(record["id"])
+                self.assertIsNotNone(public)
+                assert public is not None
+                self.assertEqual(public["status"], "completed")
+                self.assertEqual(len(public["result"]["artifacts"]), 1)
+                self.assertTrue((root / "Config" / "artifacts.json").is_file())
+        finally:
+            release_publication.set()
             manager.cancel_all_and_wait(3)
 
 
