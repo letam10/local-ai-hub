@@ -48,16 +48,30 @@ class UiPolishTests(unittest.TestCase):
         self.assertEqual(self.i18n.count("{ id:"), 5)
         self.assertIn("window.location.reload()", self.app)
 
-    def test_translation_skips_code_and_selector_content(self) -> None:
-        self.assertIn("parent.closest(\"script,style,code,pre,[data-i18n-skip]\")", self.i18n)
-        self.assertIn('data-i18n-skip', self.html)
+    def test_translation_is_limited_to_explicit_static_markup(self) -> None:
+        self.assertNotIn("document.createTreeWalker", self.i18n)
+        self.assertIn('nodes("[data-i18n]")', self.i18n)
+        self.assertIn('["data-i18n-aria-label", "aria-label"]', self.i18n)
+        self.assertIn('["data-i18n-title", "title"]', self.i18n)
+        self.assertIn('data-i18n="Trung tâm AI cục bộ"', self.html)
+        self.assertIn('data-i18n-aria-label="Mở điều hướng"', self.html)
         self.assertIn("const escaped = source.replace", self.i18n)
 
-    def test_desktop_shortcut_falls_back_to_gui_pythonw(self) -> None:
+    def test_artifact_preview_close_restores_opener_or_main_landmark(self) -> None:
+        self.assertIn("artifactPreviewOpener = button;", self.app)
+        self.assertIn("const opener = artifactPreviewOpener;", self.app)
+        self.assertIn('document.querySelector("#main-content")', self.app)
+        self.assertIn("focusTarget?.focus({ preventScroll: true });", self.app)
+        self.assertIn("if (event.key === \"Escape\"", self.app)
+        self.assertIn("closeArtifactPreview();", self.app)
+
+    def test_desktop_shortcut_fallback_requires_eligible_gui_python(self) -> None:
         shortcut_script = (ROOT / "scripts" / "update_managed_shortcuts.ps1").read_text(encoding="utf-8")
         self.assertIn("Get-Command pythonw.exe", shortcut_script)
-        self.assertIn("single GUI window", shortcut_script)
-        self.assertNotIn("python.exe'", shortcut_script)
+        self.assertIn("function Test-HubPythonwFallback", shortcut_script)
+        self.assertIn('"src.app.main", "uvicorn", "webview"', shortcut_script)
+        self.assertIn("MISSING_RUNTIME", shortcut_script)
+        self.assertIn("if ($missingRuntime)", shortcut_script)
 
 
 if __name__ == "__main__":

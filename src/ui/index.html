@@ -15,7 +15,7 @@
           <div class="brand-mark" aria-hidden="true">LA</div>
           <div>
             <div class="brand-name">Local AI Hub</div>
-            <div class="brand-subtitle">Trung tâm AI cục bộ</div>
+            <div class="brand-subtitle" data-i18n="Trung tâm AI cục bộ">Trung tâm AI cục bộ</div>
           </div>
         </div>
         <div class="top-status" id="top-status" role="status" aria-live="polite">
@@ -24,10 +24,10 @@
         <div class="top-actions">
           <span class="metric" id="disk-metric">Ổ đĩa —</span>
           <span class="metric" id="gpu-metric">GPU —</span>
-          <button class="icon-button sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Mở điều hướng" aria-controls="sidebar" aria-expanded="false">☰</button>
-          <label class="language-picker" title="Ngôn ngữ">
-            <span class="sr-only">Ngôn ngữ</span>
-            <select id="language-select" aria-label="Ngôn ngữ" data-i18n-skip>
+          <button class="icon-button sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Mở điều hướng" data-i18n-aria-label="Mở điều hướng" aria-controls="sidebar" aria-expanded="false">☰</button>
+          <label class="language-picker" title="Ngôn ngữ" data-i18n-title="Ngôn ngữ">
+            <span class="sr-only" data-i18n="Ngôn ngữ">Ngôn ngữ</span>
+            <select id="language-select" aria-label="Ngôn ngữ" data-i18n-aria-label="Ngôn ngữ">
               <option value="vi">Tiếng Việt</option>
               <option value="en">English</option>
               <option value="zh">简体中文</option>
@@ -35,18 +35,18 @@
               <option value="ko">한국어</option>
             </select>
           </label>
-          <button class="icon-button" id="refresh-snapshot" type="button" title="Làm mới snapshot" aria-label="Làm mới snapshot">↻</button>
-          <button class="icon-button" id="theme-toggle" type="button" title="Đổi giao diện" aria-label="Đổi giao diện">◐</button>
+          <button class="icon-button" id="refresh-snapshot" type="button" title="Làm mới snapshot" aria-label="Làm mới snapshot" data-i18n-title="Làm mới snapshot" data-i18n-aria-label="Làm mới snapshot">↻</button>
+          <button class="icon-button" id="theme-toggle" type="button" title="Đổi giao diện" aria-label="Đổi giao diện" data-i18n-title="Đổi giao diện" data-i18n-aria-label="Đổi giao diện">◐</button>
         </div>
       </header>
 
       <div class="workspace">
-        <aside class="sidebar" id="sidebar" aria-label="Điều hướng module">
-          <div class="sidebar-caption">MODULE</div>
+        <aside class="sidebar" id="sidebar" aria-label="Điều hướng module" data-i18n-aria-label="Điều hướng module">
+          <div class="sidebar-caption" data-i18n="MODULE">MODULE</div>
           <nav id="sidebar-nav"></nav>
           <div class="sidebar-note">
             <span class="status-dot status-dot--ok"></span>
-            <span>Chỉ loopback · không CDN</span>
+            <span data-i18n="Chỉ loopback · không CDN">Chỉ loopback · không CDN</span>
           </div>
         </aside>
 
