@@ -66,6 +66,16 @@ class UiPolishTests(unittest.TestCase):
         self.assertIn("escapeHtml(jobRecovery.reason)", self.pages)
         self.assertIn("escapeHtml(recovery.reason)", self.pages)
 
+    def test_dynamic_snapshot_and_creative_values_never_enter_translation_markers(self) -> None:
+        self.assertIn("const metricSnapshot =", self.pages)
+        self.assertIn("<small>${escapeHtml(detail)}</small>", self.pages)
+        self.assertIn("const cardDynamic =", self.pages)
+        self.assertIn("const fieldDynamic =", self.pages)
+        self.assertIn("cardDynamic(`Asset của ${selected.title}`", self.pages)
+        self.assertIn("fieldDynamic(variable.label || variable.name", self.pages)
+        self.assertIn('data-i18n-container="Attention"', self.pages)
+        self.assertNotIn('nodes("[data-recovery-count]").forEach', self.i18n)
+
     def test_artifact_preview_close_restores_opener_or_main_landmark(self) -> None:
         self.assertIn("artifactPreviewOpener = button;", self.app)
         self.assertIn("const opener = artifactPreviewOpener;", self.app)
