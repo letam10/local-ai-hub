@@ -80,6 +80,16 @@ def _safe_existing_under(root: Path, candidate: Path) -> bool:
     return resolved == current.resolve(strict=True)
 
 
+def _safe_artifact_input(hub_root: Path, candidate: Path) -> bool:
+    """Accept only an existing file from a Hub-owned artifact input root."""
+
+    for relative in (Path("Temp") / "uploads", Path("Output"), Path("Archive")):
+        root = _safe_tree(hub_root, relative)
+        if root is not None and _safe_existing_under(root, candidate) and candidate.is_file():
+            return True
+    return False
+
+
 def _safe_model_leaf(root: Path, candidate: Path) -> bool:
     """Require a real model file/directory below the fixed Models root."""
 
@@ -131,7 +141,7 @@ def main() -> int:
             or expected_jobs is None
             or not runtime.is_dir()
             or not expected_models.is_dir()
-            or not source.is_file()
+            or not _safe_artifact_input(hub_root, source)
             or not ffmpeg.is_file()
             or model_id != _MODEL_ID
             or model_name != _MODEL_NAME
@@ -144,7 +154,7 @@ def main() -> int:
         ):
             return _emit({"status": "error", "error": "AnimeSR runtime hoặc input video không tồn tại."})
         script = runtime / "scripts" / "inference_animesr_video.py"
-        if not script.is_file() or not _inside(runtime, script):
+        if not script.is_file() or not _safe_existing_under(runtime, script):
             return _emit({"status": "error", "error": "Không tìm thấy AnimeSR video inference script."})
         scale = max(1, min(4, int(request.get("scale", 2))))
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
