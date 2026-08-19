@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import threading
@@ -30,7 +30,6 @@ class TestV6ApiBackupSurface(unittest.TestCase):
         self.patches = [
             patch.object(paths_mod, "CONFIG_ROOT", self.config_dir),
             patch.object(bm_mod, "CONFIG_ROOT", self.config_dir),
-            patch.object(bm_mod, "_BACKUP_DIR", self.backup_dir),
         ]
         for p in self.patches:
             p.start()
@@ -72,34 +71,39 @@ class TestV6ApiBackupSurface(unittest.TestCase):
         status, payload = self._request("POST", "/api/backup/create")
         self.assertEqual(status, 201)
         self.assertTrue(payload.get("accepted"))
-        backup_path = payload.get("backup_path")
-        self.assertTrue(Path(backup_path).exists())
+        backup_id = payload.get("backup_id")
+        self.assertTrue(backup_id.startswith("backup_"))
 
-        # 2. Inspect backup
-        i_status, i_payload = self._request("POST", "/api/backup/inspect", {"backup_path": backup_path})
+        # 2. List backups
+        l_status, l_payload = self._request("GET", "/api/backup/list")
+        self.assertEqual(l_status, 200)
+        self.assertTrue(any(b.get("backup_id") == backup_id for b in l_payload.get("backups", [])))
+
+        # 3. Inspect backup
+        i_status, i_payload = self._request("POST", "/api/backup/inspect", {"backup_id": backup_id})
         self.assertEqual(i_status, 200)
         self.assertTrue(i_payload.get("valid"))
         self.assertEqual(i_payload.get("errors"), [])
 
-        # 3. Plan restore
-        p_status, p_payload = self._request("POST", "/api/backup/plan", {"backup_path": backup_path})
+        # 4. Plan restore
+        p_status, p_payload = self._request("POST", "/api/backup/plan", {"backup_id": backup_id})
         self.assertEqual(p_status, 200)
         self.assertTrue(p_payload.get("accepted"))
+        self.assertIn("plan_id", p_payload)
         self.assertIn("preview", p_payload)
+        plan_id = p_payload.get("plan_id")
 
-        # 4. Apply unconfirmed -> rejected (400)
+        # 5. Apply unconfirmed -> rejected (400)
         a_status, a_payload = self._request("POST", "/api/backup/apply", {
-            "backup_path": backup_path,
-            "plan": p_payload,
+            "plan_id": plan_id,
             "confirmed": False,
         })
         self.assertEqual(a_status, 400)
         self.assertFalse(a_payload.get("accepted"))
 
-        # 5. Apply confirmed -> success (200)
+        # 6. Apply confirmed -> success (200)
         c_status, c_payload = self._request("POST", "/api/backup/apply", {
-            "backup_path": backup_path,
-            "plan": p_payload,
+            "plan_id": plan_id,
             "confirmed": True,
         })
         self.assertEqual(c_status, 200)

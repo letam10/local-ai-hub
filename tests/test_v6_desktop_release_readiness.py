@@ -94,7 +94,9 @@ class TestV6DesktopReleaseReadiness(unittest.TestCase):
             with patch.object(bm_mod, "CONFIG_ROOT", cfg_dir):
                 b_res = bm.create_backup()
                 self.assertTrue(b_res["accepted"])
-                self.assertTrue(Path(b_res["backup_path"]).exists())
+                self.assertIn("backup_id", b_res)
+                zips = list((cfg_dir / "backups").glob("*.zip"))
+                self.assertEqual(len(zips), 1)
 
 
 if __name__ == "__main__":

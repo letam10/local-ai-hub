@@ -57,13 +57,15 @@ export const getDiagnosticsSubsystem = (name) => request(`/api/diagnostics/subsy
 export const exportDiagnosticsBundle = () => request("/api/diagnostics/export");
 export const repairVerifyConfig = () => request("/api/diagnostics/repair/verify-config", { method: "POST" });
 export const repairInspectRecovery = () => request("/api/diagnostics/repair/inspect-recovery", { method: "POST" });
-export const repairClearRecoveryDrafts = () => request("/api/diagnostics/repair/clear-recovery-drafts", { method: "POST" });
+export const getRecoveryDrafts = () => request("/api/diagnostics/repair/recovery-drafts");
+export const repairClearRecoveryDrafts = (scopes = [], confirmed = false) => request("/api/diagnostics/repair/clear-recovery-drafts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scopes, confirmed }) });
 
 // V6 Backup / Restore
+export const listBackups = () => request("/api/backup/list");
 export const createBackup = () => request("/api/backup/create", { method: "POST" });
-export const inspectBackup = (backupPath) => request("/api/backup/inspect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ backup_path: backupPath }) });
-export const planRestore = (backupPath) => request("/api/backup/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ backup_path: backupPath }) });
-export const applyRestore = (backupPath, plan, confirmed = false) => request("/api/backup/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ backup_path: backupPath, plan, confirmed }) });
+export const inspectBackup = (backupId) => request("/api/backup/inspect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ backup_id: backupId }) });
+export const planRestore = (backupId) => request("/api/backup/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ backup_id: backupId }) });
+export const applyRestore = (planId, confirmed = false) => request("/api/backup/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ plan_id: planId, confirmed }) });
 
 // V6 Node Studio Drafts
 export const getNodeDraft = (scope) => request(`/api/node-studio/drafts/${encodeURIComponent(scope)}`);

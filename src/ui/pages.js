@@ -647,9 +647,9 @@ const artifactList = (value) => {
     const isImage = mediaType.startsWith("image/");
     const mask = isMaskArtifact(item, name);
     const previewButton = url ? `<button class="button button--compact" type="button" data-focus-key="artifact-preview-opener" data-preview-artifact="${escapeHtml(id)}" data-artifact-url="${escapeHtml(url)}" data-artifact-name="${escapeHtml(name)}" data-artifact-type="${escapeHtml(mediaType)}" data-artifact-mask="${mask}" data-artifact-meta="${escapeHtml(artifactMetadata(item))}" data-artifact-provenance="${escapeHtml(artifactProvenance(item))}">Xem</button>` : `<span class="artifact-unavailable">Preview unavailable</span>`;
-    const saveLink = url ? `<a class="button button--compact" href="${escapeHtml(url)}" download="${escapeHtml(name)}">LÆ°u/Xuáº¥t</a>` : "";
-    const openButton = id ? `<button class="button button--compact" type="button" data-open-artifact="${escapeHtml(id)}">Má»Ÿ</button>` : "";
-    return `<div class="artifact-item">${isImage && url ? `<img class="artifact-preview${mask ? " artifact-preview--mask" : ""}" src="${escapeHtml(url)}" alt="${escapeHtml(mask ? `Mask raster: ${name}` : name)}" />` : ""}<div class="row-main"><div class="row-name">${escapeHtml(name)}</div><div class="row-meta">${escapeHtml(mediaType)} Â· ${formatGb(item.size_bytes)}${mask ? " Â· mask" : ""}</div></div>${previewButton}${saveLink}${openButton}</div>`;
+    const saveLink = url ? `<a class="button button--compact" href="${escapeHtml(url)}" download="${escapeHtml(name)}">Lưu/Xuất</a>` : "";
+    const openButton = id ? `<button class="button button--compact" type="button" data-open-artifact="${escapeHtml(id)}">Mở</button>` : "";
+    return `<div class="artifact-item">${isImage && url ? `<img class="artifact-preview${mask ? " artifact-preview--mask" : ""}" src="${escapeHtml(url)}" alt="${escapeHtml(mask ? `Mask raster: ${name}` : name)}" />` : ""}<div class="row-main"><div class="row-name">${escapeHtml(name)}</div><div class="row-meta">${escapeHtml(mediaType)} · ${formatGb(item.size_bytes)}${mask ? " · mask" : ""}</div></div>${previewButton}${saveLink}${openButton}</div>`;
   }).join("")}</div>`;
 };
 
@@ -1232,16 +1232,19 @@ function renderSettings(state) {
           <div class="row-item">
             <span>Ngôn ngữ</span>
             <select id="settings-lang" class="input input--select" data-setting-key="ui.language">
-              <option value="vi" ${settings.language === "vi" ? "selected" : ""}>Tiếng Việt</option>
-              <option value="en" ${settings.language === "en" ? "selected" : ""}>English</option>
+              <option value="vi" ${settings.language === "vi" ? "selected" : ""}>Tiếng Việt (vi)</option>
+              <option value="en" ${settings.language === "en" ? "selected" : ""}>English (en)</option>
+              <option value="zh" ${settings.language === "zh" ? "selected" : ""}>简体中文 (zh)</option>
+              <option value="ja" ${settings.language === "ja" ? "selected" : ""}>日本語 (ja)</option>
+              <option value="ko" ${settings.language === "ko" ? "selected" : ""}>한국어 (ko)</option>
             </select>
           </div>
           <div class="row-item">
             <span>Giao diện</span>
             <select id="settings-theme" class="input input--select" data-setting-key="ui.theme">
-              <option value="system" ${settings.theme === "system" ? "selected" : ""}>Theo hệ thống</option>
-              <option value="dark" ${settings.theme === "dark" ? "selected" : ""}>Tối (Dark)</option>
-              <option value="light" ${settings.theme === "light" ? "selected" : ""}>Sáng (Light)</option>
+              <option value="system" ${settings.theme === "system" ? "selected" : ""}>Theo hệ thống (system)</option>
+              <option value="dark" ${settings.theme === "dark" ? "selected" : ""}>Tối (dark)</option>
+              <option value="light" ${settings.theme === "light" ? "selected" : ""}>Sáng (light)</option>
             </select>
           </div>
           <div class="row-item">
@@ -1249,8 +1252,12 @@ function renderSettings(state) {
             <input type="checkbox" id="settings-maximized" data-setting-key="window.start_maximized" ${settings.start_maximized ? "checked" : ""} />
           </div>
           <div class="row-item">
-            <span>Kích thước tối thiểu</span>
-            <strong>${escapeHtml(settings.minimum_width || 1280)} × ${escapeHtml(settings.minimum_height || 720)}</strong>
+            <span>Chiều rộng tối thiểu (800..3840)</span>
+            <input type="number" id="settings-min-width" min="800" max="3840" class="input input--compact" data-setting-key="window.minimum_width" value="${escapeHtml(settings.minimum_width || 1280)}" />
+          </div>
+          <div class="row-item">
+            <span>Chiều cao tối thiểu (600..2160)</span>
+            <input type="number" id="settings-min-height" min="600" max="2160" class="input input--compact" data-setting-key="window.minimum_height" value="${escapeHtml(settings.minimum_height || 720)}" />
           </div>
         </div>
         <div class="form-actions">
@@ -1263,8 +1270,8 @@ function renderSettings(state) {
           <div class="row-item">
             <span>Chính sách nạp Model</span>
             <select id="settings-model-policy" class="input input--select" data-setting-key="jobs.model_load_policy">
-              <option value="on_demand" ${settings.model_load_policy === "on_demand" ? "selected" : ""}>Nạp khi cần (On demand)</option>
-              <option value="keep_loaded" ${settings.model_load_policy === "keep_loaded" ? "selected" : ""}>Giữ trong VRAM (Keep loaded)</option>
+              <option value="on_demand" ${settings.model_load_policy === "on_demand" ? "selected" : ""}>Nạp khi cần (on_demand)</option>
+              <option value="keep_loaded" ${settings.model_load_policy === "keep_loaded" ? "selected" : ""}>Giữ trong VRAM (keep_loaded)</option>
             </select>
           </div>
           <div class="row-item">
@@ -1292,9 +1299,12 @@ function renderSettings(state) {
           <button class="button button--accent" type="button" data-create-backup>Tạo bản sao lưu mới</button>
         </div>
         <div class="backup-restore-box">
-          <label for="backup-inspect-path" class="small-label">Đường dẫn file Backup để khôi phục:</label>
+          <label for="backup-select" class="small-label">Chọn bản sao lưu để khôi phục:</label>
           <div class="split">
-            <input type="text" id="backup-inspect-path" class="input" placeholder="D:\\LocalAIHub\\Config\\backups\\hub-backup-....zip" />
+            <select id="backup-select" class="input input--select">
+              <option value="">-- Chọn bản sao lưu --</option>
+              ${(state.backups || []).map(b => `<option value="${escapeHtml(b.backup_id)}">${escapeHtml(b.backup_id)} (${escapeHtml(b.created_at || "")})</option>`).join("")}
+            </select>
             <button class="button" type="button" data-inspect-backup>Kiểm tra & Lập kế hoạch</button>
           </div>
           <div id="restore-plan-output" class="restore-plan-output" role="status" aria-live="polite"></div>

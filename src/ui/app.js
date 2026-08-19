@@ -744,11 +744,14 @@ const loadRouteData = async ({ scan = false } = {}) => {
   }
   if (route === "settings") {
     if (routeLoad) return routeLoad;
-    routeLoad = getSettings().then((res) => {
-      if (res?.settings) {
-        state.settings = res.settings;
-        state.settings_revision = res.settings_revision;
-        state.settingsRecovery = res.recovery;
+    routeLoad = Promise.allSettled([getSettings(), listBackups()]).then(([setRes, backRes]) => {
+      if (setRes.status === "fulfilled" && setRes.value?.settings) {
+        state.settings = setRes.value.settings;
+        state.settings_revision = setRes.value.settings_revision;
+        state.settingsRecovery = setRes.value.recovery;
+      }
+      if (backRes.status === "fulfilled" && backRes.value?.backups) {
+        state.backups = backRes.value.backups;
       }
       render();
     }).catch(() => {}).finally(() => { routeLoad = null; });
@@ -1353,14 +1356,33 @@ document.addEventListener("click", async (event) => {
       if (action === "verify-config") {
         const res = await repairVerifyConfig();
         if (outputEl) outputEl.innerHTML = `<div class="callout callout--info"><strong>Kết quả kiểm tra cấu hình:</strong> ${escapeHtml(res.result?.reason || "Hoàn tất kiểm tra.")}</div>`;
-      } else if (action === "inspect-recovery") {
-        const res = await repairInspectRecovery();
-        if (outputEl) outputEl.innerHTML = `<div class="callout callout--info"><strong>Trạng thái phục hồi:</strong> ${escapeHtml(res.result?.reason || "Không phát hiện bản nháp sót.")}</div>`;
-      } else if (action === "clear-drafts") {
-        await repairClearRecoveryDrafts();
-        showToast("Đã dọn dẹp các bản nháp phục hồi cũ.", "success");
-        if (outputEl) outputEl.innerHTML = `<div class="callout callout--success">Đã dọn dẹp xong các bản nháp phục hồi cũ.</div>`;
-        await loadRouteData();
+      } else if (action === "inspect-recovery" || action === "clear-drafts") {
+        const res = await getRecoveryDrafts();
+        const drafts = Array.isArray(res.drafts) ? res.drafts : [];
+        if (!drafts.length) {
+          if (outputEl) outputEl.innerHTML = `<div class="callout callout--info"><strong>Trạng thái phục hồi:</strong> Không phát hiện bản nháp sót.</div>`;
+          showToast("Không có bản nháp phục hồi nào tồn tại.", "info");
+        } else {
+          if (outputEl) {
+            outputEl.innerHTML = `
+              <div class="callout callout--warning">
+                <strong>Danh sách bản nháp phục hồi (${drafts.length} bản nháp):</strong>
+                <p class="small">Chọn các bản nháp bạn muốn dọn dẹp an toàn:</p>
+                <div class="draft-selection-list">
+                  ${drafts.map((d) => `
+                    <label class="row-item" style="cursor:pointer;">
+                      <input type="checkbox" class="draft-checkbox" value="${escapeHtml(d.scope || d.name)}" checked />
+                      <span><strong>${escapeHtml(d.scope || d.name)}</strong> (${escapeHtml(String(d.size_bytes || 0))} bytes)</span>
+                    </label>
+                  `).join("")}
+                </div>
+                <div class="form-actions" style="margin-top:0.75rem;">
+                  <button class="button button--danger" type="button" data-confirm-clear-drafts>Dọn dẹp bản nháp đã chọn</button>
+                </div>
+              </div>
+            `;
+          }
+        }
       }
     } catch (error) {
       if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">${escapeHtml(error.message || "Lỗi thao tác bảo trì.")}</div>`;
@@ -1370,12 +1392,38 @@ document.addEventListener("click", async (event) => {
     }
     return;
   }
+  const clearDraftsConfirmBtn = event.target.closest("[data-confirm-clear-drafts]");
+  if (clearDraftsConfirmBtn) {
+    const checkboxes = Array.from(document.querySelectorAll(".draft-checkbox:checked"));
+    const scopes = checkboxes.map((cb) => cb.value).filter(Boolean);
+    if (!scopes.length) {
+      showToast("Vui lòng chọn ít nhất một bản nháp để dọn dẹp.", "warning");
+      return;
+    }
+    const confirmed = window.confirm(`Bạn có chắc chắn muốn dọn dẹp ${scopes.length} bản nháp phục hồi đã chọn không?`);
+    if (!confirmed) return;
+    clearDraftsConfirmBtn.disabled = true;
+    try {
+      const res = await repairClearRecoveryDrafts(scopes, true);
+      showToast(res.message || `Đã dọn dẹp ${scopes.length} bản nháp phục hồi.`, "success");
+      const outputEl = document.querySelector("#repair-output");
+      if (outputEl) outputEl.innerHTML = `<div class="callout callout--success">${escapeHtml(res.message || "Đã dọn dẹp xong.")}</div>`;
+      await loadRouteData();
+    } catch (error) {
+      showToast(error.message || "Không thể dọn dẹp bản nháp.", "error");
+    } finally {
+      clearDraftsConfirmBtn.disabled = false;
+    }
+    return;
+  }
   if (event.target.closest("[data-save-settings]")) {
     const saveButton = event.target.closest("[data-save-settings]");
     const expectedRevision = Number(saveButton.dataset.expectedRevision ?? state.settings_revision ?? 0);
     const lang = document.querySelector("#settings-lang")?.value || "vi";
     const theme = document.querySelector("#settings-theme")?.value || "system";
     const maximized = document.querySelector("#settings-maximized")?.checked ?? true;
+    const minWidth = Math.max(800, Math.min(3840, Number(document.querySelector("#settings-min-width")?.value || 1280)));
+    const minHeight = Math.max(600, Math.min(2160, Number(document.querySelector("#settings-min-height")?.value || 720)));
     const modelPolicy = document.querySelector("#settings-model-policy")?.value || "on_demand";
     const gpuJobs = Number(document.querySelector("#settings-gpu-jobs")?.value || 1);
 
@@ -1383,7 +1431,7 @@ document.addEventListener("click", async (event) => {
     try {
       const result = await patchSettings({
         ui: { language: lang, theme: theme },
-        window: { start_maximized: Boolean(maximized) },
+        window: { start_maximized: Boolean(maximized), minimum_width: minWidth, minimum_height: minHeight },
         jobs: { model_load_policy: modelPolicy, max_heavy_gpu_jobs: gpuJobs },
       }, expectedRevision);
 
@@ -1428,9 +1476,8 @@ document.addEventListener("click", async (event) => {
     try {
       const res = await createBackup();
       if (res.accepted) {
-        showToast(`Đã tạo bản sao lưu: ${res.backup_file}`, "success");
-        const inspectInput = document.querySelector("#backup-inspect-path");
-        if (inspectInput) inspectInput.value = res.backup_path;
+        showToast(`Đã tạo bản sao lưu: ${res.backup_id}`, "success");
+        await loadRouteData();
       }
     } catch (error) {
       showToast(error.message || "Không thể tạo backup.", "error");
@@ -1440,29 +1487,34 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (event.target.closest("[data-inspect-backup]")) {
-    const pathInput = document.querySelector("#backup-inspect-path");
-    const path = pathInput?.value?.trim();
+    const select = document.querySelector("#backup-select");
+    const backupId = select?.value?.trim();
     const outputEl = document.querySelector("#restore-plan-output");
-    if (!path) {
-      showToast("Vui lòng nhập đường dẫn file backup ZIP.", "warning");
+    if (!backupId) {
+      showToast("Vui lòng chọn một bản sao lưu để kiểm tra.", "warning");
       return;
     }
     try {
-      const insp = await inspectBackup(path);
+      const insp = await inspectBackup(backupId);
       if (!insp.valid) {
         if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">File backup không hợp lệ: ${(insp.errors || []).join(", ")}</div>`;
         return;
       }
-      const plan = await planRestore(path);
+      const plan = await planRestore(backupId);
+      if (!plan.accepted) {
+        if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">${escapeHtml(plan.reason || "Không thể lập kế hoạch khôi phục.")}</div>`;
+        return;
+      }
       const categories = Object.keys(plan.categories || {}).join(", ");
+      const prev = plan.preview || {};
       if (outputEl) {
         outputEl.innerHTML = `
           <div class="callout callout--warning">
-            <strong>Kế hoạch khôi phục:</strong>
-            <p>Bao gồm: ${escapeHtml(categories || "Các tệp cấu hình")}</p>
-            <p>Số tệp sẽ khôi phục: ${escapeHtml(String(plan.preview?.length || 0))}</p>
+            <strong>Kế hoạch khôi phục (Plan ID: ${escapeHtml(plan.plan_id)}):</strong>
+            <p>Phạm vi: ${escapeHtml(categories || "Tệp cấu hình")}</p>
+            <p>Chi tiết: <strong>${escapeHtml(String(prev.total || 0))}</strong> tệp (Tạo mới: ${escapeHtml(String(prev.create || 0))}, Ghi đè: ${escapeHtml(String(prev.overwrite || 0))}, Bỏ qua mới hơn: ${escapeHtml(String(prev.skip_newer || 0))})</p>
             <div class="form-actions">
-              <button class="button button--danger" type="button" data-apply-restore data-backup-path="${escapeHtml(path)}">Xác nhận khôi phục ngay</button>
+              <button class="button button--danger" type="button" data-apply-restore="${escapeHtml(plan.plan_id)}">Xác nhận khôi phục</button>
             </div>
           </div>
         `;
@@ -1475,14 +1527,18 @@ document.addEventListener("click", async (event) => {
   }
   const applyRestoreBtn = event.target.closest("[data-apply-restore]");
   if (applyRestoreBtn) {
-    const path = applyRestoreBtn.dataset.backupPath;
+    const planId = applyRestoreBtn.dataset.applyRestore;
     applyRestoreBtn.disabled = true;
     try {
-      const plan = await planRestore(path);
-      const res = await applyRestore(path, plan, true);
+      const res = await applyRestore(planId, true);
       if (res.accepted) {
         showToast("Đã khôi phục dữ liệu thành công!", "success");
         await initialize();
+      } else if (res.status === "conflict") {
+        showToast("Cảnh báo xung đột: Trạng thái cấu hình đã thay đổi. Vui lòng lập lại kế hoạch.", "warning");
+      } else {
+        showToast(res.reason || "Khôi phục thất bại.", "error");
+        applyRestoreBtn.disabled = false;
       }
     } catch (error) {
       showToast(error.message || "Khôi phục thất bại.", "error");

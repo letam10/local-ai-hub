@@ -69,18 +69,94 @@ class DiagnosticsCenter:
         """Check repository HEAD and branch in read-only manner."""
         git_dir = ROOT / ".git"
         if not git_dir.exists():
-            return _status(UNKNOWN, "Not a git repository or release build.", "No action required.")
+            return {
+                **_status(UNKNOWN, "Not a git repository or release build.", "No action required."),
+                "root_verified": ROOT.exists(),
+                "inside_work_tree": False,
+                "head_sha": "",
+                "branch": "",
+                "origin": "",
+            }
+
+        inside_work_tree = False
+        head_sha = ""
+        branch = ""
+        origin = ""
+
+        import subprocess
         try:
-            head_file = git_dir / "HEAD"
-            if head_file.exists():
-                ref = head_file.read_text(encoding="utf-8").strip()
-                return {
-                    **_status(HEALTHY, f"Git reference: {ref[:60]}.", "No action required."),
-                    "ref": ref,
-                }
-            return _status(UNKNOWN, "Git HEAD absent.", "No action required.")
-        except Exception as exc:
-            return _status(UNKNOWN, f"Git inspection error: {exc}", "No action required.")
+            res_worktree = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            inside_work_tree = res_worktree.returncode == 0 and res_worktree.stdout.strip() == "true"
+        except (subprocess.SubprocessError, OSError):
+            inside_work_tree = git_dir.exists()
+
+        try:
+            res_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            if res_head.returncode == 0:
+                head_sha = res_head.stdout.strip()
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+        try:
+            res_branch = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            if res_branch.returncode == 0:
+                branch = res_branch.stdout.strip()
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+        try:
+            res_origin = subprocess.run(
+                ["git", "config", "--get", "remote.origin.url"],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            if res_origin.returncode == 0:
+                raw_origin = res_origin.stdout.strip()
+                origin = re.sub(r"(https?://)[^:@/\s]+:[^@/\s]+@", r"\1[REDACTED]@", raw_origin)
+                origin = re.sub(r"(https?://)[^:@/\s]+@", r"\1[REDACTED]@", origin)
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+        if not head_sha:
+            try:
+                head_file = git_dir / "HEAD" if git_dir.is_dir() else None
+                if head_file and head_file.exists():
+                    ref = head_file.read_text(encoding="utf-8").strip()
+                    if ref.startswith("ref: "):
+                        branch = ref.removeprefix("ref: refs/heads/")
+                    else:
+                        head_sha = ref
+            except Exception:
+                pass
+
+        return {
+            **_status(HEALTHY, f"Git repository verified at branch '{branch or 'detached'}' @ {(head_sha[:7] if head_sha else 'HEAD')}.", "No action required."),
+            "root_verified": ROOT.exists(),
+            "inside_work_tree": inside_work_tree,
+            "head_sha": head_sha,
+            "branch": branch,
+            "origin": origin,
+        }
 
     def config_registry_state(self) -> dict[str, Any]:
         """Check settings, workspace, workflow library files."""
@@ -324,15 +400,19 @@ class DiagnosticsCenter:
     def export_diagnostics_bundle(self) -> dict[str, Any]:
         """Return a sanitised snapshot safe for sharing (no secrets, no raw paths)."""
         raw = self.snapshot()
-        # Sanitize: replace any value matching secret pattern
         def _clean(obj: Any) -> Any:
             if isinstance(obj, dict):
                 return {k: ("[REDACTED]" if _SECRET_KEY_RE.search(k) else _clean(v)) for k, v in obj.items()}
             if isinstance(obj, list):
                 return [_clean(item) for item in obj]
-            if isinstance(obj, str) and re.search(r"[A-Za-z]:[\\\\/]", obj):
-                # Redact full local paths but keep drive letter
-                return re.sub(r"([A-Za-z]:)[^\s,;\"']+", r"\1[PATH]", obj)
+            if isinstance(obj, str):
+                s = obj
+                s = re.sub(r"(https?://)[^:@/\s]+:[^@/\s]+@", r"\1[REDACTED]@", s)
+                s = re.sub(r"(https?://)[^:@/\s]+@", r"\1[REDACTED]@", s)
+                s = re.sub(r"([A-Za-z]:)[\\/][^\s,;\"'<>|]+", r"\1:[PATH]", s)
+                s = re.sub(r"\\\\[^\s,;\"'<>|]+", r"\\[PATH]", s)
+                s = re.sub(r"/(Users|home|tmp)/[^\s,;\"'<>|]+", r"/\1/[PATH]", s)
+                return s
             return obj
         return {"bundle": _clean(raw), "sanitized": True}
 

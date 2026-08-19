@@ -1,8 +1,8 @@
-﻿"""
+"""
   FILE NOTE
-  - Má»¥c Ä‘Ã­ch: Safe defaults cÃ³ phiÃªn báº£n cho V6 shell vÃ  local services, chia theo section
-  - LiÃªn káº¿t trá»±c tiáº¿p: src/app_config/schema.py, src/app_config/settings_service.py
-  - VÃ¹ng áº£nh hÆ°á»Ÿng khi sá»­a: GiÃ¡ trá»‹ máº·c Ä‘á»‹nh khi chÆ°a cÃ³ file settings hoáº·c sau per-section reset
+  - Mục đích: Safe defaults có phiên bản cho V6 shell và local services, chia theo section
+  - Liên kết trực tiếp: src/app_config/schema.py, src/app_config/settings_service.py
+  - Vùng ảnh hưởng khi sửa: Giá trị mặc định khi chưa có file settings hoặc sau per-section reset
 """
 
 from __future__ import annotations

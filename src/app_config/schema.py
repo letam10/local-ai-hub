@@ -1,8 +1,8 @@
-﻿"""
+"""
   FILE NOTE
-  - Má»¥c Ä‘Ã­ch: Validation schema cÃ³ phiÃªn báº£n, migration runner, section defaults vÃ  secret scrubbing cho settings machine-local cá»§a Local AI Hub
-  - LiÃªn káº¿t trá»±c tiáº¿p: src/app_config/settings_service.py, src/app_config/defaults.py, src/app/main.py
-  - VÃ¹ng áº£nh hÆ°á»Ÿng khi sá»­a: ToÃ n bá»™ settings persistence (schema_version, migration, safe defaults, secret guard)
+  - Mục đích: Validation schema có phiên bản, migration runner, section defaults và secret scrubbing cho settings machine-local của Local AI Hub
+  - Liên kết trực tiếp: src/app_config/settings_service.py, src/app_config/defaults.py, src/app/main.py
+  - Vùng ảnh hưởng khi sửa: Toàn bộ settings persistence (schema_version, migration, safe defaults, secret guard)
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ _SECRET_KEYS: frozenset[str] = frozenset({
 
 # Valid enum values per field.
 _VALID_LANGUAGES = frozenset({"vi", "en", "zh", "ja", "ko"})
-_VALID_THEMES = frozenset({"dark", "light", "auto"})
-_VALID_LOAD_POLICIES = frozenset({"on_demand", "eager", "never"})
+_VALID_THEMES = frozenset({"system", "dark", "light"})
+_VALID_LOAD_POLICIES = frozenset({"on_demand", "keep_loaded"})
 
 SETTINGS_SECTION_DEFAULTS: dict[str, dict[str, Any]] = {
     "ui": {
@@ -61,6 +61,8 @@ def _validate_ui(section: dict[str, Any]) -> dict[str, Any]:
     if lang in _VALID_LANGUAGES:
         result["language"] = lang
     theme = section.get("theme")
+    if theme == "auto":
+        theme = "system"
     if theme in _VALID_THEMES:
         result["theme"] = theme
     result["sidebar_collapsed"] = bool(section.get("sidebar_collapsed", False))
@@ -85,6 +87,10 @@ def _validate_jobs(section: dict[str, Any]) -> dict[str, Any]:
     if isinstance(gpu_jobs, int) and 1 <= gpu_jobs <= 4:
         result["max_heavy_gpu_jobs"] = gpu_jobs
     policy = section.get("model_load_policy", "on_demand")
+    if policy == "eager":
+        policy = "keep_loaded"
+    elif policy == "never":
+        policy = "on_demand"
     if policy in _VALID_LOAD_POLICIES:
         result["model_load_policy"] = policy
     return result
@@ -94,10 +100,10 @@ def _validate_window(section: dict[str, Any]) -> dict[str, Any]:
     result = dict(SETTINGS_SECTION_DEFAULTS["window"])
     result["start_maximized"] = bool(section.get("start_maximized", True))
     width = section.get("minimum_width", 1280)
-    if isinstance(width, int) and width >= 1280:
+    if isinstance(width, int) and 800 <= width <= 3840:
         result["minimum_width"] = width
     height = section.get("minimum_height", 720)
-    if isinstance(height, int) and height >= 720:
+    if isinstance(height, int) and 600 <= height <= 2160:
         result["minimum_height"] = height
     return result
 

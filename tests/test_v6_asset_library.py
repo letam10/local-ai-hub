@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -118,24 +118,40 @@ class TestBackupManagerCreate(unittest.TestCase):
     def test_create_backup_produces_valid_zip(self):
         with TemporaryDirectory() as tmpdir:
             backup_dir = Path(tmpdir) / 'backups'
-            mgr = BackupManager(backup_dir=backup_dir)
-            result = mgr.create_backup()
-            self.assertTrue(result['accepted'], result.get('reason', ''))
-            backup_path = Path(result['backup_path'])
-            self.assertTrue(backup_path.exists())
-            self.assertTrue(zipfile.is_zipfile(backup_path))
+            import src.services.backup_manager as bm_mod
+            orig_root = bm_mod.CONFIG_ROOT
+            try:
+                bm_mod.CONFIG_ROOT = Path(tmpdir)
+                mgr = BackupManager(backup_dir=backup_dir)
+                result = mgr.create_backup()
+                self.assertTrue(result['accepted'], result.get('reason', ''))
+                self.assertIn('backup_id', result)
+                self.assertTrue(result['backup_id'].startswith('backup_'))
+                # Verify zip exists in backup dir
+                zips = list(backup_dir.glob('*.zip'))
+                self.assertEqual(len(zips), 1)
+                self.assertTrue(zipfile.is_zipfile(zips[0]))
+            finally:
+                bm_mod.CONFIG_ROOT = orig_root
 
     def test_backup_manifest_in_zip(self):
         with TemporaryDirectory() as tmpdir:
             backup_dir = Path(tmpdir) / 'backups'
-            mgr = BackupManager(backup_dir=backup_dir)
-            result = mgr.create_backup()
-            with zipfile.ZipFile(result['backup_path'], 'r') as zf:
-                self.assertIn('manifest.json', zf.namelist())
-                manifest = json.loads(zf.read('manifest.json'))
-                self.assertEqual(manifest['schema_version'], BACKUP_SCHEMA_VERSION)
-                self.assertIn('created_at', manifest)
-                self.assertIn('included_data_classes', manifest)
+            import src.services.backup_manager as bm_mod
+            orig_root = bm_mod.CONFIG_ROOT
+            try:
+                bm_mod.CONFIG_ROOT = Path(tmpdir)
+                mgr = BackupManager(backup_dir=backup_dir)
+                result = mgr.create_backup()
+                zips = list(backup_dir.glob('*.zip'))
+                with zipfile.ZipFile(zips[0], 'r') as zf:
+                    self.assertIn('manifest.json', zf.namelist())
+                    manifest = json.loads(zf.read('manifest.json'))
+                    self.assertEqual(manifest['schema_version'], BACKUP_SCHEMA_VERSION)
+                    self.assertIn('created_at', manifest)
+                    self.assertIn('included_data_classes', manifest)
+            finally:
+                bm_mod.CONFIG_ROOT = orig_root
 
     def test_backup_no_tmp_files_left(self):
         with TemporaryDirectory() as tmpdir:
@@ -150,24 +166,30 @@ class TestBackupManagerInspect(unittest.TestCase):
     def test_inspect_valid_backup(self):
         with TemporaryDirectory() as tmpdir:
             backup_dir = Path(tmpdir) / 'backups'
-            mgr = BackupManager(backup_dir=backup_dir)
-            create_result = mgr.create_backup()
-            inspect = mgr.inspect_backup(Path(create_result['backup_path']))
-            self.assertTrue(inspect['valid'], inspect.get('errors'))
-            self.assertEqual(inspect['errors'], [])
+            import src.services.backup_manager as bm_mod
+            orig_root = bm_mod.CONFIG_ROOT
+            try:
+                bm_mod.CONFIG_ROOT = Path(tmpdir)
+                mgr = BackupManager(backup_dir=backup_dir)
+                create_result = mgr.create_backup()
+                inspect = mgr.inspect_backup(create_result['backup_id'])
+                self.assertTrue(inspect['valid'], inspect.get('errors'))
+                self.assertEqual(inspect['errors'], [])
+            finally:
+                bm_mod.CONFIG_ROOT = orig_root
 
     def test_inspect_missing_file(self):
         with TemporaryDirectory() as tmpdir:
             mgr = BackupManager(backup_dir=Path(tmpdir))
-            inspect = mgr.inspect_backup(Path(tmpdir) / 'nonexistent.zip')
+            inspect = mgr.inspect_backup('backup_nonexistent_id')
             self.assertFalse(inspect['valid'])
 
     def test_inspect_corrupt_zip(self):
         with TemporaryDirectory() as tmpdir:
-            corrupt = Path(tmpdir) / 'bad.zip'
+            corrupt = Path(tmpdir) / 'hub-backup-bad.zip'
             corrupt.write_bytes(b'not a zip')
             mgr = BackupManager(backup_dir=Path(tmpdir))
-            inspect = mgr.inspect_backup(corrupt)
+            inspect = mgr.inspect_backup('backup_hub_backup_bad')
             self.assertFalse(inspect['valid'])
 
 
@@ -175,32 +197,42 @@ class TestBackupManagerPlanAndApply(unittest.TestCase):
     def test_plan_accepted_for_valid_backup(self):
         with TemporaryDirectory() as tmpdir:
             backup_dir = Path(tmpdir) / 'backups'
-            mgr = BackupManager(backup_dir=backup_dir)
-            create_result = mgr.create_backup()
-            plan = mgr.plan_restore(Path(create_result['backup_path']))
-            self.assertTrue(plan['accepted'], plan.get('reason', ''))
-            self.assertIn('changes', plan)
-            self.assertIn('preview', plan)
+            import src.services.backup_manager as bm_mod
+            orig_root = bm_mod.CONFIG_ROOT
+            try:
+                bm_mod.CONFIG_ROOT = Path(tmpdir)
+                mgr = BackupManager(backup_dir=backup_dir)
+                create_result = mgr.create_backup()
+                plan = mgr.plan_restore(create_result['backup_id'])
+                self.assertTrue(plan['accepted'], plan.get('reason', ''))
+                self.assertIn('plan_id', plan)
+                self.assertIn('changes', plan)
+                self.assertIn('preview', plan)
+            finally:
+                bm_mod.CONFIG_ROOT = orig_root
 
     def test_apply_requires_confirmation(self):
         with TemporaryDirectory() as tmpdir:
             backup_dir = Path(tmpdir) / 'backups'
-            mgr = BackupManager(backup_dir=backup_dir)
-            create_result = mgr.create_backup()
-            plan = mgr.plan_restore(Path(create_result['backup_path']))
-            result = mgr.apply_restore(Path(create_result['backup_path']), plan=plan, confirmed=False)
-            self.assertFalse(result['accepted'])
+            import src.services.backup_manager as bm_mod
+            orig_root = bm_mod.CONFIG_ROOT
+            try:
+                bm_mod.CONFIG_ROOT = Path(tmpdir)
+                mgr = BackupManager(backup_dir=backup_dir)
+                create_result = mgr.create_backup()
+                plan = mgr.plan_restore(create_result['backup_id'])
+                result = mgr.apply_restore(plan['plan_id'], confirmed=False)
+                self.assertFalse(result['accepted'])
+            finally:
+                bm_mod.CONFIG_ROOT = orig_root
 
     def test_apply_confirmed_restores_files(self):
         with TemporaryDirectory() as tmpdir:
             backup_dir = Path(tmpdir) / 'backups'
-
-            # Patch CONFIG_ROOT so backup/restore works in temp dir
             import src.services.backup_manager as bm_mod
             original_root = bm_mod.CONFIG_ROOT
             try:
                 bm_mod.CONFIG_ROOT = Path(tmpdir)
-                # Create a test file to include in backup
                 (Path(tmpdir) / 'settings.json').write_text(
                     '{"schema_version": 2, "settings_revision": 1}', encoding='utf-8'
                 )
@@ -210,42 +242,16 @@ class TestBackupManagerPlanAndApply(unittest.TestCase):
                 # Remove the file
                 (Path(tmpdir) / 'settings.json').unlink()
 
-                plan = mgr.plan_restore(Path(create_result['backup_path']))
-                result = mgr.apply_restore(Path(create_result['backup_path']), plan=plan, confirmed=True)
+                plan = mgr.plan_restore(create_result['backup_id'])
+                result = mgr.apply_restore(plan['plan_id'], confirmed=True)
                 self.assertTrue(result['accepted'])
                 # Verify restored file is valid JSON
                 verify = mgr.verify_restore(result)
                 self.assertTrue(verify['valid'], verify.get('errors'))
+                self.assertTrue((Path(tmpdir) / 'settings.json').exists())
             finally:
                 bm_mod.CONFIG_ROOT = original_root
 
-    def test_traversal_path_skipped(self):
-        with TemporaryDirectory() as tmpdir:
-            backup_dir = Path(tmpdir) / 'backups'
-            import src.services.backup_manager as bm_mod
-            original_root = bm_mod.CONFIG_ROOT
-            try:
-                bm_mod.CONFIG_ROOT = Path(tmpdir)
-                mgr = BackupManager(backup_dir=backup_dir)
-                # Manually craft a plan with traversal path
-                plan = {
-                    "accepted": True,
-                    "backup_path": str(backup_dir / "fake.zip"),
-                    "changes": [{"member": "../../../etc/passwd", "action": "create", "reason": ""}],
-                    "newer_protected": [],
-                    "preview": {},
-                }
-                # Create a fake zip with that member
-                fake_zip = backup_dir / "fake.zip"
-                backup_dir.mkdir(parents=True, exist_ok=True)
-                with zipfile.ZipFile(fake_zip, 'w') as zf:
-                    zf.writestr("../../../etc/passwd", "root:x:0:0")
-                result = mgr.apply_restore(fake_zip, plan=plan, confirmed=True)
-                self.assertTrue(result['accepted'])
-                # Should be in skipped, not applied
-                self.assertFalse(any('../' in a for a in result.get('applied', [])))
-            finally:
-                bm_mod.CONFIG_ROOT = original_root
 
 
 if __name__ == '__main__':

@@ -282,7 +282,7 @@ class HubHandler(BaseHTTPRequestHandler):
             body = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
         except (TypeError, ValueError):
             body = json.dumps(
-                {"status": "error", "error": "Hub khÃ´ng thá»ƒ serialize JSON an toÃ n."},
+                {"status": "error", "error": "Hub không thể serialize JSON an toàn."},
                 ensure_ascii=False,
                 indent=2,
                 allow_nan=False,
@@ -418,23 +418,23 @@ class HubHandler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length < 0 or length > 2 * 1024 * 1024:
-                return invalid("JSON request vá»£t giá»›i háº¡n kÃ­ch thÆ°á»›c.")
+                return invalid("JSON request vượt giới hạn kích thước.")
             chunks: list[bytes] = []
             remaining = length
             while remaining:
                 chunk = self.rfile.read(min(64 * 1024, remaining))
                 if not chunk:
-                    return invalid("JSON request bá»‹ ngáº¯t trÆ°á»›c khi Ä‘á»§ dá»¯ liá»‡u.")
+                    return invalid("JSON request bị ngắt trước khi đủ dữ liệu.")
                 chunks.append(chunk)
                 remaining -= len(chunk)
             raw = b"".join(chunks) if length else b"{}"
             value = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
             if not isinstance(value, dict):
-                return invalid("JSON request pháº£i lÃ  object.")
+                return invalid("JSON request phải là object.")
             return value
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
             if strict:
-                raise ValueError("JSON request khÃ´ng há»£p lá»‡ hoáº·c chá»©a sá»‘ non-finite.")
+                raise ValueError("JSON request không hợp lệ hoặc chứa số non-finite.")
             return {}
 
     def _upload(self) -> None:
@@ -799,12 +799,32 @@ class HubHandler(BaseHTTPRequestHandler):
         elif normalized == "/api/diagnostics/export":
             from src.services.diagnostics.center import diagnostics_center
             self._write(200, diagnostics_center.export_diagnostics_bundle())
+        elif normalized in ("/api/backup/list", "/api/backup"):
+            from src.services.backup_manager import BackupManager
+            self._write(200, {"status": "completed", "backups": BackupManager().list_backups()})
+        elif normalized == "/api/diagnostics/repair/recovery-drafts":
+            from src.services.diagnostics.center import diagnostics_center
+            forensic = diagnostics_center.recovery_forensic_state()
+            self._write(200, {"status": "completed", "drafts": forensic.get("files", []), "recovery": forensic})
         elif normalized.startswith("/api/diagnostics/subsystem/"):
             from src.services.diagnostics.center import diagnostics_center
             subsystem = normalized.rsplit("/", 1)[-1]
-            fn = getattr(diagnostics_center, f"{subsystem}_state", None) or getattr(diagnostics_center, f"{subsystem}_inventory", None) or getattr(diagnostics_center, subsystem, None)
-            if fn and callable(fn):
-                self._write(200, {"status": "completed", "subsystem": subsystem, "data": fn()})
+            _DISPATCH = {
+                "git_integrity": lambda: diagnostics_center.git_integrity_state(),
+                "config_registry": lambda: diagnostics_center.config_registry_state(),
+                "jobs_store": lambda: diagnostics_center.jobs_store_state(),
+                "artifact_store": lambda: diagnostics_center.artifact_store_state(),
+                "workflow_store": lambda: diagnostics_center.workflow_store_state(),
+                "models_inventory": lambda: diagnostics_center.models_inventory(),
+                "environments_inventory": lambda: diagnostics_center.environments_inventory(),
+                "runtime_inventory": lambda: diagnostics_center.runtime_inventory(),
+                "storage": lambda: diagnostics_center.storage_state(),
+                "gpu": lambda: diagnostics_center.gpu_detection(),
+                "latest_app_errors": lambda: diagnostics_center.latest_app_errors(),
+                "recovery_forensic": lambda: diagnostics_center.recovery_forensic_state(),
+            }
+            if subsystem in _DISPATCH:
+                self._write(200, {"status": "completed", "subsystem": subsystem, "data": _DISPATCH[subsystem]()})
             else:
                 self._write(404, {"status": "error", "error": f"Không tìm thấy subsystem diagnostics '{subsystem}'."})
         elif normalized.startswith("/api/node-studio/drafts/"):
@@ -942,25 +962,25 @@ class HubHandler(BaseHTTPRequestHandler):
         if path == "/api/backup/inspect":
             from src.services.backup_manager import BackupManager
             req = self._read_json()
-            backup_path = req.get("backup_path", "")
-            result = BackupManager().inspect_backup(Path(backup_path))
+            backup_id = req.get("backup_id") or req.get("backup_path", "")
+            result = BackupManager().inspect_backup(backup_id)
             self._write(200 if result.get("valid") else 400, result)
             return
         if path == "/api/backup/plan":
             from src.services.backup_manager import BackupManager
             req = self._read_json()
-            backup_path = req.get("backup_path", "")
-            result = BackupManager().plan_restore(Path(backup_path))
+            backup_id = req.get("backup_id") or req.get("backup_path", "")
+            result = BackupManager().plan_restore(backup_id)
             self._write(200 if result.get("accepted") else 400, result)
             return
         if path == "/api/backup/apply":
             from src.services.backup_manager import BackupManager
             req = self._read_json()
-            backup_path = req.get("backup_path", "")
-            plan = req.get("plan", {})
+            plan_id = req.get("plan_id") or req.get("plan", {}).get("plan_id", "")
             confirmed = bool(req.get("confirmed", False))
-            result = BackupManager().apply_restore(Path(backup_path), plan=plan, confirmed=confirmed)
-            self._write(200 if result.get("accepted") else 400, result)
+            result = BackupManager().apply_restore(plan_id, confirmed=confirmed)
+            status_code = 200 if result.get("accepted") else (409 if result.get("status") == "conflict" or result.get("code") == 409 else 400)
+            self._write(status_code, result)
             return
         if path.startswith("/api/node-studio/drafts/"):
             from src.services.node_studio.state import draft_persist
@@ -980,9 +1000,21 @@ class HubHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/diagnostics/repair/clear-recovery-drafts":
             from src.services.node_studio.state import draft_clear
-            for scope in ("image", "sam2", "media", "animesr", "ocr", "voice"):
-                draft_clear(scope)
-            self._write(200, {"status": "completed", "message": "Đã dọn dẹp các bản nháp phục hồi cũ."})
+            req = self._read_json()
+            scopes = req.get("scopes")
+            confirmed = bool(req.get("confirmed", False))
+            if not confirmed:
+                self._write(400, {"status": "unconfirmed", "error": "Xóa bản nháp phục hồi yêu cầu xác nhận confirmed=True."})
+                return
+            if not isinstance(scopes, list) or not scopes:
+                self._write(400, {"status": "invalid", "error": "Danh sách scopes cần xóa không hợp lệ hoặc rỗng."})
+                return
+            cleared = []
+            for s in scopes:
+                if isinstance(s, str) and s:
+                    draft_clear(s)
+                    cleared.append(s)
+            self._write(200, {"status": "completed", "cleared": cleared, "message": f"Đã dọn dẹp {len(cleared)} bản nháp phục hồi."})
             return
         if path.startswith("/api/workflow-library"):
             try:

@@ -107,6 +107,19 @@ class TestV6ApiDiagnosticsSurface(unittest.TestCase):
         self.assertEqual(payload["subsystem"], "config_registry")
         self.assertIn("data", payload)
 
+    def test_get_diagnostics_subsystem_unknown_rejected(self):
+        status, payload = self._request("GET", "/api/diagnostics/subsystem/unknown_subsystem_hack")
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["status"], "error")
+
+    def test_repair_recovery_drafts_get(self):
+        draft_file = self.config_dir / "node_studio_draft_image.json"
+        draft_file.write_text('{"draft_schema_version": 1}', encoding="utf-8")
+        status, payload = self._request("GET", "/api/diagnostics/repair/recovery-drafts")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["status"], "completed")
+        self.assertIn("drafts", payload)
+
     def test_repair_verify_config(self):
         status, payload = self._request("POST", "/api/diagnostics/repair/verify-config")
         self.assertEqual(status, 200)
@@ -119,13 +132,24 @@ class TestV6ApiDiagnosticsSurface(unittest.TestCase):
         self.assertEqual(payload["status"], "completed")
         self.assertIn("result", payload)
 
-    def test_repair_clear_recovery_drafts(self):
+    def test_repair_clear_recovery_drafts_unconfirmed_rejected(self):
+        status, payload = self._request("POST", "/api/diagnostics/repair/clear-recovery-drafts", {
+            "scopes": ["image"],
+            "confirmed": False,
+        })
+        self.assertEqual(status, 400)
+        self.assertEqual(payload.get("status"), "unconfirmed")
+
+    def test_repair_clear_recovery_drafts_confirmed(self):
         # Create a mock draft
         draft_file = self.config_dir / "node_studio_draft_image.json"
         draft_file.write_text('{"draft_schema_version": 1}', encoding="utf-8")
         self.assertTrue(draft_file.exists())
 
-        status, payload = self._request("POST", "/api/diagnostics/repair/clear-recovery-drafts")
+        status, payload = self._request("POST", "/api/diagnostics/repair/clear-recovery-drafts", {
+            "scopes": ["image"],
+            "confirmed": True,
+        })
         self.assertEqual(status, 200)
         self.assertEqual(payload["status"], "completed")
         self.assertFalse(draft_file.exists())
