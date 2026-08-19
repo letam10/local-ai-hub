@@ -1,8 +1,8 @@
-"""Private artifact registry for files staged or produced by Local AI Hub.
-
-The API exposes opaque artifact IDs instead of workstation paths.  This keeps
-the browser control plane useful without disclosing local folders, and limits
-file serving/opening to Hub-owned temporary, output, and archive roots.
+"""
+  FILE NOTE
+  - Mục đích: Private artifact registry cho files staged/produced bởi Local AI Hub, chuyển đổi private workstation paths thành opaque artifact IDs
+  - Liên kết trực tiếp: src/shared/paths/registry.py, src/services/api/api_server.py, src/services/diagnostics/center.py
+  - Vùng ảnh hưởng khi sửa: Toàn bộ việc đăng ký, phục vụ, resolve và diagnostics của artifacts
 """
 
 from __future__ import annotations
@@ -1097,3 +1097,12 @@ def publicize(value: Any, *, key: str | None = None) -> Any:
     if isinstance(value, dict):
         return {str(item_key): publicize(item_value, key=str(item_key)) for item_key, item_value in value.items()}
     return value
+
+
+def diagnostics_summary() -> dict[str, Any]:
+    """Public read-only diagnostic summary of the artifact store."""
+    with _LOCK:
+        return {
+            "total_artifacts": len(_registry),
+            "index_path_exists": INDEX_PATH.exists(),
+        }

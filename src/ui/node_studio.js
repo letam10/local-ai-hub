@@ -18,6 +18,9 @@ import {
   runNodeGraph,
   uploadFile,
   validateNodeGraph,
+  clearNodeDraft,
+  getNodeDraft,
+  saveNodeDraft,
 } from "./api.js";
 import { workflowLibraryEntry } from "./workflow_library.js";
 
@@ -499,7 +502,13 @@ class HubGraphEditor {
     localStorage.setItem(`${keyFor(this.scope)}:draft`, String(this.draft));
     this.autosavedAt = nowIso();
     this.rememberWorkflow(graph, { source, saved });
-    if (saved) { this.savedFingerprint = graphFingerprint(graph); this.unsaved = false; }
+    if (saved) {
+      this.savedFingerprint = graphFingerprint(graph);
+      this.unsaved = false;
+      clearNodeDraft(this.scope).catch(() => {});
+    } else {
+      saveNodeDraft(this.scope, graph).catch(() => {});
+    }
     this.renderWorkflowStatus();
   }
 

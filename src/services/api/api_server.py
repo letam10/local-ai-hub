@@ -1,3 +1,10 @@
+"""
+  FILE NOTE
+  - Mục đích: Main HTTP Server cho Local AI Hub REST API (settings, diagnostics, backup, jobs, workflows, artifacts, UI serving)
+  - Liên kết trực tiếp: src/app_config/settings_service.py, src/services/diagnostics/center.py, src/services/backup_manager.py, src/services/project_manager/manager.py, src/services/node_studio/state.py
+  - Vùng ảnh hưởng khi sửa: Toàn bộ REST API routes cho UI và external clients
+"""
+
 from __future__ import annotations
 
 import json
@@ -135,20 +142,43 @@ class HubHTTPServer(ThreadingHTTPServer):
 
 
 def _settings_payload() -> dict:
-    config = hub_config()
+    from src.app_config.settings_service import SettingsPersistence
+
+    persisted = SettingsPersistence().load()
+    settings_data = persisted.get("settings", {})
+    recovery = persisted.get("recovery", {})
     upload_max_bytes, upload_disk_safety_bytes = _upload_limits()
+    # Flatten window/jobs/network sections for backward compatibility while providing full structured settings
+    window = settings_data.get("window", {})
+    jobs = settings_data.get("jobs", {})
+    network = settings_data.get("network", {})
+    ui = settings_data.get("ui", {})
     return {
         "status": "completed",
+        "schema_version": settings_data.get("schema_version", 2),
+        "settings_revision": settings_data.get("settings_revision", 0),
+        "recovery": recovery,
+        "sections": {
+            "ui": ui,
+            "jobs": jobs,
+            "network": network,
+            "window": window,
+        },
         "settings": {
-            "start_maximized": bool(config.get("start_maximized", True)),
-            "minimum_width": int(config.get("minimum_width", 1280)),
-            "minimum_height": int(config.get("minimum_height", 720)),
-            "model_load_policy": config.get("model_load_policy", "on_demand"),
-            "max_heavy_gpu_jobs": int(config.get("max_heavy_gpu_jobs", 1)),
-            "api_bind": str(config.get("bind_host", "127.0.0.1")),
-            "api_port": int(config.get("api_port", 8765)),
-            "mcp_transport": config.get("mcp_transport", "stdio"),
-            "comfyui_port": int(config.get("comfyui_port", 8188)),
+            "schema_version": settings_data.get("schema_version", 2),
+            "settings_revision": settings_data.get("settings_revision", 0),
+            "start_maximized": bool(window.get("start_maximized", True)),
+            "minimum_width": int(window.get("minimum_width", 1280)),
+            "minimum_height": int(window.get("minimum_height", 720)),
+            "model_load_policy": str(jobs.get("model_load_policy", "on_demand")),
+            "max_heavy_gpu_jobs": int(jobs.get("max_heavy_gpu_jobs", 1)),
+            "api_bind": str(network.get("bind_host", "127.0.0.1")),
+            "api_port": int(network.get("api_port", 8765)),
+            "mcp_transport": str(network.get("mcp_transport", "stdio")),
+            "comfyui_port": int(network.get("comfyui_port", 8188)),
+            "language": str(ui.get("language", "vi")),
+            "theme": str(ui.get("theme", "system")),
+            "sidebar_collapsed": bool(ui.get("sidebar_collapsed", False)),
             "upload_max_bytes": upload_max_bytes,
             "upload_disk_safety_bytes": upload_disk_safety_bytes,
         },
@@ -704,6 +734,14 @@ class HubHandler(BaseHTTPRequestHandler):
             self._creative(lambda: self._creative_or_404(project_manager.get_compare(normalized.split("/")[-2])))
         elif normalized.startswith("/api/projects/") and normalized.endswith("/export"):
             self._creative(lambda: project_manager.export_project(normalized.split("/")[-2]))
+        elif normalized.startswith("/api/projects/") and normalized.endswith("/manifest"):
+            project_id = normalized.split("/")[-2]
+            result = project_manager.export_manifest(project_id)
+            self._write(200 if result.get("accepted") else 404, result)
+        elif normalized.startswith("/api/projects/") and normalized.endswith("/missing-artifacts"):
+            project_id = normalized.split("/")[-2]
+            result = project_manager.missing_artifact_state(project_id)
+            self._write(200 if result.get("accepted") else 404, result)
         elif normalized.startswith("/api/projects/"):
             self._creative(lambda: self._creative_or_404(project_manager.get_project(normalized.rsplit("/", 1)[-1])))
         elif normalized.startswith("/api/recipes/"):
@@ -752,6 +790,55 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._write(404, {"status": "error", "error": "Chưa có trạng thái Node Studio cho job này."})
             else:
                 self._write(200, {"status": "completed", "run": run})
+        elif normalized == "/api/settings/schema":
+            from src.app_config.schema import SETTINGS_SCHEMA_VERSION, SETTINGS_SECTION_DEFAULTS
+            self._write(200, {"status": "completed", "schema_version": SETTINGS_SCHEMA_VERSION, "defaults": SETTINGS_SECTION_DEFAULTS})
+        elif normalized == "/api/diagnostics/snapshot":
+            from src.services.diagnostics.center import diagnostics_center
+            self._write(200, {"status": "completed", "snapshot": diagnostics_center.snapshot()})
+        elif normalized == "/api/diagnostics/export":
+            from src.services.diagnostics.center import diagnostics_center
+            self._write(200, diagnostics_center.export_diagnostics_bundle())
+        elif normalized.startswith("/api/diagnostics/subsystem/"):
+            from src.services.diagnostics.center import diagnostics_center
+            subsystem = normalized.rsplit("/", 1)[-1]
+            fn = getattr(diagnostics_center, f"{subsystem}_state", None) or getattr(diagnostics_center, f"{subsystem}_inventory", None) or getattr(diagnostics_center, subsystem, None)
+            if fn and callable(fn):
+                self._write(200, {"status": "completed", "subsystem": subsystem, "data": fn()})
+            else:
+                self._write(404, {"status": "error", "error": f"Không tìm thấy subsystem diagnostics '{subsystem}'."})
+        elif normalized.startswith("/api/node-studio/drafts/"):
+            from src.services.node_studio.state import draft_load
+            scope = normalized.rsplit("/", 1)[-1]
+            draft = draft_load(scope)
+            if draft is None:
+                self._write(404, {"status": "error", "error": "Chưa có draft autosave cho scope này.", "draft": None})
+            else:
+                self._write(200, {"status": "completed", "draft": draft})
+        elif normalized == "/api/assets/search":
+            query = parse_qs(parsed.query)
+            q = str(query.get("query", [""])[0])
+            tags = query.get("tag", [])
+            fav_param = query.get("favorite", [None])[0]
+            fav = fav_param.lower() in {"1", "true", "yes"} if fav_param is not None else None
+            media_prefix = str(query.get("media_type", [""])[0])
+            proj_id = str(query.get("project_id", [""])[0])
+            sort_by = str(query.get("sort_by", ["created_at"])[0])
+            sort_desc = str(query.get("sort_desc", ["true"])[0]).lower() in {"1", "true", "yes"}
+            result = project_manager.search_assets(
+                query=q,
+                tags=tags if tags else None,
+                favorite=fav,
+                media_type_prefix=media_prefix,
+                project_id=proj_id,
+                sort_by=sort_by,
+                sort_desc=sort_desc,
+            )
+            self._write(200, result)
+        elif normalized.startswith("/api/artifacts/") and normalized.endswith("/status"):
+            artifact_id = normalized.split("/")[-2]
+            result = project_manager.get_artifact_status(artifact_id)
+            self._write(200 if result.get("found") else 404, result)
         else:
             self._write(404, {"status": "error", "error": "Route not found."})
 
@@ -823,6 +910,79 @@ class HubHandler(BaseHTTPRequestHandler):
             from src.services.storage_manager.overview import storage_summary
 
             self._write(200, storage_summary(force=True))
+            return
+        if path == "/api/settings":
+            from src.app_config.settings_service import SettingsPersistence
+            try:
+                patch_data = self._read_json(strict=True)
+            except ValueError as exc:
+                self._write(400, {"status": "invalid", "error": str(exc)})
+                return
+            expected_rev = patch_data.pop("expected_revision", None)
+            result = SettingsPersistence().save(patch_data, expected_revision=expected_rev)
+            status_code = 200 if result.get("accepted") else (409 if result.get("status") == "conflict" else 400)
+            self._write(status_code, result)
+            return
+        if path == "/api/settings/reset":
+            from src.app_config.settings_service import SettingsPersistence
+            req = self._read_json()
+            section = req.get("section")
+            if section:
+                result = SettingsPersistence().reset_section(str(section))
+            else:
+                from src.app_config.schema import SETTINGS_SECTION_DEFAULTS
+                result = SettingsPersistence().save(SETTINGS_SECTION_DEFAULTS)
+            self._write(200 if result.get("accepted") else 400, result)
+            return
+        if path == "/api/backup/create":
+            from src.services.backup_manager import BackupManager
+            result = BackupManager().create_backup()
+            self._write(201 if result.get("accepted") else 500, result)
+            return
+        if path == "/api/backup/inspect":
+            from src.services.backup_manager import BackupManager
+            req = self._read_json()
+            backup_path = req.get("backup_path", "")
+            result = BackupManager().inspect_backup(Path(backup_path))
+            self._write(200 if result.get("valid") else 400, result)
+            return
+        if path == "/api/backup/plan":
+            from src.services.backup_manager import BackupManager
+            req = self._read_json()
+            backup_path = req.get("backup_path", "")
+            result = BackupManager().plan_restore(Path(backup_path))
+            self._write(200 if result.get("accepted") else 400, result)
+            return
+        if path == "/api/backup/apply":
+            from src.services.backup_manager import BackupManager
+            req = self._read_json()
+            backup_path = req.get("backup_path", "")
+            plan = req.get("plan", {})
+            confirmed = bool(req.get("confirmed", False))
+            result = BackupManager().apply_restore(Path(backup_path), plan=plan, confirmed=confirmed)
+            self._write(200 if result.get("accepted") else 400, result)
+            return
+        if path.startswith("/api/node-studio/drafts/"):
+            from src.services.node_studio.state import draft_persist
+            scope = path.rsplit("/", 1)[-1]
+            req = self._read_json()
+            graph = req.get("graph", {})
+            result = draft_persist(scope, graph)
+            self._write(200 if result.get("accepted") else 400, result)
+            return
+        if path == "/api/diagnostics/repair/verify-config":
+            from src.services.diagnostics.center import diagnostics_center
+            self._write(200, {"status": "completed", "result": diagnostics_center.config_registry_state()})
+            return
+        if path == "/api/diagnostics/repair/inspect-recovery":
+            from src.services.diagnostics.center import diagnostics_center
+            self._write(200, {"status": "completed", "result": diagnostics_center.recovery_forensic_state()})
+            return
+        if path == "/api/diagnostics/repair/clear-recovery-drafts":
+            from src.services.node_studio.state import draft_clear
+            for scope in ("image", "sam2", "media", "animesr", "ocr", "voice"):
+                draft_clear(scope)
+            self._write(200, {"status": "completed", "message": "Đã dọn dẹp các bản nháp phục hồi cũ."})
             return
         if path.startswith("/api/workflow-library"):
             try:
@@ -1012,6 +1172,12 @@ class HubHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         path = unquote(urlparse(self.path).path.rstrip("/") or "/")
+        if path.startswith("/api/node-studio/drafts/"):
+            from src.services.node_studio.state import draft_clear
+            scope = path.rsplit("/", 1)[-1]
+            draft_clear(scope)
+            self._write(200, {"status": "completed", "scope": scope})
+            return
         prefix = "/api/workflow-library/"
         if not path.startswith(prefix) or not path[len(prefix) :].strip("/"):
             self._write(404, {"status": "error", "error": "Workflow Library route not found."})
@@ -1028,6 +1194,22 @@ class HubHandler(BaseHTTPRequestHandler):
             return
         result = _workflow_library_store().delete_workflow(workflow_id, expected_revision=expected_revision)
         self._write(_workflow_http_status(result), result)
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        path = unquote(urlparse(self.path).path.rstrip("/") or "/")
+        if path == "/api/settings":
+            from src.app_config.settings_service import SettingsPersistence
+            try:
+                patch_data = self._read_json(strict=True)
+            except ValueError as exc:
+                self._write(400, {"status": "invalid", "error": str(exc)})
+                return
+            expected_rev = patch_data.pop("expected_revision", None)
+            result = SettingsPersistence().save(patch_data, expected_revision=expected_rev)
+            status_code = 200 if result.get("accepted") else (409 if result.get("status") == "conflict" else 400)
+            self._write(status_code, result)
+            return
+        self._write(404, {"status": "error", "error": "Route not found."})
 
     def do_PUT(self) -> None:  # noqa: N802
         path = unquote(urlparse(self.path).path.rstrip("/") or "/")

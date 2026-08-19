@@ -44,6 +44,22 @@ import {
   getModels,
   getStorage,
   getProject,
+  getSettings,
+  patchSettings,
+  resetSettingsSection,
+  getDiagnosticsSnapshot,
+  exportDiagnosticsBundle,
+  repairVerifyConfig,
+  repairInspectRecovery,
+  repairClearRecoveryDrafts,
+  createBackup,
+  inspectBackup,
+  planRestore,
+  applyRestore,
+  getProjectManifest,
+  getProjectMissingArtifacts,
+  searchAssets,
+  getArtifactStatus,
   importProject,
   importRecipePack,
   importImageMask,
@@ -716,18 +732,26 @@ const loadRouteData = async ({ scan = false } = {}) => {
     }
     render();
   }
-  if (route === "projects") {
+  if (route === "diagnostics") {
     if (routeLoad) return routeLoad;
-    state.creativeLoading = true;
-    render();
-    routeLoad = workflowLibraryAdapter.list().then((library) => {
-      if (library?.status) state.workflowLibrary = library;
-      return refreshCreative({ renderView: true });
-    }).catch((error) => {
-      state.creative = { ...state.creative, recovery: { status: "recovery_required", reason: error.message || "Không thể tải Creative Workspace.", action: "Kiểm tra API Hub rồi thử lại." } };
-      showToast(error.message || "Không thể tải Creative Workspace.", "error");
-      if (routeId() === "projects") render();
+    routeLoad = getDiagnosticsSnapshot().then((res) => {
+      state.diagnostics = res;
+      render();
+    }).catch((err) => {
+      showToast(err.message || "Không thể tải Diagnostics snapshot.", "error");
     }).finally(() => { routeLoad = null; });
+    return routeLoad;
+  }
+  if (route === "settings") {
+    if (routeLoad) return routeLoad;
+    routeLoad = getSettings().then((res) => {
+      if (res?.settings) {
+        state.settings = res.settings;
+        state.settings_revision = res.settings_revision;
+        state.settingsRecovery = res.recovery;
+      }
+      render();
+    }).catch(() => {}).finally(() => { routeLoad = null; });
     return routeLoad;
   }
   return undefined;
@@ -1296,6 +1320,176 @@ document.addEventListener("click", async (event) => {
   }
   const jobFilter = event.target.closest("[data-job-filter]");
   if (jobFilter) { state.jobFilter = jobFilter.dataset.jobFilter || "all"; render(); return; }
+  if (event.target.closest("[data-refresh-diagnostics]")) {
+    try {
+      state.diagnostics = await getDiagnosticsSnapshot();
+      render();
+      showToast("Đã làm mới kết quả kiểm tra hệ thống.", "success");
+    } catch (error) {
+      showToast(error.message || "Không thể làm mới Diagnostics.", "error");
+    }
+    return;
+  }
+  if (event.target.closest("[data-export-diagnostics]")) {
+    const button = event.target.closest("[data-export-diagnostics]");
+    button.disabled = true;
+    try {
+      const result = await exportDiagnosticsBundle();
+      downloadJson("local-ai-hub-diagnostics.json", result.bundle);
+      showToast("Đã xuất gói chẩn đoán an toàn (đã redact secrets).", "success");
+    } catch (error) {
+      showToast(error.message || "Không thể xuất gói chẩn đoán.", "error");
+    } finally {
+      button.disabled = false;
+    }
+    return;
+  }
+  const repairButton = event.target.closest("[data-repair]");
+  if (repairButton) {
+    const action = repairButton.dataset.repair;
+    const outputEl = document.querySelector("#repair-output");
+    repairButton.disabled = true;
+    try {
+      if (action === "verify-config") {
+        const res = await repairVerifyConfig();
+        if (outputEl) outputEl.innerHTML = `<div class="callout callout--info"><strong>Kết quả kiểm tra cấu hình:</strong> ${escapeHtml(res.result?.reason || "Hoàn tất kiểm tra.")}</div>`;
+      } else if (action === "inspect-recovery") {
+        const res = await repairInspectRecovery();
+        if (outputEl) outputEl.innerHTML = `<div class="callout callout--info"><strong>Trạng thái phục hồi:</strong> ${escapeHtml(res.result?.reason || "Không phát hiện bản nháp sót.")}</div>`;
+      } else if (action === "clear-drafts") {
+        await repairClearRecoveryDrafts();
+        showToast("Đã dọn dẹp các bản nháp phục hồi cũ.", "success");
+        if (outputEl) outputEl.innerHTML = `<div class="callout callout--success">Đã dọn dẹp xong các bản nháp phục hồi cũ.</div>`;
+        await loadRouteData();
+      }
+    } catch (error) {
+      if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">${escapeHtml(error.message || "Lỗi thao tác bảo trì.")}</div>`;
+      showToast(error.message || "Lỗi thao tác bảo trì.", "error");
+    } finally {
+      repairButton.disabled = false;
+    }
+    return;
+  }
+  if (event.target.closest("[data-save-settings]")) {
+    const saveButton = event.target.closest("[data-save-settings]");
+    const expectedRevision = Number(saveButton.dataset.expectedRevision ?? state.settings_revision ?? 0);
+    const lang = document.querySelector("#settings-lang")?.value || "vi";
+    const theme = document.querySelector("#settings-theme")?.value || "system";
+    const maximized = document.querySelector("#settings-maximized")?.checked ?? true;
+    const modelPolicy = document.querySelector("#settings-model-policy")?.value || "on_demand";
+    const gpuJobs = Number(document.querySelector("#settings-gpu-jobs")?.value || 1);
+
+    saveButton.disabled = true;
+    try {
+      const result = await patchSettings({
+        ui: { language: lang, theme: theme },
+        window: { start_maximized: Boolean(maximized) },
+        jobs: { model_load_policy: modelPolicy, max_heavy_gpu_jobs: gpuJobs },
+      }, expectedRevision);
+
+      if (result.accepted) {
+        state.settings = result.settings;
+        state.settings_revision = result.settings_revision;
+        showToast("Đã lưu cài đặt thành công.", "success");
+        render();
+      } else if (result.status === "conflict") {
+        showToast("Cảnh báo xung đột: Cài đặt đã bị thay đổi ở nơi khác. Đang tải lại...", "warning");
+        await loadRouteData();
+      }
+    } catch (error) {
+      showToast(error.message || "Không thể lưu cài đặt.", "error");
+    } finally {
+      saveButton.disabled = false;
+    }
+    return;
+  }
+  const resetSettingsBtn = event.target.closest("[data-reset-settings]");
+  if (resetSettingsBtn) {
+    const section = resetSettingsBtn.dataset.resetSettings;
+    resetSettingsBtn.disabled = true;
+    try {
+      const result = await resetSettingsSection(section);
+      if (result.accepted) {
+        state.settings = result.settings;
+        state.settings_revision = result.settings_revision;
+        showToast(`Đã đặt lại cấu hình phần ${section}.`, "success");
+        render();
+      }
+    } catch (error) {
+      showToast(error.message || "Không thể đặt lại cài đặt.", "error");
+    } finally {
+      resetSettingsBtn.disabled = false;
+    }
+    return;
+  }
+  if (event.target.closest("[data-create-backup]")) {
+    const button = event.target.closest("[data-create-backup]");
+    button.disabled = true;
+    try {
+      const res = await createBackup();
+      if (res.accepted) {
+        showToast(`Đã tạo bản sao lưu: ${res.backup_file}`, "success");
+        const inspectInput = document.querySelector("#backup-inspect-path");
+        if (inspectInput) inspectInput.value = res.backup_path;
+      }
+    } catch (error) {
+      showToast(error.message || "Không thể tạo backup.", "error");
+    } finally {
+      button.disabled = false;
+    }
+    return;
+  }
+  if (event.target.closest("[data-inspect-backup]")) {
+    const pathInput = document.querySelector("#backup-inspect-path");
+    const path = pathInput?.value?.trim();
+    const outputEl = document.querySelector("#restore-plan-output");
+    if (!path) {
+      showToast("Vui lòng nhập đường dẫn file backup ZIP.", "warning");
+      return;
+    }
+    try {
+      const insp = await inspectBackup(path);
+      if (!insp.valid) {
+        if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">File backup không hợp lệ: ${(insp.errors || []).join(", ")}</div>`;
+        return;
+      }
+      const plan = await planRestore(path);
+      const categories = Object.keys(plan.categories || {}).join(", ");
+      if (outputEl) {
+        outputEl.innerHTML = `
+          <div class="callout callout--warning">
+            <strong>Kế hoạch khôi phục:</strong>
+            <p>Bao gồm: ${escapeHtml(categories || "Các tệp cấu hình")}</p>
+            <p>Số tệp sẽ khôi phục: ${escapeHtml(String(plan.preview?.length || 0))}</p>
+            <div class="form-actions">
+              <button class="button button--danger" type="button" data-apply-restore data-backup-path="${escapeHtml(path)}">Xác nhận khôi phục ngay</button>
+            </div>
+          </div>
+        `;
+      }
+    } catch (error) {
+      if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">${escapeHtml(error.message || "Lỗi kiểm tra backup.")}</div>`;
+      showToast(error.message || "Lỗi kiểm tra backup.", "error");
+    }
+    return;
+  }
+  const applyRestoreBtn = event.target.closest("[data-apply-restore]");
+  if (applyRestoreBtn) {
+    const path = applyRestoreBtn.dataset.backupPath;
+    applyRestoreBtn.disabled = true;
+    try {
+      const plan = await planRestore(path);
+      const res = await applyRestore(path, plan, true);
+      if (res.accepted) {
+        showToast("Đã khôi phục dữ liệu thành công!", "success");
+        await initialize();
+      }
+    } catch (error) {
+      showToast(error.message || "Khôi phục thất bại.", "error");
+      applyRestoreBtn.disabled = false;
+    }
+    return;
+  }
   if (event.target.closest("#theme-toggle") || event.target.closest("[data-cycle-theme]")) { cycleTheme(); return; }
   const refreshButton = event.target.closest("[data-refresh-storage]");
   if (refreshButton) { refreshButton.disabled = true; await loadRouteData({ scan: true }); refreshButton.disabled = false; showToast("Đã quét lại storage theo yêu cầu."); return; }

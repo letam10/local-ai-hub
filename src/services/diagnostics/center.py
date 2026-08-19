@@ -1,8 +1,8 @@
-﻿"""
+"""
   FILE NOTE
-  - Muc dich: DiagnosticsCenter - he thong diagnostics read-only-first cho Local AI Hub V6, kiem tra 12 subsystem khong inference GPU/model
-  - Lien ket truc tiep: src/shared/paths/registry.py, src/app_config/settings_service.py, src/services/project_manager/manager.py, src/services/workflow_library/library.py, src/services/backup_manager.py
-  - Vung anh huong khi sua: Trang diagnostics (Config, Jobs, Models, Storage, GPU, Errors, Recovery); khong thay doi state; chi doc
+  - Mục đích: DiagnosticsCenter - hệ thống diagnostics read-only-first cho Local AI Hub V6, kiểm tra 12 subsystem không inference GPU/model
+  - Liên kết trực tiếp: src/shared/paths/registry.py, src/app_config/settings_service.py, src/services/artifact_store.py, src/services/project_manager/manager.py, src/services/workflow_library/library.py, src/services/backup_manager.py
+  - Vùng ảnh hưởng khi sửa: Trang diagnostics (Git integrity, Config, Jobs, Artifacts, Workflow, Models, Envs, Runtime, Storage, GPU, Errors, Recovery); chỉ đọc
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from src.shared.paths.registry import (
+    ROOT,
     CONFIG_ROOT,
     LOG_ROOT,
     MODEL_ROOT,
@@ -63,6 +64,23 @@ class DiagnosticsCenter:
     # ------------------------------------------------------------------
     # Config / State subsystems
     # ------------------------------------------------------------------
+
+    def git_integrity_state(self) -> dict[str, Any]:
+        """Check repository HEAD and branch in read-only manner."""
+        git_dir = ROOT / ".git"
+        if not git_dir.exists():
+            return _status(UNKNOWN, "Not a git repository or release build.", "No action required.")
+        try:
+            head_file = git_dir / "HEAD"
+            if head_file.exists():
+                ref = head_file.read_text(encoding="utf-8").strip()
+                return {
+                    **_status(HEALTHY, f"Git reference: {ref[:60]}.", "No action required."),
+                    "ref": ref,
+                }
+            return _status(UNKNOWN, "Git HEAD absent.", "No action required.")
+        except Exception as exc:
+            return _status(UNKNOWN, f"Git inspection error: {exc}", "No action required.")
 
     def config_registry_state(self) -> dict[str, Any]:
         """Check settings, workspace, workflow library files."""
@@ -114,12 +132,13 @@ class DiagnosticsCenter:
             return _status(UNAVAILABLE, f"Jobs store unavailable: {exc}", "Check job_manager module.")
 
     def artifact_store_state(self) -> dict[str, Any]:
-        """Check artifact store health."""
+        """Check artifact store health via public diagnostic method."""
         try:
             from src.services import artifact_store as ast
-            count = len(ast._registry) if hasattr(ast, "_registry") else -1
+            summary = ast.diagnostics_summary()
+            count = int(summary.get("total_artifacts", 0))
             return {
-                **_status(HEALTHY, f"Artifact store accessible. ~{count} entries.", "No action required."),
+                **_status(HEALTHY, f"Artifact store accessible. {count} entries.", "No action required."),
                 "artifact_count": count,
             }
         except Exception as exc:
@@ -147,9 +166,9 @@ class DiagnosticsCenter:
     # ------------------------------------------------------------------
 
     def models_inventory(self) -> dict[str, Any]:
-        """Scan Models/ directory for registered model families."""
+        """Scan Models/ directory for registered model families without loading."""
         if not MODEL_ROOT.exists():
-            return _status(UNAVAILABLE, "Models/ directory not found.", "Run Hub setup to initialise model paths.")
+            return _status(UNAVAILABLE, "Models/ directory not found.", "Model paths not initialised; review/install requires explicit user action.")
         entries: dict[str, Any] = {}
         total_bytes = 0
         for key, path in MODEL_PATHS.items():
@@ -163,22 +182,22 @@ class DiagnosticsCenter:
             else:
                 entries[key] = {"present": False, "size_bytes": 0}
         present = sum(1 for v in entries.values() if v["present"])
+        missing_keys = [k for k, v in entries.items() if not v["present"]]
+        next_action = f"Missing model dependencies: {', '.join(missing_keys[:3])}; review/install requires explicit user action." if missing_keys else "No action required."
         return {
-            **_status(HEALTHY if present else UNAVAILABLE, f"{present}/{len(entries)} model families present.", "Install missing models via Hub setup."),
+            **_status(HEALTHY if present else UNAVAILABLE, f"{present}/{len(entries)} model families present.", next_action),
             "models": entries,
             "total_size_bytes": total_bytes,
         }
 
     def environments_inventory(self) -> dict[str, Any]:
-        """Check presence of runtime environments (no activation)."""
-        envs_root = Path("Environments")
+        """Check presence of runtime environments using canonical registry path."""
+        envs_root = ROOT / "Environments"
         if not envs_root.exists():
-            envs_root = MODEL_ROOT.parent / "Environments"
-        if not envs_root.exists():
-            return _status(UNAVAILABLE, "Environments/ directory not found.", "Run Hub environment setup.")
+            return _status(UNAVAILABLE, "Environments/ directory not found.", "Environment paths not found; review/install requires explicit user action.")
         envs = [d.name for d in envs_root.iterdir() if d.is_dir()] if envs_root.exists() else []
         return {
-            **_status(HEALTHY if envs else NEEDS_ATTENTION, f"{len(envs)} environment(s) found.", "Run Hub environment setup if missing."),
+            **_status(HEALTHY if envs else NEEDS_ATTENTION, f"{len(envs)} environment(s) found.", "Review environments; install/update requires explicit user action." if not envs else "No action required."),
             "environments": envs,
         }
 
@@ -187,7 +206,7 @@ class DiagnosticsCenter:
         entries: dict[str, bool] = {key: path.exists() for key, path in RUNTIME_PATHS.items()}
         present = sum(entries.values())
         return {
-            **_status(HEALTHY if present else UNAVAILABLE, f"{present}/{len(entries)} runtime paths present.", "Run Hub setup to install missing engines."),
+            **_status(HEALTHY if present else UNAVAILABLE, f"{present}/{len(entries)} runtime paths present.", "Review runtime engines; install requires explicit user action." if present < len(entries) else "No action required."),
             "runtimes": entries,
         }
 
@@ -222,7 +241,7 @@ class DiagnosticsCenter:
         }
 
     def gpu_detection(self) -> dict[str, Any]:
-        """Read-only GPU detection via nvidia-smi query.  Never loads models."""
+        """Read-only GPU detection via nvidia-smi query (no model load/inference)."""
         try:
             import subprocess
             result = subprocess.run(
@@ -232,14 +251,14 @@ class DiagnosticsCenter:
             if result.returncode == 0:
                 gpus = [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
                 return {
-                    **_status(HEALTHY, f"{len(gpus)} GPU(s) detected via nvidia-smi.", "No action required."),
+                    **_status(HEALTHY, f"{len(gpus)} GPU(s) detected (metadata-only nvidia-smi query; no model load/inference).", "No action required."),
                     "gpus": gpus,
                 }
-            return _status(UNAVAILABLE, "nvidia-smi returned non-zero exit. No NVIDIA GPU or driver issue.", "Check NVIDIA driver installation.")
+            return _status(UNAVAILABLE, "nvidia-smi returned non-zero exit (metadata-only nvidia-smi query; no model load/inference).", "Check NVIDIA driver installation.")
         except FileNotFoundError:
-            return _status(UNKNOWN, "nvidia-smi not found. GPU state unknown.", "Install NVIDIA drivers or use CPU-only mode.")
+            return _status(UNKNOWN, "nvidia-smi not found (metadata-only nvidia-smi query; no model load/inference).", "Install NVIDIA drivers or use CPU-only mode.")
         except Exception as exc:
-            return _status(UNKNOWN, f"GPU detection error: {type(exc).__name__}", "Run nvidia-smi manually to diagnose.")
+            return _status(UNKNOWN, f"GPU detection error: {type(exc).__name__} (metadata-only nvidia-smi query; no model load/inference).", "Run nvidia-smi manually to diagnose.")
 
     def latest_app_errors(self, *, max_lines: int = _MAX_LOG_LINES) -> dict[str, Any]:
         """Tail sanitised error lines from Logs/."""
@@ -288,6 +307,7 @@ class DiagnosticsCenter:
         """Return a full diagnostics snapshot across all subsystems."""
         with self._lock:
             return {
+                "git_integrity": self.git_integrity_state(),
                 "config_registry": self.config_registry_state(),
                 "jobs_store": self.jobs_store_state(),
                 "artifact_store": self.artifact_store_state(),

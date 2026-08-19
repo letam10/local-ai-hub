@@ -1,4 +1,4 @@
-﻿"""
+"""
   FILE NOTE
   - Má»¥c Ä‘Ã­ch: Persistent settings service vá»›i atomic write (temp+fsync+replace), malformed-file recovery, revision/conflict detection, per-section reset, migration, vÃ  secret scrubbing
   - LiÃªn káº¿t trá»±c tiáº¿p: src/app_config/schema.py, src/app_config/defaults.py, src/app/main.py, src/services/api/
@@ -61,8 +61,8 @@ class SettingsPersistence:
     - Secret scrubbing: known secret keys are stripped before any write or export.
     """
 
-    def __init__(self, path: Path = DEFAULT_SETTINGS_PATH) -> None:
-        self.path = Path(path)
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = Path(path) if path is not None else Path(CONFIG_ROOT / "settings.json")
         self._lock = threading.RLock()
         self._shared_lock = _shared_settings_lock(self.path)
 

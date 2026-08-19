@@ -25,7 +25,7 @@ export const NAVIGATION = [
   { group: "SPEECH & VOICE", items: [["whisper", "Whisper", "≋"], ["voice", "Voice", "♪"]] },
   { group: "IMAGE & VIDEO", items: [["image", "Image AI", "✦"], ["media", "Media", "▹"], ["video", "Video Creative", "▶"], ["animesr", "AnimeSR", "⇱"]] },
   { group: "CREATIVE WORKSPACE", items: [["projects", "Projects & Recipes", "▧"]] },
-  { group: "HỆ THỐNG", items: [["jobs", "Jobs", "≡"], ["models", "Models & Storage", "▦"], ["settings", "Settings", "⚙"]] },
+  { group: "HỆ THỐNG", items: [["jobs", "Jobs", "≡"], ["models", "Models & Storage", "▦"], ["diagnostics", "Diagnostics", "⛨"], ["settings", "Settings", "⚙"]] },
 ];
 
 const component = (state, id) => (state.components || []).find((item) => item.id === id) || {};
@@ -1139,10 +1139,82 @@ function renderModels(state) {
     ${card("Model registry", models.length ? `<div class="table-wrap"><table><thead><tr><th>Model</th><th>Engine</th><th>Size</th><th>Status</th></tr></thead><tbody>${models.map((item) => `<tr><td>${escapeHtml(item.model_name)}</td><td>${escapeHtml(item.engine)}</td><td>${formatGb(item.size?.bytes)}</td><td>${statusPill(item.installed ? "installed" : "not_installed")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state compact">Chưa có model registry.</div>`, "", "card--wide")}`;
 }
 
+function renderDiagnostics(state) {
+  const diag = state.diagnostics?.snapshot || {};
+  const subsystems = [
+    ["git_integrity", "Git Integrity", diag.git_integrity],
+    ["config_registry", "Config Registry", diag.config_registry],
+    ["jobs_store", "Jobs Store", diag.jobs_store],
+    ["artifact_store", "Artifact Store", diag.artifact_store],
+    ["workflow_store", "Workflow Library", diag.workflow_store],
+    ["models_inventory", "Models Inventory", diag.models_inventory],
+    ["environments_inventory", "Environments", diag.environments_inventory],
+    ["runtime_inventory", "Runtime Engines", diag.runtime_inventory],
+    ["storage", "Storage Drives", diag.storage],
+    ["gpu", "GPU Detection", diag.gpu],
+    ["latest_app_errors", "Application Logs", diag.latest_app_errors],
+    ["recovery_forensic", "Recovery State", diag.recovery_forensic],
+  ];
+
+  const cardsHtml = subsystems.map(([id, label, info]) => {
+    const status = String(info?.status || "UNKNOWN").toUpperCase();
+    const reason = info?.reason || "Đang tải dữ liệu kiểm tra...";
+    const nextAction = info?.next_action || "Không có hành động bổ sung.";
+    return `
+      <article class="card diagnostics-card" data-subsystem="${escapeHtml(id)}" data-status="${escapeHtml(status)}">
+        <div class="split">
+          <strong>${escapeHtml(label)}</strong>
+          ${statusPill(status.toLowerCase(), status)}
+        </div>
+        <div class="diagnostics-detail">
+          <p class="diagnostics-reason">${escapeHtml(reason)}</p>
+          <div class="diagnostics-action"><span class="small-label">Khuyến nghị:</span> ${escapeHtml(nextAction)}</div>
+        </div>
+      </article>
+    `;
+  }).join("");
+
+  return heading("SYSTEM", "Diagnostics Center", "Kiểm tra toàn diện 12 subsystem phần mềm, phát hiện sự cố và hỗ trợ bảo trì an toàn (read-only first).", `
+    <div class="form-actions">
+      <button class="button" type="button" data-refresh-diagnostics>Làm mới kiểm tra</button>
+      <button class="button button--accent" type="button" data-export-diagnostics>Xuất gói chẩn đoán (Sanitized)</button>
+    </div>
+  `) + `
+    <div class="workspace-grid workspace-grid--two diagnostics-grid">
+      ${cardsHtml}
+    </div>
+    <section class="card repair-center-card">
+      <div class="card-title-row">
+        <div>
+          <span class="eyebrow">BẢO TRÌ & KHẮC PHỤC</span>
+          <h2>Desktop Repair Center</h2>
+          <p>Các hành động bảo trì chỉ tác động lên machine-local app state (fail-closed, inspect trước khi thực thi).</p>
+        </div>
+      </div>
+      <div class="form-actions repair-actions">
+        <button class="button" type="button" data-repair="verify-config">Kiểm tra cấu hình app</button>
+        <button class="button" type="button" data-repair="inspect-recovery">Kiểm tra trạng thái phục hồi</button>
+        <button class="button" type="button" data-repair="clear-drafts">Dọn dẹp bản nháp phục hồi cũ</button>
+      </div>
+      <div class="repair-output" id="repair-output" role="status" aria-live="polite"></div>
+    </section>
+  `;
+}
+
 function renderSettings(state) {
   const settings = state.settings || {};
+  const revision = Number(state.settings_revision ?? settings.settings_revision ?? 0);
+  const recovery = state.settingsRecovery || settings.recovery || {};
   const snapshot = readinessSnapshot(state);
-  return heading("SYSTEM", "Settings", "Cấu hình startup, chính sách GPU, storage và advanced integrations. Không hiển thị secrets hay local machine paths.") + `
+  const recoveryBanner = recovery.status === "recovery_required" ? `
+    <div class="callout callout--danger">
+      <strong>Cảnh báo khôi phục cấu hình:</strong> ${escapeHtml(recovery.reason || "File settings bị lỗi.")}
+      <p>${escapeHtml(recovery.action || "Vui lòng restore từ backup hoặc reset section.")}</p>
+    </div>
+  ` : "";
+
+  return heading("SYSTEM", "Settings", "Cấu hình startup, chính sách GPU, lưu trữ và sao lưu / khôi phục dữ liệu machine-local an toàn.") + `
+    ${recoveryBanner}
     <section class="readiness-page" aria-labelledby="readiness-page-title" data-readiness-source="server-snapshot">
       <section class="readiness-summary card" aria-labelledby="readiness-page-title" data-readiness-status="${escapeHtml(snapshot.status)}">
         <div class="card-title-row"><div><span class="eyebrow" data-i18n="SERVER SNAPSHOT">${uiTextHtml("SERVER SNAPSHOT")}</span><h2 id="readiness-page-title" data-i18n="Readiness & Module Plan">${uiTextHtml("Readiness & Module Plan")}</h2><p data-i18n="Bootstrap product-surface evidence is shown as received; fast refresh never promotes it to execution.">${uiTextHtml("Bootstrap product-surface evidence is shown as received; fast refresh never promotes it to execution.")}</p></div><div class="readiness-summary__pills">${statusPill(snapshot.status, readinessStatusLabel(snapshot.status))}<span class="tag">${escapeHtml(snapshot.resourceSnapshot)}</span></div></div>
@@ -1155,15 +1227,101 @@ function renderSettings(state) {
       ${mediaEvidencePanel(state, "settings")}
     </section>
     <div class="workspace-grid workspace-grid--two">
-      ${card("Appearance & startup", `<div class="row-list"><div class="row-item"><span>Start maximized</span><strong>${settings.start_maximized ? "Bật" : "Tắt"}</strong></div><div class="row-item"><span>Minimum window</span><strong>${escapeHtml(settings.minimum_width || 1280)} × ${escapeHtml(settings.minimum_height || 720)}</strong></div><div class="row-item"><span>Theme</span><button class="button button--compact" type="button" data-cycle-theme>Đổi theme</button></div></div>`)}
-      ${card("Workers & lifecycle", `<div class="row-list"><div class="row-item"><span>Model policy</span><strong>${escapeHtml(settings.model_load_policy || "on_demand")}</strong></div><div class="row-item"><span>Heavy GPU slots</span><strong>${escapeHtml(settings.max_heavy_gpu_jobs || 1)}</strong></div><div class="row-item"><span>ComfyUI port</span><strong>${escapeHtml(settings.comfyui_port || 8188)}</strong></div></div><div class="form-actions"><button class="button" type="button" data-close-backends>Đóng backend Hub-owned rảnh</button></div>`)}
-      ${card("Storage safety", `<ul class="notice-list"><li>Không ghi đè source media.</li><li>Không duplicate model multi-GB.</li><li>Không tự xoá user media hoặc unknown legacy data.</li><li>AIRI giữ external/installer-managed.</li></ul>`, "", "card--flat")}
-      ${card("Advanced legacy", `<details class="advanced"><summary>Legacy applications</summary><p>SAM2 Mask Studio, Anime Upscale Studio và Local Image Studio không nằm trong normal workflow. Giữ lại làm fallback/debug sau khi direct worker được đánh giá.</p></details>`, "", "card--flat")}
+      ${card("Giao diện & Khởi động", `
+        <div class="row-list">
+          <div class="row-item">
+            <span>Ngôn ngữ</span>
+            <select id="settings-lang" class="input input--select" data-setting-key="ui.language">
+              <option value="vi" ${settings.language === "vi" ? "selected" : ""}>Tiếng Việt</option>
+              <option value="en" ${settings.language === "en" ? "selected" : ""}>English</option>
+            </select>
+          </div>
+          <div class="row-item">
+            <span>Giao diện</span>
+            <select id="settings-theme" class="input input--select" data-setting-key="ui.theme">
+              <option value="system" ${settings.theme === "system" ? "selected" : ""}>Theo hệ thống</option>
+              <option value="dark" ${settings.theme === "dark" ? "selected" : ""}>Tối (Dark)</option>
+              <option value="light" ${settings.theme === "light" ? "selected" : ""}>Sáng (Light)</option>
+            </select>
+          </div>
+          <div class="row-item">
+            <span>Khởi động tối đa hóa</span>
+            <input type="checkbox" id="settings-maximized" data-setting-key="window.start_maximized" ${settings.start_maximized ? "checked" : ""} />
+          </div>
+          <div class="row-item">
+            <span>Kích thước tối thiểu</span>
+            <strong>${escapeHtml(settings.minimum_width || 1280)} × ${escapeHtml(settings.minimum_height || 720)}</strong>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="button button--compact" type="button" data-reset-settings="ui">Đặt lại UI</button>
+          <button class="button button--compact" type="button" data-reset-settings="window">Đặt lại Cửa sổ</button>
+        </div>
+      `)}
+      ${card("Chính sách & Tài nguyên", `
+        <div class="row-list">
+          <div class="row-item">
+            <span>Chính sách nạp Model</span>
+            <select id="settings-model-policy" class="input input--select" data-setting-key="jobs.model_load_policy">
+              <option value="on_demand" ${settings.model_load_policy === "on_demand" ? "selected" : ""}>Nạp khi cần (On demand)</option>
+              <option value="keep_loaded" ${settings.model_load_policy === "keep_loaded" ? "selected" : ""}>Giữ trong VRAM (Keep loaded)</option>
+            </select>
+          </div>
+          <div class="row-item">
+            <span>Số job GPU nặng đồng thời</span>
+            <input type="number" id="settings-gpu-jobs" min="1" max="4" class="input input--compact" data-setting-key="jobs.max_heavy_gpu_jobs" value="${escapeHtml(settings.max_heavy_gpu_jobs || 1)}" />
+          </div>
+          <div class="row-item">
+            <span>ComfyUI Port</span>
+            <strong>${escapeHtml(settings.comfyui_port || 8188)}</strong>
+          </div>
+          <div class="row-item">
+            <span>Revision hiện tại</span>
+            <span class="tag">rev ${revision}</span>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="button button--compact" type="button" data-reset-settings="jobs">Đặt lại Jobs</button>
+          <button class="button button--accent" type="button" data-save-settings data-expected-revision="${revision}">Lưu cài đặt</button>
+        </div>
+        <div id="settings-save-status" role="status" aria-live="polite"></div>
+      `)}
+      ${card("Sao lưu & Khôi phục dữ liệu (Backup & Restore)", `
+        <p class="small">Tạo bản sao lưu ZIP an toàn cho toàn bộ cấu hình, projects, recipes, workflow library và drafts (đã lọc bỏ secrets và không bao gồm models/media nặng).</p>
+        <div class="form-actions">
+          <button class="button button--accent" type="button" data-create-backup>Tạo bản sao lưu mới</button>
+        </div>
+        <div class="backup-restore-box">
+          <label for="backup-inspect-path" class="small-label">Đường dẫn file Backup để khôi phục:</label>
+          <div class="split">
+            <input type="text" id="backup-inspect-path" class="input" placeholder="D:\\LocalAIHub\\Config\\backups\\hub-backup-....zip" />
+            <button class="button" type="button" data-inspect-backup>Kiểm tra & Lập kế hoạch</button>
+          </div>
+          <div id="restore-plan-output" class="restore-plan-output" role="status" aria-live="polite"></div>
+        </div>
+      `, "", "card--wide")}
+      ${card("An toàn dữ liệu", `<ul class="notice-list"><li>Không ghi đè source media.</li><li>Không duplicate model multi-GB.</li><li>Không tự xoá user media hoặc unknown legacy data.</li><li>AIRI giữ external/installer-managed.</li></ul>`, "", "card--flat")}
     </div>`;
 }
 
 export function renderPage(route, state) {
-  const pages = { dashboard: renderDashboard, airi: renderAiri, vision: renderVision, sam2: renderSam2, ocr: renderOcr, whisper: renderWhisper, voice: renderVoice, image: renderImageQuickV5, media: renderMedia, animesr: renderAnime, projects: renderCreativeWorkspace, jobs: renderJobs, models: renderModels, settings: renderSettings };
+  const pages = {
+    dashboard: renderDashboard,
+    airi: renderAiri,
+    vision: renderVision,
+    sam2: renderSam2,
+    ocr: renderOcr,
+    whisper: renderWhisper,
+    voice: renderVoice,
+    image: renderImageQuickV5,
+    media: renderMedia,
+    animesr: renderAnime,
+    projects: renderCreativeWorkspace,
+    jobs: renderJobs,
+    models: renderModels,
+    diagnostics: renderDiagnostics,
+    settings: renderSettings,
+  };
   const pageRoute = route === "video" ? "media" : route;
   const nodeCopy = {
     image: "Compose FLUX/Qwen, SAM2 mask và image transforms trong cùng graph; preset JSON được track, workflow cá nhân autosave local.",
