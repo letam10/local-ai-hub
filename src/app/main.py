@@ -1,11 +1,10 @@
-"""Desktop shell for the one Local AI Hub frontend.
-# FILE NOTE
-# - Mục đích: Native desktop shell (pywebview window, startup mutex, single-window lifecycle, close prompt bridge, tray integration)
-# - Liên kết trực tiếp: src/app/desktop_lifecycle.py, src/app/tray.py, src/services/api/api_server.py, src/ui/index.html
-# - Vùng ảnh hưởng khi sửa: Khởi động cửa sổ desktop native, vòng đời đóng app, background tray icon
-
-The browser and desktop paths intentionally share ``/ui/``.  This module only
-owns the native window; capability and runtime state remain in the loopback API.
+"""
+/*
+  FILE NOTE
+  - Mục đích: Native desktop shell (pywebview window, single-instance mutex, startup mutex, window bounds persistence, close prompt bridge, tray integration)
+  - Liên kết trực tiếp: src/app/desktop_lifecycle.py, src/app/tray.py, src/services/api/api_server.py, src/app_config/settings_service.py, src/ui/index.html
+  - Vùng ảnh hưởng khi sửa: Khởi động cửa sổ desktop native, single-instance guard, nạp cấu hình kích thước cửa sổ, vòng đời đóng app, background tray icon
+*/
 """
 
 from __future__ import annotations
@@ -32,6 +31,7 @@ HOST = "127.0.0.1"
 PORT = 8765
 UI_URL = f"http://{HOST}:{PORT}/ui/"
 API_STARTUP_MUTEX = r"Local\LocalAIHub.ApiStartup.v1"
+APP_INSTANCE_MUTEX = r"Local\LocalAIHub.AppInstance.v1"
 _api_process: subprocess.Popen[object] | None = None
 _api_process_lock = threading.RLock()
 _shutdown_started = False
@@ -367,6 +367,23 @@ def _load_ui_when_ready(window: object) -> None:
         return
 
 
+def _load_window_settings() -> tuple[int, int, bool]:
+    """Read minimum window dimensions and start_maximized from settings.json."""
+    try:
+        from src.app_config.settings_service import SettingsPersistence
+        from src.shared.paths.registry import CONFIG_ROOT
+        svc = SettingsPersistence(CONFIG_ROOT / "settings.json")
+        loaded = svc.load()
+        settings = loaded.get("settings", {})
+        window_cfg = settings.get("window", {}) if isinstance(settings, dict) else {}
+        min_w = max(800, min(3840, int(window_cfg.get("minimum_width", 1280))))
+        min_h = max(600, min(2160, int(window_cfg.get("minimum_height", 720))))
+        maximized = bool(window_cfg.get("start_maximized", True))
+        return min_w, min_h, maximized
+    except Exception:
+        return 1280, 720, True
+
+
 def main() -> int:
     try:
         import webview
@@ -374,48 +391,51 @@ def main() -> int:
         print("pywebview is required for the desktop shell. Install requirements-hub.txt in the Hub environment.", file=sys.stderr)
         return 2
 
-    try:
-        bridge = DesktopBridge()
-        window = webview.create_window(
-            "Local AI Hub",
-            html=_loading_html(),
-            width=1280,
-            height=720,
-            min_size=(1280, 720),
-            resizable=True,
-            confirm_close=False,
-            js_api=bridge,
-        )
-        bridge._bind(window)
-        window.events.closing += bridge._request_window_close
+    min_w, min_h, start_maximized = _load_window_settings()
 
-        def initialize_window() -> None:
-            # WebView2 applies the maximize request after the native handle exists.
-            try:
-                window.maximize()
-            except Exception:
-                # The window still respects the minimum size if a work area is small.
-                pass
-            threading.Thread(
-                target=_load_ui_when_ready,
-                args=(window,),
-                name="LocalAIHub-API-startup",
-                daemon=True,
-            ).start()
+    with startup_mutex(APP_INSTANCE_MUTEX, 0.5) as instance_acquired:
+        if not instance_acquired:
+            print("Local AI Hub is already running in another instance.", file=sys.stderr)
+            return 0
 
         try:
-            webview.start(initialize_window, gui="edgechromium", debug=False)
-        finally:
-            # Background mode deliberately keeps both this window process and
-            # an API it owns alive.  Cleanup is authorized only by a normal
-            # zero-job close or a completed cooperative cancellation.
-            if bridge._controller and bridge._controller.cleanup_allowed:
-                close_owned_idle_backends()
-                close_owned_api()
-        return 0
-    except Exception as exc:  # pragma: no cover - native GUI errors are host-specific
-        print(f"Local AI Hub desktop shell failed: {exc}", file=sys.stderr)
-        return 1
+            bridge = DesktopBridge()
+            window = webview.create_window(
+                "Local AI Hub",
+                html=_loading_html(),
+                width=min_w,
+                height=min_h,
+                min_size=(1280, 720),
+                resizable=True,
+                confirm_close=False,
+                js_api=bridge,
+            )
+            bridge._bind(window)
+            window.events.closing += bridge._request_window_close
+
+            def initialize_window() -> None:
+                if start_maximized:
+                    try:
+                        window.maximize()
+                    except Exception:
+                        pass
+                threading.Thread(
+                    target=_load_ui_when_ready,
+                    args=(window,),
+                    name="LocalAIHub-API-startup",
+                    daemon=True,
+                ).start()
+
+            try:
+                webview.start(initialize_window, gui="edgechromium", debug=False)
+            finally:
+                if bridge._controller and bridge._controller.cleanup_allowed:
+                    close_owned_idle_backends()
+                    close_owned_api()
+            return 0
+        except Exception as exc:  # pragma: no cover - native GUI errors are host-specific
+            print(f"Local AI Hub desktop shell failed: {exc}", file=sys.stderr)
+            return 1
 
 
 if __name__ == "__main__":

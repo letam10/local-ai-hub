@@ -1,0 +1,152 @@
+"""
+/*
+  FILE NOTE
+  - Mục đích: Packaging and release manifest builder cho Local AI Hub V6 — tạo core release ZIP, kiểm tra SHA-256, và xuất release manifest
+  - Liên kết trực tiếp: distribution/core.manifest.json, distribution/release_manifest.json, scripts/build_core_release.py
+  - Vùng ảnh hưởng khi sửa: Quy trình đóng gói và xuất artifact release
+*/
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import zipfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+DIST_DIR = ROOT / "dist"
+MANIFEST_PATH = ROOT / "distribution" / "release_manifest.json"
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1024 * 1024):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def get_git_info() -> tuple[str, str]:
+    try:
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).decode().strip()
+    except Exception:
+        commit = "unknown"
+    try:
+        branch = subprocess.check_output(["git", "branch", "--show-current"], cwd=ROOT).decode().strip()
+    except Exception:
+        branch = "unknown"
+    return commit, branch
+
+
+def build_release_package(output_zip: Path | None = None) -> dict[str, Any]:
+    """Build the clean Core release zip containing source, scripts, config examples, docs."""
+    DIST_DIR.mkdir(parents=True, exist_ok=True)
+    out_zip = output_zip or (DIST_DIR / "LocalAIHub-Core-Win64-v6.0.0.zip")
+
+    commit, branch = get_git_info()
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    included_roots = ["src", "scripts", "distribution", "docs", "workflows"]
+    included_files = [
+        "requirements-hub.txt",
+        "dependencies.lock.json",
+        "README.md",
+        "LICENSES.md",
+        "AGENTS.md",
+    ]
+
+    total_files = 0
+    with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Add root files
+        for f_name in included_files:
+            f_path = ROOT / f_name
+            if f_path.exists():
+                zf.write(f_path, f_name)
+                total_files += 1
+
+        # Add config examples
+        config_dir = ROOT / "Config"
+        if config_dir.exists():
+            for ex in config_dir.glob("*.example.json"):
+                zf.write(ex, f"Config/{ex.name}")
+                total_files += 1
+
+        # Add roots
+        for r_name in included_roots:
+            r_path = ROOT / r_name
+            if r_path.exists():
+                for p in r_path.rglob("*"):
+                    if p.is_file() and "__pycache__" not in p.parts:
+                        rel = p.relative_to(ROOT).as_posix()
+                        zf.write(p, rel)
+                        total_files += 1
+
+    zip_hash = sha256_file(out_zip)
+    zip_size = out_zip.stat().st_size
+
+    manifest = {
+        "schema_version": 1,
+        "application_name": "Local AI Hub",
+        "version": "6.0.0",
+        "git_commit": commit,
+        "git_branch": branch,
+        "build_timestamp": timestamp,
+        "packaging_tool": "Local AI Hub Release Packager (Python/zipfile)",
+        "platform": "windows-x64",
+        "release_artifact": {
+            "file_name": out_zip.name,
+            "size_bytes": zip_size,
+            "sha256": zip_hash,
+            "total_files": total_files,
+        },
+        "included_application_components": [
+            "src (Application Core, UI Shell, API Server, Settings, Diagnostics, Backups)",
+            "scripts (Launchers, Verifiers, Updater, Repair, Uninstaller)",
+            "distribution (Installer specs, Release manifests)",
+            "docs (Architecture, Recovery, API documentation)",
+            "Config/*.example.json (Tracked configuration templates)",
+        ],
+        "excluded_machine_local_data": [
+            "Models (AI model weights preserved locally on host)",
+            "Environments (Python virtual environments preserved locally on host)",
+            "runtime (Managed native runtime binaries preserved on host)",
+            "Output (User-generated images, videos, audio preserved on host)",
+            "Config/settings.json (User settings preserved on host)",
+            "Projects & Backups (User workspace and backup archives preserved on host)",
+            "Reports (Forensic evidence and audit logs preserved on host)",
+        ],
+        "minimum_system_requirements": {
+            "os": "Windows 10 / Windows 11 (64-bit)",
+            "webview": "Microsoft Edge WebView2 Runtime",
+            "python": "Python 3.10+ (64-bit)",
+            "memory": "8 GiB RAM minimum (16 GiB+ recommended)",
+            "gpu": "NVIDIA GeForce RTX (8GB+ VRAM recommended for heavy models)",
+            "network": "Loopback-only (127.0.0.1) · No internet required for core operation",
+        },
+        "ai_runtime_validation_status": "DEFERRED BY USER",
+        "known_limitations": [
+            "AI runtime and model execution deferred until user-directed activation.",
+            "Requires Microsoft Edge WebView2 runtime installed for desktop GUI.",
+        ],
+    }
+
+    # Save manifest
+    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    (DIST_DIR / "release_manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    return manifest
+
+
+if __name__ == "__main__":
+    res = build_release_package()
+    print("=== RELEASE MANIFEST ===")
+    print(json.dumps(res, indent=2, ensure_ascii=False))

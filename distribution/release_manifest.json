@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "application_name": "Local AI Hub",
+  "version": "6.0.0",
+  "git_commit": "2e2e3b7f836fb9f21ca7afc410dcb38964670709",
+  "git_branch": "feature/v6-final-desktop-release",
+  "build_timestamp": "2026-08-19T14:11:09.581219+00:00",
+  "packaging_tool": "Local AI Hub Release Packager (Python/zipfile)",
+  "platform": "windows-x64",
+  "release_artifact": {
+    "file_name": "LocalAIHub-Core-Win64-v6.0.0.zip",
+    "size_bytes": 970188,
+    "sha256": "536db8df01df7c78acef2cb546ff206163ae6cb91cdc950f6c0f275836a93d01",
+    "total_files": 359
+  },
+  "included_application_components": [
+    "src (Application Core, UI Shell, API Server, Settings, Diagnostics, Backups)",
+    "scripts (Launchers, Verifiers, Updater, Repair, Uninstaller)",
+    "distribution (Installer specs, Release manifests)",
+    "docs (Architecture, Recovery, API documentation)",
+    "Config/*.example.json (Tracked configuration templates)"
+  ],
+  "excluded_machine_local_data": [
+    "Models (AI model weights preserved locally on host)",
+    "Environments (Python virtual environments preserved locally on host)",
+    "runtime (Managed native runtime binaries preserved on host)",
+    "Output (User-generated images, videos, audio preserved on host)",
+    "Config/settings.json (User settings preserved on host)",
+    "Projects & Backups (User workspace and backup archives preserved on host)",
+    "Reports (Forensic evidence and audit logs preserved on host)"
+  ],
+  "minimum_system_requirements": {
+    "os": "Windows 10 / Windows 11 (64-bit)",
+    "webview": "Microsoft Edge WebView2 Runtime",
+    "python": "Python 3.10+ (64-bit)",
+    "memory": "8 GiB RAM minimum (16 GiB+ recommended)",
+    "gpu": "NVIDIA GeForce RTX (8GB+ VRAM recommended for heavy models)",
+    "network": "Loopback-only (127.0.0.1) · No internet required for core operation"
+  },
+  "ai_runtime_validation_status": "DEFERRED BY USER",
+  "known_limitations": [
+    "AI runtime and model execution deferred until user-directed activation.",
+    "Requires Microsoft Edge WebView2 runtime installed for desktop GUI."
+  ]
+}

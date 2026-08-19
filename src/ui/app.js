@@ -1652,10 +1652,20 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("keydown", async (event) => {
-  if (event.key === "Escape" && artifactPreviewLayer && !artifactPreviewLayer.matches(":empty")) {
-    event.preventDefault();
-    closeArtifactPreview();
-    return;
+  if (event.key === "Escape") {
+    if (artifactPreviewLayer && !artifactPreviewLayer.matches(":empty")) {
+      event.preventDefault();
+      closeArtifactPreview();
+      return;
+    }
+    const openModals = Array.from(document.querySelectorAll(".modal, .dialog, .is-open, .modal-backdrop, .toast-container"));
+    if (openModals.length) {
+      event.preventDefault();
+      openModals.forEach((el) => {
+        if (el.classList.contains("is-open")) el.classList.remove("is-open");
+      });
+      return;
+    }
   }
   if (routeId() !== "image" || state.workspaceTabs.image !== "studio") return;
   const target = event.target;
