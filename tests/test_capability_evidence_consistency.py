@@ -1,4 +1,8 @@
 """Static contract tests for local component readiness and smoke evidence."""
+# FILE NOTE
+# - Mục đích: Static contract tests cho capability evidence readiness và smoke projection
+# - Liên kết trực tiếp: src/services/api/core.py (_last_smoke_projection, _tool_readiness)
+# - Vùng ảnh hưởng khi sửa: PR64 thêm completion_receipts() lookup; các test cần mock nó
 
 from __future__ import annotations
 
@@ -62,8 +66,12 @@ class CapabilityEvidenceConsistencyTests(unittest.TestCase):
 
     def test_component_projection_is_path_free_and_distinguishes_not_run_from_missing(self) -> None:
         item = _component(path=r"C:\private\runtime", environment=r"C:\private\env")
-        with patch.object(core, "components", return_value=[item]), patch.object(core, "_path_exists", return_value=True), patch.object(
-            core, "_port_open", return_value=False
+        with (
+            patch.object(core, "components", return_value=[item]),
+            patch.object(core, "_path_exists", return_value=True),
+            patch.object(core, "_port_open", return_value=False),
+            # PR64: completion_receipts() is now consulted; isolate from disk state.
+            patch.object(core, "completion_receipts", return_value={}),
         ):
             projection = core.component_statuses()[0]
         self.assertEqual(projection["component_status"], "installed")
@@ -91,6 +99,8 @@ class CapabilityEvidenceConsistencyTests(unittest.TestCase):
             patch.object(core, "_path_exists", return_value=True),
             patch.object(core, "_port_open", return_value=False),
             patch.object(core, "smoke_passed", return_value=True),
+            # PR64: completion_receipts() is now consulted; return {} so item's own last_smoke drives the test.
+            patch.object(core, "completion_receipts", return_value={}),
         ):
             status = core.component_statuses()[0]
             readiness = core._tool_readiness("segment_image", {"sam2": status})

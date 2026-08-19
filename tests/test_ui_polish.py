@@ -1,4 +1,8 @@
 """Focused contracts for the UI continuity, layout and language controls."""
+# FILE NOTE
+# - Mục đích: Contract tests cho UI polish: layout, focus, i18n, snapshot continuity
+# - Liên kết trực tiếp: src/ui/app.js, src/ui/pages.js, src/ui/index.html, src/ui/styles.css
+# - Vùng ảnh hưởng khi sửa: PR44 thay đổi render() signature và closeArtifactPreview() interface
 
 from __future__ import annotations
 
@@ -28,9 +32,11 @@ class UiPolishTests(unittest.TestCase):
         self.assertIn('refreshFast({ quiet: false, renderView: true })', self.app)
 
     def test_route_focus_is_intentional_and_not_every_background_render(self) -> None:
-        self.assertRegex(self.app, r"const render = \(\{ focus = false \} = \{\}\) =>")
-        self.assertIn("if (focus) view.focus({ preventScroll: true });", self.app)
-        self.assertIn('render({ focus: true }); await loadRouteData()', self.app)
+        # PR44: render() uses string focus key; background renders preserve focus via continuity
+        self.assertRegex(self.app, r'const render = \(\{ background = false, focus = "" \} = \{\}\) =>')
+        self.assertIn("restoreFocusContinuity(continuity, focus);", self.app)
+        self.assertIn('render({ focus: "main" }); await loadRouteData()', self.app)
+        self.assertIn("captureFocusContinuity", self.app)
 
     def test_full_width_content_and_focus_outline_are_explicit(self) -> None:
         module_rule = re.search(r"#module-view\s*\{([^}]*)\}", self.css, re.S)
@@ -79,10 +85,11 @@ class UiPolishTests(unittest.TestCase):
         self.assertNotIn('nodes("[data-recovery-count]").forEach', self.i18n)
 
     def test_artifact_preview_close_restores_opener_or_main_landmark(self) -> None:
+        # PR44: uses opener?.isConnected + focusMainContent() instead of querySelector + focusTarget
         self.assertIn("artifactPreviewOpener = button;", self.app)
         self.assertIn("const opener = artifactPreviewOpener;", self.app)
-        self.assertIn('document.querySelector("#main-content")', self.app)
-        self.assertIn("focusTarget?.focus({ preventScroll: true });", self.app)
+        self.assertIn("opener?.isConnected", self.app)
+        self.assertIn("focusMainContent();", self.app)
         self.assertIn("if (event.key === \"Escape\"", self.app)
         self.assertIn("closeArtifactPreview();", self.app)
 
