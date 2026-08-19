@@ -1,3 +1,10 @@
+/*
+  FILE NOTE
+  - Mục đích: Main controller và UI lifecycle cho Local AI Hub frontend (routing, snapshot state, desktop close bridge, preview layer)
+  - Liên kết trực tiếp: src/ui/index.html, src/ui/pages.js, src/ui/node_studio.js, src/ui/image_mask_studio.js, src/ui/i18n.js, src/ui/api.js
+  - Vùng ảnh hưởng khi sửa: Toàn bộ giao diện frontend (navigation, render, snapshot continuity, toast, keyboard shortcuts)
+*/
+
 import {
   cancelJob,
   closeOwnedBackends,
@@ -90,7 +97,6 @@ const sidebar = document.querySelector(".sidebar");
 const sidebarToggle = document.querySelector("#sidebar-toggle");
 const artifactPreviewLayer = document.querySelector("#artifact-preview-layer");
 const mainContent = document.querySelector("#main-content");
-const snapshotStatus = document.querySelector("#snapshot-status");
 const workflowLibraryAdapter = createWorkflowLibraryAdapter(null, {
   list: getWorkflowLibrary,
   save: ({ entry, expected_revision }) => saveWorkflowLibrary(entry, expected_revision),

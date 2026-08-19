@@ -1,3 +1,10 @@
+/*
+  FILE NOTE
+  - Mục đích: Hệ thống đa ngôn ngữ (5 ngôn ngữ: vi, en, zh, ja, ko) cho static UI copy của Local AI Hub
+  - Liên kết trực tiếp: src/ui/app.js, src/ui/pages.js, src/ui/index.html
+  - Vùng ảnh hưởng khi sửa: Toàn bộ nhãn, tiêu đề, nút bấm và câu văn static trên giao diện
+*/
+
 const LANGUAGE_STORAGE_KEY = "local-ai-hub-language";
 
 export const LANGUAGE_OPTIONS = Object.freeze([

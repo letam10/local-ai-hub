@@ -1,4 +1,8 @@
 """Desktop shell for the one Local AI Hub frontend.
+# FILE NOTE
+# - Mục đích: Native desktop shell (pywebview window, startup mutex, single-window lifecycle, close prompt bridge, tray integration)
+# - Liên kết trực tiếp: src/app/desktop_lifecycle.py, src/app/tray.py, src/services/api/api_server.py, src/ui/index.html
+# - Vùng ảnh hưởng khi sửa: Khởi động cửa sổ desktop native, vòng đời đóng app, background tray icon
 
 The browser and desktop paths intentionally share ``/ui/``.  This module only
 owns the native window; capability and runtime state remain in the loopback API.

@@ -1,3 +1,10 @@
+/*
+  FILE NOTE
+  - Mục đích: Node Studio canvas editor (Hub DAG visual workflow editor, LiteGraph adapter, Smart Connection Picker, palettes, inspector, presets)
+  - Liên kết trực tiếp: src/ui/app.js, src/ui/pages.js, src/ui/api.js, src/ui/workflow_library.js, src/ui/vendor/litegraph.js
+  - Vùng ảnh hưởng khi sửa: Toàn bộ chức năng Hub Nodes (Image AI studio, Media studio, SAM2 studio, AnimeSR studio)
+*/
+
 import {
   cancelJob,
   escapeHtml,
@@ -676,14 +683,41 @@ class HubGraphEditor {
           <button class="button button--compact" type="button" data-graph-action="toggle-guide" aria-expanded="${String(this.panelState.guide)}">Node Guide</button>
         </div>
         <details class="graph-guide" data-graph-guide ${this.panelState.guide ? "open" : ""}>
-          <summary>Node Guide · typed workflow authoring</summary>
+          <summary>Node Guide · Hướng dẫn toàn diện Hub Nodes & Typed Workflow</summary>
           <div class="graph-guide__content">
-            <p><strong>Typed sockets:</strong> connect matching IMAGE, MASK, VIDEO, AUDIO, TEXT, NUMBER, BOOLEAN or METADATA ports. A filled non-multi input rejects a second edge.</p>
-            <p><strong>Canvas:</strong> middle-drag pans; plain click selects one node; Ctrl/Shift adds; drag empty canvas for marquee; drag selected nodes together; Escape clears; Delete removes safely; arrows move selected nodes and Shift makes a larger step.</p>
-            <p><strong>Status truth:</strong> validation, dirty/downstream, cache, progress and error are shown per node. Registry statuses remain operational, partial or unavailable; opening this editor never runs a worker or probes FFmpeg.</p>
-            <p><strong>Media evidence:</strong> ${escapeHtml(this.operationScopeSummary())} ${escapeHtml(safeOperationScopeText(this.operationScope.nextAction, MEDIA_OPERATION_SCOPE_FALLBACK.nextAction))}</p>
-            <p><strong>Preview/recovery:</strong> previews use only opaque Hub artifact URLs. Video/audio use metadata preload; masks without raster media show a truthful fallback. Local draft, save, import and export keep paths and secrets out of localStorage.</p>
-            <div class="graph-guide__templates"><strong>Start from a template</strong>${this.presets.filter((item) => item.scope === this.scope).slice(0, 6).map((item) => `<button class="button button--compact" type="button" data-graph-guide-preset="${escapeHtml(item.id)}" title="${escapeHtml(item.description || "")}">${escapeHtml(item.title || item.id)}</button>`).join("") || "<span>No template metadata available.</span>"}</div>
+            <div class="graph-guide__section">
+              <strong>1. Khái niệm Typed Sockets & Dữ liệu</strong>
+              <p>Mỗi cổng (socket) trên node được quy định kiểu dữ liệu nghiêm ngặt: <code>IMAGE</code> (tím), <code>MASK</code> (xanh lục), <code>VIDEO</code> (hồng đỏ), <code>AUDIO</code> (cam), <code>TEXT</code> (lam), <code>NUMBER</code> (xanh nhạt), <code>BOOLEAN</code> (vàng), <code>METADATA</code> (xám). Socket đầu vào không hỗ trợ đa kết nối (non-multi) sẽ từ chối kết nối thứ hai để tránh xung đột.</p>
+            </div>
+            <div class="graph-guide__section">
+              <strong>2. Thao tác Canvas & Phím tắt</strong>
+              <p>• <b>Pan canvas:</b> Giữ chuột giữa (Middle click) và kéo để di chuyển khung nhìn tự do.<br/>
+              • <b>Chọn node:</b> Click chuột trái để chọn 1 node duy nhất (tự bỏ chọn các node khác); giữ <code>Ctrl</code> hoặc <code>Shift</code> để chọn thêm.<br/>
+              • <b>Quét vùng (Marquee):</b> Kéo chuột trái trên vùng canvas trống để chọn hàng loạt node.<br/>
+              • <b>Di chuyển nhóm:</b> Khi nhiều node đang được chọn, kéo 1 node sẽ di chuyển toàn bộ nhóm cùng lúc.<br/>
+              • <b>Dịch chuyển chính xác (Nudge):</b> Phím mũi tên (<code>↑ ↓ ← →</code>) dịch chuyển 5px; kết hợp <code>Shift + Mũi tên</code> dịch chuyển 25px.<br/>
+              • <b>Xóa / Hủy:</b> Phím <code>Delete</code> hoặc <code>Backspace</code> để xóa node đã chọn; phím <code>Escape</code> để bỏ chọn hoặc đóng hộp thoại.<br/>
+              • <b>Chọn tất cả:</b> Phím <code>Ctrl+A</code> / <code>Cmd+A</code> để chọn toàn bộ node trên canvas.<br/>
+              • <b>Hoàn tác / Làm lại:</b> <code>Ctrl+Z</code> (Undo) và <code>Ctrl+Y</code> hoặc <code>Ctrl+Shift+Z</code> (Redo) hỗ trợ tối đa 60 bước.</p>
+            </div>
+            <div class="graph-guide__section">
+              <strong>3. Smart Node Picker (Kéo socket tạo node tự động)</strong>
+              <p>Kéo dây từ bất kỳ socket đầu ra hoặc đầu vào nào và thả vào vùng canvas trống. <b>Smart Node Picker</b> sẽ mở ra danh sách các node tương thích kiểu dữ liệu. Bạn chỉ cần chọn node mong muốn, hệ thống sẽ tự động tạo node mới và nối dây chính xác.</p>
+            </div>
+            <div class="graph-guide__section">
+              <strong>4. Trạng thái Backend & Bằng chứng trung thực</strong>
+              <p>Mọi node hiển thị trạng thái trung thực (<code>operational</code>, <code>partial</code>, <code>unavailable</code>) kèm lý do và bước xử lý tiếp theo. Việc mở Hub Nodes hoàn toàn tĩnh, không tự ý kích hoạt GPU hay chạy ngầm tác vụ AI nặng.</p>
+            </div>
+            <div class="graph-guide__section">
+              <strong>5. Quản lý Workflow & Bản quyền Output</strong>
+              <p>Dữ liệu đồ thị workflow được lưu trữ local offline. Mọi file kết quả (Artifacts) đều sử dụng mã định danh bảo mật (<code>artifact_*</code>) và hỗ trợ xem trước video/ảnh/âm thanh an toàn qua chuẩn HTTP streaming.</p>
+            </div>
+            <div class="graph-guide__templates">
+              <strong>Mở template workflow mẫu trong Hub Nodes:</strong>
+              <div class="graph-guide__template-buttons">
+                ${this.presets.filter((item) => item.scope === this.scope).map((item) => `<button class="button button--compact" type="button" data-graph-guide-preset="${escapeHtml(item.id)}" title="${escapeHtml(item.description || "")}">Mở template: ${escapeHtml(item.title || item.id)}</button>`).join("") || "<span>Chưa có template mẫu cho workspace này.</span>"}
+              </div>
+            </div>
           </div>
         </details>
         <div class="graph-editor__layout">

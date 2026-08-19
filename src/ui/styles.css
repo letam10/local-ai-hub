@@ -1,3 +1,10 @@
+/*
+  FILE NOTE
+  - Mục đích: Định kiểu giao diện toàn diện cho Local AI Hub (theme dark/light, shell responsive, topbar, sidebar, module-view, node editor, forms, cards, toast, modals)
+  - Liên kết trực tiếp: src/ui/index.html, src/ui/app.js, src/ui/pages.js, src/ui/node_studio.js
+  - Vùng ảnh hưởng khi sửa: Bố cục, màu sắc, responsive và giao diện hiển thị của toàn bộ ứng dụng
+*/
+
 :root {
   color-scheme: dark;
   --bg: #0b1020;
@@ -431,6 +438,16 @@ td { color: var(--text); }
 .graph-node-state { display: grid; gap: 3px; padding: 8px; border-left: 3px solid var(--accent); border-radius: 6px; color: var(--muted); background: rgba(128,170,255,.08); font-size: 10px; }.graph-node-state[data-status="failed"], .graph-node-state[data-status="error"], .graph-node-state[data-status="unavailable"] { border-left-color: var(--danger); background: rgba(239,120,133,.08); }
 .graph-action-hint { display: grid; gap: 3px; margin-top: 12px; padding: 8px; border-left: 3px solid var(--warning); border-radius: 6px; color: var(--muted); background: rgba(241,173,95,.08); font-size: 10px; }.graph-action-hint strong { color: var(--text); }
 .graph-preview-image { width: 100%; max-height: var(--node-preview-max-height); object-fit: contain; border: 1px solid var(--border); border-radius: 7px; background: #050813; }.graph-empty { color: var(--muted); font-size: 11px; }
+.graph-guide { margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--border); background: var(--panel-soft); font-size: 11px; }
+.graph-guide summary { font-weight: 700; color: var(--accent); cursor: pointer; user-select: none; }
+.graph-guide__content { display: grid; gap: 10px; margin-top: 10px; padding: 8px 0; color: var(--muted); line-height: 1.55; }
+.graph-guide__section { display: grid; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.graph-guide__section strong { color: var(--text); font-size: 12px; }
+.graph-guide__section code { padding: 1px 4px; border-radius: 4px; background: var(--panel-raised); color: var(--accent); font-family: ui-monospace, Consolas, monospace; font-size: 10px; }
+.graph-guide__templates { display: grid; gap: 6px; }
+.graph-guide__templates > strong { color: var(--text); font-size: 12px; }
+.graph-guide__template-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+
 
 /* Stable LAH 2 CSS-only contract. The current Node Studio keeps these
    attributes absent, so the variables above remain the fallback layout. */

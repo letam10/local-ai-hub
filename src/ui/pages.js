@@ -1,3 +1,10 @@
+/*
+  FILE NOTE
+  - Mục đích: Render templates cho toàn bộ các trang giao diện của Local AI Hub (Dashboard, Jobs, Vision, Image, Video, Voice, Models, Settings, etc.)
+  - Liên kết trực tiếp: src/ui/app.js, src/ui/i18n.js, src/ui/api.js, src/ui/styles.css
+  - Vùng ảnh hưởng khi sửa: Toàn bộ nội dung hiển thị của các module, thẻ volume C:/D:, danh sách jobs, artifact previews
+*/
+
 import { escapeHtml, formatGb, formatStatus } from "./api.js";
 import { translateText } from "./i18n.js";
 
@@ -574,11 +581,11 @@ const imageWorkflowRail = (state) => {
   const edit = tool(state, "generate_qwen_image");
   const transform = tool(state, "run_media_operation");
   return `<section class="image-workflow-rail" aria-label="Image workflow">
-    <div class="image-workflow-rail__intro"><div><span class="eyebrow">IMAGE FOUNDATION</span><h2>Luồng ảnh end-to-end</h2><p>Chọn template trong Hub Nodes để nối Prompt → Generate/Edit → Upscale → Preview/Save. Mỗi backend hiển thị đúng partial/unavailable nếu chưa smoke.</p></div><span class="tag">artifact · job · provenance</span></div>
+    <div class="image-workflow-rail__intro"><div><span class="eyebrow">IMAGE WORKFLOW</span><h2>Luồng xử lý ảnh chuẩn</h2><p>Chuỗi node chuẩn: <b>Prompt / Input</b> → <b>Generate / Edit / Upscale / Mask</b> → <b>Preview</b> → <b>Save</b>. Trạng thái backend luôn phản ánh trung thực.</p></div><span class="tag">image · mask · DAG</span></div>
     <div class="image-workflow-rail__steps">
-      <article><span>01</span><strong>Tạo ảnh</strong><small>FLUX / ComfyUI</small>${statusPill(generation.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="image:nodes">Mở template</button></article>
-      <article><span>02</span><strong>Chỉnh ảnh</strong><small>Qwen Image-to-Image</small>${statusPill(edit.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="image:nodes">Mở template</button></article>
-      <article><span>03</span><strong>Upscale</strong><small>FFmpeg fallback / AI partial</small>${statusPill(transform.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="image:nodes">Mở template</button></article>
+      <article><span>01</span><strong>Prompt / Input</strong><small>Text prompt hoặc ảnh đầu vào</small>${statusPill("operational")}<button class="button button--compact" type="button" data-workspace-tab="image:nodes">Mở Hub Nodes</button></article>
+      <article><span>02</span><strong>Generate / Edit / Mask</strong><small>FLUX / Qwen / SAM2 / Upscale</small>${statusPill(generation.tool_status || edit.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="image:nodes">Mở template</button></article>
+      <article><span>03</span><strong>Preview & Save</strong><small>Xem preview an toàn và xuất artifact</small>${statusPill("operational")}<button class="button button--compact" type="button" data-workspace-tab="image:nodes">Xem canvas</button></article>
     </div>
   </section>`;
 };
@@ -586,11 +593,24 @@ const videoWorkflowRail = (state) => {
   const transform = tool(state, "run_media_operation");
   const upscale = tool(state, "upscale_anime_video");
   return `<section class="video-workflow-rail" aria-label="Video workflow">
-    <div class="video-workflow-rail__intro"><div><span class="eyebrow">VIDEO CREATIVE</span><h2>Luồng video trong Hub</h2><p>Chọn template để nối video artifact hoặc prompt → transform/generation → upscale → interpolate → encode → preview/export.</p></div><span class="tag">job · progress · provenance</span></div>
+    <div class="video-workflow-rail__intro"><div><span class="eyebrow">VIDEO WORKFLOW</span><h2>Luồng xử lý video chuẩn</h2><p>Chuỗi pipeline chuẩn: <b>Load Video</b> → <b>Transform</b> → <b>Upscale</b> → <b>RIFE</b> → <b>Grade</b> → <b>Subtitle / Logo</b> → <b>Audio</b> → <b>Encode</b> → <b>Preview</b> → <b>Save</b>.</p></div><span class="tag">video · streaming · DAG</span></div>
     <div class="video-workflow-rail__steps">
-      <article><span>01</span><strong>Transform</strong><small>FFmpeg allowlist</small>${statusPill(transform.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Mở template</button></article>
-      <article><span>02</span><strong>Upscale / FPS</strong><small>FFmpeg fallback · AnimeSR</small>${statusPill(upscale.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Mở template</button></article>
-      <article><span>03</span><strong>Prompt Generate</strong><small>Backend video chưa có</small>${statusPill("unavailable")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Xem contract</button></article>
+      <article><span>01</span><strong>Load & Transform</strong><small>Đầu vào video và tiền xử lý FFmpeg</small>${statusPill(transform.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Mở template</button></article>
+      <article><span>02</span><strong>Upscale & RIFE & Grade</strong><small>AnimeSR · Nội suy FPS · Color grade</small>${statusPill(upscale.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Mở template</button></article>
+      <article><span>03</span><strong>Subtitle, Encode & Save</strong><small>Chèn phụ đề / Logo · Encode · Xuất file</small>${statusPill(transform.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Xem pipeline</button></article>
+    </div>
+  </section>`;
+};
+const visionWorkflowRail = (state) => {
+  const parse = tool(state, "parse_screen");
+  const detect = tool(state, "detect_objects");
+  const ocr = tool(state, "ocr_document");
+  return `<section class="image-workflow-rail" aria-label="Vision workflow" style="background:linear-gradient(135deg, rgba(66,198,160,.1), transparent 48%), var(--panel)">
+    <div class="image-workflow-rail__intro"><div><span class="eyebrow">VISION WORKFLOW</span><h2>Luồng phân tích thị giác chuẩn</h2><p>Chuỗi thao tác chuẩn: <b>Load</b> → <b>Detect / Ground / Segment / OCR</b> → <b>Preview / Export</b>. Kết quả JSON và mask bounding box xem trực tiếp.</p></div><span class="tag">vision · bbox · OCR</span></div>
+    <div class="image-workflow-rail__steps">
+      <article><span>01</span><strong>Load Input</strong><small>Tải ảnh, tài liệu hoặc screenshot</small>${statusPill("operational")}<button class="button button--compact" type="button" data-route="vision">Mở Vision Studio</button></article>
+      <article><span>02</span><strong>Detect / Segment / OCR</strong><small>OmniParser · RF-DETR · DINO · PaddleOCR</small>${statusPill(parse.tool_status || detect.tool_status || ocr.tool_status || "partial")}<button class="button button--compact" type="button" data-route="vision">Xem modules</button></article>
+      <article><span>03</span><strong>Preview & Export</strong><small>Xem JSON annotation và trích xuất text</small>${statusPill("operational")}<button class="button button--compact" type="button" data-route="jobs">Xem Jobs</button></article>
     </div>
   </section>`;
 };
@@ -792,7 +812,7 @@ function renderVision(state) {
   const omni = component(state, "omniparser");
   const rf = component(state, "rfdetr");
   const ground = component(state, "groundingdino");
-  return heading("VISION", "Vision Studio", "Tải ảnh/screenshot vào Hub, chạy parser hoặc detector, xem JSON và artifact ngay trong cửa sổ này.") + `
+  return heading("VISION", "Vision Studio", "Tải ảnh/screenshot vào Hub, chạy parser hoặc detector, xem JSON và artifact ngay trong cửa sổ này.") + visionWorkflowRail(state) + `
     <div class="capability-grid">${capability("OmniParser", omni, "Parse UI, vùng tương tác và ảnh annotation.", tool(state, "parse_screen"))}${capability("RF-DETR", rf, "Phát hiện object theo threshold.", tool(state, "detect_objects"))}${capability("Grounding DINO", ground, "Prompt → boxes, có thể dùng lại trong SAM2.", tool(state, "ground_objects"))}</div>
     <div class="workspace-grid workspace-grid--three" style="margin-top:16px">
       ${card("OmniParser", `<form data-job-form data-tool="parse_screen" class="stack">${file("Ảnh hoặc screenshot", "asset_id", "image/*")}${field("Box threshold", `<input name="box_threshold" type="number" min="0" max="1" step="0.01" value="0.05" />`)}<div class="form-actions">${button("Phân tích UI", "button--primary")}</div>${formResult("vision-omni-result")}</form>`)}
