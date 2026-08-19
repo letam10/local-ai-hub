@@ -1256,6 +1256,103 @@ class CreativeProjectManager:
                 })
         return {"status": "completed", "gallery": items}
 
+    def search_assets(
+        self,
+        *,
+        query: str = "",
+        tags: list[str] | None = None,
+        favorite: bool | None = None,
+        media_type_prefix: str = "",
+        project_id: str = "",
+        sort_by: str = "created_at",
+        sort_desc: bool = True,
+    ) -> dict[str, Any]:
+        """Search/filter/sort assets.  Pure metadata — never touches artifact files."""
+        state, recovery, _ = self._load()
+        assets: list[dict[str, Any]] = list(state.get("asset_metadata", {}).values())
+        q = str(query).lower().strip()
+        if q:
+            assets = [a for a in assets if q in str(a.get("name", "")).lower() or q in str(a.get("description", "")).lower()]
+        if tags:
+            tag_set = {str(t).lower() for t in tags}
+            assets = [a for a in assets if tag_set & {str(t).lower() for t in a.get("tags", [])}]
+        if favorite is not None:
+            assets = [a for a in assets if bool(a.get("favorite")) == favorite]
+        if media_type_prefix:
+            assets = [a for a in assets if str(a.get("media_type", "")).startswith(media_type_prefix)]
+        if project_id:
+            assets = [a for a in assets if a.get("project_id") == project_id or project_id in (a.get("project_ids") or [])]
+        valid_sorts = {"created_at", "updated_at", "name", "size_bytes"}
+        key = sort_by if sort_by in valid_sorts else "created_at"
+        assets.sort(key=lambda a: str(a.get(key, "")), reverse=sort_desc)
+        return {"status": "completed", "assets": assets, "recovery": recovery}
+
+    def get_artifact_status(self, artifact_id: str) -> dict[str, Any]:
+        """Return metadata about which projects reference an artifact."""
+        if not isinstance(artifact_id, str) or not ARTIFACT_ID_RE.fullmatch(artifact_id):
+            return {"found": False, "reason": "Artifact ID không hợp lệ."}
+        state, _, _ = self._load()
+        asset = state.get("asset_metadata", {}).get(artifact_id)
+        if not asset:
+            return {"found": False, "artifact_id": artifact_id, "project_ids": [], "favorite": False, "tags": []}
+        project_ids = []
+        for proj in state.get("projects", {}).values():
+            if artifact_id in (proj.get("artifact_ids") or []):
+                project_ids.append(proj.get("id"))
+        return {
+            "found": True,
+            "artifact_id": artifact_id,
+            "project_ids": project_ids,
+            "favorite": bool(asset.get("favorite")),
+            "tags": list(asset.get("tags") or []),
+        }
+
+    def export_manifest(self, project_id: str) -> dict[str, Any]:
+        """Export a sanitised manifest for a project (no paths, no secrets)."""
+        if not isinstance(project_id, str) or not PROJECT_ID_RE.fullmatch(project_id):
+            return {"accepted": False, "reason": "Project ID không hợp lệ."}
+        state, _, _ = self._load()
+        project = state.get("projects", {}).get(project_id)
+        if not project:
+            return {"accepted": False, "reason": "Project không tồn tại."}
+        artifact_ids = list(project.get("artifact_ids") or [])
+        assets = [
+            {k: v for k, v in (state.get("asset_metadata", {}).get(aid) or {}).items()
+             if k not in {"local_path", "source_path", "api_key", "token", "password", "secret"}}
+            for aid in artifact_ids
+        ]
+        import hashlib as _hl
+        manifest = {
+            "manifest_schema_version": 1,
+            "created_at": now_iso(),
+            "project_id": project_id,
+            "project_title": project.get("title", ""),
+            "artifact_count": len(artifact_ids),
+            "artifact_ids": artifact_ids,
+            "assets": assets,
+            "checksum": _hl.sha256(json.dumps(artifact_ids, sort_keys=True).encode()).hexdigest(),
+        }
+        return {"accepted": True, "manifest": manifest}
+
+    def missing_artifact_state(self, project_id: str) -> dict[str, Any]:
+        """Report assets of a project whose artifact IDs are not in asset_metadata."""
+        if not isinstance(project_id, str) or not PROJECT_ID_RE.fullmatch(project_id):
+            return {"accepted": False, "reason": "Project ID không hợp lệ."}
+        state, _, _ = self._load()
+        project = state.get("projects", {}).get(project_id)
+        if not project:
+            return {"accepted": False, "reason": "Project không tồn tại."}
+        artifact_ids = list(project.get("artifact_ids") or [])
+        known_ids = set(state.get("asset_metadata", {}).keys())
+        missing = [aid for aid in artifact_ids if aid not in known_ids]
+        return {
+            "accepted": True,
+            "project_id": project_id,
+            "total": len(artifact_ids),
+            "missing_count": len(missing),
+            "missing_artifact_ids": missing,
+        }
+
     def overview(self) -> dict[str, Any]:
         projects = self.list_projects()
         recipes = self.list_recipes()
