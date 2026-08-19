@@ -1,14 +1,16 @@
-"""Decision-aware desktop shutdown coordination.
-
-The native shell is intentionally thin.  It asks the loopback API about active
-jobs, never terminates an externally managed API, and only authorizes its
-``finally`` cleanup after a safe exit decision.
+"""
+  FILE NOTE
+  - Mục đích: Desktop lifecycle coordination cho Local AI Hub — shutdown state machine, startup race guard, graceful shutdown checkpoint và startup failure UI
+  - Liên kết trực tiếp: src/app/main.py, src/app/tray.py, src/services/job_manager/, src/app_config/settings_service.py
+  - Vùng ảnh hưởng khi sửa: Shutdown flow (3 choices), tray hide/restore, single-instance mutex, startup error UI, crash-safe state flush
 """
 
 from __future__ import annotations
 
+import os
 import threading
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 
@@ -19,6 +21,111 @@ PrepareClose = Callable[[], tuple[bool, int, str]]
 Background = Callable[[], tuple[bool, str]]
 Restore = Callable[[], None]
 Destroy = Callable[[], None]
+StateFlusher = Callable[[], None]
+
+
+# ---------------------------------------------------------------------------
+# Startup helpers
+# ---------------------------------------------------------------------------
+
+def startup_failure_payload(reason: str, next_action: str) -> dict[str, Any]:
+    """Build a standardised failure payload for the startup-error UI.
+
+    The dict is consumed by the static HTML fallback screen embedded in
+    main.py; it must never contain secrets or raw workstation paths.
+    """
+    safe_reason = str(reason)[:512].replace("\x00", "")
+    safe_action = str(next_action)[:256].replace("\x00", "")
+    return {
+        "status": "startup_failure",
+        "reason": safe_reason,
+        "next_action": safe_action,
+    }
+
+
+class StartupRaceGuard:
+    """Detect stale PID / port locks left by a previous crashed session.
+
+    This is a source-only contract helper — it never probes live processes
+    or open ports; it only inspects the PID file written by the launcher.
+    """
+
+    def __init__(self, pid_path: Path) -> None:
+        self._pid_path = pid_path
+
+    def read_stale_pid(self) -> int | None:
+        """Return the PID recorded in the PID file, or None if absent/corrupt."""
+        try:
+            text = self._pid_path.read_text(encoding="utf-8").strip()
+            pid = int(text)
+            return pid if pid > 0 else None
+        except (OSError, ValueError):
+            return None
+
+    def write_current_pid(self) -> None:
+        """Overwrite PID file with the current process PID."""
+        try:
+            self._pid_path.parent.mkdir(parents=True, exist_ok=True)
+            self._pid_path.write_text(str(os.getpid()), encoding="utf-8")
+        except OSError:
+            pass
+
+    def clear(self) -> None:
+        """Remove the PID file on clean shutdown."""
+        try:
+            self._pid_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def is_stale(self) -> bool:
+        """Return True if a PID file exists from a previous run.
+
+        Only checks file presence; process liveness is NOT probed so that
+        no real subprocess is needed in tests or static validation.
+        """
+        return self._pid_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown coordinator
+# ---------------------------------------------------------------------------
+
+class GracefulShutdownCoordinator:
+    """Ensure critical state is flushed before process exit.
+
+    Registered flushers are called in registration order.  Any that raise
+    are logged but do not prevent remaining flushers from running.
+    """
+
+    def __init__(self) -> None:
+        self._flushers: list[tuple[str, StateFlusher]] = []
+        self._lock = threading.Lock()
+
+    def register(self, name: str, flusher: StateFlusher) -> None:
+        """Register a named state-flush callback."""
+        with self._lock:
+            self._flushers.append((name, flusher))
+
+    def save_checkpoint(self) -> dict[str, Any]:
+        """Call all registered flushers and return a summary.
+
+        Returns ``{"flushed": [names], "errors": {name: str}}``
+        """
+        with self._lock:
+            flushers = list(self._flushers)
+
+        flushed: list[str] = []
+        errors: dict[str, str] = {}
+        for name, fn in flushers:
+            try:
+                fn()
+                flushed.append(name)
+            except Exception as exc:  # pragma: no cover - defensive
+                errors[name] = str(exc)
+
+        return {"flushed": flushed, "errors": errors}
+
+
 
 
 class DesktopCloseController:

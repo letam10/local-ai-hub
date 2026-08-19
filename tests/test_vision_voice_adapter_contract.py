@@ -195,7 +195,7 @@ class VisionVoiceAdapterContractTests(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
 
     def test_voice_audio_alias_is_job_provenanced_and_published_as_opaque_artifact(self) -> None:
-        raw_audio = r"D:\\LocalAIHub\\Output\\Audio\\speech.wav"
+        raw_audio = str(Path("Output") / "Audio" / "speech.wav")
         normalized = normalize_worker_result(
             {"status": "completed", "audio": raw_audio},
             component_id="qwen3_tts",
