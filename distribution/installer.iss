@@ -6,7 +6,6 @@
 #define MyAppVersion "6.0.0"
 #define MyAppPublisher "Local AI Hub Project"
 #define MyAppURL "https://github.com/letam10/local-ai-hub"
-#define MyAppExeName "Local AI Hub.lnk"
 #define DefaultInstallDir "D:\LocalAIHub"
 
 [Setup]
@@ -34,7 +33,6 @@ CloseApplications=yes
 RestartApplications=no
 
 [Languages]
-Name: "vietnamese"; MessagesFile: "compiler:Languages\Vietnamese.isl"; LicenseFile: "..\LICENSES.md"
 Name: "english"; MessagesFile: "compiler:Default.isl"; LicenseFile: "..\LICENSES.md"
 
 [Tasks]
@@ -51,19 +49,21 @@ Source: "..\dependencies.lock.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\Config\*.example.json"; DestDir: "{app}\Config"; Flags: ignoreversion
+Source: "..\LocalAIHub.vbs"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\LocalAIHub.cmd"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-; Start menu and desktop shortcuts pointing to pythonw launcher
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\Environments\hub\Scripts\pythonw.exe"; Parameters: "-m src.app.main"; WorkingDir: "{app}"; Comment: "Local AI Hub Desktop Application"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\Environments\hub\Scripts\pythonw.exe"; Parameters: "-m src.app.main"; WorkingDir: "{app}"; Tasks: desktopicon; Comment: "Local AI Hub Desktop Application"
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\LocalAIHub.vbs"""; WorkingDir: "{app}"; Comment: "Local AI Hub Desktop Application"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\LocalAIHub.vbs"""; WorkingDir: "{app}"; Tasks: desktopicon; Comment: "Local AI Hub Desktop Application"
 
 [Run]
 Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\update_managed_shortcuts.ps1"" -Apply"; Flags: runhidden; Description: "Register Windows shortcuts"
 
 [UninstallDelete]
-; Only delete app components on uninstall; NEVER delete user models, environments, or configs
 Type: filesandordirs; Name: "{app}\src"
 Type: filesandordirs; Name: "{app}\distribution"
 Type: filesandordirs; Name: "{app}\docs"
 Type: files; Name: "{app}\requirements-hub.txt"
 Type: files; Name: "{app}\dependencies.lock.json"
+Type: files; Name: "{app}\LocalAIHub.vbs"
+Type: files; Name: "{app}\LocalAIHub.cmd"

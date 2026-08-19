@@ -43,6 +43,8 @@ REMOVABLE_APP_COMPONENTS = frozenset({
     "dependencies.lock.json",
     "README.md",
     "LICENSES.md",
+    "LocalAIHub.vbs",
+    "LocalAIHub.cmd",
 })
 
 

@@ -219,8 +219,11 @@ class TestReleaseManifestAndPackaging(unittest.TestCase):
         self.assertEqual(manifest["application_name"], "Local AI Hub")
         self.assertEqual(manifest["version"], "6.0.0")
         self.assertEqual(manifest["platform"], "windows-x64")
-        self.assertIn("release_artifact", manifest)
-        self.assertIn("sha256", manifest["release_artifact"])
+        self.assertIn("release_artifacts", manifest)
+        self.assertIn("core_zip", manifest["release_artifacts"])
+        self.assertIn("sha256", manifest["release_artifacts"]["core_zip"])
+        self.assertIn("setup_exe", manifest["release_artifacts"])
+        self.assertIn("sha256", manifest["release_artifacts"]["setup_exe"])
         self.assertEqual(manifest["ai_runtime_validation_status"], "DEFERRED BY USER")
         self.assertIn("excluded_machine_local_data", manifest)
 

@@ -2,23 +2,32 @@
   "schema_version": 1,
   "application_name": "Local AI Hub",
   "version": "6.0.0",
-  "git_commit": "2e2e3b7f836fb9f21ca7afc410dcb38964670709",
-  "git_branch": "feature/v6-final-desktop-release",
-  "build_timestamp": "2026-08-19T14:11:09.581219+00:00",
-  "packaging_tool": "Local AI Hub Release Packager (Python/zipfile)",
+  "git_commit": "ab57f8f355d5052f5de0bd2ac309c8648fa4da58",
+  "git_branch": "feature/local-ai-hub-v6",
+  "build_timestamp": "2026-08-19T14:37:05.257001+00:00",
+  "packaging_tool": "Local AI Hub Release Packager (Python/zipfile) + Inno Setup 6",
   "platform": "windows-x64",
-  "release_artifact": {
-    "file_name": "LocalAIHub-Core-Win64-v6.0.0.zip",
-    "size_bytes": 970188,
-    "sha256": "536db8df01df7c78acef2cb546ff206163ae6cb91cdc950f6c0f275836a93d01",
-    "total_files": 359
+  "release_artifacts": {
+    "core_zip": {
+      "file_name": "LocalAIHub-Core-Win64-v6.0.0.zip",
+      "size_bytes": 971889,
+      "sha256": "c2e1cff7c5b9b77ca10dc11afc30aa22ac1a4433cdcc52d447bd9446b2e09d6b",
+      "total_files": 361
+    },
+    "setup_exe": {
+      "file_name": "LocalAIHub-Setup-Win64-v6.0.0.exe",
+      "size_bytes": 3286071,
+      "sha256": "a4b6cfbd39100e01727b689eb66d7904329b1ba73deebe9a0b46619617ae5304"
+    }
   },
   "included_application_components": [
     "src (Application Core, UI Shell, API Server, Settings, Diagnostics, Backups)",
     "scripts (Launchers, Verifiers, Updater, Repair, Uninstaller)",
     "distribution (Installer specs, Release manifests)",
     "docs (Architecture, Recovery, API documentation)",
-    "Config/*.example.json (Tracked configuration templates)"
+    "Config/*.example.json (Tracked configuration templates)",
+    "LocalAIHub.vbs (No-console Windows desktop launcher)",
+    "LocalAIHub.cmd (Command-line desktop launcher)"
   ],
   "excluded_machine_local_data": [
     "Models (AI model weights preserved locally on host)",
@@ -35,7 +44,7 @@
     "python": "Python 3.10+ (64-bit)",
     "memory": "8 GiB RAM minimum (16 GiB+ recommended)",
     "gpu": "NVIDIA GeForce RTX (8GB+ VRAM recommended for heavy models)",
-    "network": "Loopback-only (127.0.0.1) · No internet required for core operation"
+    "network": "Loopback-only (127.0.0.1) - No internet required for core operation"
   },
   "ai_runtime_validation_status": "DEFERRED BY USER",
   "known_limitations": [
