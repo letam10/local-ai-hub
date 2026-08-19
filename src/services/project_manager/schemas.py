@@ -1,8 +1,8 @@
-"""Validation and public contracts for Milestone 4A creative workspace data.
-
-Creative projects deliberately store only small JSON metadata and opaque Hub
-references.  Files remain owned by the artifact store; models, outputs,
-machine paths and secrets are never copied into project or recipe manifests.
+"""
+  FILE NOTE
+  - Mục đích: Validation và public contracts cho creative workspace (projects, recipes, assets, collections); ngăn chặn path injection, traversal, secret leak
+  - Liên kết trực tiếp: src/services/project_manager/manager.py, src/services/artifact_store.py
+  - Vùng ảnh hưởng khi sửa: Toàn bộ creative workspace validation (ID patterns, field limits, forbidden keys, schema version)
 """
 
 from __future__ import annotations
@@ -23,6 +23,9 @@ RECIPE_CONTRACT = "creative-recipe.v1"
 RECIPE_PACK_CONTRACT = "creative-recipe-pack.v1"
 COMPARE_CONTRACT = "creative-compare.v1"
 
+# Schema version — increment when project/recipe manifest structure changes.
+PROJECT_SCHEMA_VERSION = 2
+
 ARTIFACT_ID_RE = re.compile(r"^artifact_[a-f0-9]{32}$")
 PROJECT_ID_RE = re.compile(r"^project_[a-f0-9]{32}$")
 RECIPE_ID_RE = re.compile(r"^recipe_[a-f0-9]{32}$")
@@ -31,6 +34,8 @@ COMPARE_ID_RE = re.compile(r"^compare_[a-f0-9]{32}$")
 PRESET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 VARIABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,39}$")
 LOCAL_PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\)")
+# Traversal: ../  ..\  or encoded %2F / %5C sequences
+TRAVERSAL_RE = re.compile(r"\.\.[/\\]|%2[Ff]|%5[Cc]")
 
 MAX_PROJECTS = 120
 MAX_RECIPES = 160
@@ -75,6 +80,8 @@ def _text(value: object, field: str, *, maximum: int, allow_empty: bool = False)
         raise ValueError(f"{field} vượt giới hạn {maximum} ký tự.")
     if "\x00" in result or LOCAL_PATH_RE.search(result):
         raise ValueError(f"{field} không được chứa đường dẫn máy cục bộ.")
+    if TRAVERSAL_RE.search(result):
+        raise ValueError(f"{field} không được chứa path traversal sequence.")
     return result
 
 

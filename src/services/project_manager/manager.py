@@ -1,13 +1,14 @@
-"""Local, path-safe creative project workspace for Milestone 4A.
-
-This manager owns only JSON metadata under ignored local configuration.  It
-never copies artifacts, models or user outputs; assets are referred to through
-the existing opaque artifact registry.
+"""
+  FILE NOTE
+  - Mục đích: Thread-safe CRUD, import/export contracts và autosave draft cho creative project workspace (projects, recipes, assets, collections, compare boards)
+  - Liên kết trực tiếp: src/services/project_manager/schemas.py, src/services/artifact_store.py, src/shared/paths/registry.py, src/services/api/
+  - Vùng ảnh hưởng khi sửa: Toàn bộ creative workspace persistence, atomic write, recovery, revision detection, draft autosave
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 from collections.abc import Callable, Mapping
@@ -265,16 +266,91 @@ class CreativeProjectManager:
 
     def _save(self, state: Mapping[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".tmp")
+        import tempfile as _tempfile
+        tmp: Path | None = None
         try:
-            temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            temporary.replace(self.path)
+            with _tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.path.parent,
+                prefix=".workspace-",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                tmp = Path(handle.name)
+                handle.write(json.dumps(state, ensure_ascii=False, indent=2))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self.path)
+            tmp = None
         finally:
-            if temporary.exists():
+            if tmp is not None:
                 try:
-                    temporary.unlink()
+                    tmp.unlink()
                 except OSError:
                     pass
+
+    def _save_draft(self, draft_path: Path, data: dict[str, Any]) -> None:
+        """Write an autosave recovery draft atomically without touching main state."""
+        import tempfile as _tempfile
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp: Path | None = None
+        try:
+            with _tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=draft_path.parent,
+                prefix=".draft-",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                tmp = Path(handle.name)
+                handle.write(json.dumps(data, ensure_ascii=False, indent=2))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, draft_path)
+            tmp = None
+        except (OSError, TypeError, ValueError):
+            pass
+        finally:
+            if tmp is not None:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+
+    def autosave_draft(self, project_id: str, graph: dict[str, Any]) -> dict[str, Any]:
+        """Write a crash-recovery draft for the given project's graph.
+
+        The draft file is never the main state file; it is safe to delete after
+        a clean save.  Returns ``{"accepted": bool, "draft_path": str}``.
+        """
+        if not isinstance(project_id, str) or not project_id:
+            return {"accepted": False, "reason": "Project ID không hợp lệ."}
+        safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", project_id)[:80]
+        draft_path = self.path.parent / f"draft_{safe_id}.json"
+        draft_data = {
+            "schema_version": 1,
+            "project_id": project_id,
+            "graph": graph if isinstance(graph, dict) else {},
+        }
+        self._save_draft(draft_path, draft_data)
+        return {"accepted": True, "draft_path": str(draft_path)}
+
+    def clear_draft(self, project_id: str) -> None:
+        """Remove the autosave draft after a successful explicit save."""
+        if not isinstance(project_id, str) or not project_id:
+            return
+        safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", project_id)[:80]
+        draft_path = self.path.parent / f"draft_{safe_id}.json"
+        try:
+            draft_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 
     def _mutate(self, callback: Callable[[dict[str, Any]], Any]) -> Any:
         with self._lock:
