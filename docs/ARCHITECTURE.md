@@ -339,9 +339,16 @@ Chi tiết UX và hướng dẫn vận hành nằm ở
 
 ## M4A Reliability & Large Media ownership
 
-Product release version nằm duy nhất ở `src/shared/version.py` (`4.0.0`). Nó
+Product release version nằm duy nhất ở `src/shared/version.py` (`5.0.0`). Nó
 được projection vào `/health`, HTTP server header và tracked component example;
 không đổi schema/contract version riêng của job, graph hoặc creative records.
+
+V5-C bổ sung Workflow Library local-first trong services/workflow_library/.
+Library chỉ lưu declarative graph metadata, dùng workflow-library.v1, atomic
+replace và optimistic library revision. Import/export đóng, canonical và
+redacted; migration từ localStorage luôn dry-run/user-mediated. UI không gọi
+route đoán trước: bridge server-owned chỉ được wire trong V5-D, còn thiếu
+bridge thì hiển thị partial/reason/next action.
 
 | Module | Sở hữu hardening | Không sở hữu |
 | --- | --- | --- |
@@ -395,3 +402,22 @@ dummy processes to prove cold start, a second external-API desktop instance,
 zero-active cleanup, background/restore, cooperative cancellation and native
 tray re-registration. It never starts the production API, probes GPU hardware
 or executes media/model work.
+## V5-D End-to-End productization boundary
+
+V5-D is a composition layer, not a replacement engine.  The API bootstrap
+snapshot joins the existing capability registry/Module Manager preflight,
+durable public job records, Workflow Library revision state, and Artifact Store
+health through `src/services/api/v5_productization.py`.  Its output is
+`v5-product-surface.v1`, always `execution: not_run` and `dry_run: true`.
+
+The Dashboard consumes that server-owned snapshot for readiness, module
+reason/next-action, recovery counts, and GPU/storage warnings.  Workflow
+Library routes use the existing validator and atomic optimistic-revision store:
+list/read are read-only, save/import/delete require typed revisions, migration
+has separate dry-run and user-confirmed endpoints, and conflict/recovery
+responses remain visible instead of overwriting local state.
+
+No client callable, command, manifest, raw path, secret, model/media blob, or
+execution descriptor is reflected into these public projections.  Runtime,
+provider, GPU, video, download, and install claims remain deferred unless a
+separate bounded evidence gate exists.

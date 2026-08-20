@@ -1,3 +1,10 @@
+/*
+  FILE NOTE
+  - Mục đích: Main controller và UI lifecycle cho Local AI Hub frontend (routing, snapshot state, desktop close bridge, preview layer)
+  - Liên kết trực tiếp: src/ui/index.html, src/ui/pages.js, src/ui/node_studio.js, src/ui/image_mask_studio.js, src/ui/i18n.js, src/ui/api.js
+  - Vùng ảnh hưởng khi sửa: Toàn bộ giao diện frontend (navigation, render, snapshot continuity, toast, keyboard shortcuts)
+*/
+
 import {
   cancelJob,
   closeOwnedBackends,
@@ -16,6 +23,7 @@ import {
   formatGb,
   formatStatus,
   getBootstrap,
+  getCapabilities,
   getComfyAdvanced,
   getComfyBridgeWorkflow,
   getComfyBridgeWorkflows,
@@ -25,10 +33,33 @@ import {
   getImageMaskStudioOverview,
   getHealth,
   getJobs,
+  getDurableJobs,
+  resumeDurableJob,
+  getWorkflowLibrary,
+  saveWorkflowLibrary,
+  deleteWorkflowLibrary,
+  planWorkflowLibraryMigration,
+  confirmWorkflowLibraryMigration,
   getLifecycle,
   getModels,
   getStorage,
   getProject,
+  getSettings,
+  patchSettings,
+  resetSettingsSection,
+  getDiagnosticsSnapshot,
+  exportDiagnosticsBundle,
+  repairVerifyConfig,
+  repairInspectRecovery,
+  repairClearRecoveryDrafts,
+  createBackup,
+  inspectBackup,
+  planRestore,
+  applyRestore,
+  getProjectManifest,
+  getProjectMissingArtifacts,
+  searchAssets,
+  getArtifactStatus,
   importProject,
   importRecipePack,
   importImageMask,
@@ -59,12 +90,15 @@ import {
 } from "./api.js";
 import { disposeNodeStudios, mountNodeStudios } from "./node_studio.js";
 import { mountImageMaskCanvases } from "./image_mask_studio.js";
-import { NAVIGATION, renderPage } from "./pages.js";
+import { createWorkflowLibraryAdapter } from "./workflow_library.js";
+import { NAVIGATION, jobRecoverySnapshot, renderPage } from "./pages.js";
+import { currentLanguage, localizeDocument, setLanguage, translateText } from "./i18n.js";
 
 const state = {
-  health: {}, components: [], tools: [], applications: [], jobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", apiStatus: "loading", apiError: "",
+  health: {}, capabilities: {}, productization: {}, components: [], tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", apiStatus: "loading", apiError: "",
   creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
+  workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trong V5-D trước khi đồng bộ." },
 };
 const view = document.querySelector("#module-view");
 const nav = document.querySelector("#sidebar-nav");
@@ -73,16 +107,52 @@ const diskMetric = document.querySelector("#disk-metric");
 const gpuMetric = document.querySelector("#gpu-metric");
 const jobSummary = document.querySelector("#job-summary");
 const toastRegion = document.querySelector("#toast-region");
+const snapshotStatus = document.querySelector("#snapshot-status");
+const languageSelect = document.querySelector("#language-select");
 const sidebar = document.querySelector(".sidebar");
 const sidebarToggle = document.querySelector("#sidebar-toggle");
 const artifactPreviewLayer = document.querySelector("#artifact-preview-layer");
+const mainContent = document.querySelector("#main-content");
+const workflowLibraryAdapter = createWorkflowLibraryAdapter(null, {
+  list: getWorkflowLibrary,
+  save: ({ entry, expected_revision }) => saveWorkflowLibrary(entry, expected_revision),
+  remove: ({ id, expected_revision }) => deleteWorkflowLibrary(id, expected_revision),
+  plan_migration: ({ entries }) => planWorkflowLibraryMigration(entries),
+  confirm_migration: ({ entries, expected_revision }) => confirmWorkflowLibraryMigration(entries, expected_revision),
+});
 let routeLoad = null;
 let desktopCloseLayer = null;
+let artifactPreviewOpener = null;
 let disposeImageMaskCanvases = () => {};
 
 const SIDEBAR_PREFERENCE_KEY = "local-ai-hub-sidebar-v1";
 const SIDEBAR_PREFERENCE_VERSION = 1;
 const MOBILE_NAV_MAX_WIDTH = 980;
+const SNAPSHOT_STATUS_TEXT = Object.freeze({
+  received: "Snapshot received.",
+  deferred: "Snapshot update deferred while preserving your interaction.",
+  preserved: "Snapshot applied; your interaction was preserved.",
+  unavailable: "Snapshot update unavailable; the current view is preserved.",
+});
+const FOCUS_TOKEN_SELECTORS = Object.freeze({
+  "job-filter-all": '[data-focus-key="job-filter-all"]',
+  "job-filter-active": '[data-focus-key="job-filter-active"]',
+  "job-filter-attention": '[data-focus-key="job-filter-attention"]',
+  "job-filter-completed": '[data-focus-key="job-filter-completed"]',
+  "job-action-cancel": '[data-focus-key="job-action-cancel"]',
+  "job-action-resume": '[data-focus-key="job-action-resume"]',
+  "job-action-resume-durable": '[data-focus-key="job-action-resume-durable"]',
+  "artifact-preview-opener": '[data-focus-key="artifact-preview-opener"]',
+  "artifact-preview-close": '[data-focus-key="artifact-preview-close"]',
+});
+const SAFE_FOCUS_TOKENS = new Set(Object.keys(FOCUS_TOKEN_SELECTORS));
+const focusTokenSelector = (token) => SAFE_FOCUS_TOKENS.has(token) ? FOCUS_TOKEN_SELECTORS[token] : "";
+const setSnapshotStatus = (stateKey) => {
+  if (!snapshotStatus) return;
+  const key = Object.prototype.hasOwnProperty.call(SNAPSHOT_STATUS_TEXT, stateKey) ? stateKey : "received";
+  snapshotStatus.textContent = SNAPSHOT_STATUS_TEXT[key];
+  snapshotStatus.dataset.state = key;
+};
 
 const safeStorageGet = (key) => {
   try { return window.localStorage?.getItem(key) ?? null; } catch { return null; }
@@ -90,6 +160,50 @@ const safeStorageGet = (key) => {
 
 const safeStorageSet = (key, value) => {
   try { window.localStorage?.setItem(key, value); } catch { /* Storage can be disabled or unavailable. */ }
+};
+
+const readScrollContinuity = () => ({
+  windowX: Number(window.scrollX || 0),
+  windowY: Number(window.scrollY || 0),
+  mainTop: Number(mainContent?.scrollTop || 0),
+  viewTop: Number(view?.scrollTop || 0),
+});
+
+const restoreScrollContinuity = (scroll) => {
+  if (!scroll) return;
+  if (mainContent) mainContent.scrollTop = scroll.mainTop;
+  if (view) view.scrollTop = scroll.viewTop;
+  if (typeof window.scrollTo === "function") window.scrollTo(scroll.windowX, scroll.windowY);
+};
+
+const captureFocusContinuity = () => {
+  const active = document.activeElement;
+  const insideView = Boolean(active && (active === mainContent || active === view || view?.contains(active)));
+  const insidePreview = Boolean(active && artifactPreviewLayer?.contains(active));
+  const continuity = { activeInside: insideView || insidePreview, token: "", ordinal: 0, scroll: readScrollContinuity() };
+  if (!continuity.activeInside) return continuity;
+  if (active === mainContent || active === view) { continuity.token = "main"; return continuity; }
+  const token = active?.dataset?.focusKey;
+  const selector = focusTokenSelector(token);
+  if (!selector) return continuity;
+  continuity.token = token;
+  continuity.ordinal = [...document.querySelectorAll(selector)].indexOf(active);
+  return continuity;
+};
+
+const focusMainContent = () => {
+  if (mainContent && typeof mainContent.focus === "function") mainContent.focus({ preventScroll: true });
+};
+
+const restoreFocusContinuity = (continuity, explicitFocus = "") => {
+  if (explicitFocus === "main") { focusMainContent(); return; }
+  if (!continuity?.activeInside) return;
+  if (continuity.token === "main") { focusMainContent(); return; }
+  const selector = focusTokenSelector(continuity.token);
+  const candidates = selector ? [...document.querySelectorAll(selector)] : [];
+  const candidate = candidates[continuity.ordinal] || candidates[0];
+  if (candidate && !candidate.disabled && typeof candidate.focus === "function") candidate.focus({ preventScroll: true });
+  else focusMainContent();
 };
 
 const readSidebarPreference = () => {
@@ -121,6 +235,7 @@ const syncSidebarState = () => {
     sidebar.classList.toggle("is-open", sidebarState.mobileOpen);
     sidebarToggle.setAttribute("aria-expanded", String(sidebarState.mobileOpen));
     sidebarToggle.setAttribute("aria-label", sidebarState.mobileOpen ? "Close navigation" : "Open navigation");
+    sidebarToggle.setAttribute("aria-label", translateText(sidebarToggle.getAttribute("aria-label")));
     return;
   }
   sidebarState.mobileOpen = false;
@@ -128,6 +243,7 @@ const syncSidebarState = () => {
   sidebar.classList.toggle("is-collapsed", sidebarState.desktopCollapsed);
   sidebarToggle.setAttribute("aria-expanded", String(!sidebarState.desktopCollapsed));
   sidebarToggle.setAttribute("aria-label", sidebarState.desktopCollapsed ? "Expand navigation" : "Collapse navigation");
+  sidebarToggle.setAttribute("aria-label", translateText(sidebarToggle.getAttribute("aria-label")));
 };
 
 const persistSidebarPreference = () => {
@@ -234,18 +350,34 @@ const routeId = () => {
   return NAVIGATION.flatMap((group) => group.items).some(([id]) => id === value) ? value : "dashboard";
 };
 
+const safeDisplayMessage = (value, fallback) => typeof value === "string" && value.trim() ? value : fallback;
+const setJobActionStatus = (message, kind = "") => {
+  const status = document.querySelector("[data-job-action-status]");
+  if (!status) return;
+  status.textContent = safeDisplayMessage(message, "Hub returned no displayable action message.");
+  status.dataset.status = kind;
+};
 const showToast = (message, kind = "") => {
   const toast = document.createElement("div");
   toast.className = `toast ${kind ? `toast--${kind}` : ""}`;
-  toast.textContent = message;
+  toast.textContent = safeDisplayMessage(message, "Hub returned no displayable message.");
   toastRegion.append(toast);
   window.setTimeout(() => toast.remove(), 5200);
 };
 
-const closeArtifactPreview = () => artifactPreviewLayer?.replaceChildren();
+let artifactPreviewOpener = null;
+const closeArtifactPreview = ({ restoreFocus = true } = {}) => {
+  const opener = artifactPreviewOpener;
+  artifactPreviewLayer?.replaceChildren();
+  artifactPreviewOpener = null;
+  if (!restoreFocus) return;
+  if (opener?.isConnected && !opener.disabled && typeof opener.focus === "function") opener.focus({ preventScroll: true });
+  else focusMainContent();
+};
 
-const showArtifactPreview = (button) => {
+const legacyShowArtifactPreview = (button) => {
   if (!artifactPreviewLayer) return;
+  artifactPreviewOpener = button;
   artifactPreviewLayer.replaceChildren();
   const dialog = document.createElement("section");
   dialog.className = "artifact-preview-dialog";
@@ -258,6 +390,7 @@ const showArtifactPreview = (button) => {
   const close = document.createElement("button");
   close.className = "button button--compact";
   close.type = "button";
+  close.dataset.focusKey = "artifact-preview-close";
   close.dataset.closeArtifactPreview = "true";
   close.textContent = "Đóng";
   header.append(title, close);
@@ -270,7 +403,7 @@ const showArtifactPreview = (button) => {
   } else if (mediaType.startsWith("video/")) {
     const video = document.createElement("video"); video.src = url; video.controls = true; video.preload = "metadata"; body.append(video);
   } else if (mediaType.startsWith("audio/")) {
-    const audio = document.createElement("audio"); audio.src = url; audio.controls = true; body.append(audio);
+    const audio = document.createElement("audio"); audio.src = url; audio.controls = true; audio.preload = "metadata"; body.append(audio);
   } else {
     const note = document.createElement("p"); note.textContent = "Artifact này không có trình phát inline."; body.append(note);
   }
@@ -282,23 +415,145 @@ const showArtifactPreview = (button) => {
   close.focus();
 };
 
+const ARTIFACT_URL_PATTERN = /^\/api\/artifacts\/artifact_[a-f0-9]{32}$/;
+const safeArtifactPreviewUrl = (value) => {
+  const candidate = String(value || "");
+  return ARTIFACT_URL_PATTERN.test(candidate) ? candidate : "";
+};
+const readArtifactDatasetRecord = (value) => {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+const safeArtifactRecordValue = (key, value) => {
+  if (value === null || value === undefined || value === "") return null;
+  if (key === "media_type") return /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(String(value)) ? String(value) : null;
+  if (key === "size_bytes") return Number.isInteger(value) && value >= 0 ? value : null;
+  if (key === "attempt") return Number.isInteger(value) && value >= 1 && value <= 10000 ? value : null;
+  if (key === "created_at") return /^[0-9T:.+Z-]{8,80}$/.test(String(value)) ? String(value) : null;
+  if (key === "sha256" || key === "job_spec_fingerprint") return /^[a-f0-9]{64}$/.test(String(value)) ? String(value) : null;
+  if (key === "job_id") return /^jobv5_[a-f0-9]{32}$/.test(String(value)) ? String(value) : null;
+  if (key === "adapter_id") return /^[a-z][a-z0-9_.-]{0,63}$/.test(String(value)) ? String(value) : null;
+  if (key === "status") return ["queued", "starting", "running", "cancelling", "completed", "failed", "unavailable", "interrupted"].includes(String(value)) ? String(value) : null;
+  return null;
+};
+const appendArtifactRecord = (body, title, record, keys) => {
+  const entries = keys.map((key) => [key, safeArtifactRecordValue(key, record[key])]).filter(([, value]) => value !== null);
+  if (!entries.length) return;
+  const details = document.createElement("details");
+  details.className = "artifact-preview-dialog__details";
+  const summary = document.createElement("summary");
+  summary.textContent = title;
+  details.append(summary);
+  const list = document.createElement("dl");
+  entries.forEach(([key, value]) => {
+    const term = document.createElement("dt"); term.textContent = key;
+    const description = document.createElement("dd"); description.textContent = String(value);
+    list.append(term, description);
+  });
+  details.append(list);
+  body.append(details);
+};
+const showArtifactPreview = (button) => {
+  if (!artifactPreviewLayer) return;
+  artifactPreviewOpener = button;
+  artifactPreviewLayer.replaceChildren();
+  const dialog = document.createElement("section");
+  dialog.className = "artifact-preview-dialog";
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  const header = document.createElement("header");
+  header.className = "artifact-preview-dialog__header";
+  const title = document.createElement("strong");
+  const rawName = String(button.dataset.artifactName || "Artifact preview").replace(/[\r\n]+/g, " ").split(/[\\/]/).pop().trim();
+  title.textContent = rawName || "Artifact preview";
+  const close = document.createElement("button");
+  close.className = "button button--compact";
+  close.type = "button";
+  close.dataset.focusKey = "artifact-preview-close";
+  close.dataset.closeArtifactPreview = "true";
+  close.textContent = "Đóng";
+  header.append(title, close);
+  const body = document.createElement("div");
+  body.className = "artifact-preview-dialog__body";
+  const url = safeArtifactPreviewUrl(button.dataset.artifactUrl);
+  const mediaTypeCandidate = String(button.dataset.artifactType || "").split(";", 1)[0].trim().toLowerCase();
+  const mediaType = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(mediaTypeCandidate) ? mediaTypeCandidate : "application/octet-stream";
+  const isMask = button.dataset.artifactMask === "true";
+  if (!url) {
+    const note = document.createElement("p");
+    note.textContent = "Artifact reference is unavailable; no local path is shown.";
+    body.append(note);
+  } else if (mediaType.startsWith("image/")) {
+    const image = document.createElement("img");
+    image.src = url;
+    image.alt = isMask ? `Mask raster: ${title.textContent}` : title.textContent;
+    if (isMask) image.className = "artifact-preview-image artifact-preview-image--mask";
+    body.append(image);
+  } else if (mediaType.startsWith("video/")) {
+    const video = document.createElement("video");
+    video.src = url;
+    video.controls = true;
+    video.preload = "metadata";
+    body.append(video);
+  } else if (mediaType.startsWith("audio/")) {
+    const audio = document.createElement("audio");
+    audio.src = url;
+    audio.controls = true;
+    audio.preload = "metadata";
+    body.append(audio);
+  } else {
+    const note = document.createElement("p");
+    note.textContent = isMask
+      ? "Mask raster preview is unavailable for this artifact type; Hub keeps the mask as truthful metadata without browser rasterization."
+      : "Artifact này không có trình phát inline; metadata server-owned vẫn được hiển thị bên dưới.";
+    body.append(note);
+  }
+  const metadata = readArtifactDatasetRecord(button.dataset.artifactMeta);
+  appendArtifactRecord(body, "Metadata", metadata, ["media_type", "size_bytes", "created_at", "sha256"]);
+  const provenance = readArtifactDatasetRecord(button.dataset.artifactProvenance);
+  appendArtifactRecord(body, "Provenance", provenance, ["job_id", "job_spec_fingerprint", "adapter_id", "attempt", "status"]);
+  if (url) {
+    const save = document.createElement("a");
+    save.className = "button button--primary";
+    save.href = url;
+    save.download = title.textContent || "artifact";
+    save.textContent = "Lưu/Xuất artifact";
+    body.append(save);
+  }
+  dialog.append(header, body);
+  artifactPreviewLayer.append(dialog);
+  close.focus();
+};
+
 const renderNavigation = () => {
   const active = routeId();
   if (!nav) return;
   nav.setAttribute("aria-label", "Module navigation");
+  nav.setAttribute("aria-label", translateText(nav.getAttribute("aria-label")));
   nav.innerHTML = NAVIGATION.map((group, index) => {
     const groupId = `nav-group-${index}`;
     return `
       <section class="nav-group-section" role="group" aria-labelledby="${groupId}">
-        <h2 class="nav-group" id="${groupId}">${escapeHtml(group.group)}</h2>
+        <h2 class="nav-group" id="${groupId}">${escapeHtml(translateText(group.group))}</h2>
         <div class="nav-group-items">
           ${group.items.map(([id, label, icon]) => {
             const current = id === active ? ' aria-current="page"' : "";
-            return `<button class="nav-item ${id === active ? "is-active" : ""}" type="button" data-route="${escapeHtml(id)}" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}"${current}><span class="nav-icon" aria-hidden="true">${escapeHtml(icon)}</span><span class="nav-label">${escapeHtml(label)}</span></button>`;
+            const translatedLabel = translateText(label);
+            return `<button class="nav-item ${id === active ? "is-active" : ""}" type="button" data-route="${escapeHtml(id)}" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}"${current}><span class="nav-icon" aria-hidden="true">${escapeHtml(icon)}</span><span class="nav-label">${escapeHtml(translatedLabel)}</span></button>`;
           }).join("")}
         </div>
       </section>`;
   }).join("");
+  nav.querySelectorAll(".nav-item").forEach((item) => {
+    const label = item.querySelector(".nav-label")?.textContent || "";
+    item.setAttribute("aria-label", label);
+    item.setAttribute("title", label);
+  });
 };
 
 const renderApiState = () => {
@@ -314,17 +569,25 @@ const updateTopbar = () => {
   topStatus.textContent = health.status ? `${formatStatus(health.status)} · Workflow trực tiếp` : "Đang khởi động API…";
   diskMetric.textContent = disk.free_bytes ? `Ổ đĩa ${formatGb(disk.free_bytes)} trống` : "Ổ đĩa —";
   gpuMetric.textContent = gpu.name ? `GPU ${gpu.name}` : "GPU chưa phát hiện";
-  const active = state.jobs.filter((job) => ["queued", "starting", "running", "cancelling"].includes(job.status)).length;
-  jobSummary.textContent = `Jobs: ${active} đang chạy · ${state.jobs.length} bản ghi`;
+  const recovery = jobRecoverySnapshot(state);
+  jobSummary.textContent = `Jobs: ${recovery.counts.active} active · ${recovery.counts.total} records`;
 };
 
-const render = () => {
+const render = ({ background = false, focus = "" } = {}) => {
+  const continuity = captureFocusContinuity();
+  if (background && continuity.token) {
+    setSnapshotStatus("deferred");
+    updateTopbar();
+    return false;
+  }
   disposeNodeStudios();
   disposeImageMaskCanvases();
   renderNavigation();
   syncSidebarState();
   view.innerHTML = `${renderApiState()}${renderPage(routeId(), state)}`;
-  view.focus({ preventScroll: true });
+  restoreScrollContinuity(continuity.scroll);
+  restoreFocusContinuity(continuity, focus);
+  setSnapshotStatus(background ? (continuity.activeInside ? "preserved" : "received") : (continuity.activeInside && !focus ? "preserved" : "received"));
   updateTopbar();
   if (view.querySelector("[data-node-studio]")) {
     mountNodeStudios({
@@ -333,6 +596,7 @@ const render = () => {
       initialPresetId: state.pendingGalleryPreset,
       onRecipeApplied: () => { state.pendingNodeRecipe = null; },
       onPresetApplied: () => { state.pendingGalleryPreset = null; },
+      workflowLibrary: workflowLibraryAdapter,
     });
   }
   if (view.querySelector("[data-mask-canvas]")) {
@@ -351,30 +615,44 @@ const render = () => {
       onCancel: () => { /* Escape only discards the unsaved pointer draft. */ },
     });
   }
+  if (languageSelect) languageSelect.value = currentLanguage();
+  localizeDocument(document);
+  return true;
 };
 
 const applyBootstrap = (payload) => {
   state.apiStatus = "ready";
   state.apiError = "";
   state.health = payload.health || {};
+  state.capabilities = payload.capabilities || {};
+  state.productization = payload.productization || {};
+  state.storage = payload.storage || state.productization.storage || {};
   state.components = payload.components || [];
   state.applications = payload.applications || [];
   state.jobs = payload.jobs || [];
+  state.durableJobs = payload.durable_jobs?.records || [];
   state.tools = payload.tools || [];
   state.settings = payload.settings || {};
   state.lifecycle = payload.lifecycle || {};
+  if (payload.workflow_library && typeof payload.workflow_library === "object") state.workflowLibrary = payload.workflow_library;
 };
 
-const refreshFast = async ({ quiet = false } = {}) => {
-  const [health, jobs] = await Promise.allSettled([getHealth(), getJobs()]);
+const refreshFast = async ({ quiet = false, renderView = true } = {}) => {
+  const [health, jobs, capabilities, durableJobs] = await Promise.allSettled([getHealth(), getJobs(), getCapabilities(), getDurableJobs()]);
   let failed = false;
   if (health.status === "fulfilled") state.health = health.value || {};
   else failed = true;
   if (jobs.status === "fulfilled") state.jobs = jobs.value.jobs || [];
   else failed = true;
-  if (["dashboard", "jobs"].includes(routeId())) render(); else updateTopbar();
+  if (capabilities.status === "fulfilled") state.capabilities = capabilities.value || {};
+  else failed = true;
+  if (durableJobs.status === "fulfilled") state.durableJobs = durableJobs.value?.records || [];
+  else failed = true;
+  const rendered = ["dashboard", "settings", "jobs"].includes(routeId()) ? render({ background: true }) : false;
   if (failed && state.apiStatus === "ready") state.apiStatus = "degraded";
   if (failed && !quiet) showToast("API đang khởi động hoặc một snapshot nhanh chưa sẵn sàng.", "warning");
+  if (failed && rendered !== false) setSnapshotStatus("unavailable");
+  return rendered;
 };
 
 const refreshCreative = async ({ renderView = true } = {}) => {
@@ -454,15 +732,29 @@ const loadRouteData = async ({ scan = false } = {}) => {
     }
     render();
   }
-  if (route === "projects") {
+  if (route === "diagnostics") {
     if (routeLoad) return routeLoad;
-    state.creativeLoading = true;
-    render();
-    routeLoad = refreshCreative({ renderView: true }).catch((error) => {
-      state.creative = { ...state.creative, recovery: { status: "recovery_required", reason: error.message || "Không thể tải Creative Workspace.", action: "Kiểm tra API Hub rồi thử lại." } };
-      showToast(error.message || "Không thể tải Creative Workspace.", "error");
-      if (routeId() === "projects") render();
+    routeLoad = getDiagnosticsSnapshot().then((res) => {
+      state.diagnostics = res;
+      render();
+    }).catch((err) => {
+      showToast(err.message || "Không thể tải Diagnostics snapshot.", "error");
     }).finally(() => { routeLoad = null; });
+    return routeLoad;
+  }
+  if (route === "settings") {
+    if (routeLoad) return routeLoad;
+    routeLoad = Promise.allSettled([getSettings(), listBackups()]).then(([setRes, backRes]) => {
+      if (setRes.status === "fulfilled" && setRes.value?.settings) {
+        state.settings = setRes.value.settings;
+        state.settings_revision = setRes.value.settings_revision;
+        state.settingsRecovery = setRes.value.recovery;
+      }
+      if (backRes.status === "fulfilled" && backRes.value?.backups) {
+        state.backups = backRes.value.backups;
+      }
+      render();
+    }).catch(() => {}).finally(() => { routeLoad = null; });
     return routeLoad;
   }
   return undefined;
@@ -476,7 +768,11 @@ const initialize = async () => {
     state.apiError = error.message;
     showToast(`API chưa sẵn sàng: ${error.message}`, "warning");
   }
-  render();
+  try {
+    const library = await workflowLibraryAdapter.list();
+    if (library?.status) state.workflowLibrary = library;
+  } catch { /* Keep the explicit partial adapter state. */ }
+  render({ focus: "main" });
   await loadRouteData();
 };
 
@@ -727,6 +1023,14 @@ const handleImageMaskForm = async (form) => {
 };
 
 document.addEventListener("change", (event) => {
+  const language = event.target.closest("#language-select");
+  if (language) {
+    setLanguage(language.value);
+    // Reload from the canonical server snapshot so a language change never
+    // translates an already translated text node a second time.
+    window.location.reload();
+    return;
+  }
   const input = event.target.closest("input[type=file][data-asset-key]");
   if (input) renderFilePreview(input);
   const projectSelect = event.target.closest("[data-project-select]");
@@ -784,8 +1088,27 @@ document.addEventListener("click", async (event) => {
   const preview = event.target.closest("[data-preview-artifact]");
   if (preview) { showArtifactPreview(preview); return; }
   if (event.target.closest("[data-refresh-api]")) { await initialize(); return; }
-  const route = event.target.closest("[data-route]");
-  if (route) { closeMobileSidebar(); window.location.hash = `#/${route.dataset.route}`; return; }
+  if (event.target.closest("#refresh-snapshot")) {
+    const button = event.target.closest("#refresh-snapshot");
+    button.disabled = true;
+    if (snapshotStatus) snapshotStatus.textContent = "Đang nhận snapshot mới…";
+    try {
+      await refreshFast({ quiet: false, renderView: true });
+      if (snapshotStatus) snapshotStatus.textContent = "Đã nhận snapshot mới. Chỉ lần làm mới này đã cập nhật dữ liệu.";
+      showToast("Đã làm mới snapshot theo yêu cầu.", "success");
+    } catch (error) {
+      if (snapshotStatus) snapshotStatus.textContent = "Không thể nhận snapshot mới; dữ liệu hiện tại vẫn được giữ.";
+      showToast(error.message || "Không thể làm mới snapshot.", "error");
+    } finally { button.disabled = false; }
+    return;
+  }
+  const route = event.target.closest("[data-route], [data-readiness-route]");
+  if (route) {
+    const nextRoute = route.dataset.route || route.dataset.readinessRoute;
+    if (route.dataset.recoveryFocus === "attention") state.jobFilter = "attention";
+    if (route.dataset.recoveryFocus === "all") state.jobFilter = "all";
+    closeMobileSidebar(); window.location.hash = `#/${nextRoute}`; return;
+  }
   if (event.target.closest("[data-refresh-creative]")) {
     try { await refreshCreative(); showToast("Đã làm mới Creative Workspace."); }
     catch (error) { showToast(error.message, "error"); }
@@ -1000,6 +1323,229 @@ document.addEventListener("click", async (event) => {
   }
   const jobFilter = event.target.closest("[data-job-filter]");
   if (jobFilter) { state.jobFilter = jobFilter.dataset.jobFilter || "all"; render(); return; }
+  if (event.target.closest("[data-refresh-diagnostics]")) {
+    try {
+      state.diagnostics = await getDiagnosticsSnapshot();
+      render();
+      showToast("Đã làm mới kết quả kiểm tra hệ thống.", "success");
+    } catch (error) {
+      showToast(error.message || "Không thể làm mới Diagnostics.", "error");
+    }
+    return;
+  }
+  if (event.target.closest("[data-export-diagnostics]")) {
+    const button = event.target.closest("[data-export-diagnostics]");
+    button.disabled = true;
+    try {
+      const result = await exportDiagnosticsBundle();
+      downloadJson("local-ai-hub-diagnostics.json", result.bundle);
+      showToast("Đã xuất gói chẩn đoán an toàn (đã redact secrets).", "success");
+    } catch (error) {
+      showToast(error.message || "Không thể xuất gói chẩn đoán.", "error");
+    } finally {
+      button.disabled = false;
+    }
+    return;
+  }
+  const repairButton = event.target.closest("[data-repair]");
+  if (repairButton) {
+    const action = repairButton.dataset.repair;
+    const outputEl = document.querySelector("#repair-output");
+    repairButton.disabled = true;
+    try {
+      if (action === "verify-config") {
+        const res = await repairVerifyConfig();
+        if (outputEl) outputEl.innerHTML = `<div class="callout callout--info"><strong>Kết quả kiểm tra cấu hình:</strong> ${escapeHtml(res.result?.reason || "Hoàn tất kiểm tra.")}</div>`;
+      } else if (action === "inspect-recovery" || action === "clear-drafts") {
+        const res = await getRecoveryDrafts();
+        const drafts = Array.isArray(res.drafts) ? res.drafts : [];
+        if (!drafts.length) {
+          if (outputEl) outputEl.innerHTML = `<div class="callout callout--info"><strong>Trạng thái phục hồi:</strong> Không phát hiện bản nháp sót.</div>`;
+          showToast("Không có bản nháp phục hồi nào tồn tại.", "info");
+        } else {
+          if (outputEl) {
+            outputEl.innerHTML = `
+              <div class="callout callout--warning">
+                <strong>Danh sách bản nháp phục hồi (${drafts.length} bản nháp):</strong>
+                <p class="small">Chọn các bản nháp bạn muốn dọn dẹp an toàn:</p>
+                <div class="draft-selection-list">
+                  ${drafts.map((d) => `
+                    <label class="row-item" style="cursor:pointer;">
+                      <input type="checkbox" class="draft-checkbox" value="${escapeHtml(d.scope || d.name)}" checked />
+                      <span><strong>${escapeHtml(d.scope || d.name)}</strong> (${escapeHtml(String(d.size_bytes || 0))} bytes)</span>
+                    </label>
+                  `).join("")}
+                </div>
+                <div class="form-actions" style="margin-top:0.75rem;">
+                  <button class="button button--danger" type="button" data-confirm-clear-drafts>Dọn dẹp bản nháp đã chọn</button>
+                </div>
+              </div>
+            `;
+          }
+        }
+      }
+    } catch (error) {
+      if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">${escapeHtml(error.message || "Lỗi thao tác bảo trì.")}</div>`;
+      showToast(error.message || "Lỗi thao tác bảo trì.", "error");
+    } finally {
+      repairButton.disabled = false;
+    }
+    return;
+  }
+  const clearDraftsConfirmBtn = event.target.closest("[data-confirm-clear-drafts]");
+  if (clearDraftsConfirmBtn) {
+    const checkboxes = Array.from(document.querySelectorAll(".draft-checkbox:checked"));
+    const scopes = checkboxes.map((cb) => cb.value).filter(Boolean);
+    if (!scopes.length) {
+      showToast("Vui lòng chọn ít nhất một bản nháp để dọn dẹp.", "warning");
+      return;
+    }
+    const confirmed = window.confirm(`Bạn có chắc chắn muốn dọn dẹp ${scopes.length} bản nháp phục hồi đã chọn không?`);
+    if (!confirmed) return;
+    clearDraftsConfirmBtn.disabled = true;
+    try {
+      const res = await repairClearRecoveryDrafts(scopes, true);
+      showToast(res.message || `Đã dọn dẹp ${scopes.length} bản nháp phục hồi.`, "success");
+      const outputEl = document.querySelector("#repair-output");
+      if (outputEl) outputEl.innerHTML = `<div class="callout callout--success">${escapeHtml(res.message || "Đã dọn dẹp xong.")}</div>`;
+      await loadRouteData();
+    } catch (error) {
+      showToast(error.message || "Không thể dọn dẹp bản nháp.", "error");
+    } finally {
+      clearDraftsConfirmBtn.disabled = false;
+    }
+    return;
+  }
+  if (event.target.closest("[data-save-settings]")) {
+    const saveButton = event.target.closest("[data-save-settings]");
+    const expectedRevision = Number(saveButton.dataset.expectedRevision ?? state.settings_revision ?? 0);
+    const lang = document.querySelector("#settings-lang")?.value || "vi";
+    const theme = document.querySelector("#settings-theme")?.value || "system";
+    const maximized = document.querySelector("#settings-maximized")?.checked ?? true;
+    const minWidth = Math.max(800, Math.min(3840, Number(document.querySelector("#settings-min-width")?.value || 1280)));
+    const minHeight = Math.max(600, Math.min(2160, Number(document.querySelector("#settings-min-height")?.value || 720)));
+    const modelPolicy = document.querySelector("#settings-model-policy")?.value || "on_demand";
+    const gpuJobs = Number(document.querySelector("#settings-gpu-jobs")?.value || 1);
+
+    saveButton.disabled = true;
+    try {
+      const result = await patchSettings({
+        ui: { language: lang, theme: theme },
+        window: { start_maximized: Boolean(maximized), minimum_width: minWidth, minimum_height: minHeight },
+        jobs: { model_load_policy: modelPolicy, max_heavy_gpu_jobs: gpuJobs },
+      }, expectedRevision);
+
+      if (result.accepted) {
+        state.settings = result.settings;
+        state.settings_revision = result.settings_revision;
+        showToast("Đã lưu cài đặt thành công.", "success");
+        render();
+      } else if (result.status === "conflict") {
+        showToast("Cảnh báo xung đột: Cài đặt đã bị thay đổi ở nơi khác. Đang tải lại...", "warning");
+        await loadRouteData();
+      }
+    } catch (error) {
+      showToast(error.message || "Không thể lưu cài đặt.", "error");
+    } finally {
+      saveButton.disabled = false;
+    }
+    return;
+  }
+  const resetSettingsBtn = event.target.closest("[data-reset-settings]");
+  if (resetSettingsBtn) {
+    const section = resetSettingsBtn.dataset.resetSettings;
+    resetSettingsBtn.disabled = true;
+    try {
+      const result = await resetSettingsSection(section);
+      if (result.accepted) {
+        state.settings = result.settings;
+        state.settings_revision = result.settings_revision;
+        showToast(`Đã đặt lại cấu hình phần ${section}.`, "success");
+        render();
+      }
+    } catch (error) {
+      showToast(error.message || "Không thể đặt lại cài đặt.", "error");
+    } finally {
+      resetSettingsBtn.disabled = false;
+    }
+    return;
+  }
+  if (event.target.closest("[data-create-backup]")) {
+    const button = event.target.closest("[data-create-backup]");
+    button.disabled = true;
+    try {
+      const res = await createBackup();
+      if (res.accepted) {
+        showToast(`Đã tạo bản sao lưu: ${res.backup_id}`, "success");
+        await loadRouteData();
+      }
+    } catch (error) {
+      showToast(error.message || "Không thể tạo backup.", "error");
+    } finally {
+      button.disabled = false;
+    }
+    return;
+  }
+  if (event.target.closest("[data-inspect-backup]")) {
+    const select = document.querySelector("#backup-select");
+    const backupId = select?.value?.trim();
+    const outputEl = document.querySelector("#restore-plan-output");
+    if (!backupId) {
+      showToast("Vui lòng chọn một bản sao lưu để kiểm tra.", "warning");
+      return;
+    }
+    try {
+      const insp = await inspectBackup(backupId);
+      if (!insp.valid) {
+        if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">File backup không hợp lệ: ${(insp.errors || []).join(", ")}</div>`;
+        return;
+      }
+      const plan = await planRestore(backupId);
+      if (!plan.accepted) {
+        if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">${escapeHtml(plan.reason || "Không thể lập kế hoạch khôi phục.")}</div>`;
+        return;
+      }
+      const categories = Object.keys(plan.categories || {}).join(", ");
+      const prev = plan.preview || {};
+      if (outputEl) {
+        outputEl.innerHTML = `
+          <div class="callout callout--warning">
+            <strong>Kế hoạch khôi phục (Plan ID: ${escapeHtml(plan.plan_id)}):</strong>
+            <p>Phạm vi: ${escapeHtml(categories || "Tệp cấu hình")}</p>
+            <p>Chi tiết: <strong>${escapeHtml(String(prev.total || 0))}</strong> tệp (Tạo mới: ${escapeHtml(String(prev.create || 0))}, Ghi đè: ${escapeHtml(String(prev.overwrite || 0))}, Bỏ qua mới hơn: ${escapeHtml(String(prev.skip_newer || 0))})</p>
+            <div class="form-actions">
+              <button class="button button--danger" type="button" data-apply-restore="${escapeHtml(plan.plan_id)}">Xác nhận khôi phục</button>
+            </div>
+          </div>
+        `;
+      }
+    } catch (error) {
+      if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">${escapeHtml(error.message || "Lỗi kiểm tra backup.")}</div>`;
+      showToast(error.message || "Lỗi kiểm tra backup.", "error");
+    }
+    return;
+  }
+  const applyRestoreBtn = event.target.closest("[data-apply-restore]");
+  if (applyRestoreBtn) {
+    const planId = applyRestoreBtn.dataset.applyRestore;
+    applyRestoreBtn.disabled = true;
+    try {
+      const res = await applyRestore(planId, true);
+      if (res.accepted) {
+        showToast("Đã khôi phục dữ liệu thành công!", "success");
+        await initialize();
+      } else if (res.status === "conflict") {
+        showToast("Cảnh báo xung đột: Trạng thái cấu hình đã thay đổi. Vui lòng lập lại kế hoạch.", "warning");
+      } else {
+        showToast(res.reason || "Khôi phục thất bại.", "error");
+        applyRestoreBtn.disabled = false;
+      }
+    } catch (error) {
+      showToast(error.message || "Khôi phục thất bại.", "error");
+      applyRestoreBtn.disabled = false;
+    }
+    return;
+  }
   if (event.target.closest("#theme-toggle") || event.target.closest("[data-cycle-theme]")) { cycleTheme(); return; }
   const refreshButton = event.target.closest("[data-refresh-storage]");
   if (refreshButton) { refreshButton.disabled = true; await loadRouteData({ scan: true }); refreshButton.disabled = false; showToast("Đã quét lại storage theo yêu cầu."); return; }
@@ -1012,9 +1558,47 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const cancel = event.target.closest("[data-cancel-job]");
-  if (cancel) { cancel.disabled = true; try { showToast((await cancelJob(cancel.dataset.cancelJob)).message || "Đang hủy job."); await refreshFast({ quiet: true }); } catch (error) { showToast(error.message, "error"); } return; }
+  if (cancel) {
+    cancel.disabled = true;
+    try {
+      const result = await cancelJob(cancel.dataset.cancelJob);
+      const refreshed = await refreshFast({ quiet: true });
+      if (refreshed === false) render();
+      const message = safeDisplayMessage(result?.message, "Cancel request sent; Jobs snapshot refreshed.");
+      setJobActionStatus(message, "success"); showToast(message, "success");
+    } catch (error) {
+      setJobActionStatus(error.message, "error"); showToast(error.message, "error");
+    } finally { cancel.disabled = false; }
+    return;
+  }
   const resume = event.target.closest("[data-resume-job]");
-  if (resume) { resume.disabled = true; try { showToast(`Đã tạo ${((await resumeJob(resume.dataset.resumeJob)).job || {}).id || "job tiếp tục"}.`); await refreshFast({ quiet: true }); } catch (error) { showToast(error.message, "error"); } return; }
+  if (resume) {
+    resume.disabled = true;
+    try {
+      await resumeJob(resume.dataset.resumeJob);
+      const refreshed = await refreshFast({ quiet: true });
+      if (refreshed === false) render();
+      const message = "Legacy recovery request sent; Jobs snapshot refreshed.";
+      setJobActionStatus(message, "success"); showToast(message, "success");
+    } catch (error) {
+      setJobActionStatus(error.message, "error"); showToast(error.message, "error");
+    } finally { resume.disabled = false; }
+    return;
+  }
+  const durableResume = event.target.closest("[data-resume-durable-job]");
+  if (durableResume) {
+    durableResume.disabled = true;
+    try {
+      const result = await resumeDurableJob(durableResume.dataset.resumeDurableJob);
+      const refreshed = await refreshFast({ quiet: true });
+      if (refreshed === false) render();
+      const message = safeDisplayMessage(result?.next_action, "Durable recovery response received; the server snapshot remains authoritative.");
+      setJobActionStatus(message, result?.status === "unavailable" ? "warning" : "success"); showToast(message, "warning");
+    } catch (error) {
+      setJobActionStatus(error.message, "error"); showToast(error.message, "error");
+    } finally { durableResume.disabled = false; }
+    return;
+  }
   const open = event.target.closest("[data-open-artifact]");
   if (open) { try { showToast((await openArtifact(open.dataset.openArtifact)).message || "Đã yêu cầu mở artifact."); } catch (error) { showToast(error.message, "error"); } return; }
   const comfyAction = event.target.closest("[data-comfy-action]")?.dataset.comfyAction;
@@ -1068,6 +1652,21 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("keydown", async (event) => {
+  if (event.key === "Escape") {
+    if (artifactPreviewLayer && !artifactPreviewLayer.matches(":empty")) {
+      event.preventDefault();
+      closeArtifactPreview();
+      return;
+    }
+    const openModals = Array.from(document.querySelectorAll(".modal, .dialog, .is-open, .modal-backdrop, .toast-container"));
+    if (openModals.length) {
+      event.preventDefault();
+      openModals.forEach((el) => {
+        if (el.classList.contains("is-open")) el.classList.remove("is-open");
+      });
+      return;
+    }
+  }
   if (routeId() !== "image" || state.workspaceTabs.image !== "studio") return;
   const target = event.target;
   if (target?.matches?.("input, textarea, select, [contenteditable=true]")) return;
@@ -1085,8 +1684,8 @@ document.addEventListener("keydown", async (event) => {
 });
 
 window.addEventListener("resize", syncSidebarState);
-window.addEventListener("hashchange", async () => { render(); await loadRouteData(); });
+window.addEventListener("hashchange", async () => { render({ focus: "main" }); await loadRouteData(); });
 syncSidebarState();
 applyTheme(currentTheme());
+setLanguage(currentLanguage());
 initialize();
-window.setInterval(() => refreshFast({ quiet: true }), 2500);

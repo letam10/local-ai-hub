@@ -1,3 +1,10 @@
+/*
+  FILE NOTE
+  - Mục đích: Typed HTTP client cho Local AI Hub frontend (settings, diagnostics, backup/restore, node drafts, projects, jobs, workflows)
+  - Liên kết trực tiếp: src/ui/app.js, src/ui/pages.js, src/ui/node_studio.js, src/ui/image_mask_studio.js
+  - Vùng ảnh hưởng khi sửa: Toàn bộ các tương tác gọi API từ frontend tới backend
+*/
+
 export class HubApiError extends Error {
   constructor(message, payload = {}, status = 0) {
     super(message);
@@ -29,8 +36,41 @@ export const getStorage = () => request("/api/storage");
 export const getModels = () => request("/api/models");
 export const getApplications = () => request("/api/applications");
 export const getSettings = () => request("/api/settings");
+export const getSettingsSchema = () => request("/api/settings/schema");
+export const patchSettings = (patch, expectedRevision) => request("/api/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...patch, expected_revision: expectedRevision }) });
+export const resetSettingsSection = (section) => request("/api/settings/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ section }) });
 export const getJobs = () => request("/api/jobs");
+export const getDurableJobs = () => request("/api/durable-jobs");
+export const resumeDurableJob = (id) => request(`/api/durable-jobs/${encodeURIComponent(id)}/resume`, { method: "POST" });
 export const getLifecycle = () => request("/api/lifecycle");
+export const getCapabilities = () => request("/api/capabilities");
+export const getWorkflowLibrary = () => request("/api/workflow-library");
+export const getWorkflowLibraryEntry = (id) => request(`/api/workflow-library/${encodeURIComponent(id)}`);
+export const saveWorkflowLibrary = (workflow, expectedRevision) => request("/api/workflow-library", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workflow, expected_revision: expectedRevision }) });
+export const deleteWorkflowLibrary = (id, expectedRevision) => request(`/api/workflow-library/${encodeURIComponent(id)}`, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expected_revision: expectedRevision }) });
+export const planWorkflowLibraryMigration = (entries) => request("/api/workflow-library/migration/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ entries }) });
+export const confirmWorkflowLibraryMigration = (entries, expectedRevision) => request("/api/workflow-library/migration/confirm", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ entries, expected_revision: expectedRevision }) });
+
+// V6 Diagnostics Center
+export const getDiagnosticsSnapshot = () => request("/api/diagnostics/snapshot");
+export const getDiagnosticsSubsystem = (name) => request(`/api/diagnostics/subsystem/${encodeURIComponent(name)}`);
+export const exportDiagnosticsBundle = () => request("/api/diagnostics/export");
+export const repairVerifyConfig = () => request("/api/diagnostics/repair/verify-config", { method: "POST" });
+export const repairInspectRecovery = () => request("/api/diagnostics/repair/inspect-recovery", { method: "POST" });
+export const getRecoveryDrafts = () => request("/api/diagnostics/repair/recovery-drafts");
+export const repairClearRecoveryDrafts = (scopes = [], confirmed = false) => request("/api/diagnostics/repair/clear-recovery-drafts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scopes, confirmed }) });
+
+// V6 Backup / Restore
+export const listBackups = () => request("/api/backup/list");
+export const createBackup = () => request("/api/backup/create", { method: "POST" });
+export const inspectBackup = (backupId) => request("/api/backup/inspect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ backup_id: backupId }) });
+export const planRestore = (backupId) => request("/api/backup/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ backup_id: backupId }) });
+export const applyRestore = (planId, confirmed = false) => request("/api/backup/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ plan_id: planId, confirmed }) });
+
+// V6 Node Studio Drafts
+export const getNodeDraft = (scope) => request(`/api/node-studio/drafts/${encodeURIComponent(scope)}`);
+export const saveNodeDraft = (scope, graph) => request(`/api/node-studio/drafts/${encodeURIComponent(scope)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ graph }) });
+export const clearNodeDraft = (scope) => request(`/api/node-studio/drafts/${encodeURIComponent(scope)}`, { method: "DELETE" });
 
 export const uploadFile = async (file) => {
   if (!file) throw new Error("Chọn tệp trước khi tải lên Hub.");
@@ -90,6 +130,10 @@ export const createRecipe = (payload) => request("/api/recipes", { method: "POST
 export const updateRecipe = (id, payload) => request(`/api/recipes/${encodeURIComponent(id)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
 export const applyRecipe = (id, payload = {}) => request(`/api/recipes/${encodeURIComponent(id)}/apply`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
 export const exportRecipePack = (ids = []) => request(`/api/recipes/export-pack${ids.length ? `?${ids.map((id) => `id=${encodeURIComponent(id)}`).join("&")}` : ""}`);
+export const getProjectManifest = (id) => request(`/api/projects/${encodeURIComponent(id)}/manifest`);
+export const getProjectMissingArtifacts = (id) => request(`/api/projects/${encodeURIComponent(id)}/missing-artifacts`);
+export const searchAssets = (params = {}) => request(`/api/assets/search?${new URLSearchParams(params)}`);
+export const getArtifactStatus = (id) => request(`/api/artifacts/${encodeURIComponent(id)}/status`);
 export const importRecipePack = (payload) => request("/api/recipes/import-pack", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
 export const getWorkflowGallery = () => request("/api/workflow-gallery");
 

@@ -1,4 +1,8 @@
 from __future__ import annotations
+# FILE NOTE
+# - Mục đích: Contract tests cho V4 Node Studio, polling cache, console helper
+# - Liên kết trực tiếp: src/services/node_studio/, src/ui/app.js, src/services/runtime_registry.py
+# - Vùng ảnh hưởng khi sửa: V6 đã xóa window.setInterval auto-polling; test_console_helper cần update
 
 import json
 import importlib.util
@@ -480,7 +484,10 @@ class NodeStudioContractTests(unittest.TestCase):
         self.assertIn("SW_MINIMIZE", helper)
         self.assertIn("_TASKLIST_CACHE_SECONDS = 5.0", runtime)
         self.assertIn("_GPU_CACHE_SECONDS = 2.0", gpu)
-        self.assertIn("2500", app)
+        # V6 removed window.setInterval auto-polling in favour of explicit refreshFast() calls.
+        # Verify the explicit refresh mechanism is present and no unbounded auto-poll is registered.
+        self.assertIn("refreshFast", app)
+        self.assertNotIn("window.setInterval(() => refreshFast", app)
         self.assertIn("pythonw.exe", launcher_audit)
         retired_launcher = "launch_local_ai_hub" + ".cmd"
         self.assertFalse((ROOT / "scripts" / retired_launcher).exists())

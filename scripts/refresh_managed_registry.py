@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +27,8 @@ from src.shared.version import PRODUCT_VERSION
 CONFIG = ROOT / "Config"
 RUNTIME = ROOT / "runtime"
 MODELS = ROOT / "Models"
+OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
+OLLAMA_TIMEOUT_SECONDS = 0.5
 
 
 def system_application_paths(application: str) -> tuple[Path, Path]:
@@ -34,21 +40,10 @@ def system_application_paths(application: str) -> tuple[Path, Path]:
     return application_dir, executable
 
 
-def environment_path(component: str) -> Path:
-    """Use the canonical V3 environment after import verification, else retain a safe fallback.
+def environment_path(component: str, root: Path = ROOT) -> Path:
+    """Return the one canonical environment location for a managed component."""
 
-    V3 migration is intentionally staged: the legacy environment remains selected
-    until a replacement interpreter exists.  This avoids publishing a registry
-    that points at an environment that has not been created or smoke-tested.
-    """
-
-    canonical = ROOT / "Environments" / component
-    migration = load(CONFIG / "environment_migration_v3.local.json", {})
-    state = migration.get(component) if isinstance(migration, dict) else None
-    verified = isinstance(state, dict) and state.get("status") in {"verified", "functional_smoke_passed"}
-    if verified and (canonical / "Scripts" / "python.exe").is_file():
-        return canonical
-    return Path(r"D:\AI_4K_TEMP") / f"{component}_venv"
+    return root / "Environments" / component
 
 
 def load(path: Path, default: dict[str, Any]) -> dict[str, Any]:
@@ -78,46 +73,105 @@ def replace_by_id(items: list[dict[str, Any]], item_id: str, updates: dict[str, 
     return result
 
 
-def component_records() -> list[dict[str, Any]]:
-    applications = RUNTIME / "applications"
-    engines = RUNTIME / "engines"
-    animesr_environment = environment_path("animesr")
-    sam2_environment = environment_path("sam2")
+def _ollama_record_id(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-") or "model"
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
+    return f"ollama-{slug[:48]}-{digest}"
+
+
+def ollama_model_records() -> list[dict[str, Any]] | None:
+    """Discover Ollama tags from its fixed local API without inspecting blobs.
+
+    Returning ``None`` means the service was unavailable, so callers retain
+    previously known records instead of discarding useful local registry data.
+    """
+
+    request = Request(OLLAMA_TAGS_URL, method="GET")
+    try:
+        with urlopen(request, timeout=OLLAMA_TIMEOUT_SECONDS) as response:  # noqa: S310 - fixed loopback endpoint
+            payload = json.load(response)
+    except (OSError, URLError, ValueError, json.JSONDecodeError):
+        return None
+    models = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(models, list):
+        return None
+    now = datetime.now(UTC).isoformat()
+    records: list[dict[str, Any]] = []
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        name = str(model.get("name") or model.get("model") or "").strip()
+        digest = str(model.get("digest") or "").strip()
+        size = model.get("size")
+        if not name or isinstance(size, bool):
+            continue
+        try:
+            size_bytes = int(size)
+        except (TypeError, ValueError):
+            continue
+        if size_bytes < 0:
+            continue
+        records.append({
+            "id": _ollama_record_id(name), "engine": "ollama", "model_name": name,
+            "version": digest[:12] or "unknown", "source": "Ollama loopback metadata",
+            "local_path": None, "file_size": None, "metadata_size_bytes": size_bytes,
+            "size_source": "ollama_api_tags", "precision": "managed by Ollama",
+            "vram_profile": "load on demand", "license": "Model-specific; review Ollama/model license",
+            "installed_at": None, "last_verified": now,
+        })
+    return sorted(records, key=lambda record: str(record["model_name"]).casefold())
+
+
+def reconcile_ollama_model_records(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Replace only Ollama rows when its local metadata endpoint responds."""
+
+    discovered = ollama_model_records()
+    if discovered is None:
+        return items
+    return [item for item in items if str(item.get("engine") or "").casefold() != "ollama"] + discovered
+
+
+def component_records(root: Path = ROOT) -> list[dict[str, Any]]:
+    applications = root / "runtime" / "applications"
+    engines = root / "runtime" / "engines"
+    models = root / "Models"
+    animesr_environment = environment_path("animesr", root)
+    sam2_environment = environment_path("sam2", root)
     return [
         {
             "id": "local_ai_api", "name": "Local AI API", "kind": "service", "status": "installed", "version": PRODUCT_VERSION,
-            "path": str(ROOT), "executable": str(ROOT / "Environments" / "hub" / "Scripts" / "python.exe"),
-            "environment": str(ROOT / "Environments" / "hub"), "port": 8765, "adapter": "first-party-single-window", "source": "Local AI Hub",
+            "path": str(root), "executable": str(root / "Environments" / "hub" / "Scripts" / "python.exe"),
+            "environment": str(root / "Environments" / "hub"), "port": 8765, "adapter": "first-party-single-window", "source": "Local AI Hub",
         },
         {
             "id": "animesr", "name": "AnimeSR", "kind": "portable_engine", "status": "partial", "version": "bundled",
             "path": str(engines / "video" / "AnimeSR"), "executable": None,
-            "environment": str(animesr_environment), "model": str(MODELS / "Video" / "AnimeSR" / "AnimeSR_v2.pth"), "port": None, "adapter": "direct-hidden-worker", "source": "https://github.com/TencentARC/AnimeSR",
+            "environment": str(animesr_environment), "model": str(models / "Video" / "AnimeSR" / "AnimeSR_v2.pth"), "port": None, "adapter": "direct-hidden-worker", "source": "https://github.com/TencentARC/AnimeSR",
         },
         {
             "id": "sam2", "name": "SAM 2", "kind": "portable_engine", "status": "partial", "version": "2.1",
             "path": str(engines / "vision" / "SAM2"), "executable": None,
-            "environment": str(sam2_environment), "model": str(MODELS / "Vision" / "SAM2" / "sam2.1_hiera_small.pt"), "port": None, "adapter": "direct-hidden-worker", "source": "https://github.com/facebookresearch/sam2",
+            "environment": str(sam2_environment), "model": str(models / "Vision" / "SAM2" / "sam2.1_hiera_small.pt"), "port": None, "adapter": "direct-hidden-worker", "source": "https://github.com/facebookresearch/sam2",
         },
         {
             "id": "ffmpeg", "name": "FFmpeg / FFprobe", "kind": "shared_runtime", "status": "managed", "version": "bundled",
-            "path": str(RUNTIME / "tools" / "ffmpeg"), "executable": str(RUNTIME / "tools" / "ffmpeg" / "ffmpeg.exe"),
+            "path": str(root / "runtime" / "tools" / "ffmpeg"), "executable": str(root / "runtime" / "tools" / "ffmpeg" / "ffmpeg.exe"),
             "environment": None, "port": None, "adapter": "ffmpeg", "source": "https://ffmpeg.org/",
         },
         {
             "id": "comfyui", "name": "ComfyUI", "kind": "shared_runtime", "status": "partial", "version": "local portable",
             "path": str(engines / "image" / "ComfyUI"), "executable": str(engines / "image" / "ComfyUI" / "python_embeded" / "python.exe"),
-            "environment": str(engines / "image" / "ComfyUI" / "python_embeded"), "model": str(MODELS / "Image" / "Shared-Local-Image-Studio"), "port": 8188, "adapter": "hidden-comfyui-api", "source": "https://github.com/comfyanonymous/ComfyUI",
+            "environment": str(engines / "image" / "ComfyUI" / "python_embeded"), "model": str(models / "Image" / "Shared-Local-Image-Studio"), "port": 8188, "adapter": "hidden-comfyui-api", "source": "https://github.com/comfyanonymous/ComfyUI",
         },
         {
             "id": "flux_klein_studio", "name": "FLUX Klein Studio", "kind": "image_engine", "status": "partial", "version": "local portable",
             "path": str(applications / "FLUX-Klein-Studio"), "executable": str(applications / "FLUX-Klein-Studio" / "Local Image Studio.exe"),
-            "environment": str(engines / "image" / "ComfyUI" / "python_embeded"), "model": str(MODELS / "Image" / "FLUX"), "port": None, "adapter": "direct-comfyui-workflow", "source": "local portable installation",
+            "environment": str(engines / "image" / "ComfyUI" / "python_embeded"), "model": str(models / "Image" / "FLUX"), "port": None, "adapter": "direct-comfyui-workflow", "source": "local portable installation",
         },
         {
             "id": "qwen_image", "name": "Qwen Image 2512", "kind": "image_engine", "status": "partial", "version": "2512 FP8",
-            "path": str(MODELS / "Image" / "Qwen-Image"), "executable": str(applications / "Qwen-Image-Studio" / "Local Image Studio.exe"),
-            "environment": str(engines / "image" / "ComfyUI" / "python_embeded"), "model": str(MODELS / "Image" / "Qwen-Image"), "port": None, "adapter": "direct-comfyui-workflow", "source": "local model manifest",
+            "path": str(models / "Image" / "Qwen-Image"), "executable": str(applications / "Qwen-Image-Studio" / "Local Image Studio.exe"),
+            "environment": str(engines / "image" / "ComfyUI" / "python_embeded"), "model": str(models / "Image" / "Qwen-Image"), "port": None, "adapter": "direct-comfyui-workflow", "source": "local model manifest",
         },
         {
             "id": "practical_rife", "name": "Practical-RIFE", "kind": "portable_engine", "status": "managed", "version": "unknown",
@@ -134,60 +188,62 @@ def component_records() -> list[dict[str, Any]]:
     ]
 
 
-def model_records() -> list[dict[str, Any]]:
-    now = datetime.now(UTC).isoformat()
+def model_records(root: Path = ROOT, *, verified_at: str | None = None) -> list[dict[str, Any]]:
+    models = root / "Models"
+    now = verified_at
     return [
         {
             "id": "animesr-v2", "engine": "AnimeSR", "model_name": "AnimeSR v2", "version": "bundled", "source": "https://github.com/TencentARC/AnimeSR",
-            "local_path": str(MODELS / "Video" / "AnimeSR" / "AnimeSR_v2.pth"), "file_size": 5996559, "precision": "configured locally", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": None, "last_verified": now,
+            "local_path": str(models / "Video" / "AnimeSR" / "AnimeSR_v2.pth"), "file_size": 5996559, "precision": "configured locally", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": None, "last_verified": now,
         },
         {
             "id": "sam2.1-hiera-small", "engine": "SAM 2", "model_name": "sam2.1_hiera_small", "version": "2.1", "source": "https://github.com/facebookresearch/sam2",
-            "local_path": str(MODELS / "Vision" / "SAM2" / "sam2.1_hiera_small.pt"), "file_size": 184416285, "precision": "configured locally", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": None, "last_verified": now,
+            "local_path": str(models / "Vision" / "SAM2" / "sam2.1_hiera_small.pt"), "file_size": 184416285, "precision": "configured locally", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": None, "last_verified": now,
         },
         {
             "id": "flux-2-klein-base-4b-fp8", "engine": "FLUX", "model_name": "FLUX.2 Klein Base 4B FP8", "version": "local manifest", "source": "local model manifest",
-            "local_path": str(MODELS / "Image" / "FLUX" / "diffusion_models" / "flux-2-klein-base-4b-fp8.safetensors"), "file_size": 4089498488, "precision": "FP8", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": None, "last_verified": now,
+            "local_path": str(models / "Image" / "FLUX" / "diffusion_models" / "flux-2-klein-base-4b-fp8.safetensors"), "file_size": 4089498488, "precision": "FP8", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": None, "last_verified": now,
         },
         {
             "id": "qwen-image-2512-fp8", "engine": "Qwen Image", "model_name": "Qwen Image 2512 FP8", "version": "2512", "source": "local model manifest",
-            "local_path": str(MODELS / "Image" / "Qwen-Image" / "diffusion_models" / "qwen_image_2512_fp8_e4m3fn.safetensors"), "file_size": 20430679144, "precision": "FP8", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": None, "last_verified": now,
+            "local_path": str(models / "Image" / "Qwen-Image" / "diffusion_models" / "qwen_image_2512_fp8_e4m3fn.safetensors"), "file_size": 20430679144, "precision": "FP8", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": None, "last_verified": now,
         },
         {
             "id": "qwen-3-4b", "engine": "Qwen Image", "model_name": "Qwen 3 4B text encoder", "version": "local manifest", "source": "local model manifest",
-            "local_path": str(MODELS / "Image" / "Qwen-Image" / "text_encoders" / "qwen_3_4b.safetensors"), "file_size": 8044982048, "precision": "FP8", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": None, "last_verified": now,
+            "local_path": str(models / "Image" / "Qwen-Image" / "text_encoders" / "qwen_3_4b.safetensors"), "file_size": 8044982048, "precision": "FP8", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": None, "last_verified": now,
         },
         {
             "id": "flux2-vae", "engine": "FLUX", "model_name": "FLUX.2 VAE", "version": "local manifest", "source": "local model manifest",
-            "local_path": str(MODELS / "Image" / "FLUX" / "vae" / "flux2-vae.safetensors"), "file_size": 336213556, "precision": "FP8", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": None, "last_verified": now,
+            "local_path": str(models / "Image" / "FLUX" / "vae" / "flux2-vae.safetensors"), "file_size": 336213556, "precision": "FP8", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": None, "last_verified": now,
         },
         {
             "id": "qwen-2.5-vl-7b-fp8", "engine": "Qwen Image", "model_name": "Qwen 2.5 VL 7B text encoder", "version": "local manifest", "source": "local model manifest",
-            "local_path": str(MODELS / "Image" / "Qwen-Image" / "text_encoders" / "qwen_2.5_vl_7b_fp8_scaled.safetensors"), "file_size": 9384670680, "precision": "FP8", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": None, "last_verified": now,
+            "local_path": str(models / "Image" / "Qwen-Image" / "text_encoders" / "qwen_2.5_vl_7b_fp8_scaled.safetensors"), "file_size": 9384670680, "precision": "FP8", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": None, "last_verified": now,
         },
         {
             "id": "qwen-image-vae", "engine": "Qwen Image", "model_name": "Qwen Image VAE", "version": "local manifest", "source": "local model manifest",
-            "local_path": str(MODELS / "Image" / "Qwen-Image" / "vae" / "qwen_image_vae.safetensors"), "file_size": 253806246, "precision": "FP8", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": None, "last_verified": now,
+            "local_path": str(models / "Image" / "Qwen-Image" / "vae" / "qwen_image_vae.safetensors"), "file_size": 253806246, "precision": "FP8", "vram_profile": "configured locally", "license": "verify upstream", "installed_at": None, "last_verified": now,
         },
     ]
 
 
-def application_records() -> list[dict[str, Any]]:
-    applications = RUNTIME / "applications"
-    airi_home, airi_executable = system_application_paths("airi")
-    ollama_home, ollama_executable = system_application_paths("Ollama")
+def application_records(root: Path = ROOT) -> list[dict[str, Any]]:
+    applications = root / "runtime" / "applications"
+    external_root = Path("${LOCALAPPDATA}") / "Programs"
+    airi_home, airi_executable = external_root / "airi", external_root / "airi" / "airi.exe"
+    ollama_home, ollama_executable = external_root / "Ollama", external_root / "Ollama" / "Ollama.exe"
     return [
         {
             "id": "anime-upscale-studio", "display_name": "Anime Upscale Studio", "category": "video", "classification": "PORTABLE_APP", "status": "managed",
             "path": str(applications / "Anime-Upscale-Studio"), "executable": str(applications / "Anime-Upscale-Studio" / "Anime Upscale Studio.exe"),
             "working_directory": str(applications / "Anime-Upscale-Studio"), "arguments": [], "launch": True, "advanced_only": True,
-            "notes": "Portable application is managed under LocalAIHub; the legacy path is retained as a verified junction.",
+            "notes": "Portable application is managed under LocalAIHub with no legacy compatibility path.",
         },
         {
             "id": "sam2-mask-studio", "display_name": "SAM2 Mask Studio", "category": "vision", "classification": "PORTABLE_APP", "status": "managed",
             "path": str(applications / "SAM2-Mask-Studio"), "executable": str(applications / "SAM2-Mask-Studio" / "SAM2 Mask Studio.exe"),
             "working_directory": str(applications / "SAM2-Mask-Studio"), "arguments": [], "launch": True, "advanced_only": True,
-            "notes": "Portable GUI relocated under LocalAIHub; user projects remain outside the application folder.",
+            "notes": "Portable GUI and imported legacy projects are managed under LocalAIHub.",
         },
         {
             "id": "local-image-studio", "display_name": "Local Image Studio (FLUX)", "category": "image", "classification": "PORTABLE_APP", "status": "managed",
@@ -211,9 +267,61 @@ def application_records() -> list[dict[str, Any]]:
             "id": "ollama", "display_name": "Ollama", "category": "model-service", "classification": "SYSTEM_INSTALLED_APP", "status": "external_system_app",
             "path": str(ollama_home), "executable": str(ollama_executable),
             "working_directory": str(ollama_home), "arguments": [], "launch": True,
-            "notes": "System-installed external service; model location is unchanged.",
+            "notes": "System-installed external service; model-store relocation requires separately verified service configuration.",
         },
     ]
+
+
+def build_registry_descriptors(root: Path | None = None) -> dict[str, Any]:
+    """Build deterministic, not-run descriptors without exposing local paths."""
+
+    root = root or Path("${LOCALAIHUB_ROOT}")
+
+    components = []
+    for item in component_records(root):
+        components.append({
+            **item,
+            "status": "configured",
+            "runtime_status": "not_run",
+            "execution": "not_run",
+            "recovery_state": "recovered_static",
+        })
+    models = []
+    for item in model_records(root, verified_at=None):
+        models.append({**item, "availability": "configured", "execution": "not_run", "recovery_state": "recovered_static"})
+    applications = []
+    for item in application_records(root):
+        applications.append({
+            **item,
+            "status": "configured",
+            "launch": False,
+            "execution": "not_run",
+            "recovery_state": "recovered_static",
+        })
+    root_text = str(root)
+    return {
+        "components": components,
+        "models": models,
+        "applications": applications,
+        "hub_config": {
+            "schema_version": 3,
+            "bind_host": "127.0.0.1",
+            "api_port": 8765,
+            "start_maximized": True,
+            "minimum_width": 1280,
+            "minimum_height": 720,
+            "max_heavy_gpu_jobs": 1,
+            "model_load_policy": "on_demand",
+            "auto_start_heavy_services": False,
+            "comfyui_port": 8188,
+            "comfyui_start_timeout_seconds": 45,
+            "ffmpeg_path": "${LOCALAIHUB_ROOT}/runtime/tools/ffmpeg/ffmpeg.exe",
+            "ffprobe_path": "${LOCALAIHUB_ROOT}/runtime/tools/ffmpeg/ffprobe.exe",
+            "execution": "not_run",
+            "runtime_status": "not_run",
+            "descriptor_root_fingerprint": hashlib.sha256(root_text.encode("utf-8")).hexdigest(),
+        },
+    }
 
 
 def write_external_records() -> None:
@@ -232,42 +340,14 @@ def write_external_records() -> None:
 
 
 def main() -> int:
-    components_path = CONFIG / "components.json"
-    components = load(components_path, {"schema_version": 1, "components": []})
-    items = [item for item in components.get("components", []) if isinstance(item, dict)]
-    for component in component_records():
-        items = replace_by_id(items, component["id"], component)
-    write(components_path, {**components, "schema_version": 3, "components": items})
+    from src.services.local_registry_recovery import inspect_registry, plan_registry
 
-    hub_path = CONFIG / "hub_config.json"
-    hub = load(hub_path, {})
-    write(hub_path, {
-        **hub,
-        "schema_version": 3,
-        "bind_host": "127.0.0.1",
-        "api_port": int(hub.get("api_port", 8765)),
-        "start_maximized": True,
-        "minimum_width": 1280,
-        "minimum_height": 720,
-        "max_heavy_gpu_jobs": 1,
-        "model_load_policy": "on_demand",
-        "auto_start_heavy_services": False,
-        "comfyui_port": int(hub.get("comfyui_port", 8188)),
-        "comfyui_start_timeout_seconds": int(hub.get("comfyui_start_timeout_seconds", 45)),
-        "ffmpeg_path": str(RUNTIME / "tools" / "ffmpeg" / "ffmpeg.exe"),
-        "ffprobe_path": str(RUNTIME / "tools" / "ffmpeg" / "ffprobe.exe"),
-    })
-
-    models_path = CONFIG / "model_registry.json"
-    models = load(models_path, {"schema_version": 1, "models": []})
-    model_items = [item for item in models.get("models", []) if isinstance(item, dict)]
-    for model in model_records():
-        model_items = replace_by_id(model_items, model["id"], model)
-    write(models_path, {**models, "schema_version": 3, "models": model_items})
-
-    write(CONFIG / "application_registry.local.json", {"schema_version": 2, "applications": application_records()})
-    write_external_records()
-    print("Refreshed local component, model, application and external registries.")
+    snapshot = inspect_registry()
+    plan = plan_registry()
+    if snapshot.get("status") == "error" or plan.get("status") == "error":
+        print("Local registry recovery is inspect/plan-only and unavailable.")
+        return 1
+    print("Local registry recovery is inspect/plan-only; no machine configuration was written.")
     return 0
 
 

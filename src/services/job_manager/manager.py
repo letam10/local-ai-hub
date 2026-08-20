@@ -16,9 +16,15 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from src.services.api.jobs import TERMINAL_STATUSES, active_jobs, create_job, get_job_internal, update_job
+from src.services.api.jobs import TERMINAL_STATUSES, _publish_result, active_jobs, create_job, get_job_internal, update_job
 from src.services.process_manager.managed import terminate_owned_process
-from src.services.tool_smoke import record_completed
+from src.services.tool_smoke import (
+    has_published_artifact,
+    record_completed,
+    record_failed,
+    record_unavailable,
+    requires_published_artifact,
+)
 
 
 Runner = Callable[[dict[str, Any], "JobContext"], dict[str, Any]]
@@ -49,8 +55,8 @@ class JobContext:
             self._processes.discard(process)
 
     def cancel(self) -> None:
-        self._cancel_event.set()
         with self._lock:
+            self._cancel_event.set()
             processes = list(self._processes)
         for process in processes:
             terminate_owned_process(process)
@@ -145,33 +151,78 @@ class HubJobManager:
             if heavy:
                 while not acquired:
                     if context.cancelled:
+                        record_failed(tool, failure_code="CANCELLED")
                         update_job(job_id, status="cancelled", finished_at=_now(), message="Tác vụ đã được hủy trước khi chạy.")
                         return
                     acquired = self._heavy_slot.acquire(timeout=0.2)
             if context.cancelled:
+                record_failed(tool, failure_code="CANCELLED")
                 update_job(job_id, status="cancelled", finished_at=_now(), message="Tác vụ đã được hủy trước khi chạy.")
                 return
             update_job(job_id, status="running", progress=5, message="Worker Hub đang chạy nền.")
-            result = runner(payload, context)
-            if context.cancelled or result.get("status") == "cancelled":
-                update_job(job_id, status="cancelled", progress=0, finished_at=_now(), result=result, message="Tác vụ đã được hủy.")
-            elif result.get("status") == "completed":
-                update_job(job_id, status="completed", progress=100, finished_at=_now(), result=result, message="Hoàn tất.", next_action=result.get("next_action"))
-                record_completed(tool)
-            elif result.get("status") == "unavailable":
-                update_job(
-                    job_id,
-                    status="unavailable",
-                    progress=0,
-                    finished_at=_now(),
-                    result=result,
-                    error=result.get("error") or result.get("reason") or "Backend chưa khả dụng.",
-                    message=result.get("next_action") or "Backend chưa khả dụng.",
-                    next_action=result.get("next_action"),
+            raw_result = runner(payload, context)
+            # Cancellation and publication share the context lock.  A cancel
+            # that arrives before this critical section prevents publication;
+            # a cancel that arrives during it waits until the terminal state
+            # is durable, so it cannot leave an orphaned artifact behind.
+            with context._lock:
+                record = get_job_internal(job_id) or {"id": job_id, "tool": tool}
+                result, publish_error = _publish_result(
+                    {"status": "cancelled"} if context.cancelled else raw_result,
+                    record,
                 )
-            else:
-                update_job(job_id, status="failed", progress=0, finished_at=_now(), result=result, error=result.get("error") or result.get("reason") or "Worker không hoàn tất.", message="Không thể hoàn tất tác vụ.", next_action=result.get("next_action"))
+                if context.cancelled or result.get("status") == "cancelled":
+                    record_failed(tool, failure_code="CANCELLED")
+                    update_job(job_id, status="cancelled", progress=0, finished_at=_now(), result={"status": "cancelled"}, message="Tác vụ đã được hủy.")
+                elif publish_error is not None:
+                    record_failed(tool, failure_code="OUTPUT_PUBLISH_FAILED")
+                    update_job(
+                        job_id,
+                        status="failed",
+                        progress=0,
+                        finished_at=_now(),
+                        result=result,
+                        error="Output không được publish thành artifact Hub; job giữ trạng thái failed.",
+                        message="Không thể publish output.",
+                        next_action="Kiểm tra runtime/output contract rồi tạo lại job.",
+                    )
+                elif result.get("status") == "completed":
+                    if requires_published_artifact(tool) and not has_published_artifact(result):
+                        record_failed(tool, failure_code="OUTPUT_MISSING")
+                        update_job(
+                            job_id,
+                            status="failed",
+                            progress=0,
+                            finished_at=_now(),
+                            result={
+                                "status": "failed",
+                                "failure_code": "OUTPUT_MISSING",
+                                "error": "Worker completed without a publishable Hub artifact.",
+                            },
+                            error="Job completed without a publishable artifact; capability evidence was not recorded.",
+                            message="Worker không tạo artifact Hub để publish.",
+                            next_action="Kiểm tra output contract rồi tạo lại job.",
+                        )
+                    else:
+                        update_job(job_id, status="completed", progress=100, finished_at=_now(), result=result, message="Hoàn tất.", next_action=result.get("next_action"))
+                        record_completed(tool)
+                elif result.get("status") == "unavailable":
+                    record_unavailable(tool, failure_code="BACKEND_UNAVAILABLE")
+                    update_job(
+                        job_id,
+                        status="unavailable",
+                        progress=0,
+                        finished_at=_now(),
+                        result=result,
+                        error=result.get("error") or result.get("reason") or "Backend chưa khả dụng.",
+                        message=result.get("next_action") or "Backend chưa khả dụng.",
+                        next_action=result.get("next_action"),
+                    )
+                else:
+                    record_failed(tool, failure_code="WORKER_FAILED")
+                    update_job(job_id, status="failed", progress=0, finished_at=_now(), result=result, error=result.get("error") or result.get("reason") or "Worker không hoàn tất.", message="Không thể hoàn tất tác vụ.", next_action=result.get("next_action"))
         except Exception as exc:  # pragma: no cover - guards background threads
+            record_failed(tool, failure_code="WORKER_EXCEPTION")
             update_job(job_id, status="failed", progress=0, finished_at=_now(), error=str(exc), message="Worker Hub gặp lỗi không mong đợi.")
         finally:
             if acquired:
@@ -195,6 +246,9 @@ class HubJobManager:
             context = self._contexts.get(job_id)
             if context is not None:
                 context.cancel()
+                latest = get_job_internal(job_id)
+                if latest is not None and latest.get("status") in TERMINAL_STATUSES:
+                    return False, "Job này đã kết thúc."
             elif record.get("status") == "queued":
                 self._pending_cancellations.add(job_id)
             else:

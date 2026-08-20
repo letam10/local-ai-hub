@@ -4,29 +4,126 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
+from src.services.api.config import component, models
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
-from src.shared.paths.registry import OUTPUT_ROOT
-from src.shared.utils.adapter_common import configured_path, local_root, unavailable
+from src.services.artifact_store import describe, resolve
+from src.shared.paths.registry import MODEL_ROOT, OUTPUT_ROOT
+from src.shared.utils.adapter_common import local_root, unavailable
 
 
 WORKER = Path(__file__).with_name("worker.py")
+_ARTIFACT_ID = re.compile(r"artifact_[a-f0-9]{32}")
+_MODEL_ID = "animesr-v2"
+_MODEL_SPEC = {"model": "AnimeSR_v2", "expname": "animesr_v2"}
+_MODEL_RELATIVE = Path("Video") / "AnimeSR" / "AnimeSR_v2.pth"
+_UNSAFE_INPUT_FIELDS = {
+    "path", "source", "secondary_path", "input_path", "executable", "command",
+    "model_path", "output_root", "model_id", "expname",
+}
+
+
+def _registry_path(component_id: str, field: str) -> Path | None:
+    item = component(component_id)
+    value = item.get(field) if isinstance(item, dict) and item.get("id") == component_id else None
+    if not isinstance(value, str) or not value.strip() or value.startswith("${"):
+        return None
+    try:
+        return Path(os.path.expandvars(value)).expanduser()
+    except (OSError, ValueError):
+        return None
 
 
 def _runtime() -> tuple[Path | None, Path | None]:
-    runtime = configured_path("animesr", "path", "ANIMESR_HOME")
-    environment = configured_path("animesr", "environment", "ANIMESR_ENV")
+    runtime = _registry_path("animesr", "path")
+    environment = _registry_path("animesr", "environment")
     python = environment / "Scripts" / "python.exe" if environment else None
     return python, runtime
+
+
+def _is_reparse(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            return True
+        return bool(getattr(os.lstat(path), "st_file_attributes", 0) & 0x400)
+    except OSError:
+        return True
+
+
+def _safe_model_path(candidate: Path) -> bool:
+    """Accept only one registry model leaf below the fixed Models root."""
+
+    try:
+        # Check the lexical path and every original ancestor before resolving:
+        # a symlink/junction below Models must never be allowed to redirect a
+        # registry leaf to another location.
+        root = Path(os.path.abspath(str(MODEL_ROOT)))
+        lexical = Path(os.path.abspath(str(candidate)))
+        relative = lexical.relative_to(root)
+        expected = Path(os.path.abspath(str(root / _MODEL_RELATIVE)))
+    except (OSError, ValueError):
+        return False
+    if os.path.normcase(str(lexical)) != os.path.normcase(str(expected)):
+        return False
+    if _is_reparse(root):
+        return False
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if _is_reparse(current):
+            return False
+    try:
+        resolved_root = root.resolve(strict=True)
+        resolved = lexical.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+    except (OSError, ValueError):
+        return False
+    return (resolved.is_file() or resolved.is_dir()) and current.resolve(strict=True) == resolved
+
+
+def _selected_model() -> Path | None:
+    """Resolve the fixed AnimeSR model from the server-owned local registry."""
+
+    matches = [
+        item for item in models()
+        if isinstance(item, dict)
+        and str(item.get("id")) == _MODEL_ID
+        and str(item.get("engine")).casefold() == "animesr"
+    ]
+    if len(matches) != 1:
+        return None
+    value = matches[0].get("local_path")
+    if not isinstance(value, str) or not value or value.startswith("${"):
+        return None
+    candidate = Path(os.path.expandvars(value)).expanduser()
+    return candidate if _safe_model_path(candidate) else None
+
+
+def _video_artifact(payload: dict[str, Any]) -> Path | None:
+    if any(payload.get(name) not in (None, "", []) for name in _UNSAFE_INPUT_FIELDS):
+        return None
+    artifact_id = payload.get("source_artifact_id")
+    if not isinstance(artifact_id, str) or not _ARTIFACT_ID.fullmatch(artifact_id):
+        return None
+    try:
+        source = resolve(artifact_id)
+        metadata = describe(artifact_id)
+    except Exception:
+        return None
+    media_type = str(metadata.get("media_type") or "") if isinstance(metadata, dict) else ""
+    return source if isinstance(source, Path) and source.is_file() and media_type.startswith("video/") else None
 
 
 def inspect_video(payload: dict[str, Any]) -> dict[str, Any]:
     """Return a direct worker plan without starting an external desktop GUI."""
 
-    source = Path(os.path.expandvars(str(payload.get("path", "")))).expanduser()
-    if not source.is_file():
+    if _selected_model() is None:
+        return unavailable("animesr", "AnimeSR tool model chưa được registry xác nhận dưới Models canonical.")
+    source = _video_artifact(payload)
+    if source is None:
         return {"status": "error", "error": "Không tìm thấy video AnimeSR đầu vào."}
     return {
         "status": "completed",
@@ -58,18 +155,38 @@ def split_video(payload: dict[str, Any]) -> dict[str, Any]:
 
 def run_animesr(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[str, Any]:
     python, runtime = _runtime()
+    model_path = _selected_model()
+    if model_path is None:
+        return unavailable("animesr", "AnimeSR tool model chưa được registry xác nhận dưới Models canonical.")
     if python is None or runtime is None or not python.is_file() or not runtime.is_dir() or not WORKER.is_file():
         return unavailable("animesr", "AnimeSR runtime hoặc environment trực tiếp chưa hoàn chỉnh.")
-    source = Path(os.path.expandvars(str(payload.get("path", "")))).expanduser()
-    if not source.is_file():
-        return {"status": "error", "error": "Không tìm thấy video AnimeSR đầu vào."}
-    ffmpeg_home = configured_path("ffmpeg", "path", "FFMPEG_HOME")
+    source = _video_artifact(payload)
+    if source is None:
+        return {"status": "error", "error": "AnimeSR cần VIDEO artifact do Hub quản lý."}
+    ffmpeg = _registry_path("ffmpeg", "executable")
+    if ffmpeg is None:
+        home = _registry_path("ffmpeg", "path")
+        ffmpeg = home / "ffmpeg.exe" if home else None
+    if ffmpeg is None or not ffmpeg.is_file():
+        return unavailable("ffmpeg", "Không tìm thấy FFmpeg canonical của Hub cho AnimeSR.")
+    try:
+        scale = max(1, min(4, int(payload.get("scale", 2))))
+    except (TypeError, ValueError):
+        scale = 2
     request = {
-        **payload,
         "path": str(source),
         "runtime": str(runtime),
         "output_root": str(OUTPUT_ROOT / "AnimeSR"),
-        "ffmpeg_home": str(ffmpeg_home) if ffmpeg_home else "",
+        "scale": scale,
+        "model_id": _MODEL_ID,
+        "model": _MODEL_SPEC["model"],
+        "model_path": str(model_path),
+        "expname": _MODEL_SPEC["expname"],
+        "half": bool(payload.get("half", True)),
+        # AnimeSR's checked-in inference script reads this exact environment
+        # variable.  Passing the canonical executable avoids an ambient PATH
+        # lookup without modifying the installed runtime.
+        "ffmpeg": str(ffmpeg),
     }
     return run_json_worker(
         [str(python), str(WORKER)],
@@ -78,7 +195,7 @@ def run_animesr(payload: dict[str, Any], context: ProcessOwner | None = None) ->
         cwd=runtime,
         env={**os.environ, "PYTHONPATH": str(local_root()), "LOCALAIHUB_ROOT": str(local_root()), "PYTHONIOENCODING": "utf-8"},
         owner=context,
-        timeout_seconds=float(payload.get("timeout_seconds", 3600)),
+        timeout_seconds=3600,
     )
 
 
@@ -110,17 +227,27 @@ def resume(_job_id: str) -> dict[str, Any]:
     return {"status": "completed", "operation": "resume", "message": "Job Manager tạo lại job từ payload đã lưu trong phiên Hub."}
 
 
-def queue_upscale(input_path: str, output_path: str | None = None) -> dict[str, Any]:
-    """Compatibility shim; callers should submit ``run_animesr`` through Job Manager."""
+def queue_upscale(_input_path: str, _output_path: str | None = None) -> dict[str, Any]:
+    """Deprecated raw-path shim; public callers must submit a Hub artifact."""
 
-    return run_animesr({"path": input_path, "requested_output": output_path})
+    return {"status": "unavailable", "reason": "AnimeSR chỉ nhận VIDEO artifact do Hub quản lý."}
 
 
 def capability() -> dict[str, Any]:
     python, runtime = _runtime()
+    model_path = _selected_model()
+    ffmpeg = _registry_path("ffmpeg", "executable")
+    if ffmpeg is None:
+        home = _registry_path("ffmpeg", "path")
+        ffmpeg = home / "ffmpeg.exe" if home else None
     return {
         "component": "animesr",
         "adapter_status": "direct-worker-configured",
         "runtime_ready": bool(runtime and runtime.is_dir()),
         "environment_ready": bool(python and python.is_file()),
+        "model_ready": bool(model_path),
+        "model_id": _MODEL_ID,
+        "cli_compatible": bool(model_path),
+        "ffmpeg_ready": bool(ffmpeg and ffmpeg.is_file()),
+        "worker_ready": WORKER.is_file(),
     }

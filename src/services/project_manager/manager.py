@@ -1,13 +1,14 @@
-"""Local, path-safe creative project workspace for Milestone 4A.
-
-This manager owns only JSON metadata under ignored local configuration.  It
-never copies artifacts, models or user outputs; assets are referred to through
-the existing opaque artifact registry.
+"""
+  FILE NOTE
+  - Mục đích: Thread-safe CRUD, import/export contracts và autosave draft cho creative project workspace (projects, recipes, assets, collections, compare boards)
+  - Liên kết trực tiếp: src/services/project_manager/schemas.py, src/services/artifact_store.py, src/shared/paths/registry.py, src/services/api/
+  - Vùng ảnh hưởng khi sửa: Toàn bộ creative workspace persistence, atomic write, recovery, revision detection, draft autosave
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 from collections.abc import Callable, Mapping
@@ -265,16 +266,91 @@ class CreativeProjectManager:
 
     def _save(self, state: Mapping[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".tmp")
+        import tempfile as _tempfile
+        tmp: Path | None = None
         try:
-            temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            temporary.replace(self.path)
+            with _tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.path.parent,
+                prefix=".workspace-",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                tmp = Path(handle.name)
+                handle.write(json.dumps(state, ensure_ascii=False, indent=2))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self.path)
+            tmp = None
         finally:
-            if temporary.exists():
+            if tmp is not None:
                 try:
-                    temporary.unlink()
+                    tmp.unlink()
                 except OSError:
                     pass
+
+    def _save_draft(self, draft_path: Path, data: dict[str, Any]) -> None:
+        """Write an autosave recovery draft atomically without touching main state."""
+        import tempfile as _tempfile
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp: Path | None = None
+        try:
+            with _tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=draft_path.parent,
+                prefix=".draft-",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                tmp = Path(handle.name)
+                handle.write(json.dumps(data, ensure_ascii=False, indent=2))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, draft_path)
+            tmp = None
+        except (OSError, TypeError, ValueError):
+            pass
+        finally:
+            if tmp is not None:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+
+    def autosave_draft(self, project_id: str, graph: dict[str, Any]) -> dict[str, Any]:
+        """Write a crash-recovery draft for the given project's graph.
+
+        The draft file is never the main state file; it is safe to delete after
+        a clean save.  Returns ``{"accepted": bool, "draft_path": str}``.
+        """
+        if not isinstance(project_id, str) or not project_id:
+            return {"accepted": False, "reason": "Project ID không hợp lệ."}
+        safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", project_id)[:80]
+        draft_path = self.path.parent / f"draft_{safe_id}.json"
+        draft_data = {
+            "schema_version": 1,
+            "project_id": project_id,
+            "graph": graph if isinstance(graph, dict) else {},
+        }
+        self._save_draft(draft_path, draft_data)
+        return {"accepted": True, "draft_path": str(draft_path)}
+
+    def clear_draft(self, project_id: str) -> None:
+        """Remove the autosave draft after a successful explicit save."""
+        if not isinstance(project_id, str) or not project_id:
+            return
+        safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", project_id)[:80]
+        draft_path = self.path.parent / f"draft_{safe_id}.json"
+        try:
+            draft_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 
     def _mutate(self, callback: Callable[[dict[str, Any]], Any]) -> Any:
         with self._lock:
@@ -1179,6 +1255,103 @@ class CreativeProjectManager:
                     "preview": {"kind": "workflow", "label": ", ".join(categories[:3]) or "workflow"},
                 })
         return {"status": "completed", "gallery": items}
+
+    def search_assets(
+        self,
+        *,
+        query: str = "",
+        tags: list[str] | None = None,
+        favorite: bool | None = None,
+        media_type_prefix: str = "",
+        project_id: str = "",
+        sort_by: str = "created_at",
+        sort_desc: bool = True,
+    ) -> dict[str, Any]:
+        """Search/filter/sort assets.  Pure metadata — never touches artifact files."""
+        state, recovery, _ = self._load()
+        assets: list[dict[str, Any]] = list(state.get("asset_metadata", {}).values())
+        q = str(query).lower().strip()
+        if q:
+            assets = [a for a in assets if q in str(a.get("name", "")).lower() or q in str(a.get("description", "")).lower()]
+        if tags:
+            tag_set = {str(t).lower() for t in tags}
+            assets = [a for a in assets if tag_set & {str(t).lower() for t in a.get("tags", [])}]
+        if favorite is not None:
+            assets = [a for a in assets if bool(a.get("favorite")) == favorite]
+        if media_type_prefix:
+            assets = [a for a in assets if str(a.get("media_type", "")).startswith(media_type_prefix)]
+        if project_id:
+            assets = [a for a in assets if a.get("project_id") == project_id or project_id in (a.get("project_ids") or [])]
+        valid_sorts = {"created_at", "updated_at", "name", "size_bytes"}
+        key = sort_by if sort_by in valid_sorts else "created_at"
+        assets.sort(key=lambda a: str(a.get(key, "")), reverse=sort_desc)
+        return {"status": "completed", "assets": assets, "recovery": recovery}
+
+    def get_artifact_status(self, artifact_id: str) -> dict[str, Any]:
+        """Return metadata about which projects reference an artifact."""
+        if not isinstance(artifact_id, str) or not ARTIFACT_ID_RE.fullmatch(artifact_id):
+            return {"found": False, "reason": "Artifact ID không hợp lệ."}
+        state, _, _ = self._load()
+        asset = state.get("asset_metadata", {}).get(artifact_id)
+        if not asset:
+            return {"found": False, "artifact_id": artifact_id, "project_ids": [], "favorite": False, "tags": []}
+        project_ids = []
+        for proj in state.get("projects", {}).values():
+            if artifact_id in (proj.get("artifact_ids") or []):
+                project_ids.append(proj.get("id"))
+        return {
+            "found": True,
+            "artifact_id": artifact_id,
+            "project_ids": project_ids,
+            "favorite": bool(asset.get("favorite")),
+            "tags": list(asset.get("tags") or []),
+        }
+
+    def export_manifest(self, project_id: str) -> dict[str, Any]:
+        """Export a sanitised manifest for a project (no paths, no secrets)."""
+        if not isinstance(project_id, str) or not PROJECT_ID_RE.fullmatch(project_id):
+            return {"accepted": False, "reason": "Project ID không hợp lệ."}
+        state, _, _ = self._load()
+        project = state.get("projects", {}).get(project_id)
+        if not project:
+            return {"accepted": False, "reason": "Project không tồn tại."}
+        artifact_ids = list(project.get("artifact_ids") or [])
+        assets = [
+            {k: v for k, v in (state.get("asset_metadata", {}).get(aid) or {}).items()
+             if k not in {"local_path", "source_path", "api_key", "token", "password", "secret"}}
+            for aid in artifact_ids
+        ]
+        import hashlib as _hl
+        manifest = {
+            "manifest_schema_version": 1,
+            "created_at": now_iso(),
+            "project_id": project_id,
+            "project_title": project.get("title", ""),
+            "artifact_count": len(artifact_ids),
+            "artifact_ids": artifact_ids,
+            "assets": assets,
+            "checksum": _hl.sha256(json.dumps(artifact_ids, sort_keys=True).encode()).hexdigest(),
+        }
+        return {"accepted": True, "manifest": manifest}
+
+    def missing_artifact_state(self, project_id: str) -> dict[str, Any]:
+        """Report assets of a project whose artifact IDs are not in asset_metadata."""
+        if not isinstance(project_id, str) or not PROJECT_ID_RE.fullmatch(project_id):
+            return {"accepted": False, "reason": "Project ID không hợp lệ."}
+        state, _, _ = self._load()
+        project = state.get("projects", {}).get(project_id)
+        if not project:
+            return {"accepted": False, "reason": "Project không tồn tại."}
+        artifact_ids = list(project.get("artifact_ids") or [])
+        known_ids = set(state.get("asset_metadata", {}).keys())
+        missing = [aid for aid in artifact_ids if aid not in known_ids]
+        return {
+            "accepted": True,
+            "project_id": project_id,
+            "total": len(artifact_ids),
+            "missing_count": len(missing),
+            "missing_artifact_ids": missing,
+        }
 
     def overview(self) -> dict[str, Any]:
         projects = self.list_projects()

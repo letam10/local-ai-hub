@@ -1,8 +1,11 @@
-"""Generate the ignored final migration manifest and host-local reports.
+"""Generate the historical V2 migration manifest and host-local reports.
 
 The script never moves, deletes, downloads, or executes a model.  It records
 the reviewed inventory so ``migrate_layout_v2.ps1`` can perform only explicit,
 same-volume high-confidence operations.
+
+It is not a current runtime helper.  A completed host keeps its final local
+evidence intact instead of regenerating a legacy migration plan.
 """
 
 from __future__ import annotations
@@ -503,6 +506,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Refresh ignored Local AI Hub final inventory reports.")
     parser.add_argument("--reports-only", action="store_true", help="Keep the existing manifest entries and refresh report sizes only.")
     args = parser.parse_args()
+    try:
+        existing = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        existing = {}
+    if isinstance(existing, dict) and (existing.get("historical_snapshot") or existing.get("not_runtime_configuration")):
+        print("V2 inventory is historical on this completed host; no manifest or report was rewritten.")
+        return 0
     REPORTS.mkdir(parents=True, exist_ok=True)
     entries = merge_records()
     snapshot = storage_snapshot()

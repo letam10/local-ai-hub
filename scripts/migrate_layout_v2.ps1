@@ -21,6 +21,9 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
 }
 
 $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding utf8 | ConvertFrom-Json
+if ($manifest.historical_snapshot -eq $true -or $manifest.not_runtime_configuration -eq $true) {
+    throw 'V2 layout migration is historical on this completed host; no legacy path or compatibility junction will be created.'
+}
 $entries = @($manifest.entries)
 $rootFull = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
 

@@ -1,4 +1,8 @@
 """Focused M8C contract, security, discovery and planning tests."""
+# FILE NOTE
+# - Mục đích: Contract tests cho M8 Creative Recipe Intelligence (lint, intent, CLI, security)
+# - Liên kết trực tiếp: src/services/creative_recipe_intelligence.py, scripts/validate_creative_recipes.py
+# - Vùng ảnh hưởng khi sửa: test_cli_json_and_markdown_are_static phụ thuộc Environments/hub venv
 
 from __future__ import annotations
 
@@ -9,6 +13,8 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+
+_HUB_PYTHON = Path(r"D:\LocalAIHub\Environments\hub\Scripts\python.exe")
 
 from src.services.creative_recipe_intelligence import (
     build_compatibility_report,
@@ -297,9 +303,14 @@ class Milestone8CreativeRecipeIntelligenceTests(unittest.TestCase):
         self.assertEqual(source, self.catalog)
 
     def test_cli_json_and_markdown_are_static(self) -> None:
+        if not _HUB_PYTHON.exists():
+            self.skipTest(
+                "Hub virtualenv python not present on this machine "
+                f"({_HUB_PYTHON}); install Environments/hub to run CLI smoke."
+            )
         script = ROOT / "scripts" / "validate_creative_recipes.py"
-        json_run = subprocess.run([r"D:\LocalAIHub\Environments\hub\Scripts\python.exe", "-B", str(script), "--format", "json"], cwd=ROOT, capture_output=True, text=True, check=False)
-        md_run = subprocess.run([r"D:\LocalAIHub\Environments\hub\Scripts\python.exe", "-B", str(script), "--format", "markdown"], cwd=ROOT, capture_output=True, text=True, check=False)
+        json_run = subprocess.run([str(_HUB_PYTHON), "-B", str(script), "--format", "json"], cwd=ROOT, capture_output=True, text=True, check=False)
+        md_run = subprocess.run([str(_HUB_PYTHON), "-B", str(script), "--format", "markdown"], cwd=ROOT, capture_output=True, text=True, check=False)
         self.assertEqual(json_run.returncode, 0, json_run.stderr)
         self.assertEqual(md_run.returncode, 0, md_run.stderr)
         report = json.loads(json_run.stdout)

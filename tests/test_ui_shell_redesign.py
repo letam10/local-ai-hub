@@ -19,14 +19,16 @@ class UiShellRedesignTests(unittest.TestCase):
         cls.css = CSS.read_text(encoding="utf-8")
 
     def test_desktop_shell_is_compact_and_module_view_is_left_aligned(self) -> None:
-        self.assertRegex(self.css, r"\.workspace\s*\{[^}]*grid-template-columns:\s*minmax\(224px,\s*228px\)\s+minmax\(0,\s*1fr\)", re.S)
+        self.assertRegex(self.css, r"\.workspace\s*\{[^}]*grid-template-columns:\s*minmax\(176px,\s*var\(--shell-rail\)\)\s+minmax\(0,\s*1fr\)", re.S)
         module_rule = re.search(r"#module-view\s*\{([^}]*)\}", self.css, re.S)
         self.assertIsNotNone(module_rule)
         assert module_rule is not None
         self.assertIn("margin: 0;", module_rule.group(1))
         self.assertNotRegex(module_rule.group(1), r"margin\s*:\s*0\s+auto")
-        self.assertRegex(module_rule.group(1), r"max-width:\s*1560px")
+        self.assertRegex(module_rule.group(1), r"max-width:\s*var\(--content-max\)")
         self.assertIn("clamp(", self.css)
+        self.assertIn("--shell-gutter:", self.css)
+        self.assertIn("--content-max:", self.css)
 
     def test_dashboard_shared_contract_is_fully_styled(self) -> None:
         selectors = (
@@ -70,6 +72,8 @@ class UiShellRedesignTests(unittest.TestCase):
             self.assertIn(token, self.css)
         for existing_selector in (".node-studio", ".image-workflow-rail", ".video-workflow-rail", ".image-mask-session"):
             self.assertIn(existing_selector, self.css)
+        for contract in ("data-node-palette", "data-node-inspector", "data-node-canvas-focus", "data-node-preview", "--node-palette-width", "--node-inspector-width"):
+            self.assertIn(contract, self.css)
         self.assertIn('href="/ui/styles.css"', self.html)
         self.assertIn('href="/ui/vendor/litegraph.css"', self.html)
         self.assertIn('src="/ui/vendor/litegraph.js"', self.html)

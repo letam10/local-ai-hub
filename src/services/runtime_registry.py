@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from src.services.api.config import read_local_config
 from src.services.process_manager.windows import popen_hidden, run_hidden
 from src.shared.paths.registry import CONFIG_ROOT, ROOT
 
@@ -29,15 +30,24 @@ _tasklist_cache: tuple[float, set[str]] | None = None
 _tasklist_lock = threading.RLock()
 
 
+def _read_registry_state() -> dict[str, Any]:
+    result = read_local_config(
+        LOCAL_REGISTRY.name,
+        {"applications": []},
+        config_dir=CONFIG_ROOT,
+        example_name=EXAMPLE_REGISTRY.name,
+    )
+    value = result.get("value")
+    return {
+        "value": value if isinstance(value, dict) else {"applications": []},
+        "provenance": str(result.get("provenance") or "missing"),
+    }
+
+
 def _read_registry() -> dict[str, Any]:
-    for path in (LOCAL_REGISTRY, EXAMPLE_REGISTRY):
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(value, dict):
-            return value
-    return {"applications": []}
+    """Legacy value-only view retained for compatibility."""
+
+    return _read_registry_state()["value"]
 
 
 def _as_path(value: object) -> Path | None:
@@ -99,7 +109,20 @@ def _is_managed_here(path: Path | None) -> bool:
         return False
 
 
-def _public_entry(entry: dict[str, Any], running: set[str]) -> dict[str, Any]:
+def _public_entry(entry: dict[str, Any], running: set[str], *, provenance: str) -> dict[str, Any]:
+    if provenance != "local":
+        return {
+            "id": entry.get("id"),
+            "display_name": entry.get("display_name") or entry.get("id"),
+            "category": entry.get("category") or "application",
+            "classification": entry.get("classification") or "UNKNOWN",
+            "management_status": provenance,
+            "component_status": "unavailable",
+            "launchable": False,
+            "managed_location": "Unknown",
+            "registry_provenance": provenance,
+            "notes": "A local application registry is not available; the example template is documentation only.",
+        }
     executable = _as_path(entry.get("executable"))
     configured_status = str(entry.get("status") or "unknown")
     observed = "missing"
@@ -118,24 +141,30 @@ def _public_entry(entry: dict[str, Any], running: set[str]) -> dict[str, Any]:
         "component_status": observed,
         "launchable": bool(entry.get("launch", False) and executable and executable.is_file()),
         "managed_location": "LocalAIHub" if _is_managed_here(path or executable) else "External managed",
+        "registry_provenance": provenance,
         "notes": entry.get("notes") or "",
     }
 
 
 def applications(*, force: bool = False) -> list[dict[str, Any]]:
-    running = _running_executables(force=force)
+    state = _read_registry_state()
+    provenance = state["provenance"]
+    running = _running_executables(force=force) if provenance == "local" else set()
     result: list[dict[str, Any]] = []
-    for entry in _read_registry().get("applications", []):
+    for entry in state["value"].get("applications", []):
         if not isinstance(entry, dict) or not APPLICATION_ID.fullmatch(str(entry.get("id", ""))):
             continue
-        result.append(_public_entry(entry, running))
+        result.append(_public_entry(entry, running, provenance=provenance))
     return result
 
 
 def _entry_by_id(application_id: str) -> dict[str, Any] | None:
     if not APPLICATION_ID.fullmatch(application_id):
         return None
-    for entry in _read_registry().get("applications", []):
+    state = _read_registry_state()
+    if state["provenance"] != "local":
+        return None
+    for entry in state["value"].get("applications", []):
         if isinstance(entry, dict) and entry.get("id") == application_id:
             return entry
     return None

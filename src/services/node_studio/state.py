@@ -1,13 +1,25 @@
-"""In-memory, path-safe status snapshots for Node Studio graph jobs."""
+"""
+  FILE NOTE
+  - Mục đích: In-memory, path-safe status snapshots cho Node Studio graph jobs; cung cấp draft_persist/draft_load để phục hồi sau crash
+  - Liên kết trực tiếp: src/services/node_studio/engine.py, src/services/artifact_store.py, src/shared/paths/registry.py
+  - Vùng ảnh hưởng khi sửa: Node Studio run state, crash recovery draft, artifact public output scrubbing
+"""
 
 from __future__ import annotations
 
-import threading
+import json
+import os
 import re
+import tempfile
+import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from src.services.artifact_store import publicize
+from src.shared.paths.registry import CONFIG_ROOT
+
+
 
 
 _LOCAL_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\)")
@@ -178,3 +190,85 @@ class GraphRunRegistry:
 
 
 graph_runs = GraphRunRegistry()
+
+
+# ---------------------------------------------------------------------------
+# Graph draft persistence (crash recovery)
+# ---------------------------------------------------------------------------
+
+_DRAFT_SCHEMA_VERSION = 1
+_SAFE_SCOPE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+
+
+def _draft_path(scope: str) -> Path:
+    safe = scope if _SAFE_SCOPE.match(scope) else re.sub(r"[^a-z0-9_-]", "_", scope.lower())[:32]
+    return CONFIG_ROOT / f"node_studio_draft_{safe}.json"
+
+
+def draft_persist(scope: str, graph: dict[str, Any]) -> dict[str, Any]:
+    """Write a crash-recovery draft for the given scope (e.g. 'image', 'sam2').
+
+    The draft file is separate from main workspace state and is cleared on
+    clean session close.  Returns ``{"accepted": bool}``.
+    """
+    if not isinstance(scope, str) or not scope:
+        return {"accepted": False, "reason": "scope không hợp lệ."}
+    if not isinstance(graph, dict):
+        return {"accepted": False, "reason": "graph phải là object."}
+
+    path = _draft_path(scope)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "draft_schema_version": _DRAFT_SCHEMA_VERSION,
+        "scope": scope,
+        "graph": graph,
+    }
+    tmp: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8",
+            dir=path.parent,
+            prefix=".node-draft-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp = Path(handle.name)
+            handle.write(json.dumps(data, ensure_ascii=False, indent=2))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        tmp = None
+        return {"accepted": True, "draft_path": str(path)}
+    except (OSError, TypeError, ValueError):
+        return {"accepted": False, "reason": "Không ghi được draft."}
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def draft_load(scope: str) -> dict[str, Any] | None:
+    """Load a crash-recovery draft for the given scope.  Returns None if absent or corrupt."""
+    if not isinstance(scope, str) or not scope:
+        return None
+    path = _draft_path(scope)
+    try:
+        raw = json.loads(path.read_bytes())
+        if not isinstance(raw, dict) or raw.get("draft_schema_version") != _DRAFT_SCHEMA_VERSION:
+            return None
+        return raw
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def draft_clear(scope: str) -> None:
+    """Remove the crash-recovery draft for the given scope after clean save."""
+    if not isinstance(scope, str) or not scope:
+        return
+    try:
+        _draft_path(scope).unlink(missing_ok=True)
+    except OSError:
+        pass

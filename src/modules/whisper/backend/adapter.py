@@ -1,38 +1,150 @@
+"""Faster-Whisper adapter for Hub-owned jobs and opaque artifacts."""
+
 from __future__ import annotations
 
 import os
+import re
+import uuid
 from pathlib import Path
 from typing import Any
 
+from src.services.api.config import models
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
 from src.shared.utils.adapter_common import configured_path, local_root, unavailable
 
 
-def _runtime() -> tuple[Path | None, Path | None, Path]:
+_MODEL_ID = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
+_TOKEN = re.compile(r"[a-f0-9]{32}\Z")
+_MAX_TIMEOUT_SECONDS = 1_200
+
+
+def _runtime() -> tuple[Path | None, Path, Path]:
     root = local_root()
     python = configured_path("whisper", "executable", "WHISPER_PYTHON")
-    service = configured_path("whisper", "path", "WHISPER_HOME")
-    return python, service, root / "Services" / "Whisper" / "whisper_cli.py"
+    return python, root / "Services" / "Whisper" / "whisper_cli.py", root
+
+
+def _is_reparse(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            return True
+        return bool(getattr(os.lstat(path), "st_file_attributes", 0) & 0x400)
+    except OSError:
+        return True
+
+
+def _model_id() -> str | None:
+    candidates: list[str] = []
+    for item in models():
+        if not isinstance(item, dict) or item.get("engine") != "Faster-Whisper":
+            continue
+        identifier = item.get("id")
+        if isinstance(identifier, str) and _MODEL_ID.fullmatch(identifier) and isinstance(item.get("local_path"), str):
+            candidates.append(identifier)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _timeout(value: object) -> float:
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        return float(_MAX_TIMEOUT_SECONDS)
+    if timeout != timeout or timeout <= 0:
+        return float(_MAX_TIMEOUT_SECONDS)
+    return min(timeout, float(_MAX_TIMEOUT_SECONDS))
+
+
+def _outputs(root: Path, token: str) -> tuple[Path, Path] | None:
+    if not _TOKEN.fullmatch(token):
+        return None
+    output_base = root / "Output"
+    output_root = output_base / "Speech"
+    transcript = output_root / f"whisper_{token}.json"
+    srt = transcript.with_suffix(".srt")
+    try:
+        root_resolved = root.resolve(strict=True)
+        base_resolved = output_base.resolve(strict=True)
+        resolved_root = output_root.resolve(strict=True)
+        transcript_resolved = transcript.resolve(strict=True)
+        srt_resolved = srt.resolve(strict=True)
+        base_resolved.relative_to(root_resolved)
+        resolved_root.relative_to(root_resolved)
+        transcript_resolved.relative_to(resolved_root)
+        srt_resolved.relative_to(resolved_root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if output_base.parent.resolve(strict=False) != root_resolved or output_root.parent.resolve(strict=False) != base_resolved:
+        return None
+    if any(_is_reparse(item) for item in (root, output_base, output_root, transcript, srt)) or not transcript.is_file() or not srt.is_file():
+        return None
+    return transcript, srt
 
 
 def transcribe(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[str, Any]:
-    python, whisper_home, helper = _runtime()
+    python, wrapper, root = _runtime()
     source = Path(os.path.expandvars(str(payload.get("path", "")))).expanduser()
-    if not source.is_file():
-        return {"status": "error", "error": "Không tìm thấy media đầu vào Whisper."}
-    if python is None or not python.exists() or not helper.exists():
-        return unavailable("whisper", "Faster-Whisper environment hoặc Hub wrapper chưa hoàn chỉnh.")
-    return run_json_worker(
-        [str(python), str(helper)],
-        {**payload, "path": str(source)},
+    model_id = _model_id()
+    if not source.is_file() or _is_reparse(source):
+        return {"status": "error", "code": "input_unavailable", "error": "Không tìm thấy media đầu vào Whisper."}
+    if python is None or not python.is_file() or _is_reparse(python) or not wrapper.is_file() or _is_reparse(wrapper) or model_id is None:
+        return unavailable("whisper", "Faster-Whisper runtime hoặc local model registry chưa sẵn sàng.")
+    token = uuid.uuid4().hex
+    request = {
+        "path": str(source),
+        "start": payload.get("start", 0),
+        "end": payload.get("end", 10),
+        "device": payload.get("device", "cpu"),
+        "language": payload.get("language", "auto"),
+        "timeout_seconds": _timeout(payload.get("timeout_seconds", _MAX_TIMEOUT_SECONDS)),
+    }
+    result = run_json_worker(
+        [str(python), str(wrapper)],
+        request,
         label="whisper",
-        cwd=helper.parent,
-        env={**os.environ, "LOCALAIHUB_ROOT": str(local_root()), "WHISPER_HOME": str(whisper_home) if whisper_home else "", "WHISPER_PYTHON": str(python), "PYTHONIOENCODING": "utf-8"},
+        cwd=wrapper.parent,
+        env={
+            **os.environ,
+            "LOCALAIHUB_ROOT": str(root),
+            "WHISPER_PYTHON": str(python),
+            "WHISPER_MODEL_ID": model_id,
+            "PYTHONIOENCODING": "utf-8",
+        },
         owner=context,
-        timeout_seconds=float(payload.get("timeout_seconds", 1200)),
+        timeout_seconds=_timeout(payload.get("timeout_seconds", _MAX_TIMEOUT_SECONDS)),
     )
+    if result.get("status") != "completed" or result.get("operation") != "transcribe_media":
+        return {
+            "status": "error",
+            "code": "transcription_failed",
+            "error": "Faster-Whisper không hoàn tất transcript Hub.",
+            "next_action": "Kiểm tra local model registry, environment Faster-Whisper và thử lại bằng một job mới.",
+        }
+    outputs = _outputs(root, str(result.get("transcript_token") or ""))
+    if outputs is None:
+        return {
+            "status": "error",
+            "code": "transcript_artifact_unavailable",
+            "error": "Faster-Whisper không tạo artifact transcript hợp lệ.",
+        }
+    transcript, srt = outputs
+    segment_count = result.get("segment_count")
+    return {
+        "status": "completed",
+        "operation": "transcribe_media",
+        "output": str(transcript),
+        "srt": str(srt),
+        "segment_count": int(segment_count) if isinstance(segment_count, int) and segment_count >= 0 else 0,
+        "device": result.get("device") if result.get("device") in {"cpu", "cuda"} else "cpu",
+    }
 
 
 def capability() -> dict[str, Any]:
-    python, whisper_home, helper = _runtime()
-    return {"component": "whisper", "adapter_status": "direct-worker-configured", "runtime_ready": helper.exists() and bool(whisper_home and whisper_home.exists()), "environment_ready": bool(python and python.exists())}
+    python, wrapper, _root = _runtime()
+    model_id = _model_id()
+    return {
+        "component": "whisper",
+        "adapter_status": "first-party-job-worker",
+        "runtime_ready": wrapper.is_file() and not _is_reparse(wrapper),
+        "environment_ready": bool(python and python.is_file() and not _is_reparse(python)),
+        "model_registry_ready": model_id is not None,
+    }

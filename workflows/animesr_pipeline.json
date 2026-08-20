@@ -3,18 +3,31 @@
   "id": "animesr-pipeline",
   "title": "Video — AnimeSR → RIFE fallback → Encode",
   "scope": "animesr",
+  "metadata": {
+    "title": "Video — AnimeSR → RIFE fallback → Encode",
+    "purpose": "Keep AnimeSR and the known RIFE/FFmpeg runtime boundary visible without claiming a successful upscale.",
+    "category": "video",
+    "node_count": 7,
+    "capability": "partial",
+    "status": "partial",
+    "output_intent": "preview then save then export"
+  },
   "nodes": [
     {"id": "input", "type": "load_video", "position": {"x": 70, "y": 240}, "data": {"asset_id": ""}},
     {"id": "animesr", "type": "animesr_upscale", "position": {"x": 350, "y": 240}, "data": {"scale": 2}},
     {"id": "rife", "type": "frame_interpolate", "position": {"x": 650, "y": 240}, "data": {"mode": "target_fps", "target_fps": 60, "backend": "ffmpeg_minterpolate"}},
     {"id": "encode", "type": "encode", "position": {"x": 950, "y": 240}, "data": {"container": "mp4", "codec": "auto", "rate_control": "quality", "quality": 20, "bitrate_kbps": 6000, "max_bitrate_kbps": 9000, "buffer_kbps": 12000, "preset": "medium", "pixel_format": "", "audio_codec": "aac", "audio_bitrate_kbps": 192, "prefer_gpu": true, "multipass": false}},
-    {"id": "preview", "type": "preview_video", "position": {"x": 1250, "y": 240}, "data": {}}
+    {"id": "preview", "type": "preview_video", "position": {"x": 1250, "y": 240}, "data": {}},
+    {"id": "save", "type": "save_video", "position": {"x": 1510, "y": 240}, "data": {}},
+    {"id": "export", "type": "export_video", "position": {"x": 1760, "y": 240}, "data": {}}
   ],
   "edges": [
     {"id": "input_to_animesr", "source": {"node": "input", "port": "video"}, "target": {"node": "animesr", "port": "video"}},
     {"id": "animesr_to_rife", "source": {"node": "animesr", "port": "video"}, "target": {"node": "rife", "port": "video"}},
     {"id": "rife_to_encode", "source": {"node": "rife", "port": "video"}, "target": {"node": "encode", "port": "video"}},
-    {"id": "encode_to_preview", "source": {"node": "encode", "port": "video"}, "target": {"node": "preview", "port": "video"}}
+    {"id": "encode_to_preview", "source": {"node": "encode", "port": "video"}, "target": {"node": "preview", "port": "video"}},
+    {"id": "preview_to_save", "source": {"node": "preview", "port": "video"}, "target": {"node": "save", "port": "video"}},
+    {"id": "save_to_export", "source": {"node": "save", "port": "video"}, "target": {"node": "export", "port": "video"}}
   ],
   "groups": []
 }

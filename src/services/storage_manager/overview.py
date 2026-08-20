@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from src.services.api.config import load_json
 from src.shared.paths.registry import (
@@ -22,8 +25,16 @@ from src.shared.paths.registry import (
 
 
 _CACHE_SECONDS = 120.0
+_LOW_SPACE_BYTES = 20 * 1024**3
+_OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
+_OLLAMA_TIMEOUT_SECONDS = 0.5
+_VOLUME_ALLOWLIST = (
+    ("c", "C:", Path("C:/")),
+    ("d", "D:", Path("D:/")),
+)
 _cache_lock = threading.Lock()
 _size_cache: tuple[float, dict[str, Any]] | None = None
+_volume_snapshot_cache: tuple[float, dict[str, Any]] | None = None
 _model_cache: tuple[float, list[dict[str, Any]]] | None = None
 
 
@@ -72,6 +83,171 @@ def _bytes_record(value: int) -> dict[str, Any]:
     return {"bytes": value, "gb": round(value / (1024**3), 3)}
 
 
+def _unavailable_volume(*, volume_id: str, label: str, reason: str, next_action: str) -> dict[str, Any]:
+    """Return a truthful volume record without exposing a workstation path."""
+
+    return {
+        "id": volume_id,
+        "label": label,
+        "total_bytes": None,
+        "free_bytes": None,
+        "used_bytes": None,
+        "total_gb": None,
+        "free_gb": None,
+        "used_gb": None,
+        "low_space": None,
+        "status": "unavailable",
+        "availability": "unknown",
+        "reason": reason,
+        "next_action": next_action,
+    }
+
+
+def _volume_record(volume_id: str, label: str, root: Path) -> dict[str, Any]:
+    """Project one fixed allowlisted volume using server-owned disk usage."""
+
+    try:
+        usage = shutil.disk_usage(root)
+    except FileNotFoundError:
+        return _unavailable_volume(
+            volume_id=volume_id,
+            label=label,
+            reason="Volume is not mounted or is unavailable.",
+            next_action="Connect or mount the volume, then refresh storage.",
+        )
+    except PermissionError:
+        return _unavailable_volume(
+            volume_id=volume_id,
+            label=label,
+            reason="Volume is present but its statistics cannot be read.",
+            next_action="Check volume permissions, then refresh storage.",
+        )
+    except OSError:
+        return _unavailable_volume(
+            volume_id=volume_id,
+            label=label,
+            reason="Volume statistics are unavailable.",
+            next_action="Verify the volume is readable, then refresh storage.",
+        )
+
+    total, used, free = usage
+    if any(type(value) is not int or value < 0 for value in (total, used, free)):
+        return _unavailable_volume(
+            volume_id=volume_id,
+            label=label,
+            reason="Volume statistics are invalid and were not displayed.",
+            next_action="Refresh storage after the volume reports valid statistics.",
+        )
+    if free > total or used > total:
+        return _unavailable_volume(
+            volume_id=volume_id,
+            label=label,
+            reason="Volume statistics are inconsistent and were not displayed.",
+            next_action="Refresh storage after the volume reports consistent statistics.",
+        )
+
+    low_space = free < _LOW_SPACE_BYTES
+    reason = "Free space is below the 20 GiB low-space threshold." if low_space else "Volume statistics are available from the server-owned allowlist."
+    next_action = "Review output, cache, and temporary data before new writes." if low_space else "No action is required; refresh after external storage changes."
+    return {
+        "id": volume_id,
+        "label": label,
+        "total_bytes": total,
+        "free_bytes": free,
+        "used_bytes": used,
+        "total_gb": round(total / (1024**3), 3),
+        "free_gb": round(free / (1024**3), 3),
+        "used_gb": round(used / (1024**3), 3),
+        "low_space": low_space,
+        "status": "available",
+        "availability": "available",
+        "reason": reason,
+        "next_action": next_action,
+    }
+
+
+def _volume_projection() -> list[dict[str, Any]]:
+    """Inspect only the fixed C:/D: volume allowlist; never accept client input."""
+
+    return [_volume_record(volume_id, label, root) for volume_id, label, root in _VOLUME_ALLOWLIST]
+
+
+def _volume_projection_payload(volumes: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "status": "completed" if all(item["status"] == "available" for item in volumes) else "partial",
+        "execution": "not_run",
+        "allowlist": [item["id"] for item in volumes],
+        "volumes": volumes,
+    }
+
+
+def dashboard_volume_snapshot(*, force: bool = False) -> dict[str, Any]:
+    """Return a cached, metadata-only C:/D: snapshot for Dashboard bootstrap.
+
+    This path deliberately does not read managed directories, legacy metadata, or
+    model/provider endpoints.  Full areas/legacy storage remains owned by
+    ``storage_summary`` and its existing route.
+    """
+
+    global _volume_snapshot_cache
+    now = time.monotonic()
+    with _cache_lock:
+        if not force and _volume_snapshot_cache and now - _volume_snapshot_cache[0] < _CACHE_SECONDS:
+            return _volume_snapshot_cache[1]
+    result = _volume_projection_payload(_volume_projection())
+    with _cache_lock:
+        _volume_snapshot_cache = (now, result)
+    return result
+
+
+def _is_ollama_model(item: dict[str, Any]) -> bool:
+    return str(item.get("engine") or "").casefold() == "ollama"
+
+
+def _ollama_tag_sizes() -> dict[str, int]:
+    """Return per-tag byte sizes from Ollama's fixed loopback tags endpoint.
+
+    Ollama owns manifests and blobs, so scanning its model-store directory would
+    over-count shared blobs and make every registry row look like the entire
+    store.  The local tags API supplies the model/tag size that Ollama itself
+    reports.  A missing or unavailable service is intentionally represented by
+    an empty result rather than a guessed filesystem total.
+    """
+
+    request = Request(_OLLAMA_TAGS_URL, method="GET")
+    try:
+        with urlopen(request, timeout=_OLLAMA_TIMEOUT_SECONDS) as response:  # noqa: S310 - fixed loopback endpoint
+            payload = json.load(response)
+    except (OSError, URLError, ValueError, json.JSONDecodeError):
+        return {}
+    models = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(models, list):
+        return {}
+    result: dict[str, int] = {}
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        name = str(model.get("name") or model.get("model") or "").strip()
+        size = model.get("size")
+        if not name or isinstance(size, bool):
+            continue
+        try:
+            size_bytes = int(size)
+        except (TypeError, ValueError):
+            continue
+        if size_bytes >= 0:
+            result[name] = size_bytes
+    return result
+
+
+def invalidate_model_cache() -> None:
+    """Discard the read-only model summary cache after an external model change."""
+
+    global _model_cache
+    with _cache_lock:
+        _model_cache = None
+
+
 def _legacy_records() -> list[dict[str, Any]]:
     path = ROOT / "Config" / "layout_migration.local.json"
     try:
@@ -105,8 +281,6 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
         total = usage.f_blocks * usage.f_frsize
         free = usage.f_bavail * usage.f_frsize
     else:
-        import shutil
-
         total, _used, free = shutil.disk_usage(ROOT)
     roots = {
         "Models": MODEL_ROOT,
@@ -119,6 +293,7 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
     }
     areas = {name: _bytes_record(_directory_size(path)) for name, path in roots.items()}
     legacy = _legacy_records()
+    volumes = _volume_projection()
     result = {
         "status": "completed",
         "disk": {
@@ -126,8 +301,10 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
             "free_bytes": free,
             "used_bytes": max(0, total - free),
             "free_gb": round(free / (1024**3), 3),
-            "low_space": free < 20 * 1024**3,
+            "low_space": free < _LOW_SPACE_BYTES,
         },
+        "volumes": volumes,
+        "volume_projection": _volume_projection_payload(volumes),
         "areas": areas,
         "legacy": legacy,
         "legacy_counts": {
@@ -149,28 +326,39 @@ def model_summary(*, force: bool = False) -> list[dict[str, Any]]:
         if not force and _model_cache and now - _model_cache[0] < _CACHE_SECONDS:
             return [dict(item) for item in _model_cache[1]]
     value = load_json("model_registry.json", {})
+    items = [item for item in value.get("models", []) if isinstance(item, dict)]
+    ollama_sizes = _ollama_tag_sizes() if any(_is_ollama_model(item) for item in items) else {}
     result: list[dict[str, Any]] = []
-    for item in value.get("models", []):
-        if not isinstance(item, dict):
-            continue
-        local_path = str(item.get("local_path") or "")
-        if local_path.startswith("${"):
-            location = "not configured"
-            installed = False
-            size = 0
+    for item in items:
+        is_ollama = _is_ollama_model(item)
+        model_name = str(item.get("model_name") or item.get("id") or "")
+        if is_ollama:
+            metadata_size = ollama_sizes.get(model_name)
+            installed = metadata_size is not None
+            location = "Ollama-managed model store"
+            size = metadata_size or 0
+            size_source = "ollama_api_tags" if installed else "ollama_api_tags_unavailable"
         else:
-            path = Path(os.path.expandvars(local_path))
-            installed = path.exists()
-            location = "managed model store" if path.is_relative_to(MODEL_ROOT) else "external managed"
-            size = _directory_size(path) if installed else 0
+            local_path = str(item.get("local_path") or "")
+            if local_path.startswith("${"):
+                location = "not configured"
+                installed = False
+                size = 0
+            else:
+                path = Path(os.path.expandvars(local_path))
+                installed = path.exists()
+                location = "managed model store" if path.is_relative_to(MODEL_ROOT) else "external managed"
+                size = _directory_size(path) if installed else 0
+            size_source = "filesystem"
         result.append({
             "id": item.get("id"),
-            "model_name": item.get("model_name") or item.get("id"),
+            "model_name": model_name,
             "engine": item.get("engine"),
             "version": item.get("version"),
             "installed": installed,
             "location": location,
             "size": _bytes_record(size),
+            "size_source": size_source,
             "load_policy": "on_demand",
         })
     with _cache_lock:

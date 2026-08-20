@@ -1,8 +1,8 @@
 {
   "schema_version": 3,
   "components": [
-    {"id": "local_ai_api", "name": "Local AI API", "kind": "service", "status": "planned", "version": "4.0.0", "path": "${LOCAL_AI_HOME}", "executable": "${PYTHON_EXECUTABLE}", "environment": "${LOCAL_AI_ENV}", "port": 8765, "adapter": "first-party-single-window", "source": "Local AI Hub"},
-    {"id": "local_ai_mcp", "name": "Local AI MCP", "kind": "service", "status": "planned", "version": "4.0.0", "path": "${LOCAL_AI_HOME}", "executable": "${PYTHON_EXECUTABLE}", "environment": "${LOCAL_AI_ENV}", "port": null, "adapter": "first-party", "source": "Local AI Hub"},
+    {"id": "local_ai_api", "name": "Local AI API", "kind": "service", "status": "planned", "version": "5.0.0", "path": "${LOCAL_AI_HOME}", "executable": "${PYTHON_EXECUTABLE}", "environment": "${LOCAL_AI_ENV}", "port": 8765, "adapter": "first-party-single-window", "source": "Local AI Hub"},
+    {"id": "local_ai_mcp", "name": "Local AI MCP", "kind": "service", "status": "planned", "version": "5.0.0", "path": "${LOCAL_AI_HOME}", "executable": "${PYTHON_EXECUTABLE}", "environment": "${LOCAL_AI_ENV}", "port": null, "adapter": "first-party", "source": "Local AI Hub"},
     {"id": "animesr", "name": "AnimeSR", "kind": "portable_engine", "status": "partial", "version": "unknown", "path": "${ANIMESR_HOME}", "executable": null, "environment": "${ANIMESR_ENV}", "port": null, "adapter": "direct-hidden-worker", "source": "https://github.com/TencentARC/AnimeSR"},
     {"id": "sam2", "name": "SAM 2", "kind": "portable_engine", "status": "partial", "version": "unknown", "path": "${SAM2_HOME}", "executable": null, "environment": "${SAM2_ENV}", "port": null, "adapter": "direct-hidden-worker", "source": "https://github.com/facebookresearch/sam2"},
     {"id": "whisper", "name": "Faster-Whisper ASR", "kind": "external", "status": "partial", "version": "unknown", "path": "${WHISPER_HOME}", "executable": "${WHISPER_PYTHON}", "environment": "${WHISPER_ENV}", "port": null, "adapter": "direct-worker", "source": "https://github.com/SYSTRAN/faster-whisper"},

@@ -1,3 +1,10 @@
+"""
+  FILE NOTE
+  - Mục đích: Main HTTP Server cho Local AI Hub REST API (settings, diagnostics, backup, jobs, workflows, artifacts, UI serving)
+  - Liên kết trực tiếp: src/app_config/settings_service.py, src/services/diagnostics/center.py, src/services/backup_manager.py, src/services/project_manager/manager.py, src/services/node_studio/state.py
+  - Vùng ảnh hưởng khi sửa: Toàn bộ REST API routes cho UI và external clients
+"""
+
 from __future__ import annotations
 
 import json
@@ -20,14 +27,16 @@ from src.services.image_mask_studio import StudioConflictError, image_mask_studi
 from src.services.job_manager.manager import job_manager
 from src.services.project_manager import project_manager
 from src.services.runtime_registry import applications, launch
+from src.services.storage_manager.overview import dashboard_volume_snapshot
 from src.shared.paths.registry import ROOT
 from src.shared.version import PRODUCT_VERSION
 
 from .config import hub_config
-from .core import component_statuses, get_job_or_error, health, prepare_owned_shutdown, submit_graph, submit_tool, tool_catalog
+from .core import capability_control_plane, component_statuses, get_job_or_error, health, prepare_owned_shutdown, submit_graph, submit_tool, tool_catalog
 from .jobs import flush as flush_jobs
 from .jobs import reconcile_startup
 from .jobs import get_job, list_jobs
+from .v5_productization import admit_durable_job, durable_jobs_snapshot, project_product_surface, reconcile_durable_jobs, resume_durable_job
 
 
 LOG = logging.getLogger("local-ai-hub")
@@ -38,6 +47,53 @@ _bootstrap_cache: tuple[float, dict] | None = None
 _bootstrap_lock = threading.RLock()
 _PRESET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 ARTIFACT_CHUNK_BYTES = 1024 * 1024
+
+
+def _workflow_library_store():
+    """Return the existing server-owned Workflow Library store lazily."""
+
+    from src.services.workflow_library import WorkflowLibraryStore
+
+    return WorkflowLibraryStore()
+
+
+def _workflow_http_status(payload: object) -> int:
+    value = payload if isinstance(payload, dict) else {}
+    status = str(value.get("status") or "")
+    return {
+        "conflict": 409,
+        "invalid": 400,
+        "not_found": 404,
+        "recovery_required": 503,
+        "error": 500,
+    }.get(status, 200)
+
+
+def _durable_admission_http_status(payload: object) -> int:
+    status = payload.get("status") if isinstance(payload, dict) else None
+    return {"accepted": 202, "invalid": 400, "unavailable": 503}.get(status, 500)
+
+
+def _shutdown_owned_idle() -> None:
+    """Release idle Comfy-owned resources without breaking API shutdown."""
+
+    try:
+        from src.modules.image_generation.backend.comfyui import shutdown_owned_idle
+
+        shutdown_owned_idle()
+    except Exception:
+        # Shutdown must still flush Jobs and close the listener when the
+        # optional Comfy runtime is unavailable or already stopped.
+        LOG.warning("Comfy idle shutdown was unavailable; continuing API shutdown.")
+
+
+def _workflow_library_payload() -> dict:
+    value = _workflow_library_store().list_workflows()
+    result = dict(value) if isinstance(value, dict) else {"status": "partial", "workflows": []}
+    recovery = result.get("recovery") if isinstance(result.get("recovery"), dict) else {}
+    result["reason"] = str(recovery.get("reason") or "Workflow Library is server-owned local metadata.")[:240]
+    result["action"] = str(recovery.get("action") or "Review the validated revision before saving.")[:240]
+    return result
 
 
 def _reject_json_constant(value: str) -> None:
@@ -86,20 +142,43 @@ class HubHTTPServer(ThreadingHTTPServer):
 
 
 def _settings_payload() -> dict:
-    config = hub_config()
+    from src.app_config.settings_service import SettingsPersistence
+
+    persisted = SettingsPersistence().load()
+    settings_data = persisted.get("settings", {})
+    recovery = persisted.get("recovery", {})
     upload_max_bytes, upload_disk_safety_bytes = _upload_limits()
+    # Flatten window/jobs/network sections for backward compatibility while providing full structured settings
+    window = settings_data.get("window", {})
+    jobs = settings_data.get("jobs", {})
+    network = settings_data.get("network", {})
+    ui = settings_data.get("ui", {})
     return {
         "status": "completed",
+        "schema_version": settings_data.get("schema_version", 2),
+        "settings_revision": settings_data.get("settings_revision", 0),
+        "recovery": recovery,
+        "sections": {
+            "ui": ui,
+            "jobs": jobs,
+            "network": network,
+            "window": window,
+        },
         "settings": {
-            "start_maximized": bool(config.get("start_maximized", True)),
-            "minimum_width": int(config.get("minimum_width", 1280)),
-            "minimum_height": int(config.get("minimum_height", 720)),
-            "model_load_policy": config.get("model_load_policy", "on_demand"),
-            "max_heavy_gpu_jobs": int(config.get("max_heavy_gpu_jobs", 1)),
-            "api_bind": str(config.get("bind_host", "127.0.0.1")),
-            "api_port": int(config.get("api_port", 8765)),
-            "mcp_transport": config.get("mcp_transport", "stdio"),
-            "comfyui_port": int(config.get("comfyui_port", 8188)),
+            "schema_version": settings_data.get("schema_version", 2),
+            "settings_revision": settings_data.get("settings_revision", 0),
+            "start_maximized": bool(window.get("start_maximized", True)),
+            "minimum_width": int(window.get("minimum_width", 1280)),
+            "minimum_height": int(window.get("minimum_height", 720)),
+            "model_load_policy": str(jobs.get("model_load_policy", "on_demand")),
+            "max_heavy_gpu_jobs": int(jobs.get("max_heavy_gpu_jobs", 1)),
+            "api_bind": str(network.get("bind_host", "127.0.0.1")),
+            "api_port": int(network.get("api_port", 8765)),
+            "mcp_transport": str(network.get("mcp_transport", "stdio")),
+            "comfyui_port": int(network.get("comfyui_port", 8188)),
+            "language": str(ui.get("language", "vi")),
+            "theme": str(ui.get("theme", "system")),
+            "sidebar_collapsed": bool(ui.get("sidebar_collapsed", False)),
             "upload_max_bytes": upload_max_bytes,
             "upload_disk_safety_bytes": upload_disk_safety_bytes,
         },
@@ -114,7 +193,7 @@ def _lifecycle_payload() -> dict:
 
 
 def _bootstrap_payload(*, force: bool = False) -> dict:
-    """One cached startup snapshot; intentionally excludes models and storage scans."""
+    """One cached startup snapshot with a lightweight server-owned volume projection."""
 
     global _bootstrap_cache
     now = time.monotonic()
@@ -122,15 +201,33 @@ def _bootstrap_payload(*, force: bool = False) -> dict:
         if not force and _bootstrap_cache and now - _bootstrap_cache[0] < _BOOTSTRAP_CACHE_SECONDS:
             return _bootstrap_cache[1]
     components = component_statuses()
+    health_snapshot = health(probe_gpu=True)
+    capabilities = capability_control_plane()
+    workflow_library = _workflow_library_payload()
+    storage_snapshot = dashboard_volume_snapshot()
+    jobs = list_jobs()
+    durable_jobs = durable_jobs_snapshot()
+    product_surface = project_product_surface(
+        control_plane=capabilities,
+        health=health_snapshot,
+        jobs=[*jobs, *durable_jobs.get("records", [])],
+        workflow_library=workflow_library,
+        storage=storage_snapshot,
+    )
     payload = {
         "status": "completed",
-        "health": health(probe_gpu=True),
+        "health": health_snapshot,
         "components": components,
         "applications": applications(),
-        "jobs": list_jobs(),
+        "jobs": jobs,
+        "durable_jobs": durable_jobs,
         "tools": tool_catalog(components),
         "settings": _settings_payload()["settings"],
         "lifecycle": _lifecycle_payload(),
+        "capabilities": capabilities,
+        "productization": product_surface,
+        "storage": product_surface["storage"],
+        "workflow_library": workflow_library,
     }
     with _bootstrap_lock:
         _bootstrap_cache = (now, payload)
@@ -185,7 +282,7 @@ class HubHandler(BaseHTTPRequestHandler):
             body = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
         except (TypeError, ValueError):
             body = json.dumps(
-                {"status": "error", "error": "Hub khÃ´ng thá»ƒ serialize JSON an toÃ n."},
+                {"status": "error", "error": "Hub không thể serialize JSON an toàn."},
                 ensure_ascii=False,
                 indent=2,
                 allow_nan=False,
@@ -321,23 +418,23 @@ class HubHandler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length < 0 or length > 2 * 1024 * 1024:
-                return invalid("JSON request vá»£t giá»›i háº¡n kÃ­ch thÆ°á»›c.")
+                return invalid("JSON request vượt giới hạn kích thước.")
             chunks: list[bytes] = []
             remaining = length
             while remaining:
                 chunk = self.rfile.read(min(64 * 1024, remaining))
                 if not chunk:
-                    return invalid("JSON request bá»‹ ngáº¯t trÆ°á»›c khi Ä‘á»§ dá»¯ liá»‡u.")
+                    return invalid("JSON request bị ngắt trước khi đủ dữ liệu.")
                 chunks.append(chunk)
                 remaining -= len(chunk)
             raw = b"".join(chunks) if length else b"{}"
             value = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
             if not isinstance(value, dict):
-                return invalid("JSON request pháº£i lÃ  object.")
+                return invalid("JSON request phải là object.")
             return value
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
             if strict:
-                raise ValueError("JSON request khÃ´ng há»£p lá»‡ hoáº·c chá»©a sá»‘ non-finite.")
+                raise ValueError("JSON request không hợp lệ hoặc chứa số non-finite.")
             return {}
 
     def _upload(self) -> None:
@@ -527,18 +624,29 @@ class HubHandler(BaseHTTPRequestHandler):
             self._write(200, health(probe_gpu=False))
         elif normalized == "/api/bootstrap":
             self._write(200, _bootstrap_payload())
+        elif normalized == "/api/capabilities":
+            self._write(200, capability_control_plane())
+        elif normalized == "/api/workflow-library":
+            self._write(200, _workflow_library_payload())
+        elif normalized.startswith("/api/workflow-library/"):
+            workflow_id = normalized[len("/api/workflow-library/") :].strip("/")
+            result = _workflow_library_store().get_workflow(workflow_id)
+            self._write(_workflow_http_status(result), result)
         elif normalized == "/tools":
             self._write(200, {"status": "completed", "tools": tool_catalog()})
         elif normalized == "/models":
             from src.services.storage_manager.overview import model_summary
 
-            self._write(200, {"status": "completed", "models": model_summary()})
+            refresh = parse_qs(parsed.query).get("refresh", [""])[0].casefold() in {"1", "true"}
+            self._write(200, {"status": "completed", "models": model_summary(force=refresh)})
         elif normalized == "/components":
             self._write(200, {"status": "completed", "components": component_statuses()})
         elif normalized in {"/jobs", "/api/jobs"}:
             query = parse_qs(parsed.query)
             limit = _bounded_int(query.get("limit", [None])[0], 200, minimum=1, maximum=500)
             self._write(200, {"status": "completed", "jobs": list_jobs(limit=limit)})
+        elif normalized == "/api/durable-jobs":
+            self._write(200, durable_jobs_snapshot())
         elif normalized.startswith("/jobs/"):
             self._write(*get_job_or_error(normalized.split("/", 2)[2]))
         elif normalized == "/api/dashboard":
@@ -550,7 +658,8 @@ class HubHandler(BaseHTTPRequestHandler):
         elif normalized == "/api/models":
             from src.services.storage_manager.overview import model_summary
 
-            self._write(200, {"status": "completed", "models": model_summary()})
+            refresh = parse_qs(parsed.query).get("refresh", [""])[0].casefold() in {"1", "true"}
+            self._write(200, {"status": "completed", "models": model_summary(force=refresh)})
         elif normalized == "/api/applications":
             self._write(200, {"status": "completed", "applications": applications()})
         elif normalized == "/api/lifecycle":
@@ -625,6 +734,14 @@ class HubHandler(BaseHTTPRequestHandler):
             self._creative(lambda: self._creative_or_404(project_manager.get_compare(normalized.split("/")[-2])))
         elif normalized.startswith("/api/projects/") and normalized.endswith("/export"):
             self._creative(lambda: project_manager.export_project(normalized.split("/")[-2]))
+        elif normalized.startswith("/api/projects/") and normalized.endswith("/manifest"):
+            project_id = normalized.split("/")[-2]
+            result = project_manager.export_manifest(project_id)
+            self._write(200 if result.get("accepted") else 404, result)
+        elif normalized.startswith("/api/projects/") and normalized.endswith("/missing-artifacts"):
+            project_id = normalized.split("/")[-2]
+            result = project_manager.missing_artifact_state(project_id)
+            self._write(200 if result.get("accepted") else 404, result)
         elif normalized.startswith("/api/projects/"):
             self._creative(lambda: self._creative_or_404(project_manager.get_project(normalized.rsplit("/", 1)[-1])))
         elif normalized.startswith("/api/recipes/"):
@@ -673,6 +790,75 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._write(404, {"status": "error", "error": "Chưa có trạng thái Node Studio cho job này."})
             else:
                 self._write(200, {"status": "completed", "run": run})
+        elif normalized == "/api/settings/schema":
+            from src.app_config.schema import SETTINGS_SCHEMA_VERSION, SETTINGS_SECTION_DEFAULTS
+            self._write(200, {"status": "completed", "schema_version": SETTINGS_SCHEMA_VERSION, "defaults": SETTINGS_SECTION_DEFAULTS})
+        elif normalized == "/api/diagnostics/snapshot":
+            from src.services.diagnostics.center import diagnostics_center
+            self._write(200, {"status": "completed", "snapshot": diagnostics_center.snapshot()})
+        elif normalized == "/api/diagnostics/export":
+            from src.services.diagnostics.center import diagnostics_center
+            self._write(200, diagnostics_center.export_diagnostics_bundle())
+        elif normalized in ("/api/backup/list", "/api/backup"):
+            from src.services.backup_manager import BackupManager
+            self._write(200, {"status": "completed", "backups": BackupManager().list_backups()})
+        elif normalized == "/api/diagnostics/repair/recovery-drafts":
+            from src.services.diagnostics.center import diagnostics_center
+            forensic = diagnostics_center.recovery_forensic_state()
+            self._write(200, {"status": "completed", "drafts": forensic.get("files", []), "recovery": forensic})
+        elif normalized.startswith("/api/diagnostics/subsystem/"):
+            from src.services.diagnostics.center import diagnostics_center
+            subsystem = normalized.rsplit("/", 1)[-1]
+            _DISPATCH = {
+                "git_integrity": lambda: diagnostics_center.git_integrity_state(),
+                "config_registry": lambda: diagnostics_center.config_registry_state(),
+                "jobs_store": lambda: diagnostics_center.jobs_store_state(),
+                "artifact_store": lambda: diagnostics_center.artifact_store_state(),
+                "workflow_store": lambda: diagnostics_center.workflow_store_state(),
+                "models_inventory": lambda: diagnostics_center.models_inventory(),
+                "environments_inventory": lambda: diagnostics_center.environments_inventory(),
+                "runtime_inventory": lambda: diagnostics_center.runtime_inventory(),
+                "storage": lambda: diagnostics_center.storage_state(),
+                "gpu": lambda: diagnostics_center.gpu_detection(),
+                "latest_app_errors": lambda: diagnostics_center.latest_app_errors(),
+                "recovery_forensic": lambda: diagnostics_center.recovery_forensic_state(),
+            }
+            if subsystem in _DISPATCH:
+                self._write(200, {"status": "completed", "subsystem": subsystem, "data": _DISPATCH[subsystem]()})
+            else:
+                self._write(404, {"status": "error", "error": f"Không tìm thấy subsystem diagnostics '{subsystem}'."})
+        elif normalized.startswith("/api/node-studio/drafts/"):
+            from src.services.node_studio.state import draft_load
+            scope = normalized.rsplit("/", 1)[-1]
+            draft = draft_load(scope)
+            if draft is None:
+                self._write(404, {"status": "error", "error": "Chưa có draft autosave cho scope này.", "draft": None})
+            else:
+                self._write(200, {"status": "completed", "draft": draft})
+        elif normalized == "/api/assets/search":
+            query = parse_qs(parsed.query)
+            q = str(query.get("query", [""])[0])
+            tags = query.get("tag", [])
+            fav_param = query.get("favorite", [None])[0]
+            fav = fav_param.lower() in {"1", "true", "yes"} if fav_param is not None else None
+            media_prefix = str(query.get("media_type", [""])[0])
+            proj_id = str(query.get("project_id", [""])[0])
+            sort_by = str(query.get("sort_by", ["created_at"])[0])
+            sort_desc = str(query.get("sort_desc", ["true"])[0]).lower() in {"1", "true", "yes"}
+            result = project_manager.search_assets(
+                query=q,
+                tags=tags if tags else None,
+                favorite=fav,
+                media_type_prefix=media_prefix,
+                project_id=proj_id,
+                sort_by=sort_by,
+                sort_desc=sort_desc,
+            )
+            self._write(200, result)
+        elif normalized.startswith("/api/artifacts/") and normalized.endswith("/status"):
+            artifact_id = normalized.split("/")[-2]
+            result = project_manager.get_artifact_status(artifact_id)
+            self._write(200 if result.get("found") else 404, result)
         else:
             self._write(404, {"status": "error", "error": "Route not found."})
 
@@ -744,6 +930,149 @@ class HubHandler(BaseHTTPRequestHandler):
             from src.services.storage_manager.overview import storage_summary
 
             self._write(200, storage_summary(force=True))
+            return
+        if path == "/api/settings":
+            from src.app_config.settings_service import SettingsPersistence
+            try:
+                patch_data = self._read_json(strict=True)
+            except ValueError as exc:
+                self._write(400, {"status": "invalid", "error": str(exc)})
+                return
+            expected_rev = patch_data.pop("expected_revision", None)
+            result = SettingsPersistence().save(patch_data, expected_revision=expected_rev)
+            status_code = 200 if result.get("accepted") else (409 if result.get("status") == "conflict" else 400)
+            self._write(status_code, result)
+            return
+        if path == "/api/settings/reset":
+            from src.app_config.settings_service import SettingsPersistence
+            req = self._read_json()
+            section = req.get("section")
+            if section:
+                result = SettingsPersistence().reset_section(str(section))
+            else:
+                from src.app_config.schema import SETTINGS_SECTION_DEFAULTS
+                result = SettingsPersistence().save(SETTINGS_SECTION_DEFAULTS)
+            self._write(200 if result.get("accepted") else 400, result)
+            return
+        if path == "/api/backup/create":
+            from src.services.backup_manager import BackupManager
+            result = BackupManager().create_backup()
+            self._write(201 if result.get("accepted") else 500, result)
+            return
+        if path == "/api/backup/inspect":
+            from src.services.backup_manager import BackupManager
+            req = self._read_json()
+            backup_id = req.get("backup_id") or req.get("backup_path", "")
+            result = BackupManager().inspect_backup(backup_id)
+            self._write(200 if result.get("valid") else 400, result)
+            return
+        if path == "/api/backup/plan":
+            from src.services.backup_manager import BackupManager
+            req = self._read_json()
+            backup_id = req.get("backup_id") or req.get("backup_path", "")
+            result = BackupManager().plan_restore(backup_id)
+            self._write(200 if result.get("accepted") else 400, result)
+            return
+        if path == "/api/backup/apply":
+            from src.services.backup_manager import BackupManager
+            req = self._read_json()
+            plan_id = req.get("plan_id") or req.get("plan", {}).get("plan_id", "")
+            confirmed = bool(req.get("confirmed", False))
+            result = BackupManager().apply_restore(plan_id, confirmed=confirmed)
+            status_code = 200 if result.get("accepted") else (409 if result.get("status") == "conflict" or result.get("code") == 409 else 400)
+            self._write(status_code, result)
+            return
+        if path.startswith("/api/node-studio/drafts/"):
+            from src.services.node_studio.state import draft_persist
+            scope = path.rsplit("/", 1)[-1]
+            req = self._read_json()
+            graph = req.get("graph", {})
+            result = draft_persist(scope, graph)
+            self._write(200 if result.get("accepted") else 400, result)
+            return
+        if path == "/api/diagnostics/repair/verify-config":
+            from src.services.diagnostics.center import diagnostics_center
+            self._write(200, {"status": "completed", "result": diagnostics_center.config_registry_state()})
+            return
+        if path == "/api/diagnostics/repair/inspect-recovery":
+            from src.services.diagnostics.center import diagnostics_center
+            self._write(200, {"status": "completed", "result": diagnostics_center.recovery_forensic_state()})
+            return
+        if path == "/api/diagnostics/repair/clear-recovery-drafts":
+            from src.services.node_studio.state import draft_clear
+            req = self._read_json()
+            scopes = req.get("scopes")
+            confirmed = bool(req.get("confirmed", False))
+            if not confirmed:
+                self._write(400, {"status": "unconfirmed", "error": "Xóa bản nháp phục hồi yêu cầu xác nhận confirmed=True."})
+                return
+            if not isinstance(scopes, list) or not scopes:
+                self._write(400, {"status": "invalid", "error": "Danh sách scopes cần xóa không hợp lệ hoặc rỗng."})
+                return
+            cleared = []
+            for s in scopes:
+                if isinstance(s, str) and s:
+                    draft_clear(s)
+                    cleared.append(s)
+            self._write(200, {"status": "completed", "cleared": cleared, "message": f"Đã dọn dẹp {len(cleared)} bản nháp phục hồi."})
+            return
+        if path.startswith("/api/workflow-library"):
+            try:
+                request = self._read_json(strict=True)
+            except ValueError as exc:
+                self._write(400, {"status": "invalid", "error": str(exc)})
+                return
+            store = _workflow_library_store()
+            if path == "/api/workflow-library":
+                expected_revision = request.get("expected_revision")
+                if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
+                    self._write(400, {"status": "invalid", "error": "expected_revision must be a non-negative integer."})
+                    return
+                result = store.save_workflow(request.get("workflow"), expected_revision=expected_revision)
+            elif path == "/api/workflow-library/import":
+                expected_revision = request.get("expected_revision")
+                if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
+                    self._write(400, {"status": "invalid", "error": "expected_revision must be a non-negative integer."})
+                    return
+                content = request.get("content", "")
+                if not isinstance(content, str) or len(content.encode("utf-8")) > 2 * 1024 * 1024:
+                    self._write(400, {"status": "invalid", "error": "Workflow Library import content is bounded UTF-8 text."})
+                    return
+                result = store.import_json(content, expected_revision=expected_revision)
+            elif path == "/api/workflow-library/migration/plan":
+                result = store.plan_migration(request.get("entries", []))
+            elif path == "/api/workflow-library/migration/confirm":
+                expected_revision = request.get("expected_revision")
+                if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
+                    self._write(400, {"status": "invalid", "error": "expected_revision must be a non-negative integer."})
+                    return
+                result = store.confirm_migration(request.get("entries", []), expected_revision=expected_revision)
+            else:
+                self._write(404, {"status": "error", "error": "Workflow Library route not found."})
+                return
+            self._write(_workflow_http_status(result), result)
+            return
+        if path.startswith("/api/durable-jobs/") and path.endswith("/resume"):
+            job_id = path[len("/api/durable-jobs/") : -len("/resume")].strip("/")
+            result = resume_durable_job(job_id)
+            self._write(_workflow_http_status(result), result)
+            return
+        if path == "/api/durable-jobs":
+            try:
+                request = self._read_json(strict=True)
+            except ValueError:
+                self._write(400, {
+                    "status": "invalid",
+                    "execution": "not_run",
+                    "dry_run": True,
+                    "error": {
+                        "code": "INVALID_JOB_SPEC",
+                        "action": "Create a new allowlisted media.video_grade.v1 job.",
+                    },
+                })
+                return
+            result = admit_durable_job(request)
+            self._write(_durable_admission_http_status(result), result)
             return
         if path == "/api/projects":
             self._creative(lambda: project_manager.create_project(self._read_json()))
@@ -873,6 +1202,47 @@ class HubHandler(BaseHTTPRequestHandler):
         status, payload = submit_tool(tool, self._read_json())
         self._write(status, payload)
 
+    def do_DELETE(self) -> None:  # noqa: N802
+        path = unquote(urlparse(self.path).path.rstrip("/") or "/")
+        if path.startswith("/api/node-studio/drafts/"):
+            from src.services.node_studio.state import draft_clear
+            scope = path.rsplit("/", 1)[-1]
+            draft_clear(scope)
+            self._write(200, {"status": "completed", "scope": scope})
+            return
+        prefix = "/api/workflow-library/"
+        if not path.startswith(prefix) or not path[len(prefix) :].strip("/"):
+            self._write(404, {"status": "error", "error": "Workflow Library route not found."})
+            return
+        workflow_id = path[len(prefix) :].strip("/")
+        try:
+            request = self._read_json(strict=True)
+        except ValueError as exc:
+            self._write(400, {"status": "invalid", "error": str(exc)})
+            return
+        expected_revision = request.get("expected_revision")
+        if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
+            self._write(400, {"status": "invalid", "error": "expected_revision must be a non-negative integer."})
+            return
+        result = _workflow_library_store().delete_workflow(workflow_id, expected_revision=expected_revision)
+        self._write(_workflow_http_status(result), result)
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        path = unquote(urlparse(self.path).path.rstrip("/") or "/")
+        if path == "/api/settings":
+            from src.app_config.settings_service import SettingsPersistence
+            try:
+                patch_data = self._read_json(strict=True)
+            except ValueError as exc:
+                self._write(400, {"status": "invalid", "error": str(exc)})
+                return
+            expected_rev = patch_data.pop("expected_revision", None)
+            result = SettingsPersistence().save(patch_data, expected_revision=expected_rev)
+            status_code = 200 if result.get("accepted") else (409 if result.get("status") == "conflict" else 400)
+            self._write(status_code, result)
+            return
+        self._write(404, {"status": "error", "error": "Route not found."})
+
     def do_PUT(self) -> None:  # noqa: N802
         path = unquote(urlparse(self.path).path.rstrip("/") or "/")
         if path.startswith("/api/image-mask-studio/sessions/"):
@@ -916,6 +1286,10 @@ def main() -> int:
     except OSError as exc:
         LOG.error("Local AI Hub could not bind %s:%s: %s", host, port, exc)
         return 1
+    try:
+        reconcile_durable_jobs()
+    except Exception:
+        LOG.warning("V5 durable recovery is unavailable; preserving the existing state.")
     reconcile_startup()
     LOG.info("Local AI Hub listening on %s:%s", host, port)
     try:
@@ -923,7 +1297,7 @@ def main() -> int:
     except KeyboardInterrupt:
         LOG.info("Stopping Local AI Hub")
     finally:
-        shutdown_owned_idle()
+        _shutdown_owned_idle()
         flush_jobs()
         server.server_close()
     return 0

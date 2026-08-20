@@ -22,6 +22,9 @@ if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
 }
 
 $state = Get-Content -LiteralPath $statePath -Raw -Encoding utf8 | ConvertFrom-Json
+if ($state.historical_snapshot -eq $true -or $state.not_runtime_configuration -eq $true) {
+    throw 'V3 cleanup is historical on this completed host; no legacy path will be recreated or deleted by this helper.'
+}
 $junctions = @($state.records | Where-Object {
     $_.type -in @('JUNCTION', 'SYMLINK') -and
     $_.cleanup_state -eq 'JUNCTION_REFERENCE_AUDIT_REQUIRED' -and

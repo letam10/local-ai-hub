@@ -16,13 +16,14 @@ import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime
+from math import sqrt
 from pathlib import Path
 from typing import Any
 
 from src.services.api.config import component, hub_config
 from src.services.job_manager.manager import JobContext
 from src.services.process_manager.managed import background_processes
-from src.shared.paths.registry import OUTPUT_ROOT, ROOT
+from src.shared.paths.registry import OUTPUT_ROOT, ROOT, TEMP_ROOT
 from src.shared.utils.adapter_common import configured_path, local_root, unavailable
 
 
@@ -32,6 +33,63 @@ BRIDGE_LOCAL_ROOT = ROOT / "workflows" / "local" / "comfyui"
 BRIDGE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 BRIDGE_INPUTS = {"text", "image", "mask", "video", "audio", "metadata"}
 _WINDOWS_PATH = re.compile(r"(?i)(?:[A-Z]:[\\/]|\\\\)")
+
+# These are first-party *binding* contracts, not model manifests.  The actual
+# API graphs stay machine-local with the selected ComfyUI installation, but a
+# graph must expose each node/input that Hub mutates before it may start a
+# backend or submit a prompt.  This turns a stale local export into a finite
+# unavailable result instead of a KeyError after ComfyUI has been started.
+_ENGINE_WORKFLOWS = {
+    "flux": {
+        "component": "flux_klein_studio",
+        "names": {
+            False: "flux2_klein_t2i_base_api.json",
+            True: "flux2_klein_i2i_base_api.json",
+        },
+        "bindings": {
+            "74": ("text",),
+            "67": ("text",),
+            "62": ("steps", "width", "height"),
+            "66": ("width", "height"),
+            "73": ("noise_seed",),
+            "9": ("filename_prefix",),
+        },
+        "input_image": ("80", "image"),
+        "default_width": 768,
+        "default_height": 768,
+        "maximum_dimension": 2048,
+        "maximum_steps": 80,
+        "default_steps": 20,
+        "memory_profile": "standard",
+    },
+    "qwen": {
+        "component": "qwen_image",
+        "names": {False: "qwen_image_2512_t2i_api.json"},
+        "bindings": {
+            "5": ("text",),
+            "6": ("text",),
+            "7": ("width", "height"),
+            "8": ("seed", "steps"),
+            "10": ("filename_prefix",),
+        },
+        # The Qwen Image assets can be much larger than an 8 GiB GPU.  Hub
+        # therefore admits only this low-VRAM text-to-image profile.  It does
+        # not download, select, or relocate models; ComfyUI must already have
+        # the locally registered assets and still needs a real bounded smoke.
+        "input_image": None,
+        "default_width": 512,
+        "default_height": 512,
+        "maximum_dimension": 768,
+        "maximum_pixels": 512 * 512,
+        "maximum_steps": 12,
+        "default_steps": 8,
+        "memory_profile": "qwen_8gb_low_vram",
+    },
+}
+_MEMORY_PROFILE_FLAGS = {
+    "standard": (),
+    "qwen_8gb_low_vram": ("--lowvram",),
+}
 
 
 def _port() -> int:
@@ -72,12 +130,86 @@ def _runtime() -> tuple[Path | None, Path | None]:
     return python if python.is_file() else None, main if main.is_file() else None
 
 
-def _studio_root() -> Path | None:
-    for component_id, variable in (("flux_klein_studio", "FLUX_STUDIO_HOME"), ("qwen_image", "QWEN_IMAGE_HOME")):
-        path = configured_path(component_id, "path", variable)
-        if path and path.is_dir():
-            return path
+def _is_reparse(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            return True
+        return bool(getattr(os.lstat(path), "st_file_attributes", 0) & 0x400)
+    except OSError:
+        return True
+
+
+def _safe_relative_file(root: Path, *parts: str) -> Path | None:
+    """Return a regular non-reparse file below a selected local engine root."""
+
+    candidate = root.joinpath(*parts)
+    try:
+        resolved_root = root.resolve(strict=True)
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    current = candidate
+    while True:
+        if _is_reparse(current):
+            return None
+        if current == root:
+            break
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+    return resolved if resolved.is_file() else None
+
+
+def _safe_input_image(value: object) -> Path | None:
+    """Resolve one existing Hub artifact leaf without following reparses.
+
+    Core resolves opaque artifact IDs before this adapter runs.  The adapter
+    still independently constrains that resulting path to the fixed Hub
+    artifact roots so a direct internal caller cannot make ComfyUI read a
+    workstation file.  This check deliberately happens before backend start.
+    """
+
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        candidate = Path(value)
+        lexical_candidate = Path(os.path.abspath(str(candidate)))
+    except (OSError, ValueError):
+        return None
+    for root in (OUTPUT_ROOT, TEMP_ROOT / "uploads", ROOT / "Archive"):
+        try:
+            if not root.is_dir() or _is_reparse(root):
+                continue
+            lexical_root = Path(os.path.abspath(str(root)))
+            relative = lexical_candidate.relative_to(lexical_root)
+            current = lexical_root
+            for part in relative.parts:
+                current = current / part
+                if not current.exists() or _is_reparse(current):
+                    break
+            else:
+                resolved_root = root.resolve(strict=True)
+                resolved = lexical_candidate.resolve(strict=True)
+                resolved.relative_to(resolved_root)
+                if resolved.is_file() and not _is_reparse(resolved):
+                    return resolved
+        except (OSError, RuntimeError, ValueError):
+            continue
     return None
+
+
+def _studio_root(engine: str) -> Path | None:
+    contract = _ENGINE_WORKFLOWS.get(engine)
+    if contract is None:
+        return None
+    component_id = str(contract["component"])
+    variable = "FLUX_STUDIO_HOME" if engine == "flux" else "QWEN_IMAGE_HOME"
+    path = configured_path(component_id, "path", variable)
+    if path is None or not path.is_dir() or _is_reparse(path):
+        return None
+    return path
 
 
 def health() -> dict[str, Any]:
@@ -92,16 +224,26 @@ def health() -> dict[str, Any]:
     }
 
 
-def ensure_running() -> tuple[bool, str]:
+def _runtime_command(python: Path, main: Path, *, memory_profile: str = "standard") -> list[str] | None:
+    """Build the fixed Hub-owned ComfyUI command without accepting user flags."""
+
+    flags = _MEMORY_PROFILE_FLAGS.get(memory_profile)
+    if flags is None:
+        return None
+    return [str(python), str(main), "--listen", "127.0.0.1", "--port", str(_port()), *flags]
+
+
+def ensure_running(*, memory_profile: str = "standard") -> tuple[bool, str]:
     if _json_request("/system_stats", timeout=2):
         return True, "ComfyUI đã sẵn sàng."
     python, main = _runtime()
-    if python is None or main is None:
+    command = _runtime_command(python, main, memory_profile=memory_profile) if python is not None and main is not None else None
+    if command is None:
         return False, "Không tìm thấy Python hoặc main.py của ComfyUI canonical."
     try:
         background_processes.start(
             "comfyui",
-            [str(python), str(main), "--listen", "127.0.0.1", "--port", str(_port())],
+            command,
             cwd=main.parent,
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
@@ -276,39 +418,116 @@ def save_bridge_workflow(workflow_id: str, value: object) -> tuple[int, dict[str
 
 
 def _workflow_path(engine: str, has_input_image: bool) -> Path | None:
-    root = _studio_root()
-    if root is None:
+    contract = _ENGINE_WORKFLOWS.get(engine)
+    if contract is None:
         return None
-    if engine == "qwen":
-        name = "qwen_image_2512_t2i_api.json"
-    elif has_input_image:
-        name = "flux2_klein_i2i_base_api.json"
-    else:
-        name = "flux2_klein_t2i_api.json"
-    path = root / "workflows" / name
-    return path if path.is_file() else None
+    names = contract["names"]
+    if not isinstance(names, dict):
+        return None
+    name = names.get(has_input_image)
+    if not isinstance(name, str):
+        return None
+    root = _studio_root(engine)
+    return _safe_relative_file(root, "workflows", name) if root is not None else None
+
+
+def _bounded_int(value: object, default: int, *, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return max(minimum, min(maximum, number))
+
+
+def _align_dimension(value: int) -> int:
+    return max(256, (int(value) // 64) * 64)
+
+
+def _fit_dimensions(width: int, height: int, maximum_pixels: int | None) -> tuple[int, int]:
+    if maximum_pixels is None or width * height <= maximum_pixels:
+        return width, height
+    scale = sqrt(maximum_pixels / float(width * height))
+    fitted_width = _align_dimension(int(width * scale))
+    fitted_height = _align_dimension(int(height * scale))
+    while fitted_width * fitted_height > maximum_pixels:
+        if fitted_width >= fitted_height and fitted_width > 256:
+            fitted_width -= 64
+        elif fitted_height > 256:
+            fitted_height -= 64
+        else:
+            return 256, 256
+    return fitted_width, fitted_height
+
+
+def _workflow_contract(value: object, engine: str, *, has_input_image: bool) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate only the nodes and inputs Hub is permitted to mutate."""
+
+    contract = _ENGINE_WORKFLOWS.get(engine)
+    if not isinstance(value, dict) or contract is None:
+        return None, "image_workflow_invalid"
+    required = contract["bindings"]
+    if not isinstance(required, dict):
+        return None, "image_workflow_invalid"
+    for node_id, names in required.items():
+        node = value.get(node_id)
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict) or not all(name in inputs for name in names):
+            return None, "image_workflow_invalid"
+    image_binding = contract.get("input_image")
+    if has_input_image:
+        if not isinstance(image_binding, tuple) or len(image_binding) != 2:
+            return None, "image_input_workflow_unavailable"
+        node = value.get(image_binding[0])
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict) or image_binding[1] not in inputs:
+            return None, "image_workflow_invalid"
+    try:
+        clone = json.loads(json.dumps(value, ensure_ascii=False))
+    except (TypeError, ValueError):
+        return None, "image_workflow_invalid"
+    return clone, None
 
 
 def _workflow(engine: str, request: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
-    image_path = request.get("input_image")
-    has_input = isinstance(image_path, str) and Path(image_path).is_file()
+    contract = _ENGINE_WORKFLOWS.get(engine)
+    if contract is None:
+        return None, "image_engine_not_allowed"
+    requested_input = request.get("input_image")
+    image_path = _safe_input_image(requested_input) if requested_input is not None else None
+    has_input = image_path is not None
+    if requested_input is not None and not has_input:
+        return None, "image_input_unavailable"
     path = _workflow_path(engine, has_input)
     if path is None:
-        return None, "Không tìm thấy API workflow cục bộ cho engine image đã chọn."
+        return None, "image_workflow_unavailable"
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return None, str(exc)
-    if not isinstance(value, dict):
-        return None, "API workflow image không đúng định dạng JSON object."
+        raw_workflow = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None, "image_workflow_invalid"
+    value, error = _workflow_contract(raw_workflow, engine, has_input_image=has_input)
+    if value is None:
+        return None, error or "image_workflow_invalid"
     prompt = str(request.get("prompt") or "").strip()
     if not prompt:
-        return None, "Nhập prompt trước khi tạo ảnh."
-    negative = str(request.get("negative_prompt") or "")
-    width = max(256, min(2048, int(request.get("width", 768))))
-    height = max(256, min(2048, int(request.get("height", 768))))
-    steps = max(1, min(80, int(request.get("steps", 20))))
-    seed = max(0, int(request.get("seed", int(time.time() * 1000) % 2_147_483_647)))
+        return None, "prompt_required"
+    negative = str(request.get("negative_prompt") or "")[:2_000]
+    width = _bounded_int(
+        request.get("width"),
+        int(contract["default_width"]),
+        minimum=256,
+        maximum=int(contract["maximum_dimension"]),
+    )
+    height = _bounded_int(
+        request.get("height"),
+        int(contract["default_height"]),
+        minimum=256,
+        maximum=int(contract["maximum_dimension"]),
+    )
+    width, height = _fit_dimensions(width, height, contract.get("maximum_pixels") if isinstance(contract.get("maximum_pixels"), int) else None)
+    steps = _bounded_int(request.get("steps"), int(contract["default_steps"]), minimum=1, maximum=int(contract["maximum_steps"]))
+    seed = _bounded_int(request.get("seed"), int(time.time() * 1000) % 2_147_483_647, minimum=0, maximum=2_147_483_647)
     prefix = f"LocalAIHub/{engine}/{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     if engine == "qwen":
         value["5"]["inputs"]["text"] = prompt
@@ -323,12 +542,28 @@ def _workflow(engine: str, request: dict[str, Any]) -> tuple[dict[str, Any] | No
         value["66"]["inputs"].update({"width": width, "height": height})
         value["73"]["inputs"]["noise_seed"] = seed
         value["9"]["inputs"]["filename_prefix"] = prefix
-        if has_input:
-            uploaded, error = _upload_input_image(Path(str(image_path)))
-            if not uploaded:
-                return None, error
-            value["80"]["inputs"]["image"] = uploaded
     return value, None
+
+
+def _bind_input_image(workflow: dict[str, Any], engine: str, image_path: object) -> str | None:
+    if image_path is None:
+        return None
+    contract = _ENGINE_WORKFLOWS.get(engine)
+    image_binding = contract.get("input_image") if contract is not None else None
+    if not isinstance(image_binding, tuple) or len(image_binding) != 2:
+        return "image_input_workflow_unavailable"
+    path = _safe_input_image(image_path)
+    if path is None:
+        return "image_input_unavailable"
+    uploaded, error = _upload_input_image(path)
+    if not uploaded:
+        return error or "image_input_unavailable"
+    node = workflow.get(image_binding[0])
+    inputs = node.get("inputs") if isinstance(node, dict) else None
+    if not isinstance(inputs, dict):
+        return "image_workflow_invalid"
+    inputs[image_binding[1]] = uploaded
+    return None
 
 
 def _upload_input_image(path: Path) -> tuple[str | None, str | None]:
@@ -488,29 +723,14 @@ def run_bridge_workflow(workflow_id: str, inputs: dict[str, Any], data: dict[str
 def generate(engine: str, request: dict[str, Any], context: JobContext | None = None) -> dict[str, Any]:
     if engine not in {"flux", "qwen"}:
         return {"status": "error", "error": "Image engine không nằm trong allowlist."}
-    available, reason = ensure_running()
-    if not available:
-        return unavailable("comfyui", reason)
     workflow, error = _workflow(engine, request)
     if workflow is None:
-        return {"status": "error", "error": error or "Không tạo được workflow image."}
-    response = _json_request("/prompt", method="POST", payload={"prompt": workflow, "client_id": f"local-ai-hub-{uuid.uuid4().hex}"}, timeout=30)
-    prompt_id = response.get("prompt_id") if isinstance(response, dict) else None
-    if not isinstance(prompt_id, str) or not prompt_id:
-        return {"status": "error", "error": (response or {}).get("error", "ComfyUI không nhận workflow.") if isinstance(response, dict) else "ComfyUI không nhận workflow."}
-    deadline = time.monotonic() + float(request.get("timeout_seconds", 1800))
-    while time.monotonic() < deadline:
-        if context and context.cancelled:
-            _json_request("/queue", method="DELETE", payload={"delete": [prompt_id]}, timeout=5)
-            return {"status": "cancelled", "reason": "Đã yêu cầu ComfyUI hủy prompt do Hub tạo."}
-        history = _json_request(f"/history/{prompt_id}", timeout=10)
-        if history and prompt_id in history:
-            outputs = _copy_history_outputs(history, prompt_id, engine)
-            if outputs:
-                return {"status": "completed", "operation": "generate_image", "engine": engine, "outputs": outputs, "seed": request.get("seed"), "prompt": request.get("prompt")}
-            return {"status": "error", "error": "ComfyUI hoàn tất nhưng không tìm thấy image output hợp lệ."}
-        if context:
-            context.progress(20, "ComfyUI đang xử lý prompt image trong nền.")
-        time.sleep(0.8)
-    _json_request("/queue", method="DELETE", payload={"delete": [prompt_id]}, timeout=5)
-    return {"status": "error", "error": "Image workflow vượt quá thời gian cho phép của Hub."}
+        return unavailable("comfyui", error or "image_workflow_unavailable")
+    contract = _ENGINE_WORKFLOWS[engine]
+    available, reason = ensure_running(memory_profile=str(contract["memory_profile"]))
+    if not available:
+        return unavailable("comfyui", reason)
+    error = _bind_input_image(workflow, engine, request.get("input_image"))
+    if error:
+        return unavailable("comfyui", error)
+    return _submit_workflow(workflow, engine, request, context)
