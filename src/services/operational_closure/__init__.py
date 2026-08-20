@@ -14,6 +14,7 @@ from .update_service import (
     UpdateResolver,
     UpdateSchedule,
 )
+from .evidence import record_runtime_smoke, runtime_evidence_passed, runtime_fingerprint
 
 __all__ = [
     "SOURCE_STATUSES",
@@ -22,4 +23,7 @@ __all__ = [
     "UPDATE_STATUSES",
     "UpdateResolver",
     "UpdateSchedule",
+    "record_runtime_smoke",
+    "runtime_evidence_passed",
+    "runtime_fingerprint",
 ]

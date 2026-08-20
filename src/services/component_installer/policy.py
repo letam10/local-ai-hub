@@ -14,9 +14,9 @@ INSTALL_JOB_STATES = frozenset({
     "INSTALLING", "FINALIZING", "COMPLETED", "FAILED", "CANCELLED",
 })
 TRUSTED_HOSTS = frozenset({
-    "github.com", "raw.githubusercontent.com", "objects.githubusercontent.com",
+    "github.com", "raw.githubusercontent.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com",
     "huggingface.co", "hf.co", "download.pytorch.org", "python.org",
-    "www.python.org", "ffmpeg.org", "www.ffmpeg.org",
+    "www.python.org", "ffmpeg.org", "www.ffmpeg.org", "gyan.dev", "www.gyan.dev",
 })
 _SAFE_ID = re.compile(r"^[a-z][a-z0-9._-]{1,95}$")
 _SECRET_QUERY = re.compile(r"(?:token|secret|password|api[_-]?key|access[_-]?token|authorization)", re.I)

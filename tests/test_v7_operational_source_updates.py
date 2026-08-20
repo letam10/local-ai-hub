@@ -6,6 +6,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import zipfile
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from src.platform.paths import HubPaths
 from src.services.operational_closure.source_availability import SourceAvailabilityService
@@ -162,6 +165,60 @@ class V7SourceAndUpdateTests(unittest.TestCase):
         self.assertEqual(rolled_back["status"], "completed")
         self.assertEqual((current_root / "demo.bin").read_bytes(), b"old")
         self.assertNotIn(str(self.temp.name), json.dumps(applied))
+
+    def test_public_lifecycle_runtime_plan_uses_archive_executor(self) -> None:
+        archive = Path(self.temp.name) / "ffmpeg.zip"
+        with zipfile.ZipFile(archive, "w") as handle:
+            handle.writestr("ffmpeg-1/bin/ffmpeg.exe", b"ffmpeg")
+            handle.writestr("ffmpeg-1/bin/ffprobe.exe", b"ffprobe")
+        catalog_path = self.app / "Config" / "runtime-only.json"
+        catalog_path.write_text(json.dumps({
+            "schema_version": "v7-production-catalog.v1",
+            "models": [],
+            "runtimes": [{
+                "runtime_id": "ffmpeg",
+                "display_name": "FFmpeg",
+                "kind": "tool",
+                "version": "1",
+                "revision": "r1",
+                "root_class": "runtime_root",
+                "required_leaves": ["tools/ffmpeg/ffmpeg.exe", "tools/ffmpeg/ffprobe.exe"],
+                "modules": ["video"],
+                "official_source": "https://github.com/example/ffmpeg.zip",
+                "disposition": "AUTO_INSTALL_READY",
+                "install_strategy": "portable_archive",
+                "archive_format": "zip",
+                "archive_prefix": "ffmpeg-1/bin",
+                "archive_leaves": {"tools/ffmpeg/ffmpeg.exe": "ffmpeg.exe", "tools/ffmpeg/ffprobe.exe": "ffprobe.exe"},
+                "sha256": "a" * 64,
+                "estimated_download_size": 7,
+                "estimated_disk_size": 13,
+            }],
+        }), encoding="utf-8")
+        catalog = ProductionCatalog(paths=self.paths, catalog_path=catalog_path)
+        from src.services.productization import ComponentLifecycle
+        self.data.mkdir(parents=True, exist_ok=True)
+        lifecycle = ComponentLifecycle(paths=self.paths, catalog=catalog)
+        plan = lifecycle.plan_one_click("ffmpeg")
+
+        class _Downloader:
+            def __init__(self, **_kwargs):
+                pass
+
+            def download(self, *_args, **_kwargs):
+                return SimpleNamespace(staged_path=archive)
+
+        with patch("src.services.productization.lifecycle.TrustedDownloader", _Downloader), patch("src.services.productization.lifecycle.trusted_source", return_value=True):
+            result = lifecycle.confirm(plan["plan_id"], confirmed=True)
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue((self.paths.runtime_root / "tools" / "ffmpeg" / "ffmpeg.exe").is_file())
+
+    def test_catalog_projection_redacts_source_urls_and_candidate_metadata(self) -> None:
+        payload = self.catalog.snapshot()
+        encoded = json.dumps(payload, ensure_ascii=True)
+        self.assertNotIn("official_source", encoded)
+        self.assertNotIn("https://", encoded)
+        self.assertNotIn("update_candidate", encoded)
 
     def test_check_all_never_auto_applies_and_schedule_defaults_manual(self) -> None:
         schedule = UpdateSchedule(paths=self.paths)

@@ -4,6 +4,10 @@ The public contract is inspect -> plan -> confirm -> apply.  Real downloads
 remain subject to the catalog disposition and trusted downloader policy.  The
 fixture apply path exists solely for clean-machine acceptance tests; it uses
 the same ModelManager/RuntimeManager and receipt flow as an owner install.
+Legacy unsupported component types remain fail-closed rather than pretending
+to execute; historical callers may still recognize ``manager_executor_required``
+as a compatibility refusal, while supported runtime candidates use the bounded
+executor below.
 """
 
 from __future__ import annotations
@@ -13,12 +17,16 @@ import hashlib
 import json
 from pathlib import Path
 import secrets
+import shutil
 import time
 from typing import Any
 
 from src.platform.paths import HubPaths, get_paths
 
 from .catalog import ProductionCatalog, ProductionCatalogError
+from .runtime_executor import RuntimeArchiveExecutor
+from src.services.component_installer.downloader import DownloadError, TrustedDownloader
+from src.services.component_installer.policy import trusted_source
 
 
 class LifecycleError(ValueError):
@@ -67,7 +75,9 @@ class ComponentLifecycle:
         action = "Download & Install" if can_install else ("Authorize & Install" if record.get("disposition") == "AUTH_REQUIRED" else "Review License" if record.get("disposition") == "LICENSE_REQUIRED" else "Import Model" if kind == "model" else "Review Runtime")
         body = {"schema_version": "v7-component-install-plan.v1", "component_id": component_id, "component_type": kind, "catalog_fingerprint": self.catalog.fingerprint, "dependencies": dependencies, "expected_state": current["status"], "action": action, "disposition": record.get("disposition"), "estimated_download_size_bytes": int(record.get("estimated_download_size", 0)), "estimated_disk_size_bytes": int(record.get("estimated_disk_size", 0)), "preserve_existing": True, "execution": "not_run", "dry_run": True}
         plan_id = "v7_plan_" + secrets.token_hex(16)
-        plan = {**body, "plan_id": plan_id, "plan_fingerprint": _fingerprint(body), "created_at": int(time.time())}
+        # Keep the normalized catalog record server-side only; the public plan
+        # projection contains IDs/fingerprints and bounded estimates.
+        plan = {**body, "record": record, "plan_id": plan_id, "plan_fingerprint": _fingerprint(body), "created_at": int(time.time())}
         self._plans[plan_id] = plan
         status = "planned" if can_install and current["status"] != "INSTALLED" else "manual_review" if current["status"] != "INSTALLED" else "already_installed"
         return {**body, "plan_id": plan_id, "plan_fingerprint": plan["plan_fingerprint"], "status": status, "reason": "Server-owned dependency plan; no download or write occurred." if status == "planned" else "The catalog or existing owner state requires explicit review.", "next_action": action}
@@ -88,7 +98,38 @@ class ComponentLifecycle:
             return {"status": "conflict", "code": "catalog_changed", "plan_id": plan_id, "execution": "not_run"}
         if plan.get("disposition") != "AUTO_INSTALL_READY":
             return {"status": "unavailable", "code": "manual_review_required", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": "Use the explicitly documented import/license/authentication flow."}
-        return {"status": "unavailable", "code": "manager_executor_required", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": "The manager executor must perform a fresh disk/process/source preflight before apply."}
+        record = plan.get("record") if isinstance(plan.get("record"), Mapping) else None
+        if not isinstance(record, Mapping):
+            return {"status": "unavailable", "code": "catalog_record_unavailable", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
+        if plan.get("component_type") != "runtime" or record.get("install_strategy") != "portable_archive":
+            return {"status": "unavailable", "code": "component_executor_unavailable", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": "Use a reviewed component executor for this bundle type."}
+        source = record.get("official_source")
+        if not trusted_source(source, fixture_mode=False):
+            return {"status": "unavailable", "code": "source_not_trusted", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
+        expected_size = int(record.get("estimated_download_size", 0) or 0)
+        expected_hash = record.get("sha256")
+        if expected_size <= 0 or not isinstance(expected_hash, str) or len(expected_hash) != 64:
+            return {"status": "unavailable", "code": "trusted_source_metadata_required", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
+        required = expected_size + int(record.get("estimated_disk_size", 0) or 0) + 256 * 1024 * 1024
+        try:
+            free = int(shutil.disk_usage(self.paths.data_root).free)
+        except OSError:
+            free = 0
+        if free < required:
+            return {"status": "unavailable", "code": "insufficient_disk", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
+        stage = self.paths.temp_root / "component-install" / plan_id
+        try:
+            stage.mkdir(parents=True, exist_ok=True)
+            downloaded = TrustedDownloader(staging_root=stage, max_bytes=required).download(
+                str(source), f"{plan['component_id']}.zip", expected_sha256=expected_hash, expected_size=expected_size,
+                disk_free_bytes=free, disk_safety_bytes=256 * 1024 * 1024,
+            )
+            result = RuntimeArchiveExecutor(paths=self.paths).apply(record, downloaded.staged_path, catalog_fingerprint=self.catalog.fingerprint)
+            return {"status": result.get("status"), "plan_id": plan_id, "component_id": plan["component_id"], "execution": result.get("execution", "not_run"), "dry_run": False, "result": {key: result.get(key) for key in ("state", "receipt", "code", "next_action") if key in result}, "next_action": result.get("next_action")}
+        except DownloadError as exc:
+            return {"status": "failed", "code": exc.code, "plan_id": plan_id, "execution": "not_run", "dry_run": False}
+        except (OSError, ValueError):
+            return {"status": "failed", "code": "component_install_failed", "plan_id": plan_id, "execution": "not_run", "dry_run": False}
 
     def plan_maintenance(self, component_id: str, action: str) -> dict[str, Any]:
         if action not in {"repair", "update", "uninstall"}:

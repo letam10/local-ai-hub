@@ -19,6 +19,7 @@ from typing import Any
 
 from src.platform.paths import HubPaths, get_paths
 from src.services.operational_closure.source_availability import SourceAvailabilityService
+from src.services.operational_closure.evidence import runtime_evidence_passed, runtime_fingerprint
 
 
 SCHEMA = "v7-production-catalog.v1"
@@ -215,6 +216,10 @@ def _validate_runtime(item: Mapping[str, Any]) -> dict[str, Any]:
         "source_type": str(item.get("source_type") or "metadata_only")[:64],
         "disposition": disposition,
         "install_strategy": str(item.get("install_strategy") or "reference_existing"),
+        "archive_format": str(item.get("archive_format") or "")[:16],
+        "archive_prefix": str(item.get("archive_prefix") or "")[:256],
+        "archive_leaves": dict(item.get("archive_leaves")) if isinstance(item.get("archive_leaves"), Mapping) else {},
+        "sha256": str(item.get("sha256"))[:64] if isinstance(item.get("sha256"), str) else None,
         "estimated_download_size": max(0, int(item.get("estimated_download_size", 0) or 0)),
         "estimated_disk_size": max(0, int(item.get("estimated_disk_size", 0) or 0)),
         "notes": str(item.get("notes") or "")[:500],
@@ -305,7 +310,7 @@ class ProductionCatalog:
             action = "Use Import Model after verifying the official source and license."
         cache = self._size_cache().get(model_id) if status == "INSTALLED" else None
         installed_size = cache.get("size_bytes") if isinstance(cache, Mapping) and isinstance(cache.get("size_bytes"), int) else self._receipt_size(model_id) if status == "INSTALLED" else None
-        projected = {key: value for key, value in record.items() if key not in {"official_source", "license_url", "files"}}
+        projected = {key: value for key, value in record.items() if key not in {"official_source", "primary_source", "trusted_fallback_sources", "license_url", "files", "update_candidate"}}
         projected.update({"status": status, "execution": "not_run", "operational": False, "leaves": leaves, "installed_size_bytes": installed_size, "expected_download_size_bytes": record["estimated_download_size"] or None, "expected_disk_size_bytes": record["estimated_disk_size"] or None, "source_availability": self.source_availability.cached(model_id), "reason": reason, "next_action": action})
         if installed_size is None and status == "INSTALLED":
             projected["size_label"] = "Size unavailable"
@@ -325,16 +330,16 @@ class ProductionCatalog:
             target = _safe_leaf(root, relative)
             leaves.append({"relative_leaf": relative, "present": bool(target and target.is_file())})
         if leaves and all(item["present"] for item in leaves):
-            status = "INSTALLED"
-            reason = "Required runtime leaves are present; import/package and smoke evidence are still required."
+            status = "OPERATIONAL" if runtime_evidence_passed(self.paths, runtime_id, record) else "INSTALLED_UNVERIFIED"
+            reason = "Required runtime leaves and fresh matching bounded smoke evidence are present." if status == "OPERATIONAL" else "Required runtime leaves are present; import/package and bounded smoke evidence are still required."
         elif any(item["present"] for item in leaves):
             status = "PARTIAL"
             reason = "Some runtime leaves are present but the runtime is incomplete."
         else:
             status = "NOT_INSTALLED"
             reason = "No required runtime leaf was observed at the managed root."
-        projected = {key: value for key, value in record.items() if key != "official_source"}
-        projected.update({"status": status, "execution": "not_run", "operational": False, "leaves": leaves, "source_availability": self.source_availability.cached(runtime_id), "reason": reason, "next_action": "Review the pinned runtime plan; existing environments are never overwritten automatically."})
+        projected = {key: value for key, value in record.items() if key not in {"official_source", "primary_source", "trusted_fallback_sources", "update_candidate"}}
+        projected.update({"status": status, "execution": "not_run", "operational": status == "OPERATIONAL", "runtime_fingerprint": runtime_fingerprint(self.paths, record), "leaves": leaves, "source_availability": self.source_availability.cached(runtime_id), "reason": reason, "next_action": "Use Verify and run the bounded runtime smoke before operational promotion." if status != "OPERATIONAL" else "Runtime is operational under the last matching bounded evidence."})
         return projected
 
     def snapshot(self, *, query: str = "", category: str = "", installed: bool | None = None) -> dict[str, Any]:
