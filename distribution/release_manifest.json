@@ -2,22 +2,22 @@
   "schema_version": 1,
   "application_name": "Local AI Hub",
   "version": "7.0.0",
-  "git_commit": "9a434249d13d9e8e5705fb9084d64766bcb0e48b",
+  "git_commit": "7628d331fdbf84f9c8a63a4ef6c905e35b1a6fd0",
   "git_branch": "feature/v7-final-productization",
-  "build_timestamp": "2026-08-20T11:26:59.864326+00:00",
+  "build_timestamp": "2026-08-20T11:30:11.499205+00:00",
   "packaging_tool": "Local AI Hub Release Packager (Python/zipfile) + Inno Setup 6",
   "platform": "windows-x64",
   "release_artifacts": {
     "core_zip": {
       "file_name": "LocalAIHub-Core-Win64-v7.0.0.zip",
-      "size_bytes": 1105946,
-      "sha256": "96911ee1834fae2f44e76510fe81b694b94c1285da548b5114e1077e7f83ee52",
-      "total_files": 485
+      "size_bytes": 1107093,
+      "sha256": "0e739baaea3e698b6989f0b93ca89cc68f4e092b69f5081161c0813bcc8cbbd8",
+      "total_files": 486
     },
     "setup_exe": {
       "file_name": "LocalAIHub-Setup-Win64-v7.0.0.exe",
-      "size_bytes": 3440264,
-      "sha256": "9eaa6e85fea53421dcc9f1526dda30c0bec1b1bf661dffe2fb24897cff9e5935"
+      "size_bytes": 3441718,
+      "sha256": "1ad819e434eb7345cb9b7209b33cabc33e842a2e8724ff4d4680264f387eb3c6"
     }
   },
   "included_application_components": [
