@@ -15,3 +15,18 @@
 10. Run syntax, focused tests, architecture guards, diff, secret and large-file
     checks. Only a bounded functional smoke can change `PARTIAL` to
     `OPERATIONAL`.
+
+## V7 Phase 2 installation boundary
+
+The module manifest remains declarative. Runtime/model installation is owned by
+the server-side Component Installer and uses fixed catalog IDs, not commands,
+URLs, Python callables or filesystem paths from the manifest or browser. A
+module may expose an `install` plan and a dependency graph, but it must not
+download at startup or claim `OPERATIONAL` from file presence alone. The
+composition is:
+
+`manifest → Runtime Manager → Model Manager → capability evidence → Module Manager`
+
+Use the existing adapter and Job Manager execution path after installation;
+do not add a parallel inference backend. Missing optional assets must remain
+`NOT_INSTALLED`/`PARTIAL`/`UNAVAILABLE` with a concrete reason and next action.

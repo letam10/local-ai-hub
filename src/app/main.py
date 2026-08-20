@@ -22,6 +22,8 @@ from pathlib import Path
 
 from src.services.process_manager.managed import terminate_owned_process
 from src.services.process_manager.windows import popen_hidden, startup_mutex
+from src.services.runtime_manager.core_resolver import CoreRuntimeResolver
+from src.platform.paths import get_paths
 
 from .desktop_lifecycle import DesktopCloseController
 from .tray import WindowsTray
@@ -66,7 +68,22 @@ def ensure_api(timeout_seconds: float = 20.0) -> subprocess.Popen[object] | None
             if _wait_for_api(deadline):
                 return None
             raise RuntimeError(f"Local AI Hub API startup lock timed out at {HOST}:{PORT}.")
-        python = os.environ.get("LOCALAIHUB_PYTHON") or sys.executable
+        # Resolve the same Core interpreter used by the desktop launcher.  An
+        # explicit environment override remains a development-only escape
+        # hatch, but is accepted only when it is a regular file under a
+        # bounded trusted root; arbitrary client paths never enter the API.
+        candidate = CoreRuntimeResolver(paths=get_paths(app_root=ROOT)).resolve_python()
+        override = os.environ.get("LOCALAIHUB_PYTHON")
+        if candidate is None and override:
+            override_path = Path(override).expanduser()
+            try:
+                if override_path.is_file() and not override_path.is_symlink():
+                    candidate = override_path.resolve()
+            except OSError:
+                candidate = None
+        if candidate is None:
+            raise RuntimeError("Local AI Hub Core Python is unavailable; run scripts/bootstrap_core.ps1 first.")
+        python = str(candidate)
         log_path = ROOT / "Logs" / "api_server.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as log:

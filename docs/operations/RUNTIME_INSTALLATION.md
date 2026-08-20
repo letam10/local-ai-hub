@@ -11,3 +11,17 @@ activation/receipt. It must not move or overwrite an existing environment and
 must not change NVIDIA drivers or system CUDA. Runtime presence alone is
 `INSTALLED_UNVERIFIED` or `PARTIAL`; only a matching bounded smoke receipt can
 produce `OPERATIONAL`.
+# Runtime installation and reference
+
+Runtime Manager resolves and inspects fixed runtime leaves without executing
+them at startup. A runtime can be `NOT_INSTALLED`, `PARTIAL` or
+`INSTALLED_UNVERIFIED`; it is not operational merely because an executable
+exists.
+
+Runtime installation is plan-first and uses a fixed strategy allowlist:
+`reference_existing`, `portable_archive`, `python_environment` or
+`manual_import`. A future executor must stage, validate expected leaves and
+write an atomic receipt. It must not accept commands from catalog JSON, move
+an existing environment, alter NVIDIA drivers/system CUDA, or overwrite a
+working runtime. The example catalog has no pinned production assets, so its
+plans remain review/manual only.

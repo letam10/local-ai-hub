@@ -25,7 +25,7 @@ export const NAVIGATION = [
   { group: "SPEECH & VOICE", items: [["whisper", "Whisper", "≋"], ["voice", "Voice", "♪"]] },
   { group: "IMAGE & VIDEO", items: [["image", "Image AI", "✦"], ["media", "Media", "▹"], ["video", "Video Creative", "▶"], ["animesr", "AnimeSR", "⇱"]] },
   { group: "CREATIVE WORKSPACE", items: [["projects", "Projects & Recipes", "▧"]] },
-  { group: "HỆ THỐNG", items: [["jobs", "Jobs", "≡"], ["models", "Models & Storage", "▦"], ["diagnostics", "Diagnostics", "⛨"], ["settings", "Settings", "⚙"]] },
+  { group: "HỆ THỐNG", items: [["jobs", "Jobs", "≡"], ["components", "Components / AI Setup", "⬡"], ["models", "Models & Storage", "▦"], ["diagnostics", "Diagnostics", "⛨"], ["settings", "Settings", "⚙"]] },
 ];
 
 const component = (state, id) => (state.components || []).find((item) => item.id === id) || {};
@@ -1139,6 +1139,26 @@ function renderModels(state) {
     ${card("Model registry", models.length ? `<div class="table-wrap"><table><thead><tr><th>Model</th><th>Engine</th><th>Size</th><th>Status</th></tr></thead><tbody>${models.map((item) => `<tr><td>${escapeHtml(item.model_name)}</td><td>${escapeHtml(item.engine)}</td><td>${formatGb(item.size?.bytes)}</td><td>${statusPill(item.installed ? "installed" : "not_installed")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state compact">Chưa có model registry.</div>`, "", "card--wide")}`;
 }
 
+function renderComponents(state) {
+  const manager = state.componentManager || {};
+  const records = Array.isArray(manager.records) ? manager.records : [];
+  const plans = state.componentPlans || {};
+  const safeId = (value) => /^[a-z][a-z0-9._-]{1,95}$/.test(String(value || "")) ? String(value) : "";
+  const rows = records.map((item) => {
+    const id = safeId(item.component_id);
+    const type = item.component_type === "runtime" ? "runtime" : item.component_type === "model" ? "model" : "";
+    if (!id || !type) return "";
+    const key = `${type}:${id}`;
+    const plan = plans[key];
+    const status = String(item.status || "unavailable").toLowerCase();
+    const planButton = item.plan_available === false ? "" : `<button class="button button--compact" type="button" data-component-plan="${escapeHtml(id)}" data-component-type="${escapeHtml(type)}" data-i18n="Lập kế hoạch">${uiTextHtml("Lập kế hoạch")}</button>`;
+    const planDetail = plan ? `<div class="component-plan-preview" data-component-plan-preview="${escapeHtml(key)}"><div class="split"><strong><span data-i18n="Kế hoạch">${uiTextHtml("Kế hoạch")}</span> ${escapeHtml(plan.plan_id || "")}</strong>${statusPill(plan.status || "planned")}</div><p>${escapeHtml(plan.reason || uiText("Kế hoạch do server quản lý; chưa thực thi."))}</p>${plan.plan_id ? `<button class="button button--compact button--accent" type="button" data-component-confirm="${escapeHtml(plan.plan_id)}" data-i18n="Xác nhận kế hoạch">${uiTextHtml("Xác nhận kế hoạch")}</button>` : ""}</div>` : "";
+    return `<article class="component-manager-card card" data-component-id="${escapeHtml(id)}" data-component-type="${escapeHtml(type)}"><div class="card-title-row"><div><span class="eyebrow">${escapeHtml(type.toUpperCase())}</span><h2>${escapeHtml(item.display_name || id)}</h2><p class="small">${escapeHtml(id)}</p></div>${statusPill(status)}</div><div class="component-manager-grid"><div><span data-i18n="Module state">${uiTextHtml("Module state")}</span><strong>${escapeHtml(status)}</strong></div><div><span data-i18n="Runtime state">${uiTextHtml("Runtime state")}</span><strong>${escapeHtml(item.runtime_status || "—")}</strong></div><div><span data-i18n="Model state">${uiTextHtml("Model state")}</span><strong>${escapeHtml(item.model_status || "—")}</strong></div><div><span data-i18n="Execution">${uiTextHtml("Execution")}</span><strong>${escapeHtml(item.execution || "not_run")}</strong></div></div><p>${escapeHtml(item.reason || uiText("Server snapshot chưa có thêm lý do."))}</p><div class="workspace-state__action"><strong data-i18n="Bước tiếp theo">${uiTextHtml("Bước tiếp theo")}</strong><span>${escapeHtml(item.next_action || uiText("Xem kế hoạch server-owned."))}</span></div><div class="form-actions">${planButton}<button class="button button--compact" type="button" data-component-maintenance="${escapeHtml(id)}" data-component-type="${escapeHtml(type)}" data-maintenance-action="repair" data-i18n="Lập kế hoạch sửa">${uiTextHtml("Lập kế hoạch sửa")}</button></div>${planDetail}</article>`;
+  }).join("");
+  const dependencyGraph = manager.dependency_graph && typeof manager.dependency_graph === "object" ? Object.keys(manager.dependency_graph).length : 0;
+  return heading("MODULE MANAGER", "Components / AI Setup", "Quản lý runtime và model bằng kế hoạch server-owned. Không tự tải/cài khi mở Hub; chỉ xác nhận đúng kế hoạch đã xem.", `<button class="button" type="button" data-refresh-components data-i18n="Làm mới">${uiTextHtml("Làm mới")}</button>`) + `<div class="callout callout--warning">${escapeHtml(manager.reason || uiText("AI components là tuỳ chọn; trạng thái thiếu/partial được giữ trung thực."))} ${dependencyGraph ? `<span data-i18n="Dependency graph">${uiTextHtml("Dependency graph")}</span>: ${dependencyGraph} module.` : ""}</div><div class="component-manager-list">${rows || `<div class="empty-state"><strong data-i18n="Chưa có component catalog">${uiTextHtml("Chưa có component catalog")}</strong><span data-i18n="Catalog sẽ hiển thị khi Core bootstrap đọc được metadata tracked.">${uiTextHtml("Catalog sẽ hiển thị khi Core bootstrap đọc được metadata tracked.")}</span></div>`}</div>`;
+}
+
 function renderDiagnostics(state) {
   const diag = state.diagnostics?.snapshot || {};
   const subsystems = [
@@ -1328,6 +1348,7 @@ export function renderPage(route, state) {
     animesr: renderAnime,
     projects: renderCreativeWorkspace,
     jobs: renderJobs,
+    components: renderComponents,
     models: renderModels,
     diagnostics: renderDiagnostics,
     settings: renderSettings,

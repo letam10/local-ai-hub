@@ -42,6 +42,11 @@ import {
   confirmWorkflowLibraryMigration,
   getLifecycle,
   getModels,
+  getComponents,
+  createComponentPlan,
+  confirmComponentPlan,
+  createComponentMaintenancePlan,
+  confirmComponentMaintenance,
   getStorage,
   getProject,
   getSettings,
@@ -95,7 +100,7 @@ import { NAVIGATION, jobRecoverySnapshot, renderPage } from "./pages.js";
 import { currentLanguage, localizeDocument, setLanguage, translateText } from "./i18n.js";
 
 const state = {
-  health: {}, capabilities: {}, productization: {}, components: [], tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", apiStatus: "loading", apiError: "",
+  health: {}, capabilities: {}, productization: {}, components: [], componentManager: {}, componentPlans: {}, tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", apiStatus: "loading", apiError: "",
   creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
   workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trong V5-D trước khi đồng bộ." },
@@ -720,6 +725,16 @@ const loadRouteData = async ({ scan = false } = {}) => {
     }).catch(() => {}).finally(() => { routeLoad = null; });
     return routeLoad;
   }
+  if (route === "components") {
+    if (routeLoad) return routeLoad;
+    routeLoad = getComponents().then((payload) => {
+      state.componentManager = payload || {};
+      render();
+    }).catch((error) => {
+      showToast(error.message || "Không thể tải Component Manager.", "error");
+    }).finally(() => { routeLoad = null; });
+    return routeLoad;
+  }
   if (route === "image") {
     const results = await Promise.allSettled([getLifecycle(), getComfyAdvanced(), getComfyBridgeWorkflows()]);
     if (results[0].status === "fulfilled") state.lifecycle = results[0].value;
@@ -1088,6 +1103,54 @@ document.addEventListener("click", async (event) => {
   const preview = event.target.closest("[data-preview-artifact]");
   if (preview) { showArtifactPreview(preview); return; }
   if (event.target.closest("[data-refresh-api]")) { await initialize(); return; }
+  const refreshComponents = event.target.closest("[data-refresh-components]");
+  if (refreshComponents) {
+    refreshComponents.disabled = true;
+    try { state.componentManager = await getComponents(); render(); showToast("Đã làm mới Component Manager.", "success"); }
+    catch (error) { showToast(error.message || "Không thể làm mới Component Manager.", "error"); }
+    finally { refreshComponents.disabled = false; }
+    return;
+  }
+  const componentPlanButton = event.target.closest("[data-component-plan]");
+  if (componentPlanButton) {
+    componentPlanButton.disabled = true;
+    try {
+      const id = componentPlanButton.dataset.componentPlan || "";
+      const type = componentPlanButton.dataset.componentType || "";
+      const plan = await createComponentPlan(id, type);
+      state.componentPlans[`${type}:${id}`] = plan;
+      render();
+      showToast("Đã tạo kế hoạch cài đặt server-owned.", "success");
+    } catch (error) { showToast(error.message || "Không thể lập kế hoạch component.", "error"); }
+    finally { componentPlanButton.disabled = false; }
+    return;
+  }
+  const componentConfirm = event.target.closest("[data-component-confirm]");
+  if (componentConfirm) {
+    componentConfirm.disabled = true;
+    try {
+      const result = await confirmComponentPlan(componentConfirm.dataset.componentConfirm || "", true);
+      showToast(result.next_action || result.reason || "Kế hoạch đã được xử lý theo policy.", result.status === "unavailable" ? "warning" : "success");
+      state.componentManager = await getComponents(); render();
+    } catch (error) { showToast(error.message || "Không thể xác nhận kế hoạch.", "error"); }
+    finally { componentConfirm.disabled = false; }
+    return;
+  }
+  const maintenanceButton = event.target.closest("[data-component-maintenance]");
+  if (maintenanceButton) {
+    maintenanceButton.disabled = true;
+    try {
+      const id = maintenanceButton.dataset.componentMaintenance || "";
+      const type = maintenanceButton.dataset.componentType || "";
+      const action = maintenanceButton.dataset.maintenanceAction || "repair";
+      const plan = await createComponentMaintenancePlan(id, action);
+      state.componentPlans[`${type}:${id}`] = plan;
+      render();
+      showToast("Đã tạo kế hoạch bảo trì server-owned.", "success");
+    } catch (error) { showToast(error.message || "Không thể lập kế hoạch bảo trì.", "error"); }
+    finally { maintenanceButton.disabled = false; }
+    return;
+  }
   if (event.target.closest("#refresh-snapshot")) {
     const button = event.target.closest("#refresh-snapshot");
     button.disabled = true;

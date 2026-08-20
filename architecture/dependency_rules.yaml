@@ -14,6 +14,7 @@ forbidden_imports:
   - [src.ui, subprocess]
   - [src.ui, pathlib.Path]
   - [src.services.api, src.ui]
+  - [src.services.component_installer, src.ui]
 rules:
   - id: no-arbitrary-plugin-import
     text: Manifest discovery is data-only and uses a fixed allowlist.
@@ -23,3 +24,7 @@ rules:
     text: Core bootstrap never loads or downloads model weights.
   - id: evidence-required
     text: File presence is not operational evidence; bounded smoke is required.
+  - id: component-plan-owned
+    text: Component installation, import and maintenance plans are server-owned and accept fixed IDs or opaque selection IDs only.
+  - id: no-global-scan
+    text: Model/runtime discovery is bounded to configured roots and known catalog leaves; no drive-wide scan is allowed.

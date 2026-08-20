@@ -42,7 +42,8 @@ def validate_model_entry(value: Mapping[str, Any]) -> dict[str, Any]:
         "model_id", "display_name", "provider", "family", "version", "files",
         "estimated_download_size", "estimated_disk_size", "sha256",
         "official_source", "license", "authentication_required", "modules_using_model",
-        "minimum_vram", "recommended_vram", "used_by",
+        "minimum_vram", "recommended_vram", "used_by", "revision", "source_type",
+        "license_url", "notes", "install_supported", "shared_dependency_id",
     }
     if set(value) - allowed:
         raise ModelCatalogError("unknown_model_field")
@@ -77,18 +78,31 @@ def validate_model_entry(value: Mapping[str, Any]) -> dict[str, Any]:
     source = value.get("official_source")
     if not isinstance(source, str) or not (source.startswith("https://") or source == "local"):
         raise ModelCatalogError("invalid_official_source")
+    overall_hash = value.get("sha256")
+    if overall_hash is not None and (not isinstance(overall_hash, str) or not _SHA256.fullmatch(overall_hash.lower())):
+        raise ModelCatalogError("invalid_model_hash")
+    download_size = int(value.get("estimated_download_size", sum(item["size_bytes"] for item in normalized_files)))
+    disk_size = int(value.get("estimated_disk_size", sum(item["size_bytes"] for item in normalized_files)))
+    if download_size < 0 or disk_size < 0:
+        raise ModelCatalogError("invalid_model_size")
     return {
         "model_id": identifier,
         "display_name": display_name.strip(),
         "provider": str(value.get("provider", "unknown")),
         "family": str(value.get("family", "unknown")),
         "version": str(value.get("version", "unknown")),
+        "revision": str(value.get("revision", value.get("version", "unknown"))),
+        "source_type": str(value.get("source_type", "official")),
         "files": normalized_files,
-        "estimated_download_size": int(value.get("estimated_download_size", sum(item["size_bytes"] for item in normalized_files))),
-        "estimated_disk_size": int(value.get("estimated_disk_size", sum(item["size_bytes"] for item in normalized_files))),
-        "sha256": value.get("sha256"),
+        "estimated_download_size": download_size,
+        "estimated_disk_size": disk_size,
+        "sha256": overall_hash.lower() if isinstance(overall_hash, str) else None,
         "official_source": source,
         "license": str(value.get("license", "verify upstream")),
+        "license_url": str(value.get("license_url", "")),
+        "notes": str(value.get("notes", "")),
+        "install_supported": bool(value.get("install_supported", False)),
+        "shared_dependency_id": str(value.get("shared_dependency_id", "")) or None,
         "authentication_required": bool(value.get("authentication_required", False)),
         "modules_using_model": sorted(set(modules)),
         "minimum_vram": int(value.get("minimum_vram", 0)),

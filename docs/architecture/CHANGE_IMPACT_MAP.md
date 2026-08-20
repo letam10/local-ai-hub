@@ -19,6 +19,8 @@ machine data. Never infer permission from a filename alone.
 | Module Manager | `src/services/module_manager/` | future modules UI | capability/module tests | manifest allowlist, no arbitrary plugin import |
 | Model Manager | `src/services/model_manager/` | future model UI | catalog/install fixture tests | HTTPS/checksum/staging/receipt; no weights in Git |
 | Runtime Manager | `src/services/runtime_manager/` | diagnostics/modules UI | runtime catalog tests | no driver/CUDA change; no environment overwrite |
+| Component Installer | `src/services/component_installer/` | Components / AI Setup API/UI | Phase 2 component contract tests | trusted HTTPS, bounded staging, resume/checksum/archive safety, opaque plans |
+| Component maintenance | `src/services/api/components.py`, manager | Components / AI Setup | Phase 2 API/UI tests | repair/update/uninstall are plan-only; preserve shared/user data |
 | Installer/bootstrap | `scripts/bootstrap_core.py`, `src/services/bootstrap_core.py` | desktop launchers | clean-clone tests | model-free, offline, idempotent, preserve local files |
 | Versioning | `src/shared/version.py` | health/installer/docs | version consistency | one product source; schema versions unchanged |
 

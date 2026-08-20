@@ -8,9 +8,11 @@ authorized UI/desktop chooser and is intentionally absent from startup.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import shutil
 import tempfile
 import time
@@ -24,21 +26,52 @@ from .catalog import ModelCatalogError, catalog_fingerprint, load_catalog
 def _safe_child(root: Path, relative: str) -> Path | None:
     candidate = root / Path(relative)
     try:
-        resolved_root = root.resolve()
-        resolved = candidate.resolve()
-        resolved.relative_to(resolved_root)
+        lexical_root = root.absolute()
+        lexical = candidate.absolute()
+        lexical.relative_to(lexical_root)
     except (OSError, ValueError):
         return None
-    current = candidate
-    while True:
-        if current.exists() and current.is_symlink():
-            return None
-        if current == root:
-            break
-        if current.parent == current:
+    current = lexical
+    while current.parent != current:
+        if _is_reparse(current):
             return None
         current = current.parent
+    if _is_reparse(current):
+        return None
+    try:
+        candidate.resolve().relative_to(lexical_root.resolve())
+    except (OSError, ValueError):
+        return None
     return candidate
+
+
+def _is_reparse(path: Path) -> bool:
+    try:
+        if stat.S_ISLNK(path.lstat().st_mode):
+            return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            attrs = ctypes.windll.kernel32.GetFileAttributesW(str(path))
+            attrs = int(attrs) & 0xFFFFFFFF
+            return attrs != 0xFFFFFFFF and bool(attrs & 0x400)
+        except (AttributeError, OSError):
+            return False
+    return False
+
+
+def _safe_directory(path: Path) -> bool:
+    current = path.absolute()
+    while current.parent != current:
+        if _is_reparse(current):
+            return False
+        current = current.parent
+    return not _is_reparse(current)
 
 
 class ModelManager:
@@ -94,6 +127,16 @@ class ModelManager:
             "next_action": "Choose an explicit model plan from the Module/Model Manager.",
         }
 
+    def verify(self, model_id: str) -> dict[str, Any]:
+        state = self.inspect(model_id)
+        return {
+            "schema_version": "model-verify.v1", "status": "completed", "execution": "not_run", "dry_run": True,
+            "model_id": model_id, "state": state["status"], "files": state["files"],
+            "verified": state["status"] == "INSTALLED_UNVERIFIED",
+            "reason": "Bounded file existence/size verification only; no model load or inference ran.",
+            "next_action": "Run the module-specific bounded verification under explicit authorization.",
+        }
+
     def plan_install(self, model_id: str, *, free_bytes: int | None = None) -> dict[str, Any]:
         record = self._record(model_id)
         required = int(record["estimated_disk_size"])
@@ -109,7 +152,8 @@ class ModelManager:
             "status": "planned" if enough else "unavailable",
             "execution": "not_run",
             "dry_run": True,
-            "source": record["official_source"],
+            "source_policy": "trusted_catalog" if record.get("install_supported") else "manual_import_or_review",
+            "source_fingerprint": __import__("src.services.component_installer.policy", fromlist=["source_fingerprint"]).source_fingerprint(record["official_source"]),
             "license": record["license"],
             "estimated_download_size": record["estimated_download_size"],
             "estimated_disk_size": required,
@@ -123,13 +167,15 @@ class ModelManager:
         """Install a complete tiny fixture atomically; intended for tests/QA only."""
 
         record = self._record(model_id)
-        source = source_root.resolve()
-        if not source.is_dir() or source.is_symlink():
+        source = Path(source_root).absolute()
+        if not source.is_dir() or _is_reparse(source):
             return {"status": "failed", "code": "source_unavailable", "execution": "not_run"}
         destination = self.paths.models_root / model_id
         if destination.exists():
             return {"status": "failed", "code": "target_exists_manual_review", "execution": "not_run"}
         stage_parent = self.paths.temp_root / "v7-model-install"
+        if not _safe_directory(stage_parent) or not _safe_directory(destination.parent) or not _safe_directory(self.paths.config_root):
+            return {"status": "failed", "code": "unsafe_install_root", "execution": "not_run"}
         stage_parent.mkdir(parents=True, exist_ok=True)
         stage = Path(tempfile.mkdtemp(prefix=f"{model_id}-", dir=stage_parent))
         try:
@@ -137,6 +183,14 @@ class ModelManager:
                 source_file = _safe_child(source, expected["relative_path"])
                 if source_file is None or not source_file.is_file() or source_file.stat().st_size != expected["size_bytes"]:
                     return {"status": "failed", "code": "source_mismatch", "execution": "not_run"}
+                expected_hash = expected.get("sha256")
+                if expected_hash:
+                    digest = hashlib.sha256()
+                    with source_file.open("rb") as handle:
+                        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                    if digest.hexdigest() != expected_hash:
+                        return {"status": "failed", "code": "source_checksum_mismatch", "execution": "not_run"}
                 staged_file = stage / expected["relative_path"]
                 staged_file.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source_file, staged_file)
@@ -149,13 +203,39 @@ class ModelManager:
             if not isinstance(records, dict):
                 records = {}
             records[model_id] = {"status": "INSTALLED_UNVERIFIED", "catalog_fingerprint": self.catalog_fingerprint, "installed_at": int(time.time()), "location_class": "models_root"}
-            receipt.write_text(json.dumps({"schema_version": "model-install-receipts.v1", "records": records}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            temporary = receipt.with_suffix(".tmp")
+            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(json.dumps({"schema_version": "model-install-receipts.v1", "records": records}, indent=2, sort_keys=True) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, receipt)
             return {"status": "completed", "model_id": model_id, "state": "INSTALLED_UNVERIFIED", "location_class": "models_root", "execution": "not_run"}
         except (OSError, ValueError, json.JSONDecodeError):
             return {"status": "failed", "code": "atomic_install_failed", "execution": "not_run"}
         finally:
             if stage.exists():
                 shutil.rmtree(stage, ignore_errors=True)
+
+    def install_staged_file(self, model_id: str, staged_path: Path) -> dict[str, Any]:
+        """Finalize one server-downloaded catalog leaf through the fixture-safe path."""
+
+        record = self._record(model_id)
+        if len(record["files"]) != 1:
+            return {"status": "failed", "code": "multi_file_recipe_requires_executor", "execution": "not_run"}
+        staged = Path(staged_path).absolute()
+        if not staged.is_file() or _is_reparse(staged):
+            return {"status": "failed", "code": "staged_payload_unavailable", "execution": "not_run"}
+        source_root = self.paths.temp_root / "component-install" / f"source-{model_id}-{int(time.time() * 1000)}"
+        try:
+            leaf = source_root / record["files"][0]["relative_path"]
+            leaf.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(staged, leaf)
+            return self.install_fixture(model_id, source_root)
+        except OSError:
+            return {"status": "failed", "code": "staged_payload_copy_failed", "execution": "not_run"}
+        finally:
+            if source_root.exists():
+                shutil.rmtree(source_root, ignore_errors=True)
 
 
 __all__ = ["ModelManager"]

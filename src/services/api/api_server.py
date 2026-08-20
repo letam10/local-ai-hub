@@ -624,6 +624,63 @@ class HubHandler(BaseHTTPRequestHandler):
             self._write(200, health(probe_gpu=False))
         elif normalized == "/api/bootstrap":
             self._write(200, _bootstrap_payload())
+        elif normalized == "/api/components":
+            from src.services.api.components import snapshot
+
+            self._write(200, snapshot())
+        elif normalized == "/api/modules":
+            # Module Manager is a server-owned composition; the browser never
+            # supplies a manifest or dependency path.
+            control = capability_control_plane()
+            plan = control.get("module_manager") if isinstance(control, dict) else {}
+            self._write(200, plan if isinstance(plan, dict) else {"status": "unavailable", "execution": "not_run", "dry_run": True})
+        elif normalized.startswith("/api/modules/"):
+            module_id = normalized[len("/api/modules/") :].strip("/")
+            control = capability_control_plane()
+            plan = control.get("module_manager") if isinstance(control, dict) else {}
+            modules = plan.get("modules") if isinstance(plan, dict) else []
+            selected = next((item for item in modules if isinstance(item, dict) and item.get("id") == module_id), None)
+            self._write(200 if selected else 404, {"status": "completed", "execution": "not_run", "dry_run": True, "module": selected} if selected else {"status": "error", "error": "unknown_module"})
+        elif normalized.startswith("/api/components/plans/"):
+            from src.services.api.components import lookup_plan
+
+            plan_id = normalized[len("/api/components/plans/") :].strip("/")
+            value = lookup_plan(plan_id)
+            self._write(200 if value else 404, value or {"status": "error", "error": "unknown_component_plan"})
+        elif normalized.startswith("/api/components/jobs/"):
+            from src.services.api.components import lookup_job
+
+            job_id = normalized[len("/api/components/jobs/") :].strip("/")
+            value = lookup_job(job_id)
+            self._write(200 if value else 404, value or {"status": "error", "error": "unknown_component_job"})
+        elif normalized.startswith("/api/components/"):
+            from src.services.api.components import detail
+
+            component_id = normalized[len("/api/components/") :].strip("/")
+            try:
+                self._write(200, detail(component_id))
+            except Exception:
+                self._write(404, {"status": "error", "error": "unknown_component"})
+        elif normalized == "/api/runtimes":
+            from src.services.runtime_manager import RuntimeManager
+
+            self._write(200, RuntimeManager().snapshot())
+        elif normalized.startswith("/api/runtimes/"):
+            from src.services.runtime_manager import RuntimeManager
+
+            runtime_id = normalized[len("/api/runtimes/") :].strip("/")
+            try:
+                self._write(200, {"status": "completed", "runtime": RuntimeManager().verify(runtime_id)})
+            except Exception:
+                self._write(404, {"status": "error", "error": "unknown_runtime"})
+        elif normalized.startswith("/api/models/"):
+            from src.services.model_manager import ModelManager
+
+            model_id = normalized[len("/api/models/") :].strip("/")
+            try:
+                self._write(200, {"status": "completed", "model": ModelManager().inspect(model_id)})
+            except Exception:
+                self._write(404, {"status": "error", "error": "unknown_model"})
         elif normalized == "/api/capabilities":
             self._write(200, capability_control_plane())
         elif normalized == "/api/workflow-library":
@@ -880,6 +937,9 @@ class HubHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = unquote(urlparse(self.path).path.rstrip("/") or "/")
+        if path.startswith("/api/components/"):
+            self._component_post(path)
+            return
         if path == "/api/uploads":
             self._upload()
             return
@@ -1201,6 +1261,90 @@ class HubHandler(BaseHTTPRequestHandler):
             return
         status, payload = submit_tool(tool, self._read_json())
         self._write(status, payload)
+
+    def _component_post(self, path: str) -> None:
+        """Handle typed component plans without accepting filesystem input."""
+
+        from src.services.api import components as component_api
+
+        try:
+            request = self._read_json(strict=True)
+        except ValueError as exc:
+            self._write(400, {"status": "invalid", "error": str(exc), "execution": "not_run"})
+            return
+
+        try:
+            if path == "/api/components/install/plan":
+                allowed = {"component_id", "component_type", "variant"}
+                if set(request) - allowed or not isinstance(request.get("component_id"), str) or not isinstance(request.get("component_type"), str) or (request.get("variant") is not None and not isinstance(request.get("variant"), str)):
+                    raise ValueError("component_plan_payload_invalid")
+                result = component_api.plan_install(request["component_id"], component_type=request["component_type"], variant=request.get("variant"))
+                self._write(200, result)
+                return
+            if path.startswith("/api/components/plans/") and path.endswith("/confirm"):
+                plan_id = path[len("/api/components/plans/") : -len("/confirm")].strip("/")
+                if set(request) - {"confirmed"} or type(request.get("confirmed")) is not bool:
+                    raise ValueError("component_confirmation_invalid")
+                result = component_api.confirm_install(plan_id, confirmed=request["confirmed"])
+                self._write(200 if result.get("status") not in {"invalid", "error", "conflict"} else 409, result)
+                return
+            if path == "/api/components/install/confirm":
+                if set(request) - {"plan_id", "confirmed"} or not isinstance(request.get("plan_id"), str) or type(request.get("confirmed")) is not bool:
+                    raise ValueError("component_confirmation_invalid")
+                result = component_api.confirm_install(request["plan_id"], confirmed=request["confirmed"])
+                self._write(200 if result.get("status") not in {"invalid", "error", "conflict"} else 409, result)
+                return
+            if path == "/api/components/install/apply":
+                if set(request) - {"plan_id", "confirmed"} or not isinstance(request.get("plan_id"), str) or type(request.get("confirmed")) is not bool:
+                    raise ValueError("component_apply_payload_invalid")
+                result = component_api.confirm_install(request["plan_id"], confirmed=request["confirmed"])
+                self._write(200 if result.get("status") not in {"invalid", "error", "conflict"} else 409, result)
+                return
+            if path == "/api/components/import/plan":
+                if set(request) - {"selection_id", "mode"} or not isinstance(request.get("selection_id"), str) or not isinstance(request.get("mode"), str):
+                    raise ValueError("component_import_payload_invalid")
+                self._write(200, component_api.plan_import(request["selection_id"], mode=request["mode"]))
+                return
+            if path == "/api/components/import/confirm":
+                if set(request) - {"plan_id", "confirmed"} or not isinstance(request.get("plan_id"), str) or type(request.get("confirmed")) is not bool:
+                    raise ValueError("component_confirmation_invalid")
+                result = component_api.confirm_import(request["plan_id"], confirmed=request["confirmed"])
+                self._write(200 if result.get("status") not in {"invalid", "error", "conflict"} else 409, result)
+                return
+            if path == "/api/components/verify/plan":
+                if set(request) - {"component_id", "component_type"} or not isinstance(request.get("component_id"), str) or not isinstance(request.get("component_type"), str):
+                    raise ValueError("component_verify_payload_invalid")
+                self._write(200, component_api.plan_verify(request["component_id"], component_type=request["component_type"]))
+                return
+            if path == "/api/components/maintenance/plan":
+                if set(request) - {"component_id", "action"} or not isinstance(request.get("component_id"), str) or not isinstance(request.get("action"), str):
+                    raise ValueError("component_maintenance_payload_invalid")
+                self._write(200, component_api.plan_maintenance(request["component_id"], action=request["action"]))
+                return
+            for action in ("repair", "update", "uninstall"):
+                if path == f"/api/components/{action}/plan":
+                    if set(request) - {"component_id"} or not isinstance(request.get("component_id"), str):
+                        raise ValueError("component_maintenance_payload_invalid")
+                    self._write(200, component_api.plan_maintenance(request["component_id"], action=action))
+                    return
+            if path.startswith("/api/components/maintenance/") and path.endswith("/confirm"):
+                plan_id = path[len("/api/components/maintenance/") : -len("/confirm")].strip("/")
+                if set(request) - {"confirmed"} or type(request.get("confirmed")) is not bool:
+                    raise ValueError("component_confirmation_invalid")
+                result = component_api.confirm_maintenance(plan_id, confirmed=request["confirmed"])
+                self._write(200 if result.get("status") not in {"invalid", "error", "conflict"} else 409, result)
+                return
+            if path.startswith("/api/components/jobs/") and path.endswith("/cancel"):
+                if request:
+                    raise ValueError("component_cancel_payload_invalid")
+                job_id = path[len("/api/components/jobs/") : -len("/cancel")].strip("/")
+                result = component_api.component_installer().cancel_job(job_id)
+                self._write(202 if result.get("status") == "cancelling" else 409, result)
+                return
+            self._write(404, {"status": "error", "error": "Component route not found."})
+        except Exception as exc:
+            status, payload = component_api.handle_error(exc)
+            self._write(status, payload)
 
     def do_DELETE(self) -> None:  # noqa: N802
         path = unquote(urlparse(self.path).path.rstrip("/") or "/")

@@ -9,6 +9,30 @@ local configuration from examples and opens the core without requiring AI
 weights. See `docs/architecture/ARCHITECTURE.md` and
 `docs/architecture/V7_MIGRATION_PLAN.md`.
 
+## V7 Phase 2 — clean clone and managed components
+
+Fresh Windows checkout:
+
+```powershell
+git clone <repository-url>
+Set-Location .\local-ai-hub
+.\scripts\bootstrap_core.ps1
+```
+
+Core bootstrap resolves the managed `Environments\core` Python first, then
+reuses the legacy `Environments\hub`, then a supported Python 3.10+
+development interpreter. `LOCALAIHUB_DATA_ROOT` may point machine-local data
+outside the source checkout; the owner installation remains in legacy
+single-root mode and is discovered without copying or moving its data.
+
+Open `Components / AI Setup` to inspect module, runtime and model states. AI
+installation is never automatic: the server creates an opaque inspect → plan
+→ confirmation flow, with trusted catalog sources, bounded staging, checksum
+and archive validation, native opaque model import, and atomic receipts.
+Missing AI remains `NOT_INSTALLED`, `PARTIAL` or `INSTALLED_UNVERIFIED` until
+separate bounded evidence proves `OPERATIONAL`. Core startup does not scan
+drives, download models, launch AI runtimes, or change CUDA/drivers.
+
 Local AI Hub là ứng dụng Windows điều phối các workflow AI chạy cục bộ trong
 một cửa sổ. Kho Git chỉ chứa mã nguồn, cấu hình mẫu, launcher, adapter, script
 và tài liệu; không chứa model, môi trường Python, cache, output, media cá

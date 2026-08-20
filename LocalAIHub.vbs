@@ -6,13 +6,13 @@ Set objShell = CreateObject("WScript.Shell")
 Set objFSO = CreateObject("Scripting.FileSystemObject")
 strRoot = objFSO.GetParentFolderName(WScript.ScriptFullName)
 
-strPythonw = ""
-If objFSO.FileExists(strRoot & "\Environments\hub\Scripts\pythonw.exe") Then
-    strPythonw = strRoot & "\Environments\hub\Scripts\pythonw.exe"
-ElseIf objFSO.FileExists(strRoot & "\runtime\bootstrap-python\pythonw.exe") Then
-    strPythonw = strRoot & "\runtime\bootstrap-python\pythonw.exe"
-Else
-    strPythonw = "pythonw.exe"
+strResolver = strRoot & "\scripts\resolve_core_runtime.ps1"
+strPowerShell = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File " & chr(34) & strResolver & chr(34) & " -Mode Pythonw"
+Set resolverProcess = objShell.Exec(strPowerShell)
+strPythonw = Trim(resolverProcess.StdOut.ReadAll)
+If strPythonw = "" Then
+    MsgBox "Local AI Hub Core runtime chưa sẵn sàng. Hãy chạy scripts\\bootstrap_core.ps1 trước.", vbExclamation, "Local AI Hub"
+    WScript.Quit 2
 End If
 
 strCmd = chr(34) & strPythonw & chr(34) & " -m src.app.launcher"

@@ -45,6 +45,14 @@ domains:
     owner: [src/services/runtime_manager/]
     depends_on: [platform.paths, process-manager]
     forbidden: [model-weights, driver-CUDA-change]
+  component_installer:
+    owner: [src/services/component_installer/]
+    depends_on: [model_manager, runtime_manager, platform.paths, shared]
+    forbidden: [browser-path-input, arbitrary-command, startup-download, secret-logging]
+  component_api:
+    owner: [src/services/api/components.py]
+    depends_on: [component_installer, shared]
+    forbidden: [raw-path-input, raw-url-input, direct-filesystem-ui]
   sam2:
     owner: [src/modules/sam2/]
     depends_on: [artifact_store, job_manager]

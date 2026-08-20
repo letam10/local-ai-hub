@@ -16,3 +16,11 @@ start a server/worker or change system Python, CUDA or drivers.
 
 The output is a sanitized JSON receipt. AI modules show `NOT_INSTALLED` or
 `UNAVAILABLE` until an explicit Module/Model Manager plan is approved.
+
+After Core is available, open `Components / AI Setup` in the same Hub shell.
+It reads the tracked model/runtime catalogs through server-owned APIs and
+offers inspect, install-plan, import-plan, verify and maintenance-plan
+actions. Plan responses expose only safe location classes (`models_root`,
+`runtime_root`, `environment_root`) and opaque plan IDs. The current example
+catalogs deliberately remain manual-import/review-only until a pinned source,
+size and digest are reviewed.
