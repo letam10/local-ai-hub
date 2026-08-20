@@ -46,6 +46,12 @@ export const createComponentImportPlan = (selectionId, mode) => request("/api/co
 export const createComponentVerifyPlan = (componentId, componentType) => request("/api/components/verify/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ component_id: componentId, component_type: componentType }) });
 export const createComponentMaintenancePlan = (componentId, action) => request("/api/components/maintenance/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ component_id: componentId, action }) });
 export const confirmComponentMaintenance = (planId, confirmed = false) => request(`/api/components/maintenance/${encodeURIComponent(planId)}/confirm`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed }) });
+export const getUpdateSettings = () => request("/api/updates/settings");
+export const setUpdateSchedule = (policy) => request("/api/updates/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ policy }) });
+export const checkComponentUpdate = (componentId, refreshSource = false) => request("/api/updates/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ component_id: String(componentId), refresh_source: Boolean(refreshSource) }) });
+export const checkAllUpdates = (refreshSource = false) => request("/api/updates/check-all", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refresh_source: Boolean(refreshSource) }) });
+export const planComponentUpdate = (componentId) => request("/api/updates/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ component_id: String(componentId) }) });
+export const confirmComponentUpdate = (planId, confirmed = false) => request(`/api/updates/plans/${encodeURIComponent(planId)}/confirm`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: Boolean(confirmed) }) });
 export const getApplications = () => request("/api/applications");
 export const getSettings = () => request("/api/settings");
 export const getSettingsSchema = () => request("/api/settings/schema");

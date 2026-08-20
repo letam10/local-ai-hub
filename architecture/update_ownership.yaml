@@ -1,0 +1,25 @@
+schema_version: v7-update-ownership.v1
+source_availability:
+  owner: src/services/operational_closure/source_availability.py
+  writes: Config/source_availability_cache.json
+  network: explicit_check_only
+  public_fields: [status, source_identity, selected_source, checked_at, expires_at, reason_code]
+update_resolver:
+  owner: src/services/operational_closure/update_service.py
+  policy_default: manual
+  schedules: [manual, startup_24h, daily, weekly]
+  auto_apply: false
+update_executor:
+  owner: src/services/operational_closure/update_executor.py
+  allowed_candidates: catalog_owned_immutable_candidate
+  activation: staged_verify_then_atomic_switch
+  rollback: retained_component_version_only
+manual_import:
+  owner: src/services/component_installer/import_executor.py
+  selection: opaque_short_lived_native_token
+  destination: managed_models_root
+  overwrite_existing: false
+maintenance:
+  owner: src/services/component_installer/maintenance_executor.py
+  actions: [repair, update, uninstall]
+  user_data_preserved: true

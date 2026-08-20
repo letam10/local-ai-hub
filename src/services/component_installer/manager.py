@@ -34,6 +34,9 @@ from .policy import (
     validate_component_id,
 )
 from .downloader import DownloadError, TrustedDownloader
+from .import_executor import ManualImportExecutor
+from .maintenance_executor import MaintenanceExecutor
+from .receipts import source_identity, write_component_receipt
 
 
 class SelectionError(ValueError):
@@ -113,6 +116,20 @@ class ComponentInstaller:
         if record is None:
             raise InstallPlanError("unknown_component")
         return record
+
+    def _dependency_steps(self, component_id: str, component_type: str, record: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """Build a fixed server-owned dependency graph for one plan."""
+
+        if component_type != "model":
+            return []
+        runtime_id = record.get("runtime_id")
+        if not isinstance(runtime_id, str) or not runtime_id:
+            return []
+        runtime = self._runtime_record(runtime_id)
+        if runtime is None:
+            return [{"kind": "runtime", "component_id": runtime_id, "status": "UNAVAILABLE", "disposition": "UNSUPPORTED"}]
+        state = self.runtime_manager.inspect(runtime_id)
+        return [{"kind": "runtime", "component_id": runtime_id, "status": state.get("status", "UNAVAILABLE"), "disposition": runtime.get("disposition", "MANUAL_INSTALL"), "install_strategy": runtime.get("install_strategy", "reference_existing"), "shared_dependency_id": runtime.get("shared_dependency_id")}]
 
     def _history_path(self) -> Path:
         return self.paths.config_root / "component_install_history.json"
@@ -210,6 +227,7 @@ class ComponentInstaller:
             raise InstallPlanError("invalid_component_type")
         record = self._catalog_record(component_id, component_type)
         state = self._inspect(component_id, component_type)
+        dependencies = self._dependency_steps(component_id, component_type, record)
         projection = safe_component_projection({**record, "component_id": component_id, "component_type": component_type, "location_class": "models_root" if component_type == "model" else record.get("root_class")})
         if variant is not None and variant not in {"default", "low_vram", "portable"}:
             raise InstallPlanError("invalid_component_variant")
@@ -224,6 +242,9 @@ class ComponentInstaller:
             "auto_install_supported": self._auto_install_ready(record),
             "location_class": projection["location_class"],
             "source_policy": projection["source_policy"],
+            "dependencies": dependencies,
+            "bundle_strategy": "composite_server_owned" if dependencies else "single_component",
+            "preserve_existing_dependencies": True,
         }
         plan_id = f"install_plan_{secrets.token_hex(16)}"
         fingerprint = plan_fingerprint(plan_body)
@@ -236,6 +257,7 @@ class ComponentInstaller:
             "source_policy": projection["source_policy"], "auto_install_supported": bool(plan_body["auto_install_supported"]),
             "download_bytes": int(record.get("estimated_download_size", 0)),
             "estimated_disk_bytes": int(record.get("estimated_disk_size", 0)),
+            "dependencies": dependencies,
             "warnings": ["Installation requires explicit confirmation and a fresh stale-plan check."],
             "reason": "The browser supplies only a component ID; destination, source and files remain server-owned.",
             "next_action": "Confirm this exact plan or choose a managed manual-import flow.",
@@ -252,6 +274,9 @@ class ComponentInstaller:
             return {"status": "conflict", "code": "stale_install_plan", "plan_id": plan_id, "next_action": "Create a fresh plan."}
         if not internal["auto_install_supported"]:
             return {"status": "unavailable", "code": "trusted_source_metadata_required", "plan_id": plan_id, "execution": "not_run", "next_action": "Use a server-owned native manual import selection or complete trusted catalog metadata."}
+        dependency_block = next((item for item in internal.get("dependencies", []) if item.get("status") not in {"INSTALLED", "OPERATIONAL"}), None)
+        if dependency_block is not None:
+            return {"status": "unavailable", "code": "dependency_unavailable", "plan_id": plan_id, "execution": "not_run", "dependency": {key: dependency_block.get(key) for key in ("kind", "component_id", "status", "disposition")}, "next_action": "Review or install the exact server-owned dependency before confirming this bundle."}
         return self.apply_plan(plan_id, confirmed=True)
 
     def apply_plan(self, plan_id: str, *, confirmed: bool = False, cancel_event: Any | None = None) -> dict[str, Any]:
@@ -273,6 +298,9 @@ class ComponentInstaller:
             return {"status": "conflict", "code": "stale_install_plan", "plan_id": plan_id, "next_action": "Create a fresh plan."}
         if not plan.get("auto_install_supported"):
             return {"status": "unavailable", "code": "trusted_source_metadata_required", "plan_id": plan_id, "execution": "not_run", "next_action": "Use a server-owned native manual import selection or complete trusted catalog metadata."}
+        dependency_block = next((item for item in plan.get("dependencies", []) if item.get("status") not in {"INSTALLED", "OPERATIONAL"}), None)
+        if dependency_block is not None:
+            return {"status": "unavailable", "code": "dependency_unavailable", "plan_id": plan_id, "execution": "not_run", "dependency": {key: dependency_block.get(key) for key in ("kind", "component_id", "status", "disposition")}, "next_action": "Install or reuse the dependency before applying this bundle."}
         record = plan.get("record") if isinstance(plan.get("record"), Mapping) else {}
         source = record.get("official_source")
         if not trusted_source(source, fixture_mode=False):
@@ -314,6 +342,26 @@ class ComponentInstaller:
                 self._record_history(job_id)
                 self._cancel_events.pop(job_id, None)
                 return {"status": "failed", "code": "finalization_failed", "job_id": job_id, "plan_id": plan_id, "execution": "not_run"}
+            try:
+                write_component_receipt(self.paths.config_root, plan["component_id"], {
+                    "component_id": plan["component_id"],
+                    "component_type": plan["component_type"],
+                    "bundle_revision": str(record.get("revision") or "unknown"),
+                    "source": "catalog_primary",
+                    "source_identity": source_identity(record),
+                    "installed_at": int(time.time()),
+                    "verified_at": None,
+                    "state": "INSTALLED_UNVERIFIED",
+                    "operational": False,
+                    "previous_version": None,
+                    "rollback_candidate": None,
+                    "catalog_fingerprint": plan.get("catalog_fingerprint"),
+                })
+            except OSError:
+                self._jobs[job_id].update({"state": "FAILED", "execution": "not_run", "error": "receipt_write_failed"})
+                self._record_history(job_id)
+                self._cancel_events.pop(job_id, None)
+                return {"status": "failed", "code": "receipt_write_failed", "job_id": job_id, "plan_id": plan_id, "execution": "not_run"}
             self._jobs[job_id].update({"state": "COMPLETED", "execution": "completed"})
             self._record_history(job_id)
             self._cancel_events.pop(job_id, None)
@@ -357,6 +405,7 @@ class ComponentInstaller:
                 "schema_version", "plan_id", "plan_fingerprint", "component_id",
                 "component_type", "variant", "status", "execution", "dry_run",
                 "expected_state_fingerprint", "action", "current_status",
+                "dependencies", "bundle_strategy", "preserve_existing_dependencies",
             )
             if key in plan
         }
@@ -415,7 +464,7 @@ class ComponentInstaller:
                 break
             current = current.parent
         selection_id = f"selection_{secrets.token_hex(16)}"
-        self._selections[selection_id] = {"component_id": component_id, "component_type": component_type, "path": candidate, "expires_at": time.time() + 300}
+        self._selections[selection_id] = {"selection_id": selection_id, "component_id": component_id, "component_type": component_type, "path": candidate, "expires_at": time.time() + 300}
         return {"status": "ready", "selection_id": selection_id, "component_id": component_id, "location_class": "native_selection", "expires_in_seconds": 300}
 
     def plan_import(self, selection_id: str, *, mode: str = "COPY_INTO_MANAGED_MODELS") -> dict[str, Any]:
@@ -426,7 +475,7 @@ class ComponentInstaller:
             raise SelectionError("invalid_import_mode")
         record = self._model_record(selection["component_id"])
         assert record is not None
-        plan_body = {"schema_version": "model-import-plan.v1", "component_id": selection["component_id"], "mode": mode, "catalog_fingerprint": self.model_manager.catalog_fingerprint, "selection_id": selection_id}
+        plan_body = {"schema_version": "model-import-plan.v1", "component_id": selection["component_id"], "component_type": "model", "mode": mode, "catalog_fingerprint": self.model_manager.catalog_fingerprint, "selection_id": selection_id}
         plan_id = f"import_plan_{secrets.token_hex(16)}"
         fingerprint = plan_fingerprint(plan_body)
         self._plans[plan_id] = {**plan_body, "plan_id": plan_id, "plan_fingerprint": fingerprint, "selection": selection}
@@ -441,10 +490,11 @@ class ComponentInstaller:
         selection = plan.get("selection") if isinstance(plan.get("selection"), Mapping) else {}
         if not selection or float(selection.get("expires_at", 0)) < time.time():
             return {"status": "conflict", "code": "selection_expired", "plan_id": plan_id, "execution": "not_run"}
-        return {
-            "status": "unavailable", "code": "manager_executor_required", "plan_id": plan_id,
-            "execution": "not_run", "next_action": "A native manager executor must revalidate the selection and exact import plan.",
-        }
+        result = ManualImportExecutor(paths=self.paths, model_manager=self.model_manager, runtime_manager=self.runtime_manager).apply(plan, confirmed=True)
+        result["plan_id"] = plan_id
+        if result.get("status") == "completed":
+            self._selections.pop(str(selection.get("selection_id")), None)
+        return result
 
     def plan_maintenance(self, component_id: str, *, action: str) -> dict[str, Any]:
         component_id = validate_component_id(component_id)
@@ -469,7 +519,18 @@ class ComponentInstaller:
         current = self._inspect(plan["component_id"], plan["component_type"])
         if _state_fingerprint(current) != plan["expected_state_fingerprint"]:
             return {"status": "conflict", "code": "stale_maintenance_plan", "plan_id": plan_id}
-        return {"status": "unavailable", "code": "manager_executor_required", "plan_id": plan_id, "execution": "not_run", "next_action": "A separately authorized native executor must perform the reviewed maintenance plan."}
+        result = MaintenanceExecutor(paths=self.paths, catalog=self._catalog_adapter()).apply(plan, confirmed=True)
+        result["plan_id"] = plan_id
+        return result
+
+    def _catalog_adapter(self) -> Any:
+        """Expose the fixed model/runtime records to the maintenance executor."""
+
+        class _Catalog:
+            models = {item["model_id"]: item for item in self.model_manager._records}
+            runtimes = {item["runtime_id"]: item for item in self.runtime_manager._records}
+
+        return _Catalog()
 
     def install_fixture(self, component_id: str, source_root: Path) -> dict[str, Any]:
         """Backend-only synthetic acceptance hook; never exposed as an API route."""

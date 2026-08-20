@@ -44,6 +44,7 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
     model_manager: ModelManager | None = None
     runtime_manager: RuntimeManager | None = None
     productization_service: Any | None = None
+    update_service: Any | None = None
     get = bindings.get
 
     def model_service() -> ModelManager:
@@ -64,6 +65,13 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
             from src.services.productization import ComponentLifecycle
             productization_service = ComponentLifecycle()
         return productization_service
+
+    def updates() -> Any:
+        nonlocal update_service
+        if update_service is None:
+            from src.services.operational_closure import UpdateResolver
+            update_service = UpdateResolver()
+        return update_service
 
     def product_snapshot(**kwargs: Any) -> dict[str, Any]:
         return productization().catalog.snapshot(**kwargs)
@@ -135,6 +143,14 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         "productization_plan_lookup": lambda plan_id: productization().lookup_plan(plan_id),
         "productization_confirm": lambda plan_id, confirmed=False: productization().confirm(plan_id, confirmed=confirmed),
         "productization_maintenance": lambda component_id, action: productization().plan_maintenance(component_id, action),
+        "update_settings_get": lambda: updates().schedule.get(),
+        "update_settings_set": lambda policy: updates().schedule.set_policy(policy),
+        "update_check": lambda component_id, force_source_check=False: updates().check_component(component_id, force_source_check=force_source_check),
+        "update_check_all": lambda force_source_check=False: updates().check_all(force_source_check=force_source_check),
+        "update_plan": lambda component_id: updates().plan_update(component_id),
+        "update_plan_lookup": lambda plan_id: updates()._plans.get(plan_id),
+        "update_apply": lambda plan_id, confirmed=False: updates().apply_update(plan_id, confirmed=confirmed),
+        "update_rollback": lambda component_id: updates().rollback(component_id),
         "settings_payload": get("settings_payload"), "settings_schema": lambda: {"status": "completed", "schema_version": SETTINGS_SCHEMA_VERSION, "defaults": SETTINGS_SECTION_DEFAULTS},
         "settings_save": lambda payload, expected_revision=None: SettingsPersistence().save(payload, expected_revision=expected_revision),
         "settings_reset": lambda section: SettingsPersistence().reset_section(section), "settings_reset_all": lambda: SettingsPersistence().save(SETTINGS_SECTION_DEFAULTS),

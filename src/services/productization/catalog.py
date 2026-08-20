@@ -18,6 +18,7 @@ import tempfile
 from typing import Any
 
 from src.platform.paths import HubPaths, get_paths
+from src.services.operational_closure.source_availability import SourceAvailabilityService
 
 
 SCHEMA = "v7-production-catalog.v1"
@@ -123,6 +124,20 @@ def _validate_model(item: Mapping[str, Any]) -> dict[str, Any]:
         if digest is not None and (not isinstance(digest, str) or len(digest) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in digest)):
             raise ProductionCatalogError("invalid_model_file_hash")
         files.append({"relative_path": relative, "size_bytes": size, "sha256": digest.lower() if isinstance(digest, str) else None})
+    official_source = item.get("official_source")
+    if isinstance(official_source, Mapping):
+        official_source_value: Any = {
+            key: value for key, value in official_source.items()
+            if key in {"provider", "kind", "url", "https_url", "canonical_identity", "artifact_identity", "revision", "release", "priority", "authentication_required", "auth_required", "license_required"}
+        }
+    else:
+        official_source_value = str(official_source or "local")[:2048]
+    primary_source = item.get("primary_source")
+    if primary_source is not None and not isinstance(primary_source, (str, Mapping)):
+        primary_source = None
+    fallback_sources = item.get("trusted_fallback_sources", [])
+    if not isinstance(fallback_sources, list):
+        fallback_sources = []
     return {
         "model_id": model_id,
         "display_name": str(item.get("display_name") or model_id)[:160],
@@ -130,7 +145,16 @@ def _validate_model(item: Mapping[str, Any]) -> dict[str, Any]:
         "provider": str(item.get("provider") or "unknown")[:96],
         "version": str(item.get("version") or "unknown")[:96],
         "revision": str(item.get("revision") or item.get("version") or "unknown")[:128],
-        "official_source": str(item.get("official_source") or "local")[:2048],
+        "official_source": official_source_value,
+        "primary_source": primary_source,
+        "trusted_fallback_sources": [dict(value) for value in fallback_sources[:4] if isinstance(value, Mapping)],
+        "source_identity": str(item.get("source_identity") or item.get("canonical_identity") or item.get("revision") or "unknown")[:256],
+        "latest_upstream_revision": str(item.get("latest_upstream_revision") or item.get("revision") or "unknown")[:128],
+        "latest_supported_revision": str(item.get("latest_supported_revision") or item.get("revision") or "unknown")[:128],
+        "update_parts": [str(value) for value in item.get("update_parts", []) if value in {"backend", "runtime", "dependencies", "model"}],
+        "install_strategy": str(item.get("install_strategy") or "manual_import"),
+        "compatibility": dict(item.get("compatibility")) if isinstance(item.get("compatibility"), Mapping) else {},
+        "update_candidate": dict(item.get("update_candidate")) if isinstance(item.get("update_candidate"), Mapping) else None,
         "source_type": str(item.get("source_type") or "metadata_only")[:64],
         "disposition": disposition,
         "license": str(item.get("license") or "review_required")[:160],
@@ -156,6 +180,20 @@ def _validate_runtime(item: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(leaves, list) or not leaves:
         raise ProductionCatalogError("invalid_runtime_leaves")
     normalized = [_safe_relative(value) for value in leaves]
+    official_source = item.get("official_source")
+    if isinstance(official_source, Mapping):
+        official_source_value: Any = {
+            key: value for key, value in official_source.items()
+            if key in {"provider", "kind", "url", "https_url", "canonical_identity", "artifact_identity", "revision", "release", "priority", "authentication_required", "auth_required", "license_required"}
+        }
+    else:
+        official_source_value = str(official_source or "local")[:2048]
+    primary_source = item.get("primary_source")
+    if primary_source is not None and not isinstance(primary_source, (str, Mapping)):
+        primary_source = None
+    fallback_sources = item.get("trusted_fallback_sources", [])
+    if not isinstance(fallback_sources, list):
+        fallback_sources = []
     return {
         "runtime_id": runtime_id,
         "display_name": str(item.get("display_name") or runtime_id)[:160],
@@ -165,7 +203,15 @@ def _validate_runtime(item: Mapping[str, Any]) -> dict[str, Any]:
         "root_class": str(item.get("root_class") or "runtime_root"),
         "required_leaves": normalized,
         "modules": sorted({_safe_id(value, "module_id") for value in item.get("modules", []) if isinstance(value, str)}),
-        "official_source": str(item.get("official_source") or "local")[:2048],
+        "official_source": official_source_value,
+        "primary_source": primary_source,
+        "trusted_fallback_sources": [dict(value) for value in fallback_sources[:4] if isinstance(value, Mapping)],
+        "source_identity": str(item.get("source_identity") or item.get("canonical_identity") or item.get("revision") or "unknown")[:256],
+        "latest_upstream_revision": str(item.get("latest_upstream_revision") or item.get("revision") or "unknown")[:128],
+        "latest_supported_revision": str(item.get("latest_supported_revision") or item.get("revision") or "unknown")[:128],
+        "update_parts": [str(value) for value in item.get("update_parts", []) if value in {"backend", "runtime", "dependencies", "model"}],
+        "compatibility": dict(item.get("compatibility")) if isinstance(item.get("compatibility"), Mapping) else {},
+        "update_candidate": dict(item.get("update_candidate")) if isinstance(item.get("update_candidate"), Mapping) else None,
         "source_type": str(item.get("source_type") or "metadata_only")[:64],
         "disposition": disposition,
         "install_strategy": str(item.get("install_strategy") or "reference_existing"),
@@ -203,6 +249,7 @@ class ProductionCatalog:
         self.models = {item["model_id"]: item for item in loaded["models"]}
         self.runtimes = {item["runtime_id"]: item for item in loaded["runtimes"]}
         self.fingerprint = _fingerprint(loaded)
+        self.source_availability = SourceAvailabilityService(paths=self.paths)
 
     def _root_for_runtime(self, record: Mapping[str, Any]) -> Path:
         if record["root_class"] == "environments_root":
@@ -259,7 +306,7 @@ class ProductionCatalog:
         cache = self._size_cache().get(model_id) if status == "INSTALLED" else None
         installed_size = cache.get("size_bytes") if isinstance(cache, Mapping) and isinstance(cache.get("size_bytes"), int) else self._receipt_size(model_id) if status == "INSTALLED" else None
         projected = {key: value for key, value in record.items() if key not in {"official_source", "license_url", "files"}}
-        projected.update({"status": status, "execution": "not_run", "operational": False, "leaves": leaves, "installed_size_bytes": installed_size, "expected_download_size_bytes": record["estimated_download_size"] or None, "expected_disk_size_bytes": record["estimated_disk_size"] or None, "reason": reason, "next_action": action})
+        projected.update({"status": status, "execution": "not_run", "operational": False, "leaves": leaves, "installed_size_bytes": installed_size, "expected_download_size_bytes": record["estimated_download_size"] or None, "expected_disk_size_bytes": record["estimated_disk_size"] or None, "source_availability": self.source_availability.cached(model_id), "reason": reason, "next_action": action})
         if installed_size is None and status == "INSTALLED":
             projected["size_label"] = "Size unavailable"
         elif installed_size is not None:
@@ -287,7 +334,7 @@ class ProductionCatalog:
             status = "NOT_INSTALLED"
             reason = "No required runtime leaf was observed at the managed root."
         projected = {key: value for key, value in record.items() if key != "official_source"}
-        projected.update({"status": status, "execution": "not_run", "operational": False, "leaves": leaves, "reason": reason, "next_action": "Review the pinned runtime plan; existing environments are never overwritten automatically."})
+        projected.update({"status": status, "execution": "not_run", "operational": False, "leaves": leaves, "source_availability": self.source_availability.cached(runtime_id), "reason": reason, "next_action": "Review the pinned runtime plan; existing environments are never overwritten automatically."})
         return projected
 
     def snapshot(self, *, query: str = "", category: str = "", installed: bool | None = None) -> dict[str, Any]:

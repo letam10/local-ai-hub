@@ -92,6 +92,10 @@ import {
   linkImageMaskProject,
   uploadFile,
   escapeHtml,
+  getUpdateSettings,
+  setUpdateSchedule,
+  checkComponentUpdate,
+  checkAllUpdates,
 } from "./api.js";
 import { disposeNodeStudios, mountNodeStudios } from "./features/node_studio/studio.js";
 import { mountImageMaskCanvases } from "./image_mask_studio.js";
@@ -106,7 +110,7 @@ const state = {
   creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
   workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trong V5-D trước khi đồng bộ." },
-  productionCatalog: { status: "partial", models: [], runtimes: [] }, modelFilters: { query: "", category: "", installed: "all" },
+  productionCatalog: { status: "partial", models: [], runtimes: [] }, updateCenter: { settings: { policy: "manual" }, records: [] }, modelFilters: { query: "", category: "", installed: "all" },
   featureRegistry: FEATURE_REGISTRY,
 };
 const view = document.querySelector("#module-view");
@@ -723,10 +727,11 @@ const loadRouteData = async ({ scan = false } = {}) => {
   const route = routeId();
   if (route === "models") {
     if (routeLoad) return routeLoad;
-    routeLoad = Promise.allSettled([getModels(), scan ? scanStorage() : getStorage(), getProductionCatalog()]).then((results) => {
+    routeLoad = Promise.allSettled([getModels(), scan ? scanStorage() : getStorage(), getProductionCatalog(), getUpdateSettings()]).then((results) => {
       if (results[0].status === "fulfilled") state.models = results[0].value.models || [];
       if (results[1].status === "fulfilled") state.storage = results[1].value || {};
       if (results[2].status === "fulfilled") state.productionCatalog = results[2].value || state.productionCatalog;
+      if (results[3].status === "fulfilled") state.updateCenter = { ...state.updateCenter, settings: results[3].value || state.updateCenter.settings };
       render();
     }).catch(() => {}).finally(() => { routeLoad = null; });
     return routeLoad;
@@ -1639,6 +1644,43 @@ document.addEventListener("click", async (event) => {
   if (event.target.closest("#theme-toggle") || event.target.closest("[data-cycle-theme]")) { cycleTheme(); return; }
   const refreshButton = event.target.closest("[data-refresh-storage]");
   if (refreshButton) { refreshButton.disabled = true; await loadRouteData({ scan: true }); refreshButton.disabled = false; showToast("Đã quét lại storage theo yêu cầu."); return; }
+  const checkAllUpdatesButton = event.target.closest("[data-check-all-updates]");
+  if (checkAllUpdatesButton) {
+    checkAllUpdatesButton.disabled = true;
+    try {
+      const result = await checkAllUpdates(true);
+      state.updateCenter = { ...state.updateCenter, records: result.records || [], last_checked: Date.now() };
+      render();
+      showToast("Đã kiểm tra metadata update; không có component nào tự cài.", "success");
+    } catch (error) { showToast(error.message || "Không thể kiểm tra update.", "error"); }
+    finally { checkAllUpdatesButton.disabled = false; }
+    return;
+  }
+  const checkUpdateButton = event.target.closest("[data-check-update]");
+  if (checkUpdateButton) {
+    checkUpdateButton.disabled = true;
+    try {
+      const result = await checkComponentUpdate(checkUpdateButton.dataset.checkUpdate || "", true);
+      const records = [...(state.updateCenter.records || []).filter((item) => item.component_id !== result.component_id), result];
+      state.updateCenter = { ...state.updateCenter, records, last_checked: Date.now() };
+      render();
+      showToast(`Đã kiểm tra update cho ${result.component_id || "component"}.`, "success");
+    } catch (error) { showToast(error.message || "Không thể kiểm tra update.", "error"); }
+    finally { checkUpdateButton.disabled = false; }
+    return;
+  }
+  const saveUpdateScheduleButton = event.target.closest("[data-save-update-schedule]");
+  if (saveUpdateScheduleButton) {
+    const policy = view.querySelector("[data-update-schedule]")?.value || "manual";
+    saveUpdateScheduleButton.disabled = true;
+    try {
+      const result = await setUpdateSchedule(policy);
+      if (result.status === "saved") { state.updateCenter = { ...state.updateCenter, settings: result }; render(); showToast("Đã lưu lịch kiểm tra update; không tự cài đặt.", "success"); }
+      else showToast(result.code || "Lịch update không hợp lệ.", "warning");
+    } catch (error) { showToast(error.message || "Không thể lưu lịch update.", "error"); }
+    finally { saveUpdateScheduleButton.disabled = false; }
+    return;
+  }
   const launchButton = event.target.closest("[data-launch]");
   if (launchButton) {
     launchButton.disabled = true;
