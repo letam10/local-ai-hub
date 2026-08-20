@@ -126,11 +126,18 @@ def ensure_api(timeout_seconds: float = 20.0) -> subprocess.Popen[object] | None
         python = str(candidate)
         log_path = ROOT / "Logs" / "api_server.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        child_env = dict(os.environ)
+        child_env["PYTHONPATH"] = str(ROOT)
+        child_env["LOCALAIHUB_APP_ROOT"] = str(ROOT)
+        # Do not collapse a split installation back into legacy single-root
+        # mode.  The parent-selected LOCALAIHUB_DATA_ROOT is retained; an old
+        # LOCALAIHUB_ROOT override is removed from the child environment.
+        child_env.pop("LOCALAIHUB_ROOT", None)
         with log_path.open("a", encoding="utf-8") as log:
             process = popen_hidden(
                 [python, "-m", "src.services.api.api_server"],
                 cwd=ROOT,
-                env={**os.environ, "PYTHONPATH": str(ROOT), "LOCALAIHUB_ROOT": str(ROOT)},
+                env=child_env,
                 stdout=log,
                 stderr=subprocess.STDOUT,
             )
