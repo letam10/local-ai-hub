@@ -2,25 +2,25 @@
   "schema_version": 1,
   "application_name": "Local AI Hub",
   "version": "7.1.0",
-  "git_commit": "590471939eed75844e6d01abbf8ce3f18c344c17",
+  "git_commit": "baf6fbf1cb8a2746e6a4e30d1e9de38f3a496338",
   "git_branch": "feature/v7-operational-closure",
   "tag": "v7.0.0",
   "tag_commit": "ca1da09fb84234c4d8db38a7b5c1a9b3ad33c41e",
   "source_reference": "refs/heads/feature/v7-operational-closure",
-  "build_timestamp": "2026-08-20T16:28:45.710395+00:00",
+  "build_timestamp": "2026-08-20T16:29:35.313408+00:00",
   "packaging_tool": "Local AI Hub Release Packager (Python/zipfile) + Inno Setup 6",
   "platform": "windows-x64",
   "release_artifacts": {
     "core_zip": {
       "file_name": "LocalAIHub-Core-Win64-v7.1.0.zip",
-      "size_bytes": 1180551,
-      "sha256": "d41d2a0bf46765e1dbaef1de56b7267d3c4bae9da26413ce91d92283a284c92b",
+      "size_bytes": 1180555,
+      "sha256": "fd5eed5e950fbb8c03cb92468a247efb053219e0651c39fa7f53185eeb8e4fa3",
       "total_files": 528
     },
     "setup_exe": {
       "file_name": "LocalAIHub-Setup-Win64-v7.1.0.exe",
-      "size_bytes": 3527954,
-      "sha256": "80278a95d9e4c20424f329c261bc3faf2221419f56bdd276ea53509c07241071"
+      "size_bytes": 3527965,
+      "sha256": "57c6b79ce95df585e123af4e19256ae6ad7e501ce00fd005259f0bf8411636f9"
     }
   },
   "included_application_components": [
