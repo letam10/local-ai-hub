@@ -229,6 +229,9 @@ class DesktopBridge:
         self._controller: DesktopCloseController | None = None
         self._tray: WindowsTray | None = None
         self._close_prompt_fallback = False
+        # Keep the native component picker in a nested bridge namespace so
+        # the top-level close API remains the exact three-choice contract.
+        self.component_import = _ComponentSelectionBridge(self)
 
     def _bind(self, window: object) -> None:
         self._window = window
@@ -333,10 +336,50 @@ class DesktopBridge:
 
         return self._controller.keep_running_in_background(background)
 
+    def _select_component_source(self, component_id: str) -> dict[str, object]:
+        """Open the native picker and return only a short-lived selection ID.
+
+        The browser never receives the selected path.  The desktop bridge is
+        the trusted owner of the native chooser and stores the opaque token in
+        the server-side ComponentInstaller selection table.
+        """
+
+        if not isinstance(component_id, str) or not component_id or len(component_id) > 96:
+            return {"status": "invalid", "code": "invalid_component_id", "execution": "not_run"}
+        window = self._window
+        if window is None:
+            return {"status": "unavailable", "code": "desktop_bridge_unavailable", "execution": "not_run"}
+        chooser = getattr(window, "create_file_dialog", None)
+        if not callable(chooser):
+            return {"status": "unavailable", "code": "native_picker_unavailable", "execution": "not_run"}
+        try:
+            import webview
+            dialog_type = getattr(webview, "FOLDER_DIALOG", getattr(webview, "OPEN_DIALOG", 0))
+            selected = chooser(dialog_type, allow_multiple=False)
+            if isinstance(selected, (list, tuple)):
+                selected = selected[0] if selected else None
+            if not isinstance(selected, (str, os.PathLike)) or not str(selected):
+                return {"status": "cancelled", "execution": "not_run"}
+            from src.services.api.components import component_installer
+            result = component_installer().issue_selection(component_id, Path(selected))
+            return {key: result[key] for key in ("status", "selection_id", "component_id", "location_class", "expires_in_seconds") if key in result}
+        except Exception:
+            return {"status": "unavailable", "code": "native_selection_rejected", "execution": "not_run"}
+
     def _request_window_close(self) -> bool:
         if not self._controller:
             return False
         return self._controller.request_window_close()
+
+
+class _ComponentSelectionBridge:
+    """Nested pywebview namespace for native, opaque component selection."""
+
+    def __init__(self, owner: DesktopBridge) -> None:
+        self._owner = owner
+
+    def select_source(self, component_id: str) -> dict[str, object]:
+        return self._owner._select_component_source(component_id)
 
 
 def _loading_html() -> str:

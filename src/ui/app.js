@@ -45,6 +45,12 @@ import {
   getComponents,
   createComponentPlan,
   confirmComponentPlan,
+  createComponentImportPlan,
+  confirmComponentImport,
+  createComponentBundlePlan,
+  confirmComponentBundle,
+  createComponentReusePlan,
+  confirmComponentReuse,
   createComponentMaintenancePlan,
   confirmComponentMaintenance,
   getStorage,
@@ -1144,6 +1150,72 @@ document.addEventListener("click", async (event) => {
     finally { componentPlanButton.disabled = false; }
     return;
   }
+  const nativeImportButton = event.target.closest("[data-component-native-import]");
+  if (nativeImportButton) {
+    nativeImportButton.disabled = true;
+    try {
+      const bridge = globalThis.pywebview?.api;
+      if (!bridge?.component_import || typeof bridge.component_import.select_source !== "function") throw new Error("Desktop bridge chưa sẵn sàng; hãy mở Hub bằng ứng dụng desktop.");
+      const selected = await bridge.component_import.select_source(nativeImportButton.dataset.componentNativeImport || "");
+      if (selected?.status !== "ready" || !selected.selection_id) throw new Error(selected?.code || "Không nhận được lựa chọn hợp lệ.");
+      const plan = await createComponentImportPlan(selected.selection_id, "COPY_INTO_MANAGED_MODELS");
+      state.componentPlans[`import:${plan.component?.component_id || nativeImportButton.dataset.componentNativeImport}`] = plan;
+      render();
+      showToast("Đã nhận lựa chọn native; hãy xem và xác nhận kế hoạch import.", "success");
+    } catch (error) { showToast(error.message || "Không thể chọn model để import.", "error"); }
+    finally { nativeImportButton.disabled = false; }
+    return;
+  }
+  const componentBundleButton = event.target.closest("[data-component-bundle]");
+  if (componentBundleButton) {
+    componentBundleButton.disabled = true;
+    try {
+      const id = componentBundleButton.dataset.componentBundle || "";
+      const type = componentBundleButton.dataset.componentType || "model";
+      const plan = await createComponentBundlePlan(id, type);
+      state.componentPlans[`bundle:${type}:${id}`] = plan;
+      render();
+      showToast("Đã lập gói dependency theo thứ tự server-owned; chưa có download.", "success");
+    } catch (error) { showToast(error.message || "Không thể lập gói dependency.", "error"); }
+    finally { componentBundleButton.disabled = false; }
+    return;
+  }
+  const componentBundleConfirm = event.target.closest("[data-component-bundle-confirm]");
+  if (componentBundleConfirm) {
+    componentBundleConfirm.disabled = true;
+    try {
+      const result = await confirmComponentBundle(componentBundleConfirm.dataset.componentBundleConfirm || "", true);
+      showToast(result.next_action || result.reason || "Gói dependency đã được xử lý.", result.status === "completed" ? "success" : "warning");
+      state.componentManager = await getComponents(); render();
+    } catch (error) { showToast(error.message || "Không thể xác nhận gói dependency.", "error"); }
+    finally { componentBundleConfirm.disabled = false; }
+    return;
+  }
+  const componentReuseButton = event.target.closest("[data-component-reuse]");
+  if (componentReuseButton) {
+    componentReuseButton.disabled = true;
+    try {
+      const id = componentReuseButton.dataset.componentReuse || "";
+      const type = componentReuseButton.dataset.componentType || "model";
+      const plan = await createComponentReusePlan(id, type);
+      state.componentPlans[`reuse:${type}:${id}`] = plan;
+      render();
+      showToast("Đã kiểm tra bản cài sẵn; chưa sao chép hoặc tải lại dữ liệu.", "success");
+    } catch (error) { showToast(error.message || "Không thể kiểm tra bản cài sẵn.", "error"); }
+    finally { componentReuseButton.disabled = false; }
+    return;
+  }
+  const componentReuseConfirm = event.target.closest("[data-component-reuse-confirm]");
+  if (componentReuseConfirm) {
+    componentReuseConfirm.disabled = true;
+    try {
+      const result = await confirmComponentReuse(componentReuseConfirm.dataset.componentReuseConfirm || "", true);
+      showToast(result.next_action || result.reason || "Đã xử lý reuse bản cài sẵn.", result.status === "completed" ? "success" : "warning");
+      state.componentManager = await getComponents(); render();
+    } catch (error) { showToast(error.message || "Không thể xác nhận reuse.", "error"); }
+    finally { componentReuseConfirm.disabled = false; }
+    return;
+  }
   const componentConfirm = event.target.closest("[data-component-confirm]");
   if (componentConfirm) {
     componentConfirm.disabled = true;
@@ -1153,6 +1225,17 @@ document.addEventListener("click", async (event) => {
       state.componentManager = await getComponents(); render();
     } catch (error) { showToast(error.message || "Không thể xác nhận kế hoạch.", "error"); }
     finally { componentConfirm.disabled = false; }
+    return;
+  }
+  const componentImportConfirm = event.target.closest("[data-component-import-confirm]");
+  if (componentImportConfirm) {
+    componentImportConfirm.disabled = true;
+    try {
+      const result = await confirmComponentImport(componentImportConfirm.dataset.componentImportConfirm || "", true);
+      showToast(result.next_action || result.reason || "Kế hoạch import đã được xử lý.", result.status === "completed" ? "success" : "warning");
+      state.componentManager = await getComponents(); render();
+    } catch (error) { showToast(error.message || "Không thể xác nhận import.", "error"); }
+    finally { componentImportConfirm.disabled = false; }
     return;
   }
   const maintenanceConfirm = event.target.closest("[data-component-maintenance-confirm]");

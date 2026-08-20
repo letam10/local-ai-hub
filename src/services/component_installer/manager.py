@@ -36,6 +36,7 @@ from .policy import (
 from .downloader import DownloadError, TrustedDownloader
 from .import_executor import ManualImportExecutor
 from .maintenance_executor import MaintenanceExecutor
+from .reuse_executor import ExistingInstallReuseExecutor
 from .receipts import source_identity, write_component_receipt
 
 
@@ -274,7 +275,7 @@ class ComponentInstaller:
             return {"status": "conflict", "code": "stale_install_plan", "plan_id": plan_id, "next_action": "Create a fresh plan."}
         if not internal["auto_install_supported"]:
             return {"status": "unavailable", "code": "trusted_source_metadata_required", "plan_id": plan_id, "execution": "not_run", "next_action": "Use a server-owned native manual import selection or complete trusted catalog metadata."}
-        dependency_block = next((item for item in internal.get("dependencies", []) if item.get("status") not in {"INSTALLED", "OPERATIONAL"}), None)
+        dependency_block = next((item for item in internal.get("dependencies", []) if item.get("status") not in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"}), None)
         if dependency_block is not None:
             return {"status": "unavailable", "code": "dependency_unavailable", "plan_id": plan_id, "execution": "not_run", "dependency": {key: dependency_block.get(key) for key in ("kind", "component_id", "status", "disposition")}, "next_action": "Review or install the exact server-owned dependency before confirming this bundle."}
         return self.apply_plan(plan_id, confirmed=True)
@@ -298,7 +299,7 @@ class ComponentInstaller:
             return {"status": "conflict", "code": "stale_install_plan", "plan_id": plan_id, "next_action": "Create a fresh plan."}
         if not plan.get("auto_install_supported"):
             return {"status": "unavailable", "code": "trusted_source_metadata_required", "plan_id": plan_id, "execution": "not_run", "next_action": "Use a server-owned native manual import selection or complete trusted catalog metadata."}
-        dependency_block = next((item for item in plan.get("dependencies", []) if item.get("status") not in {"INSTALLED", "OPERATIONAL"}), None)
+        dependency_block = next((item for item in plan.get("dependencies", []) if item.get("status") not in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"}), None)
         if dependency_block is not None:
             return {"status": "unavailable", "code": "dependency_unavailable", "plan_id": plan_id, "execution": "not_run", "dependency": {key: dependency_block.get(key) for key in ("kind", "component_id", "status", "disposition")}, "next_action": "Install or reuse the dependency before applying this bundle."}
         record = plan.get("record") if isinstance(plan.get("record"), Mapping) else {}
@@ -494,6 +495,43 @@ class ComponentInstaller:
         result["plan_id"] = plan_id
         if result.get("status") == "completed":
             self._selections.pop(str(selection.get("selection_id")), None)
+        return result
+
+    def plan_reuse(self, component_id: str, *, component_type: str = "model") -> dict[str, Any]:
+        """Plan a receipt-only reuse of a complete managed installation."""
+
+        component_id = validate_component_id(component_id)
+        if component_type not in {"model", "runtime"}:
+            raise InstallPlanError("invalid_component_type")
+        record = self._catalog_record(component_id, component_type)
+        state = self._inspect(component_id, component_type)
+        body = {
+            "schema_version": "component-reuse-plan.v1",
+            "component_id": component_id,
+            "component_type": component_type,
+            "catalog_fingerprint": self.model_manager.catalog_fingerprint if component_type == "model" else _state_fingerprint({"runtimes": self.runtime_manager._records}),
+            "expected_state_fingerprint": _state_fingerprint(state),
+            "current_status": state.get("status"),
+            "source": "existing_install_reuse",
+            "execution": "not_run",
+            "dry_run": True,
+        }
+        plan_id = f"reuse_plan_{secrets.token_hex(16)}"
+        fingerprint = plan_fingerprint(body)
+        self._plans[plan_id] = {**body, "plan_id": plan_id, "plan_fingerprint": fingerprint, "record": record}
+        return {**body, "plan_id": plan_id, "plan_fingerprint": fingerprint, "status": "planned", "next_action": "Confirm only if every catalog leaf is already present under the managed root."}
+
+    def confirm_reuse(self, plan_id: str, *, confirmed: bool = False) -> dict[str, Any]:
+        plan = self._plans.get(plan_id)
+        if not isinstance(plan, Mapping) or plan.get("schema_version") != "component-reuse-plan.v1":
+            return {"status": "error", "code": "unknown_reuse_plan", "execution": "not_run"}
+        if not confirmed:
+            return {"status": "waiting_confirmation", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
+        current = self._inspect(str(plan["component_id"]), str(plan["component_type"]))
+        if _state_fingerprint(current) != plan.get("expected_state_fingerprint"):
+            return {"status": "conflict", "code": "stale_reuse_plan", "plan_id": plan_id, "execution": "not_run", "next_action": "Create a fresh existing-install reuse plan."}
+        result = ExistingInstallReuseExecutor(paths=self.paths, manager=self).apply(plan, confirmed=True)
+        result["plan_id"] = plan_id
         return result
 
     def plan_maintenance(self, component_id: str, *, action: str) -> dict[str, Any]:

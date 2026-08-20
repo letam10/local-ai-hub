@@ -19,6 +19,15 @@ manual_import:
   selection: opaque_short_lived_native_token
   destination: managed_models_root
   overwrite_existing: false
+composite_bundle:
+  owner: src/services/component_installer/bundle.py
+  graph: catalog_owned_runtime_then_model
+  apply: ordered_child_plans_only
+  shared_dependency_policy: deduplicate_and_preserve_referenced
+existing_install_reuse:
+  owner: src/services/component_installer/reuse_executor.py
+  writes: component_install_receipts.v2_only
+  copies_or_downloads: false
 maintenance:
   owner: src/services/component_installer/maintenance_executor.py
   actions: [repair, update, uninstall]

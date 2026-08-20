@@ -100,6 +100,41 @@ def import_confirm(request: ApiRequest, context: ApiContext, params: Mapping[str
     return ApiResponse(200 if result.get("status") not in {"invalid", "error", "conflict"} else 409, result)
 
 
+def bundle_plan(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    body = request.json(strict=True)
+    if set(body) - {"component_id", "component_type", "variant"} or not isinstance(body.get("component_id"), str) or body.get("component_type") not in {"model", "runtime"} or (body.get("variant") is not None and not isinstance(body.get("variant"), str)):
+        return ApiResponse(400, {"status": "invalid", "error": "component_bundle_payload_invalid", "execution": "not_run", "dry_run": True})
+    return ApiResponse(200, context.call("component_plan_bundle", body["component_id"], component_type=body["component_type"], variant=body.get("variant") or "default"))
+
+
+def bundle_lookup(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    value = context.call("component_bundle_lookup", params["plan_id"])
+    return ApiResponse(200 if value else 404, value or {"status": "error", "error": "unknown_component_bundle_plan"})
+
+
+def bundle_confirm(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    body = request.json(strict=True)
+    if set(body) != {"confirmed"} or type(body.get("confirmed")) is not bool:
+        return ApiResponse(400, {"status": "invalid", "error": "component_confirmation_invalid", "execution": "not_run", "dry_run": True})
+    result = context.call("component_confirm_bundle", params["plan_id"], confirmed=body["confirmed"])
+    return ApiResponse(200 if result.get("status") not in {"invalid", "error", "conflict"} else 409, result)
+
+
+def reuse_plan(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    body = request.json(strict=True)
+    if set(body) - {"component_id", "component_type"} or not isinstance(body.get("component_id"), str) or body.get("component_type", "model") not in {"model", "runtime"}:
+        return ApiResponse(400, {"status": "invalid", "error": "component_reuse_payload_invalid", "execution": "not_run", "dry_run": True})
+    return ApiResponse(200, context.call("component_plan_reuse", body["component_id"], component_type=body.get("component_type", "model")))
+
+
+def reuse_confirm(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    body = request.json(strict=True)
+    if set(body) != {"confirmed"} or type(body.get("confirmed")) is not bool:
+        return ApiResponse(400, {"status": "invalid", "error": "component_confirmation_invalid", "execution": "not_run", "dry_run": True})
+    result = context.call("component_confirm_reuse", params["plan_id"], confirmed=body["confirmed"])
+    return ApiResponse(200 if result.get("status") not in {"invalid", "error", "conflict"} else 409, result)
+
+
 def action_plan(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
     body = request.json(strict=True)
     action = params.get("action")
@@ -121,6 +156,11 @@ def register(router: Router) -> None:
     router.register(route_id="components.verify_plan", method="POST", path="/api/components/verify/plan", domain="components", owner=owner, handler=plan_verify)
     router.register(route_id="components.import_plan", method="POST", path="/api/components/import/plan", domain="components", owner=owner, handler=import_plan)
     router.register(route_id="components.import_confirm", method="POST", path="/api/components/import/confirm", domain="components", owner=owner, handler=import_confirm)
+    router.register(route_id="components.bundle_plan", method="POST", path="/api/components/bundles/plan", domain="components", owner=owner, handler=bundle_plan)
+    router.register(route_id="components.bundle_lookup", method="GET", path="/api/components/bundles/{plan_id}", domain="components", owner=owner, handler=bundle_lookup)
+    router.register(route_id="components.bundle_confirm", method="POST", path="/api/components/bundles/{plan_id}/confirm", domain="components", owner=owner, handler=bundle_confirm)
+    router.register(route_id="components.reuse_plan", method="POST", path="/api/components/reuse/plan", domain="components", owner=owner, handler=reuse_plan)
+    router.register(route_id="components.reuse_confirm", method="POST", path="/api/components/reuse/{plan_id}/confirm", domain="components", owner=owner, handler=reuse_confirm)
     router.register(route_id="components.maintenance_plan", method="POST", path="/api/components/maintenance/plan", domain="components", owner=owner, handler=maintenance_plan)
     for action in ("repair", "update", "uninstall"):
         router.register(route_id=f"components.{action}_plan", method="POST", path=f"/api/components/{action}/plan", domain="components", owner=owner, handler=action_plan)

@@ -62,6 +62,21 @@ Existing targets are never overwritten. Successful imports write a path-free
 `component-install-receipts.v2` record with `source=manual_import` and state
 `INSTALLED_UNVERIFIED` until the real adapter verification passes.
 
+The Components page also exposes a composite bundle plan.  A model request is
+expanded into the reviewed runtime/dependency graph in dependency order; shared
+dependencies are counted once and already-installed leaves are marked
+`reuse_existing`.  Confirmation delegates each step to the same server-owned
+component installer used by the normal UI route.  It never accepts a client
+path, URL, command or executable.  A complete managed installation can be
+registered separately with the receipt-only Existing Install Reuse action; it
+does not copy, redownload or overwrite bytes.
+
+The native desktop bridge exposes the picker under a nested
+`component_import.select_source` namespace.  It stores the selected file/folder
+server-side and returns only the short-lived selection ID to the WebView.  A
+browser-only session therefore cannot manufacture a local path or bypass the
+catalog validation.
+
 Repair can refresh a receipt when all owned leaves remain present and safe. If a
 leaf is missing and no trusted candidate is available, repair stops with
 `repair_source_required`; it does not fabricate or delete files. Uninstall is

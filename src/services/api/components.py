@@ -16,10 +16,12 @@ import threading
 from typing import Any
 
 from src.services.component_installer import ComponentInstaller, InstallPlanError, SelectionError
+from src.services.component_installer.bundle import ComponentBundleService
 
 
 _lock = threading.RLock()
 _manager: ComponentInstaller | None = None
+_bundle: ComponentBundleService | None = None
 
 
 def component_installer() -> ComponentInstaller:
@@ -28,6 +30,14 @@ def component_installer() -> ComponentInstaller:
         if _manager is None:
             _manager = ComponentInstaller()
         return _manager
+
+
+def component_bundle_service() -> ComponentBundleService:
+    global _bundle
+    with _lock:
+        if _bundle is None:
+            _bundle = ComponentBundleService(component_installer())
+        return _bundle
 
 
 def _public_error(code: str, *, plan_id: str | None = None) -> dict[str, Any]:
@@ -68,6 +78,26 @@ def confirm_import(plan_id: str, *, confirmed: bool) -> dict[str, Any]:
     return component_installer().confirm_import(plan_id, confirmed=confirmed)
 
 
+def plan_bundle(component_id: str, *, component_type: str, variant: str = "default") -> dict[str, Any]:
+    return component_bundle_service().plan(component_id, component_type=component_type, variant=variant)
+
+
+def lookup_bundle(plan_id: str) -> dict[str, Any] | None:
+    return component_bundle_service().lookup(plan_id)
+
+
+def confirm_bundle(plan_id: str, *, confirmed: bool) -> dict[str, Any]:
+    return component_bundle_service().confirm(plan_id, confirmed=confirmed)
+
+
+def plan_reuse(component_id: str, *, component_type: str = "model") -> dict[str, Any]:
+    return component_installer().plan_reuse(component_id, component_type=component_type)
+
+
+def confirm_reuse(plan_id: str, *, confirmed: bool) -> dict[str, Any]:
+    return component_installer().confirm_reuse(plan_id, confirmed=confirmed)
+
+
 def plan_verify(component_id: str, *, component_type: str) -> dict[str, Any]:
     return component_installer().plan_verify(component_id, component_type=component_type)
 
@@ -98,6 +128,6 @@ def handle_error(exc: Exception, *, plan_id: str | None = None) -> tuple[int, di
 
 __all__ = [
     "component_installer", "confirm_import", "confirm_install", "confirm_maintenance", "detail",
-    "handle_error", "lookup_job", "lookup_plan", "plan_import", "plan_install", "plan_maintenance",
+    "component_bundle_service", "confirm_bundle", "confirm_reuse", "handle_error", "lookup_bundle", "lookup_job", "lookup_plan", "plan_bundle", "plan_import", "plan_install", "plan_maintenance", "plan_reuse",
     "plan_verify", "snapshot",
 ]
