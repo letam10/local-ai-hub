@@ -2,8 +2,31 @@
 
 This audit records the reviewed disposition of the current 14 model records
 and 15 runtime records.  It is intentionally conservative: `AUTO_INSTALL_READY`
-means the public plan/confirm path has a real bounded executor and immutable
-metadata.  A source URL alone never upgrades a record.
+is absent from all model records and is retained only for the reviewed FFmpeg
+runtime metadata.  A source URL, revision string, local receipt, or catalog
+record alone never upgrades a capability to operational.
+
+## Closed v2 contract
+
+`v7-production-catalog.v2` has exactly 14 fixed model IDs and 15 fixed runtime
+IDs.  The top-level catalog version is bounded, every record is closed against
+unknown properties, and each model `runtime_id` must reference one of the fixed
+runtime IDs.  The loader rejects duplicate JSON keys, non-finite numbers,
+duplicate/missing/unknown IDs, dangling references, unsafe relative leaves,
+credential-bearing URLs, and mismatched primary/fallback source identities.
+
+Every record carries explicit provider/kind/version/revision, primary source
+or `null`, trusted fallback sources, source identity and verification state,
+latest upstream/supported revisions, license/authentication state and update
+parts.  The loader never fills these fields from `revision` or silently turns a
+legacy v1 document into v2.  Legacy v1 loading remains an explicit compatibility
+path for existing static callers.
+
+Verified leaves must carry a positive `size_bytes` and lowercase 64-hex
+`sha256`.  An unverified leaf must omit both fields; `size_bytes: 0` is never
+used as an unknown sentinel.  Catalog loading and snapshot composition are
+read-only, `execution: not_run`, `dry_run: true`, and perform no network,
+process, model or runtime discovery action.
 
 ## Models
 

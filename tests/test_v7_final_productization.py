@@ -36,8 +36,8 @@ class FinalProductizationTests(unittest.TestCase):
     def test_production_catalog_lists_all_supported_records_and_no_raw_paths(self) -> None:
         catalog = ProductionCatalog(paths=self.paths)
         snapshot = catalog.snapshot()
-        self.assertGreaterEqual(snapshot["counts"]["models"], 13)
-        self.assertGreaterEqual(snapshot["counts"]["runtimes"], 14)
+        self.assertEqual(snapshot["counts"]["models"], 14)
+        self.assertEqual(snapshot["counts"]["runtimes"], 15)
         encoded = json.dumps(snapshot, ensure_ascii=True)
         self.assertNotIn(str(self.data), encoded)
         self.assertNotIn("official_source", encoded)

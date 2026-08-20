@@ -25,8 +25,9 @@ class V7FinalArchitectureTests(unittest.TestCase):
         config = ROOT / "Config/v7_production_catalog.example.json"
         raw = json.loads(config.read_text(encoding="utf-8"))
         self.assertEqual(raw["schema_version"], "v7-production-catalog.v2")
-        self.assertGreaterEqual(len(raw["models"]), 13)
-        self.assertGreaterEqual(len(raw["runtimes"]), 14)
+        self.assertEqual(raw["catalog_version"], "2026.08.21")
+        self.assertEqual(len(raw["models"]), 14)
+        self.assertEqual(len(raw["runtimes"]), 15)
         for item in [*raw["models"], *raw["runtimes"]]:
             self.assertIn("disposition", item)
             self.assertNotIn("download_url", item)
@@ -65,8 +66,8 @@ class V7FinalArchitectureTests(unittest.TestCase):
 
     def test_release_config_excludes_machine_data(self) -> None:
         script = (ROOT / "scripts/build_installer.py").read_text(encoding="utf-8")
-        for name in ("Models", "Environments", "runtime", "Output", "Reports"):
-            self.assertIn(name, script)
+        self.assertIn("RELEASE_ROOTS", script)
+        self.assertIn("release_file_names", script)
         self.assertNotIn("rglob('*')", script)
         installer = (ROOT / "distribution/installer.iss").read_text(encoding="utf-8")
         self.assertIn('{autopf}\\Local AI Hub', installer)
