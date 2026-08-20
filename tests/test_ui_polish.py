@@ -94,6 +94,7 @@ class UiPolishTests(unittest.TestCase):
         self.assertIn("focusMainContent();", self.app)
         self.assertIn("if (event.key === \"Escape\"", self.app)
         self.assertIn("closeArtifactPreview();", self.app)
+        self.assertEqual(self.app.count("let artifactPreviewOpener = null;"), 1)
 
     def test_desktop_shortcut_fallback_requires_eligible_gui_python(self) -> None:
         shortcut_script = (ROOT / "scripts" / "update_managed_shortcuts.ps1").read_text(encoding="utf-8")

@@ -387,7 +387,6 @@ const showToast = (message, kind = "") => {
   window.setTimeout(() => toast.remove(), 5200);
 };
 
-let artifactPreviewOpener = null;
 const closeArtifactPreview = ({ restoreFocus = true } = {}) => {
   const opener = artifactPreviewOpener;
   artifactPreviewLayer?.replaceChildren();
