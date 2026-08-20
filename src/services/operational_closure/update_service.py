@@ -139,6 +139,26 @@ class UpdateResolver:
     def _local(self, component_id: str, kind: str) -> Mapping[str, Any]:
         return self.catalog.inspect_model(component_id) if kind == "model" else self.catalog.inspect_runtime(component_id)
 
+    def _source_binding(self, component_id: str, kind: str, record: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Build the current catalog binding; plans never supply this context."""
+
+        catalog_version = getattr(self.catalog, "catalog_version", None)
+        catalog_version = catalog_version if isinstance(catalog_version, str) else None
+        catalog_schema = getattr(self.catalog, "catalog_schema_version", None)
+        catalog_fingerprint = getattr(self.catalog, "fingerprint", None)
+        revision = record.get("revision") if isinstance(record.get("revision"), str) else None
+        return {
+            "catalog_schema": catalog_schema,
+            "catalog_version": catalog_version,
+            "catalog_revision": catalog_version or revision,
+            "catalog_fingerprint": catalog_fingerprint,
+            "source_identity": record.get("source_identity") if isinstance(record.get("source_identity"), str) else None,
+            "component_id": component_id,
+            "component_type": kind,
+            "record_revision": revision,
+            "install_strategy": record.get("install_strategy") if isinstance(record.get("install_strategy"), str) else None,
+        }
+
     def _receipt(self, component_id: str) -> Mapping[str, Any] | None:
         for filename in ("component_install_receipts.json", "model_install_receipts.json", "runtime_install_receipts.json"):
             try:
@@ -151,8 +171,8 @@ class UpdateResolver:
                 return item
         return None
 
-    def _source_for(self, component_id: str, record: Mapping[str, Any], *, force: bool) -> dict[str, Any]:
-        return self.sources.check(component_id, record, force=force)
+    def _source_for(self, component_id: str, record: Mapping[str, Any], *, kind: str, force: bool) -> dict[str, Any]:
+        return self.sources.check(component_id, record, force=force, binding=self._source_binding(component_id, kind, record))
 
     @staticmethod
     def _revisions(record: Mapping[str, Any], receipt: Mapping[str, Any] | None) -> tuple[str, str, str]:
@@ -180,7 +200,7 @@ class UpdateResolver:
         kind, record = self._record(component_id)
         local = self._local(component_id, kind)
         receipt = self._receipt(component_id)
-        source = self._source_for(component_id, record, force=force_source_check)
+        source = self._source_for(component_id, record, kind=kind, force=force_source_check)
         installed, upstream, supported = self._revisions(record, receipt)
         status = self._status(str(local.get("status", "NOT_INSTALLED")), source, installed, upstream, supported)
         update_parts = record.get("update_parts") if isinstance(record.get("update_parts"), list) else []
@@ -197,7 +217,7 @@ class UpdateResolver:
             "latest_supported_revision": supported,
             "changed_parts": sorted({str(item) for item in update_parts if item in {"backend", "runtime", "dependencies", "model"}}),
             "download_required": status == "UPDATE_AVAILABLE",
-            "source": source_status_projection(source),
+            "source": source_status_projection(source, allow_public=True),
             "rollback_available": bool(receipt and receipt.get("previous_version")),
             "execution": "completed" if force_source_check else "not_run",
             "dry_run": not force_source_check,

@@ -661,6 +661,23 @@ class ProductionCatalog:
             install_strategy=record.get("install_strategy"),
         )
 
+    def _source_availability_binding(self, component_id: str, record: Mapping[str, Any], *, component_type: str) -> dict[str, Any]:
+        """Build the current server-owned source/cache binding for one record."""
+
+        catalog_version = self.catalog_version if isinstance(self.catalog_version, str) else None
+        revision = record.get("revision") if isinstance(record.get("revision"), str) else None
+        return {
+            "catalog_schema": self.catalog_schema_version,
+            "catalog_version": catalog_version,
+            "catalog_revision": catalog_version or revision,
+            "catalog_fingerprint": self.fingerprint,
+            "source_identity": record.get("source_identity") if isinstance(record.get("source_identity"), str) else None,
+            "component_id": component_id,
+            "component_type": component_type,
+            "record_revision": revision,
+            "install_strategy": record.get("install_strategy") if isinstance(record.get("install_strategy"), str) else None,
+        }
+
     def _size_cache_path(self) -> Path:
         return self.paths.config_root / "model_size_cache.json"
 
@@ -709,7 +726,7 @@ class ProductionCatalog:
         cache = self._size_cache().get(model_id) if status == "INSTALLED" else None
         installed_size = cache.get("size_bytes") if isinstance(cache, Mapping) and isinstance(cache.get("size_bytes"), int) else self._receipt_size(model_id) if status == "INSTALLED" else None
         projected = {key: value for key, value in record.items() if key not in {"official_source", "primary_source", "trusted_fallback_sources", "license_url", "files", "update_candidate"}}
-        projected.update({"status": status, "execution": "not_run", "operational": False, "leaves": leaves, "installed_size_bytes": installed_size, "expected_download_size_bytes": record["estimated_download_size"] or None, "expected_disk_size_bytes": record["estimated_disk_size"] or None, "source_availability": self.source_availability.cached(model_id), "reason": reason, "next_action": action})
+        projected.update({"status": status, "execution": "not_run", "operational": False, "leaves": leaves, "installed_size_bytes": installed_size, "expected_download_size_bytes": record["estimated_download_size"] or None, "expected_disk_size_bytes": record["estimated_disk_size"] or None, "source_availability": self.source_availability.cached(model_id, record, binding=self._source_availability_binding(model_id, record, component_type="model")), "reason": reason, "next_action": action})
         if installed_size is None and status == "INSTALLED":
             projected["size_label"] = "Size unavailable"
         elif installed_size is not None:
@@ -742,7 +759,7 @@ class ProductionCatalog:
             reason = "No required runtime leaf was observed at the managed root."
         binding = self._runtime_evidence_binding(runtime_id, record)
         projected = {key: value for key, value in record.items() if key not in {"official_source", "primary_source", "trusted_fallback_sources", "update_candidate"}}
-        projected.update({"status": status, "execution": "not_run", "dry_run": True, "operational": status == "OPERATIONAL", "runtime_fingerprint": runtime_fingerprint(self.paths, record, binding=binding), "leaves": leaves, "source_availability": self.source_availability.cached(runtime_id), "reason": reason, "next_action": "Use Verify and run the bounded runtime smoke before operational promotion." if status != "OPERATIONAL" else "Runtime is operational under the last matching bounded evidence."})
+        projected.update({"status": status, "execution": "not_run", "dry_run": True, "operational": status == "OPERATIONAL", "runtime_fingerprint": runtime_fingerprint(self.paths, record, binding=binding), "leaves": leaves, "source_availability": self.source_availability.cached(runtime_id, record, binding=self._source_availability_binding(runtime_id, record, component_type="runtime")), "reason": reason, "next_action": "Use Verify and run the bounded runtime smoke before operational promotion." if status != "OPERATIONAL" else "Runtime is operational under the last matching bounded evidence."})
         return projected
 
     def snapshot(self, *, query: str = "", category: str = "", installed: bool | None = None) -> dict[str, Any]:
