@@ -279,6 +279,8 @@ class V5EndToEndProductizationTests(unittest.TestCase):
         adapter = (ROOT / "src" / "services" / "api" / "v5_productization.py").read_text(encoding="utf-8")
         ui = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
         pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
+        shared = (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
+        renderers = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src" / "ui" / "features").rglob("*.js"))
         for marker in ("/api/workflow-library", "/api/durable-jobs", "capability_control_plane", "project_product_surface", "storage_summary", '"storage": product_surface["storage"]'):
             self.assertIn(marker, api)
         bootstrap = api[api.index("def _bootstrap_payload"):api.index("\ndef _preset_summaries", api.index("def _bootstrap_payload"))]
@@ -289,19 +291,21 @@ class V5EndToEndProductizationTests(unittest.TestCase):
         for marker in ("getCapabilities", "getWorkflowLibrary", "state.capabilities", "workflowLibraryAdapter"):
             self.assertIn(marker, ui)
         for marker in ("source.capabilities", "module_manager", "dashboard-page", "nextAction"):
-            self.assertIn(marker, pages)
+            self.assertIn(marker, pages + shared + renderers)
         self.assertNotIn("subprocess", adapter)
         self.assertNotIn("fetch(", adapter)
 
     def test_job_recovery_actions_keep_durable_endpoint_separate(self) -> None:
         pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
+        shared = (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
+        renderers = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src" / "ui" / "features").rglob("*.js"))
         app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
-        self.assertIn('const durable = job.source === "durable";', pages)
-        self.assertIn('data-resume-durable-job="${escapeHtml(job.id)}"', pages)
-        self.assertIn('data-resume-job="${escapeHtml(job.id)}"', pages)
+        self.assertIn('const durable = job.source === "durable";', renderers)
+        self.assertIn('data-resume-durable-job="${escapeHtml(job.id)}"', renderers)
+        self.assertIn('data-resume-job="${escapeHtml(job.id)}"', renderers)
         self.assertIn("[data-resume-durable-job]", app)
         self.assertIn("resumeDurableJob", app)
-        durable_branch = pages[pages.index('data-resume-durable-job='):pages.index('data-resume-job=')]
+        durable_branch = renderers[renderers.index('data-resume-durable-job='):renderers.index('data-resume-job=')]
         self.assertNotIn("data-resume-job", durable_branch)
 
 

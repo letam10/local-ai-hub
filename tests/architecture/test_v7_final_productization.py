@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import unittest
 
 from src.services.productization.catalog import ProductionCatalog
@@ -40,6 +41,23 @@ class V7FinalArchitectureTests(unittest.TestCase):
         self.assertIn("confirmed", setup)
         self.assertIn("manager_executor_required", lifecycle)
         self.assertIn("preserve_existing", lifecycle)
+
+    def test_ui_facade_and_feature_ownership_boundary(self) -> None:
+        pages = ROOT / "src/ui/pages.js"
+        shared = ROOT / "src/ui/shared/rendering.js"
+        self.assertTrue(shared.is_file())
+        self.assertLess(pages.stat().st_size, 20_000, "pages.js must remain a thin composition facade")
+        ownership = (ROOT / "architecture/ui_features.yaml").read_text(encoding="utf-8")
+        feature_ids = re.findall(r"^\s*- id: ([a-z0-9_]+)\s*$", ownership, re.MULTILINE)
+        self.assertEqual(len(feature_ids), len(set(feature_ids)))
+        for required in ("api_dependencies:", "state_owner:", "styles:", "i18n_namespace:", "tests:", "related_services:"):
+            self.assertIn(required, ownership)
+        for path in (ROOT / "src/ui/features").rglob("*.js"):
+            source = path.read_text(encoding="utf-8")
+            self.assertNotRegex(source, r"(?i)from\s+[\"'](?:fs|node:fs|child_process|node:child_process)")
+            self.assertNotIn("require(\"fs\")", source)
+            self.assertNotIn("D:\\", source)
+            self.assertNotIn("C:\\Users", source)
 
     def test_release_config_excludes_machine_data(self) -> None:
         script = (ROOT / "scripts/build_installer.py").read_text(encoding="utf-8")

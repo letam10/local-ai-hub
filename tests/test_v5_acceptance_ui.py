@@ -104,7 +104,7 @@ class V5AcceptanceUiTests(unittest.TestCase):
         self.assertIn('preload = "metadata"', preview)
         for forbidden in ("fetch(", "arrayBuffer()", "FileReader", "Blob", "URL.createObjectURL"):
             self.assertNotIn(forbidden, preview)
-        pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
+        pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8") + (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
         self.assertIn("data-artifact-meta", pages)
         self.assertIn("data-artifact-provenance", pages)
         self.assertIn("data-artifact-mask", pages)

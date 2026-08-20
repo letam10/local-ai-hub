@@ -134,7 +134,7 @@ class DashboardInformationLayoutTests(unittest.TestCase):
 
     def test_dashboard_routes_are_existing_and_no_new_api(self):
         source = dashboard_source()
-        full_source = PAGES.read_text(encoding="utf-8")
+        full_source = PAGES.read_text(encoding="utf-8") + (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
         navigation_source = full_source.split("function renderDashboardLegacy", 1)[0]
         existing_routes = set(re.findall(r'\["([a-z0-9-]+)",\s*"[^"]+"', navigation_source))
         rendered_routes = set(re.findall(r'data-route="([^"]+)"', render_dashboard({})))

@@ -7,14 +7,15 @@ catalog is data-driven, fixed-root and path-free at the public boundary.
 ## Ownership
 
 `src/ui/features/` owns feature presentation; `src/ui/core/` owns bootstrap and
-feature registration; `src/services/productization/` composes the production
+feature registration; `src/ui/shared/rendering.js` owns path-free sanitizers,
+formatters and shared render primitives; `src/services/productization/` composes the production
 catalog and one-click lifecycle; `src/services/model_manager/`,
 `runtime_manager/` and `component_installer/` remain the single execution
 implementations for owner and clean-machine fixtures.
 
-`pages.js` and `app.js` remain compatibility facades during the strangler
-migration. They may compose features but must not grow new feature business
-logic. New catalog data enters through `/api/productization/catalog` and
+`pages.js` is now a small compatibility composition facade and `app.js` owns
+bootstrap/navigation/global lifecycle. They may compose features but must not
+grow new feature business logic. New catalog data enters through `/api/productization/catalog` and
 opaque plans through `/api/productization/plans`.
 
 ## State truth

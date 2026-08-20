@@ -38,7 +38,7 @@ class Phase2ApiUiTests(unittest.TestCase):
     def test_public_api_and_ui_are_component_owned_and_path_free(self) -> None:
         server = (ROOT / "src/services/api/api_server.py").read_text(encoding="utf-8")
         client = (ROOT / "src/ui/api.js").read_text(encoding="utf-8")
-        pages = (ROOT / "src/ui/pages.js").read_text(encoding="utf-8")
+        pages = (ROOT / "src/ui/pages.js").read_text(encoding="utf-8") + (ROOT / "src/ui/shared/rendering.js").read_text(encoding="utf-8")
         app = (ROOT / "src/ui/app.js").read_text(encoding="utf-8")
         for route in ("/api/components", "/api/components/install/plan", "/api/components/import/plan", "/api/components/verify/plan", "/api/components/maintenance/plan"):
             self.assertIn(route, server)

@@ -22,6 +22,8 @@ class V5JobRecoveryArtifactUiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
+        cls.shared_renderer = (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
+        cls.jobs_renderer = (ROOT / "src" / "ui" / "features" / "jobs" / "render.js").read_text(encoding="utf-8")
         cls.app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
         cls.styles = (ROOT / "src" / "ui" / "styles.css").read_text(encoding="utf-8")
 
@@ -102,11 +104,11 @@ process.stdout.write(html);
         self.assertEqual(durable_response["execution"], "not_run")
 
     def test_productization_jobs_are_primary_and_normalized_without_unknown_stringification(self) -> None:
-        recovery_slice = self.pages[self.pages.index("export const jobRecoverySnapshot"):self.pages.index("const readinessModuleDetails")]
+        recovery_slice = self.shared_renderer[self.shared_renderer.index("const jobRecoverySnapshot"):self.shared_renderer.index("const readinessModuleDetails")]
         for marker in ("productJobs.records", "productJobs.counts", "hasCanonical", "productization.jobs", "safeHotJobDetail"):
             self.assertIn(marker, recovery_slice)
         for marker in ("const safeJobArtifacts", "const safeJobProvenance"):
-            self.assertIn(marker, self.pages)
+            self.assertIn(marker, self.shared_renderer)
         self.assertIn("source: jobSource", recovery_slice)
         self.assertNotIn("JSON.stringify", recovery_slice)
         self.assertNotIn("Object.values", recovery_slice)
@@ -159,10 +161,10 @@ process.stdout.write(html);
         self.assertNotIn("JSON.stringify(result", action_slice)
         for marker in ("job-recovery-counts", "job-recovery-detail", "job-action-status", "focus-visible", "overflow-wrap", "@media (max-width: 980px)"):
             self.assertIn(marker, self.styles)
-        pages_actions = self.pages[self.pages.index("function renderJobs"):self.pages.index("function renderModels")]
-        self.assertIn('const durable = job.source === "durable";', pages_actions)
-        self.assertIn('job.resumable === true', pages_actions)
-        self.assertNotIn("job.lifecycle || job.status", pages_actions)
+        jobs_actions = self.jobs_renderer
+        self.assertIn('const durable = job.source === "durable";', jobs_actions)
+        self.assertIn('job.resumable === true', jobs_actions)
+        self.assertNotIn("job.lifecycle || job.status", jobs_actions)
 
     def test_artifact_preview_and_fixture_transport_remain_bounded(self) -> None:
         app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")

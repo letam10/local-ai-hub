@@ -18,6 +18,8 @@ class V5ReadinessModuleUiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
+        cls.shared_renderer = (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
+        cls.settings_renderer = (ROOT / "src" / "ui" / "features" / "settings" / "render.js").read_text(encoding="utf-8")
         cls.app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
 
     def setUp(self) -> None:
@@ -57,18 +59,18 @@ class V5ReadinessModuleUiTests(unittest.TestCase):
         self.assertNotRegex(encoded, r"(?i)([a-z]:[\\/]|api[_-]?key|password|secret|token)\s*[:=]")
 
     def test_readiness_projection_uses_product_surface_and_explicit_resource_fields(self) -> None:
-        module_slice = self.pages[self.pages.index("const safeReadinessModules"):self.pages.index("const safeStorageVolumes")]
+        module_slice = self.shared_renderer[self.shared_renderer.index("const safeReadinessModules"):self.shared_renderer.index("const safeStorageVolumes")]
         self.assertIn("productization.capabilities", module_slice)
         self.assertIn("record.component", module_slice)
         self.assertIn("record.provider", module_slice)
         self.assertNotIn("registry.records", module_slice)
-        resource_slice = self.pages[self.pages.index("const safeResourcePlan"):self.pages.index("const readinessSnapshot")]
+        resource_slice = self.shared_renderer[self.shared_renderer.index("const safeResourcePlan"):self.shared_renderer.index("const readinessSnapshot")]
         for marker in ("resource_plan", "target_gpu", "physical", "concurrent", "errors", "actions"):
             self.assertIn(marker, resource_slice)
         self.assertNotIn("JSON.stringify", resource_slice)
 
     def test_settings_is_server_snapshot_without_install_or_runtime_controls(self) -> None:
-        settings_slice = self.pages[self.pages.index("function renderSettings"):self.pages.index("export function renderPage")]
+        settings_slice = self.settings_renderer
         for marker in ("Readiness & Module Plan", 'data-readiness-source="server-snapshot"', "dry_run", "Install / repair / uninstall", "Reason", "Next action"):
             self.assertIn(marker, settings_slice)
         self.assertNotRegex(settings_slice, r"data-(?:install|repair|uninstall)")

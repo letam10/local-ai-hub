@@ -12,6 +12,8 @@ class V5WorkspaceUiContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
         cls.pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
+        cls.shared_renderer = (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
+        cls.renderers = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src" / "ui" / "features").rglob("*.js"))
         cls.nodes = (ROOT / "src" / "ui" / "node_studio.js").read_text(encoding="utf-8")
         cls.adapter = (ROOT / "src" / "ui" / "workflow_library.js").read_text(encoding="utf-8")
         cls.styles = (ROOT / "src" / "ui" / "styles.css").read_text(encoding="utf-8")
@@ -21,7 +23,7 @@ class V5WorkspaceUiContractTests(unittest.TestCase):
     def test_dashboard_and_node_studio_show_truthful_library_state(self) -> None:
         self.assertIn("workflowLibrary", self.app)
         self.assertIn("workflowLibraryState", self.pages)
-        self.assertIn("data-status=", self.pages)
+        self.assertIn("data-status=", self.shared_renderer + self.renderers)
         self.assertIn("data-workflow-library-status", self.nodes)
         self.assertIn("V5-D", self.adapter)
         self.assertIn("partial", self.adapter)
@@ -39,7 +41,7 @@ class V5WorkspaceUiContractTests(unittest.TestCase):
         for marker in ("aria-label", "data-graph-search", "data-graph-inspector", "data-graph-minimap", "data-graph-action"):
             self.assertIn(marker, self.nodes)
         self.assertIn("workflow-library-state", self.styles)
-        self.assertIn("workflowLibraryHtml", self.pages)
+        self.assertIn("workflowLibraryState", self.shared_renderer)
 
     def test_product_version_and_docs_are_v5(self) -> None:
         self.assertIn('PRODUCT_VERSION = "7.0.0"', self.version)

@@ -22,6 +22,7 @@ class UiRefreshIntegrationTests(unittest.TestCase):
         cls.css = CSS_PATH.read_text(encoding="utf-8")
         cls.app = APP_PATH.read_text(encoding="utf-8")
         cls.pages = PAGES_PATH.read_text(encoding="utf-8")
+        cls.pages += "\n" + (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
         cls.dashboard = DASHBOARD_PATH.read_text(encoding="utf-8")
 
     def test_sidebar_toggle_targets_the_owned_aside(self) -> None:

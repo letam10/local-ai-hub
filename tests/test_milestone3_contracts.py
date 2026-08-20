@@ -14,6 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 class Milestone3ContractTests(unittest.TestCase):
     def test_unified_state_and_artifact_actions_are_in_hub(self) -> None:
         pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
+        shared = (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
+        feature_sources = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src" / "ui" / "features").rglob("*.js"))
+        render_sources = pages + "\n" + shared + "\n" + feature_sources
         app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
         node = (ROOT / "src" / "ui" / "node_studio.js").read_text(encoding="utf-8")
         css = (ROOT / "src" / "ui" / "styles.css").read_text(encoding="utf-8")
@@ -25,7 +28,7 @@ class Milestone3ContractTests(unittest.TestCase):
             "provenanceList",
             "next_action",
         ):
-            self.assertIn(token, pages)
+            self.assertIn(token, render_sources)
         for token in ("global-state", "data-refresh-api", "artifact-preview-dialog", "sidebar-toggle"):
             self.assertIn(token, app)
         for token in (
