@@ -244,6 +244,17 @@ class V7SourceAndUpdateTests(unittest.TestCase):
         self.assertFalse(result["auto_apply"])
         self.assertTrue(result["dry_run"])
 
+    def test_check_all_targets_only_selected_or_installed_components(self) -> None:
+        model_root = self.paths.models_root / "demo-model"
+        model_root.mkdir(parents=True)
+        (model_root / "demo.bin").write_bytes(b"local")
+        calls: list[str] = []
+        service = SourceAvailabilityService(paths=self.paths)
+        resolver = UpdateResolver(paths=self.paths, catalog=self.catalog, source_service=service)
+        result = resolver.check_all(force_source_check=True)
+        self.assertEqual(result["checked_count"], 1)
+        self.assertEqual(result["records"][0]["component_id"], "demo-model")
+
     def test_manual_import_publishes_catalog_bound_receipt_without_overwrite(self) -> None:
         model_catalog = self.app / "Config" / "model_catalog.json"
         model_catalog.write_text(json.dumps({

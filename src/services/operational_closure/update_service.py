@@ -205,7 +205,16 @@ class UpdateResolver:
         }
 
     def check_all(self, *, force_source_check: bool = False) -> dict[str, Any]:
-        ids = sorted(set(self.catalog.models) | set(self.catalog.runtimes))[:32]
+        # Check only configured/installed catalog components.  A global check
+        # must not fan out to every optional model in the catalog or random
+        # Internet records that the owner never selected.
+        ids: list[str] = []
+        for component_id in sorted(set(self.catalog.models) | set(self.catalog.runtimes)):
+            kind, _record = self._record(component_id)
+            local = self._local(component_id, kind)
+            if str(local.get("status")) in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL", "PARTIAL", "UPDATE_AVAILABLE"}:
+                ids.append(component_id)
+        ids = ids[:32]
         reports = []
         for component_id in ids:
             reports.append(self.check_component(component_id, force_source_check=force_source_check))
