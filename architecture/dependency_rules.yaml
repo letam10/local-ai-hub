@@ -1,0 +1,25 @@
+schema_version: dependency-rules.v1
+direction:
+  ui: [api]
+  api: [services, shared, platform]
+  services: [modules, platform, shared]
+  modules: [platform, shared]
+  platform: [shared]
+  shared: []
+forbidden_imports:
+  - [src.shared, src.ui]
+  - [src.shared, src.services]
+  - [src.shared, src.modules]
+  - [src.modules, src.ui]
+  - [src.ui, subprocess]
+  - [src.ui, pathlib.Path]
+  - [src.services.api, src.ui]
+rules:
+  - id: no-arbitrary-plugin-import
+    text: Manifest discovery is data-only and uses a fixed allowlist.
+  - id: no-raw-public-path
+    text: Browser/API projections use opaque artifact/model/runtime identifiers.
+  - id: no-model-at-startup
+    text: Core bootstrap never loads or downloads model weights.
+  - id: evidence-required
+    text: File presence is not operational evidence; bounded smoke is required.

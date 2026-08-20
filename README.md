@@ -1,4 +1,13 @@
-# Local AI Hub — Unified Workspace V5
+# Local AI Hub — Unified Workspace V5/V6 with V7 architecture foundation
+
+V5 and V6 remain preserved product lines. The V7 foundation is an incremental
+architecture layer: source checkout and machine data roots are resolved through
+`src/platform/paths.py`, AI modules use validated `module.json` manifests, and
+Model/Runtime Managers inspect and plan without downloading or running models.
+For a clean clone, use `.\scripts\bootstrap_core.ps1`; it initializes only missing
+local configuration from examples and opens the core without requiring AI
+weights. See `docs/architecture/ARCHITECTURE.md` and
+`docs/architecture/V7_MIGRATION_PLAN.md`.
 
 Local AI Hub là ứng dụng Windows điều phối các workflow AI chạy cục bộ trong
 một cửa sổ. Kho Git chỉ chứa mã nguồn, cấu hình mẫu, launcher, adapter, script
