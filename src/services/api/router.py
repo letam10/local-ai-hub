@@ -46,6 +46,7 @@ class Route:
     owner: str
     handler: Handler
     streaming: bool = False
+    transport_class: str = "JSON"
 
     @property
     def key(self) -> tuple[str, str]:
@@ -77,8 +78,8 @@ class Router:
         self._routes: list[Route] = []
         self._keys: set[tuple[str, str]] = set()
 
-    def register(self, *, route_id: str, method: str, path: str, domain: str, owner: str, handler: Handler, streaming: bool = False) -> Route:
-        route = Route(route_id, method.upper(), path, domain, owner, handler, streaming)
+    def register(self, *, route_id: str, method: str, path: str, domain: str, owner: str, handler: Handler, streaming: bool = False, transport_class: str = "JSON") -> Route:
+        route = Route(route_id, method.upper(), path, domain, owner, handler, streaming, transport_class)
         if route.key in self._keys:
             raise DuplicateRouteError(f"duplicate_route:{route.method}:{route.path}")
         if not re.fullmatch(r"[a-z][a-z0-9_.-]{1,95}", route_id):

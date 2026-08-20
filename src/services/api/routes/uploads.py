@@ -7,13 +7,14 @@ from typing import Mapping
 from ..context import ApiContext
 from ..response import ApiResponse
 from ..router import ApiRequest, Router
+from ..streaming import UploadStreamHandler
 
 
 def unavailable(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
     # The current handler owns Content-Length, chunking and staging.  This
     # adapter is intentionally not registered until a streaming transport
     # regression suite is attached.
-    return ApiResponse(501, {"status": "unavailable", "error": "streaming_transport_legacy"})
+    return ApiResponse(501, {"status": "unavailable", "error": "streaming_transport_owned"})
 
 
 STREAMING_CONTRACT = {
@@ -21,8 +22,10 @@ STREAMING_CONTRACT = {
     "chunk_bytes": 1024 * 1024,
     "staging": "Temp/uploads",
     "publication": "opaque_artifact_id",
-    "transport": "legacy",
+    "transport": "UPLOAD",
 }
+
+UPLOAD_STREAM = UploadStreamHandler()
 
 
 def contract_metadata() -> dict[str, object]:

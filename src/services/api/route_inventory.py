@@ -18,6 +18,7 @@ class RouteMetadata:
     body_limit: str = "json_default"
     status_codes: tuple[int, ...] = (200, 400, 404, 409, 500)
     transport: str = "router"
+    transport_class: str = "JSON"
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -25,11 +26,12 @@ class RouteMetadata:
             "domain": self.domain, "owner": self.owner, "service": self.service,
             "streaming": self.streaming, "body_limit": self.body_limit,
             "status_codes": list(self.status_codes), "transport": self.transport,
+            "transport_class": self.transport_class,
         }
 
 
-def legacy_routes() -> tuple[RouteMetadata, ...]:
-    """Routes intentionally retained in HubHandler during the strangler phase."""
+def _legacy_domain_routes_for_forensics() -> tuple[RouteMetadata, ...]:
+    """Original Phase 3 legacy set retained only as audit input."""
 
     rows: list[tuple[str, str, str, str, bool, str]] = [
         ("ui.redirect", "GET", "/ui", "static", False, "static_transport"),
@@ -107,7 +109,7 @@ def legacy_routes() -> tuple[RouteMetadata, ...]:
     return tuple(RouteMetadata(
         route_id=route_id, method=method, path=path, domain=domain,
         owner="src/services/api/api_server.py", service=service,
-        streaming=streaming, body_limit="upload_stream" if streaming else "json_default", transport="legacy",
+        streaming=streaming, body_limit="upload_stream" if streaming else "json_default", transport="forensic_input",
     ) for route_id, method, path, domain, streaming, service in rows)
 
 
@@ -124,4 +126,28 @@ def validate_metadata(rows: Iterable[RouteMetadata]) -> None:
         seen_key.add(key)
 
 
-__all__ = ["RouteMetadata", "legacy_routes", "validate_metadata"]
+def legacy_routes() -> tuple[RouteMetadata, ...]:
+    """Explicit non-JSON transports; generic/domain legacy rows are zero."""
+
+    rows = (
+        ("ui.redirect", "GET", "/ui", "static", False, "static_transport", "STATIC"),
+        ("ui.static", "GET", "/ui/{asset}", "static", False, "static_transport", "STATIC"),
+        ("artifacts.get", "GET", "/api/artifacts/{artifact_id}", "artifacts", True, "artifact_store", "STREAM"),
+        ("artifacts.head", "HEAD", "/api/artifacts/{artifact_id}", "artifacts", True, "artifact_store", "STREAM"),
+        ("uploads.stream", "POST", "/api/uploads", "uploads", True, "artifact_store", "UPLOAD"),
+    )
+    return tuple(RouteMetadata(
+        route_id=route_id, method=method, path=path, domain=domain,
+        owner="src/services/api/api_server.py", service=service,
+        streaming=streaming, body_limit="upload_stream" if streaming else "json_default",
+        transport="transport", transport_class=transport_class,
+    ) for route_id, method, path, domain, streaming, service, transport_class in rows)
+
+
+def legacy_forensic_routes() -> tuple[RouteMetadata, ...]:
+    """Return the 71-row Phase 3 input set for the mandatory audit report."""
+
+    return _legacy_domain_routes_for_forensics()
+
+
+__all__ = ["RouteMetadata", "legacy_routes", "legacy_forensic_routes", "validate_metadata"]

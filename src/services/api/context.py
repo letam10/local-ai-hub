@@ -78,6 +78,7 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         return {"status": "completed", "cleared": cleared, "message": f"Đã dọn dẹp {len(cleared)} bản nháp phục hồi."}
 
     project = get("project_manager")
+    studio = get("image_mask_studio")
     return ApiContext({
         "health": get("health"), "bootstrap_payload": get("bootstrap_payload"),
         "capability_control_plane": get("capability_control_plane"), "lifecycle_payload": get("lifecycle_payload"),
@@ -86,12 +87,15 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         "component_detail": component_api.detail, "component_plan_lookup": component_api.lookup_plan,
         "component_job_lookup": component_api.lookup_job, "component_plan_install": component_api.plan_install,
         "component_confirm_install": component_api.confirm_install, "component_plan_verify": component_api.plan_verify,
+        "component_plan_import": component_api.plan_import, "component_confirm_import": component_api.confirm_import,
         "component_plan_maintenance": component_api.plan_maintenance, "component_confirm_maintenance": component_api.confirm_maintenance,
         "component_cancel_job": lambda job_id: component_api.component_installer().cancel_job(job_id),
         "project_manager": project, "workflow_library_store": get("workflow_library_store"),
         "list_jobs": get("list_jobs"), "get_job": get("get_job"), "durable_jobs_snapshot": get("durable_jobs_snapshot"),
         "admit_durable_job": get("admit_durable_job"), "resume_durable_job": get("resume_durable_job"),
         "submit_graph": get("submit_graph"), "open_artifact": get("open_artifact"),
+        "submit_tool": get("submit_tool"), "image_mask_studio": studio,
+        "image_mask_link_project": lambda session_id, payload: _link_image_mask_project(studio, project, session_id, payload),
         "artifact_status": project.get_artifact_status, "node_registry_payload": lambda scope=None: __import__("src.services.node_studio.registry", fromlist=["registry_payload"]).registry_payload(scope),
         "node_preset_summaries": get("node_preset_summaries") or get("preset_summaries"), "node_preset": get("node_preset") or get("preset"),
         "node_validate": lambda graph, require_runnable=False: __import__("src.services.node_studio.schema", fromlist=["validate_graph"]).validate_graph(graph, require_runnable=require_runnable),
@@ -101,6 +105,11 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         "node_draft_clear": lambda scope: __import__("src.services.node_studio.state", fromlist=["draft_clear"]).draft_clear(scope),
         "node_run_snapshot": lambda run_id: __import__("src.services.node_studio.state", fromlist=["graph_runs"]).graph_runs.snapshot(run_id),
         "model_summary": model_summary, "model_manager_inspect": lambda model_id: model_service().inspect(model_id),
+        "storage_summary": get("storage_summary"), "dashboard_volume_snapshot": get("dashboard_volume_snapshot"),
+        "applications": get("applications"), "launch_application": get("launch_application"),
+        "workflow_library_payload": get("workflow_library_payload"),
+        "comfy_health": get("comfy_health"), "comfy_start": get("comfy_start"),
+        "comfy_workflows": get("comfy_workflows"), "comfy_workflow": get("comfy_workflow"), "comfy_save_workflow": get("comfy_save_workflow"),
         "runtime_manager_snapshot": lambda: runtime_service().snapshot(), "runtime_manager_verify": lambda runtime_id: runtime_service().verify(runtime_id),
         "settings_payload": get("settings_payload"), "settings_schema": lambda: {"status": "completed", "schema_version": SETTINGS_SCHEMA_VERSION, "defaults": SETTINGS_SECTION_DEFAULTS},
         "settings_save": lambda payload, expected_revision=None: SettingsPersistence().save(payload, expected_revision=expected_revision),
@@ -127,6 +136,37 @@ def _diagnostic_subsystem(center: object, subsystem: str) -> dict[str, Any] | No
     if method is None or not hasattr(center, method):
         return None
     return {"status": "completed", "subsystem": subsystem, "data": getattr(center, method)()}
+
+
+def _link_image_mask_project(studio: Any, project: Any, session_id: str, payload: object) -> dict[str, Any]:
+    """Preserve the existing Studio-to-project attachment transaction."""
+
+    from src.services.image_mask_studio import StudioConflictError
+
+    prepared = studio.prepare_project_attachment(session_id, payload)
+    attachment = prepared.get("attachment") if isinstance(prepared, dict) else None
+    session = prepared.get("session") if isinstance(prepared, dict) else None
+    if not isinstance(attachment, dict) or not isinstance(session, dict):
+        raise RuntimeError("image_mask_attachment_invalid")
+    if prepared.get("status") == "completed":
+        return {"status": "completed", "session": session, "project": None, "attachment": attachment, "idempotent": True}
+    project_id = attachment.get("project_id")
+    artifact_ids = attachment.get("artifacts")
+    intent_id = attachment.get("intent_id")
+    revision = attachment.get("revision")
+    if not isinstance(project_id, str) or not isinstance(artifact_ids, list) or not isinstance(intent_id, str) or not isinstance(revision, int) or isinstance(revision, bool):
+        raise RuntimeError("image_mask_attachment_invalid")
+    selected_ids = set(artifact_ids)
+    mask_ids = [layer.get("artifact_id") for layer in session.get("layers", []) if isinstance(layer, dict) and layer.get("kind") == "mask" and isinstance(layer.get("artifact_id"), str) and layer["artifact_id"] in selected_ids]
+    public_attachment = {key: value for key, value in attachment.items() if key != "intent_id"}
+    try:
+        linked = project.attach_image_mask_studio_revision(project_id, {"studio_id": session_id, "revision": revision, "source_artifact_id": session.get("source_artifact_id"), "artifact_ids": artifact_ids, "mask_artifact_ids": mask_ids})
+        completed = studio.complete_project_attachment(session_id, project_id=project_id, artifact_ids=artifact_ids, intent_id=intent_id, expected_revision=revision)
+    except StudioConflictError as exc:
+        return {"status": "pending_project_attach", "error": str(exc), "session": session, "attachment": public_attachment, "current_revision": exc.current_revision, "action": "Studio changed; reload the server revision and retry the project link."}
+    except (KeyError, ValueError) as exc:
+        return {"status": "pending_project_attach", "error": str(exc), "session": session, "attachment": public_attachment, "action": "Repair the target project and retry the link; the Studio draft remains durable."}
+    return {"status": "completed", "session": completed.get("session"), "project": linked.get("project"), "attachment": public_attachment}
 
 
 __all__ = ["ApiContext", "build_default_context"]

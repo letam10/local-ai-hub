@@ -3,11 +3,11 @@
   "generated_by": "scripts/generate_api_route_inventory.py",
   "routes": [
     {
-      "route_id": "node.drafts.delete",
+      "route_id": "node.draft_delete",
       "method": "DELETE",
       "path": "/api/node-studio/drafts/{scope}",
       "domain": "node_studio",
-      "owner": "src/services/api/api_server.py",
+      "owner": "src/services/api/routes/node_studio.py",
       "service": "node_studio",
       "streaming": false,
       "body_limit": "json_default",
@@ -18,15 +18,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "creative.project_delete",
+      "route_id": "projects.delete",
       "method": "DELETE",
       "path": "/api/projects/{project_id}",
       "domain": "projects",
-      "owner": "src/services/api/api_server.py",
-      "service": "project_manager",
+      "owner": "src/services/api/routes/projects.py",
+      "service": "projects",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -36,7 +37,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "workflows.delete",
@@ -54,7 +56,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "health.root",
@@ -72,15 +75,16 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "applications.list",
       "method": "GET",
       "path": "/api/applications",
       "domain": "applications",
-      "owner": "src/services/api/api_server.py",
-      "service": "runtime_registry",
+      "owner": "src/services/api/routes/compatibility.py",
+      "service": "applications",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -90,7 +94,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "artifacts.get",
@@ -108,7 +113,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "transport",
+      "transport_class": "STREAM"
     },
     {
       "route_id": "artifacts.status",
@@ -126,7 +132,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "creative.assets",
@@ -144,15 +151,16 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "assets.search",
+      "route_id": "creative.assets_search",
       "method": "GET",
       "path": "/api/assets/search",
       "domain": "creative",
-      "owner": "src/services/api/api_server.py",
-      "service": "project_manager",
+      "owner": "src/services/api/routes/creative.py",
+      "service": "creative",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -162,7 +170,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "backups.list",
@@ -180,7 +189,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "backups.list_compat",
@@ -198,7 +208,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "bootstrap.status",
@@ -216,7 +227,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "capabilities.snapshot",
@@ -234,7 +246,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "creative.collections",
@@ -252,14 +265,15 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "comfy.health",
       "method": "GET",
       "path": "/api/comfyui/advanced",
-      "domain": "components",
-      "owner": "src/services/api/api_server.py",
+      "domain": "comfyui",
+      "owner": "src/services/api/routes/comfyui.py",
       "service": "comfyui",
       "streaming": false,
       "body_limit": "json_default",
@@ -270,14 +284,15 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "SPECIAL_PROTOCOL"
     },
     {
       "route_id": "comfy.workflows",
       "method": "GET",
       "path": "/api/comfyui/workflows",
-      "domain": "components",
-      "owner": "src/services/api/api_server.py",
+      "domain": "comfyui",
+      "owner": "src/services/api/routes/comfyui.py",
       "service": "comfyui",
       "streaming": false,
       "body_limit": "json_default",
@@ -288,14 +303,15 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "SPECIAL_PROTOCOL"
     },
     {
       "route_id": "comfy.workflow",
       "method": "GET",
       "path": "/api/comfyui/workflows/{workflow_id}",
-      "domain": "components",
-      "owner": "src/services/api/api_server.py",
+      "domain": "comfyui",
+      "owner": "src/services/api/routes/comfyui.py",
       "service": "comfyui",
       "streaming": false,
       "body_limit": "json_default",
@@ -306,7 +322,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "SPECIAL_PROTOCOL"
     },
     {
       "route_id": "components.snapshot",
@@ -324,7 +341,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "components.job",
@@ -342,7 +360,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "components.plan",
@@ -360,7 +379,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "components.detail",
@@ -378,7 +398,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "creative.overview",
@@ -396,7 +417,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "dashboard.snapshot",
@@ -414,7 +436,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "diagnostics.export",
@@ -432,7 +455,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "diagnostics.recovery_drafts",
@@ -450,7 +474,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "diagnostics.snapshot",
@@ -468,7 +493,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "diagnostics.subsystem",
@@ -486,7 +512,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "jobs.durable_list",
@@ -504,14 +531,15 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "image_mask.overview",
       "method": "GET",
       "path": "/api/image-mask-studio/overview",
       "domain": "image_mask_studio",
-      "owner": "src/services/api/api_server.py",
+      "owner": "src/services/api/routes/image_mask.py",
       "service": "image_mask_studio",
       "streaming": false,
       "body_limit": "json_default",
@@ -522,14 +550,15 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "image_mask.preflight",
       "method": "GET",
       "path": "/api/image-mask-studio/preflight",
       "domain": "image_mask_studio",
-      "owner": "src/services/api/api_server.py",
+      "owner": "src/services/api/routes/image_mask.py",
       "service": "image_mask_studio",
       "streaming": false,
       "body_limit": "json_default",
@@ -540,14 +569,15 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "image_mask.sessions",
       "method": "GET",
       "path": "/api/image-mask-studio/sessions",
       "domain": "image_mask_studio",
-      "owner": "src/services/api/api_server.py",
+      "owner": "src/services/api/routes/image_mask.py",
       "service": "image_mask_studio",
       "streaming": false,
       "body_limit": "json_default",
@@ -558,14 +588,15 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "image_mask.session",
       "method": "GET",
       "path": "/api/image-mask-studio/sessions/{session_id}",
       "domain": "image_mask_studio",
-      "owner": "src/services/api/api_server.py",
+      "owner": "src/services/api/routes/image_mask.py",
       "service": "image_mask_studio",
       "streaming": false,
       "body_limit": "json_default",
@@ -576,14 +607,15 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "image_mask.compare",
       "method": "GET",
       "path": "/api/image-mask-studio/sessions/{session_id}/compare",
       "domain": "image_mask_studio",
-      "owner": "src/services/api/api_server.py",
+      "owner": "src/services/api/routes/image_mask.py",
       "service": "image_mask_studio",
       "streaming": false,
       "body_limit": "json_default",
@@ -594,17 +626,18 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "image_mask.export",
       "method": "GET",
       "path": "/api/image-mask-studio/sessions/{session_id}/layers/{layer_id}/export",
       "domain": "image_mask_studio",
-      "owner": "src/services/api/api_server.py",
+      "owner": "src/services/api/routes/image_mask.py",
       "service": "image_mask_studio",
-      "streaming": true,
-      "body_limit": "upload_stream",
+      "streaming": false,
+      "body_limit": "json_default",
       "status_codes": [
         200,
         400,
@@ -612,7 +645,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "jobs.list",
@@ -630,7 +664,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "lifecycle.snapshot",
@@ -648,7 +683,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "models.list",
@@ -666,7 +702,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "models.detail",
@@ -684,7 +721,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "modules.list",
@@ -702,7 +740,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "modules.detail",
@@ -720,7 +759,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "node.availability",
@@ -738,14 +778,15 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "node.drafts",
+      "route_id": "node.draft_get",
       "method": "GET",
       "path": "/api/node-studio/drafts/{scope}",
       "domain": "node_studio",
-      "owner": "src/services/api/api_server.py",
+      "owner": "src/services/api/routes/node_studio.py",
       "service": "node_studio",
       "streaming": false,
       "body_limit": "json_default",
@@ -756,7 +797,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "node.presets",
@@ -774,7 +816,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "node.preset",
@@ -792,7 +835,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "node.registry",
@@ -810,14 +854,15 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "node.runs",
+      "route_id": "node.run_snapshot",
       "method": "GET",
       "path": "/api/node-studio/runs/{run_id}",
       "domain": "node_studio",
-      "owner": "src/services/api/api_server.py",
+      "owner": "src/services/api/routes/node_studio.py",
       "service": "node_studio",
       "streaming": false,
       "body_limit": "json_default",
@@ -828,7 +873,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "projects.list",
@@ -846,7 +892,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "projects.detail",
@@ -864,15 +911,16 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "projects.compare",
       "method": "GET",
       "path": "/api/projects/{project_id}/compare",
       "domain": "projects",
-      "owner": "src/services/api/api_server.py",
-      "service": "project_manager",
+      "owner": "src/services/api/routes/projects.py",
+      "service": "projects",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -882,7 +930,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "projects.export",
@@ -900,7 +949,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "projects.manifest",
@@ -918,7 +968,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "projects.missing",
@@ -936,7 +987,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "creative.recipes",
@@ -954,33 +1006,16 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "recipes.export_pack",
+      "route_id": "creative.recipe_export_pack",
       "method": "GET",
       "path": "/api/recipes/export-pack",
       "domain": "creative",
-      "owner": "src/services/api/api_server.py",
-      "service": "project_manager",
-      "streaming": true,
-      "body_limit": "upload_stream",
-      "status_codes": [
-        200,
-        400,
-        404,
-        409,
-        500
-      ],
-      "transport": "legacy"
-    },
-    {
-      "route_id": "recipes.detail",
-      "method": "GET",
-      "path": "/api/recipes/{recipe_id}",
-      "domain": "creative",
-      "owner": "src/services/api/api_server.py",
-      "service": "project_manager",
+      "owner": "src/services/api/routes/creative.py",
+      "service": "creative",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -990,7 +1025,27 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "creative.recipe_detail",
+      "method": "GET",
+      "path": "/api/recipes/{recipe_id}",
+      "domain": "creative",
+      "owner": "src/services/api/routes/creative.py",
+      "service": "creative",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "runtimes.list",
@@ -1008,7 +1063,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "runtimes.detail",
@@ -1026,7 +1082,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "settings.get",
@@ -1044,7 +1101,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "settings.schema",
@@ -1062,15 +1120,16 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "storage.legacy",
+      "route_id": "compat.storage",
       "method": "GET",
       "path": "/api/storage",
       "domain": "storage",
-      "owner": "src/services/api/api_server.py",
-      "service": "storage_manager",
+      "owner": "src/services/api/routes/compatibility.py",
+      "service": "storage",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -1080,7 +1139,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "creative.gallery",
@@ -1098,7 +1158,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "workflows.list",
@@ -1116,7 +1177,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "workflows.detail",
@@ -1134,7 +1196,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "components.compat",
@@ -1152,7 +1215,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "health.live",
@@ -1170,15 +1234,16 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "jobs.compat_list",
       "method": "GET",
       "path": "/jobs",
       "domain": "jobs",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/jobs.py",
+      "service": "jobs",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -1188,7 +1253,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "jobs.detail",
@@ -1206,15 +1272,16 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "storage.models_compat",
+      "route_id": "compat.models",
       "method": "GET",
       "path": "/models",
       "domain": "models",
-      "owner": "src/services/api/api_server.py",
-      "service": "storage_manager",
+      "owner": "src/services/api/routes/compatibility.py",
+      "service": "models",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -1224,7 +1291,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "tools.catalog",
@@ -1242,7 +1310,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "ui.redirect",
@@ -1260,7 +1329,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "transport",
+      "transport_class": "STATIC"
     },
     {
       "route_id": "ui.static",
@@ -1278,7 +1348,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "transport",
+      "transport_class": "STATIC"
     },
     {
       "route_id": "artifacts.head",
@@ -1296,7 +1367,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "transport",
+      "transport_class": "STREAM"
     },
     {
       "route_id": "settings.patch",
@@ -1314,15 +1386,16 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "applications.launch",
       "method": "POST",
       "path": "/api/applications/{application_id}/launch",
       "domain": "applications",
-      "owner": "src/services/api/api_server.py",
-      "service": "runtime_registry",
+      "owner": "src/services/api/routes/compatibility.py",
+      "service": "applications",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -1332,7 +1405,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "artifacts.open",
@@ -1350,7 +1424,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "backups.apply",
@@ -1368,7 +1443,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "backups.create",
@@ -1386,7 +1462,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "backups.inspect",
@@ -1404,7 +1481,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "backups.plan",
@@ -1422,15 +1500,16 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "collections.create",
+      "route_id": "creative.collection_create",
       "method": "POST",
       "path": "/api/collections",
       "domain": "creative",
-      "owner": "src/services/api/api_server.py",
-      "service": "project_manager",
+      "owner": "src/services/api/routes/creative.py",
+      "service": "creative",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -1440,14 +1519,15 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "comfy.start",
       "method": "POST",
       "path": "/api/comfyui/advanced/start",
-      "domain": "components",
-      "owner": "src/services/api/api_server.py",
+      "domain": "comfyui",
+      "owner": "src/services/api/routes/comfyui.py",
       "service": "comfyui",
       "streaming": false,
       "body_limit": "json_default",
@@ -1458,7 +1538,46 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "SPECIAL_PROTOCOL"
+    },
+    {
+      "route_id": "components.import_confirm",
+      "method": "POST",
+      "path": "/api/components/import/confirm",
+      "domain": "components",
+      "owner": "src/services/api/routes/components.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "components.import_plan",
+      "method": "POST",
+      "path": "/api/components/import/plan",
+      "domain": "components",
+      "owner": "src/services/api/routes/components.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "components.install_apply",
@@ -1476,7 +1595,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "components.install_confirm",
@@ -1494,7 +1614,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "components.install_plan",
@@ -1512,7 +1633,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "components.cancel",
@@ -1530,7 +1652,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "components.maintenance_plan",
@@ -1548,7 +1671,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "components.maintenance_confirm",
@@ -1566,7 +1690,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "components.plan_confirm",
@@ -1584,7 +1709,65 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "components.repair_plan",
+      "method": "POST",
+      "path": "/api/components/repair/plan",
+      "domain": "components",
+      "owner": "src/services/api/routes/components.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "components.uninstall_plan",
+      "method": "POST",
+      "path": "/api/components/uninstall/plan",
+      "domain": "components",
+      "owner": "src/services/api/routes/components.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "components.update_plan",
+      "method": "POST",
+      "path": "/api/components/update/plan",
+      "domain": "components",
+      "owner": "src/services/api/routes/components.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "components.verify_plan",
@@ -1602,7 +1785,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "diagnostics.clear_recovery",
@@ -1620,7 +1804,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "diagnostics.inspect_recovery",
@@ -1638,7 +1823,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "diagnostics.verify_config",
@@ -1656,7 +1842,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "jobs.durable_admit",
@@ -1674,7 +1861,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "jobs.durable_resume",
@@ -1692,14 +1880,15 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "image_mask.create",
       "method": "POST",
       "path": "/api/image-mask-studio/sessions",
       "domain": "image_mask_studio",
-      "owner": "src/services/api/api_server.py",
+      "owner": "src/services/api/routes/image_mask.py",
       "service": "image_mask_studio",
       "streaming": false,
       "body_limit": "json_default",
@@ -1710,14 +1899,15 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "image_mask.layer_mutate",
+      "route_id": "image_mask.layer_action",
       "method": "POST",
       "path": "/api/image-mask-studio/sessions/{session_id}/layers/{layer_id}/{action}",
       "domain": "image_mask_studio",
-      "owner": "src/services/api/api_server.py",
+      "owner": "src/services/api/routes/image_mask.py",
       "service": "image_mask_studio",
       "streaming": false,
       "body_limit": "json_default",
@@ -1728,14 +1918,72 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "image_mask.mutate",
+      "route_id": "image_mask.import",
+      "method": "POST",
+      "path": "/api/image-mask-studio/sessions/{session_id}/masks/import",
+      "domain": "image_mask_studio",
+      "owner": "src/services/api/routes/image_mask.py",
+      "service": "image_mask_studio",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "image_mask.apply_preset",
+      "method": "POST",
+      "path": "/api/image-mask-studio/sessions/{session_id}/presets/{preset_id}/apply",
+      "domain": "image_mask_studio",
+      "owner": "src/services/api/routes/image_mask.py",
+      "service": "image_mask_studio",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "image_mask.restore",
+      "method": "POST",
+      "path": "/api/image-mask-studio/sessions/{session_id}/snapshots/{snapshot_id}/restore",
+      "domain": "image_mask_studio",
+      "owner": "src/services/api/routes/image_mask.py",
+      "service": "image_mask_studio",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "image_mask.action",
       "method": "POST",
       "path": "/api/image-mask-studio/sessions/{session_id}/{action}",
       "domain": "image_mask_studio",
-      "owner": "src/services/api/api_server.py",
+      "owner": "src/services/api/routes/image_mask.py",
       "service": "image_mask_studio",
       "streaming": false,
       "body_limit": "json_default",
@@ -1746,15 +1994,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "image.flux",
       "method": "POST",
       "path": "/api/image/flux",
       "domain": "image",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/image.py",
+      "service": "image",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -1764,15 +2013,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "image.qwen",
       "method": "POST",
       "path": "/api/image/qwen",
       "domain": "image",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/image.py",
+      "service": "image",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -1782,15 +2032,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "jobs.tool_submit",
       "method": "POST",
       "path": "/api/jobs/{tool}",
       "domain": "jobs",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/jobs.py",
+      "service": "jobs",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -1800,7 +2051,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "lifecycle.close",
@@ -1818,7 +2070,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "lifecycle.cancel_jobs",
@@ -1836,7 +2089,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "lifecycle.prepare_close",
@@ -1854,15 +2108,16 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "media.run",
       "method": "POST",
       "path": "/api/media/run",
       "domain": "media",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/media.py",
+      "service": "media",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -1872,7 +2127,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "node.dirty",
@@ -1890,14 +2146,15 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "node.drafts.save",
+      "route_id": "node.draft_save",
       "method": "POST",
       "path": "/api/node-studio/drafts/{scope}",
       "domain": "node_studio",
-      "owner": "src/services/api/api_server.py",
+      "owner": "src/services/api/routes/node_studio.py",
       "service": "node_studio",
       "streaming": false,
       "body_limit": "json_default",
@@ -1908,7 +2165,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "node.run",
@@ -1926,7 +2184,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "node.validate",
@@ -1944,7 +2203,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "projects.create",
@@ -1962,7 +2222,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "projects.import",
@@ -1980,15 +2241,16 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "projects.archive",
       "method": "POST",
       "path": "/api/projects/{project_id}/archive",
       "domain": "projects",
-      "owner": "src/services/api/api_server.py",
-      "service": "project_manager",
+      "owner": "src/services/api/routes/projects.py",
+      "service": "projects",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -1998,15 +2260,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "projects.assets.add",
+      "route_id": "projects.assets_add",
       "method": "POST",
       "path": "/api/projects/{project_id}/assets",
       "domain": "projects",
-      "owner": "src/services/api/api_server.py",
-      "service": "project_manager",
+      "owner": "src/services/api/routes/projects.py",
+      "service": "projects",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2016,15 +2279,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "projects.compare.update",
+      "route_id": "projects.compare_update",
       "method": "POST",
       "path": "/api/projects/{project_id}/compare",
       "domain": "projects",
-      "owner": "src/services/api/api_server.py",
-      "service": "project_manager",
+      "owner": "src/services/api/routes/projects.py",
+      "service": "projects",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2034,15 +2298,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "projects.restore",
       "method": "POST",
       "path": "/api/projects/{project_id}/restore",
       "domain": "projects",
-      "owner": "src/services/api/api_server.py",
-      "service": "project_manager",
+      "owner": "src/services/api/routes/projects.py",
+      "service": "projects",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2052,15 +2317,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "recipes.create",
+      "route_id": "creative.recipe_create",
       "method": "POST",
       "path": "/api/recipes",
       "domain": "creative",
-      "owner": "src/services/api/api_server.py",
-      "service": "project_manager",
+      "owner": "src/services/api/routes/creative.py",
+      "service": "creative",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2070,15 +2336,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "recipes.import_pack",
+      "route_id": "creative.recipe_import",
       "method": "POST",
       "path": "/api/recipes/import-pack",
       "domain": "creative",
-      "owner": "src/services/api/api_server.py",
-      "service": "project_manager",
+      "owner": "src/services/api/routes/creative.py",
+      "service": "creative",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2088,15 +2355,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "recipes.apply",
+      "route_id": "creative.recipe_apply",
       "method": "POST",
       "path": "/api/recipes/{recipe_id}/apply",
       "domain": "creative",
-      "owner": "src/services/api/api_server.py",
-      "service": "project_manager",
+      "owner": "src/services/api/routes/creative.py",
+      "service": "creative",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2106,7 +2374,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "settings.post",
@@ -2124,7 +2393,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "settings.reset",
@@ -2142,15 +2412,16 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "storage.scan",
+      "route_id": "compat.storage_scan",
       "method": "POST",
       "path": "/api/storage/scan",
       "domain": "storage",
-      "owner": "src/services/api/api_server.py",
-      "service": "storage_manager",
+      "owner": "src/services/api/routes/compatibility.py",
+      "service": "storage",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2160,7 +2431,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "uploads.stream",
@@ -2178,7 +2450,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "transport",
+      "transport_class": "UPLOAD"
     },
     {
       "route_id": "workflows.save",
@@ -2196,7 +2469,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "workflows.import",
@@ -2214,7 +2488,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "workflows.migration_confirm",
@@ -2232,7 +2507,8 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "workflows.migration_plan",
@@ -2250,15 +2526,16 @@
         409,
         500
       ],
-      "transport": "router"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "jobs.cancel",
       "method": "POST",
       "path": "/jobs/{job_id}/cancel",
       "domain": "jobs",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/jobs.py",
+      "service": "jobs",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2268,15 +2545,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "jobs.resume",
       "method": "POST",
       "path": "/jobs/{job_id}/resume",
       "domain": "jobs",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/jobs.py",
+      "service": "jobs",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2286,15 +2564,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "media.probe",
       "method": "POST",
       "path": "/media/probe",
       "domain": "media",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/media.py",
+      "service": "media",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2304,15 +2583,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "ocr.parse",
+      "route_id": "vision.ocr",
       "method": "POST",
       "path": "/ocr/parse",
       "domain": "vision",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/vision.py",
+      "service": "vision",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2322,15 +2602,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "media.probe_compat",
+      "route_id": "media.probe_alias",
       "method": "POST",
       "path": "/probe_media",
       "domain": "media",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/media.py",
+      "service": "media",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2340,15 +2621,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "speech.transcribe",
       "method": "POST",
       "path": "/speech/transcribe",
-      "domain": "speech",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "domain": "voice",
+      "owner": "src/services/api/routes/voice.py",
+      "service": "voice",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2358,15 +2640,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "video.subtitle",
       "method": "POST",
       "path": "/video/subtitle",
       "domain": "video",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/video.py",
+      "service": "video",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2376,15 +2659,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "video.anime",
       "method": "POST",
       "path": "/video/upscale/anime",
       "domain": "video",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/video.py",
+      "service": "video",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2394,15 +2678,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "vision.detect",
       "method": "POST",
       "path": "/vision/detect",
       "domain": "vision",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/vision.py",
+      "service": "vision",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2412,15 +2697,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "vision.ground",
       "method": "POST",
       "path": "/vision/ground",
       "domain": "vision",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/vision.py",
+      "service": "vision",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2430,15 +2716,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "vision.segment",
       "method": "POST",
       "path": "/vision/segment",
       "domain": "vision",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/vision.py",
+      "service": "vision",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2448,15 +2735,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "vision.segment_box",
       "method": "POST",
       "path": "/vision/segment-box",
       "domain": "vision",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/vision.py",
+      "service": "vision",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2466,15 +2754,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "vision.segment_points",
       "method": "POST",
       "path": "/vision/segment-points",
       "domain": "vision",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/vision.py",
+      "service": "vision",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2484,15 +2773,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "vision.track",
       "method": "POST",
       "path": "/vision/track",
       "domain": "vision",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/vision.py",
+      "service": "vision",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2502,15 +2792,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "vision.parse",
       "method": "POST",
       "path": "/vision/ui/parse",
       "domain": "vision",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/vision.py",
+      "service": "vision",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2520,15 +2811,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "voice.clone",
       "method": "POST",
       "path": "/voice/clone",
       "domain": "voice",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/voice.py",
+      "service": "voice",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2538,15 +2830,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "voice.convert",
       "method": "POST",
       "path": "/voice/convert",
       "domain": "voice",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/voice.py",
+      "service": "voice",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2556,15 +2849,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "voice.design",
       "method": "POST",
       "path": "/voice/design",
       "domain": "voice",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/voice.py",
+      "service": "voice",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2574,15 +2868,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "voice.tts",
       "method": "POST",
       "path": "/voice/tts",
       "domain": "voice",
-      "owner": "src/services/api/api_server.py",
-      "service": "job_manager",
+      "owner": "src/services/api/routes/voice.py",
+      "service": "voice",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2592,15 +2887,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "assets.update",
+      "route_id": "creative.asset_update",
       "method": "PUT",
       "path": "/api/assets/{asset_id}",
       "domain": "creative",
-      "owner": "src/services/api/api_server.py",
-      "service": "project_manager",
+      "owner": "src/services/api/routes/creative.py",
+      "service": "creative",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2610,15 +2906,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "collections.update",
+      "route_id": "creative.collection_update",
       "method": "PUT",
       "path": "/api/collections/{collection_id}",
       "domain": "creative",
-      "owner": "src/services/api/api_server.py",
-      "service": "project_manager",
+      "owner": "src/services/api/routes/creative.py",
+      "service": "creative",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2628,14 +2925,15 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "comfy.workflow.save",
+      "route_id": "comfy.workflow_save",
       "method": "PUT",
       "path": "/api/comfyui/workflows/{workflow_id}",
-      "domain": "components",
-      "owner": "src/services/api/api_server.py",
+      "domain": "comfyui",
+      "owner": "src/services/api/routes/comfyui.py",
       "service": "comfyui",
       "streaming": false,
       "body_limit": "json_default",
@@ -2646,14 +2944,15 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "SPECIAL_PROTOCOL"
     },
     {
       "route_id": "image_mask.put_session",
       "method": "PUT",
       "path": "/api/image-mask-studio/sessions/{session_id}",
       "domain": "image_mask_studio",
-      "owner": "src/services/api/api_server.py",
+      "owner": "src/services/api/routes/image_mask.py",
       "service": "image_mask_studio",
       "streaming": false,
       "body_limit": "json_default",
@@ -2664,14 +2963,15 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "image_mask.put_layer",
       "method": "PUT",
       "path": "/api/image-mask-studio/sessions/{session_id}/layers/{layer_id}",
       "domain": "image_mask_studio",
-      "owner": "src/services/api/api_server.py",
+      "owner": "src/services/api/routes/image_mask.py",
       "service": "image_mask_studio",
       "streaming": false,
       "body_limit": "json_default",
@@ -2682,15 +2982,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "projects.update",
       "method": "PUT",
       "path": "/api/projects/{project_id}",
       "domain": "projects",
-      "owner": "src/services/api/api_server.py",
-      "service": "project_manager",
+      "owner": "src/services/api/routes/projects.py",
+      "service": "projects",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2700,15 +3001,16 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
-      "route_id": "recipes.update",
+      "route_id": "creative.recipe_update",
       "method": "PUT",
       "path": "/api/recipes/{recipe_id}",
       "domain": "creative",
-      "owner": "src/services/api/api_server.py",
-      "service": "project_manager",
+      "owner": "src/services/api/routes/creative.py",
+      "service": "creative",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2718,7 +3020,8 @@
         409,
         500
       ],
-      "transport": "legacy"
+      "transport": "router",
+      "transport_class": "JSON"
     }
   ]
 }

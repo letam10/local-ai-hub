@@ -45,6 +45,37 @@ def project_missing(request: ApiRequest, context: ApiContext, params: Mapping[st
     return ApiResponse(200 if value.get("accepted") else 404, value)
 
 
+def project_compare(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    value = _pm(context).get_compare(params["project_id"])
+    return ApiResponse(200 if value is not None else 404, value or {"status": "error", "error": "project_compare_not_found"})
+
+
+def project_archive(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    return ApiResponse(200, _pm(context).archive_project(params["project_id"], archived=True))
+
+
+def project_restore(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    return ApiResponse(200, _pm(context).archive_project(params["project_id"], archived=False))
+
+
+def project_assets_add(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    return ApiResponse(200, _pm(context).add_project_asset(params["project_id"], request.json()))
+
+
+def project_compare_update(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    return ApiResponse(200, _pm(context).update_compare(params["project_id"], request.json()))
+
+
+def project_update(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    return ApiResponse(200, _pm(context).update_project(params["project_id"], request.json()))
+
+
+def project_delete(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    # The Project Manager deliberately has no destructive delete primitive;
+    # the legacy DELETE alias is a safe archive operation.
+    return ApiResponse(200, _pm(context).archive_project(params["project_id"], archived=True))
+
+
 def register(router: Router) -> None:
     owner = "src/services/api/routes/projects.py"
     router.register(route_id="projects.list", method="GET", path="/api/projects", domain="projects", owner=owner, handler=list_projects)
@@ -54,3 +85,10 @@ def register(router: Router) -> None:
     router.register(route_id="projects.export", method="GET", path="/api/projects/{project_id}/export", domain="projects", owner=owner, handler=project_export)
     router.register(route_id="projects.manifest", method="GET", path="/api/projects/{project_id}/manifest", domain="projects", owner=owner, handler=project_manifest)
     router.register(route_id="projects.missing", method="GET", path="/api/projects/{project_id}/missing-artifacts", domain="projects", owner=owner, handler=project_missing)
+    router.register(route_id="projects.compare", method="GET", path="/api/projects/{project_id}/compare", domain="projects", owner=owner, handler=project_compare)
+    router.register(route_id="projects.archive", method="POST", path="/api/projects/{project_id}/archive", domain="projects", owner=owner, handler=project_archive)
+    router.register(route_id="projects.restore", method="POST", path="/api/projects/{project_id}/restore", domain="projects", owner=owner, handler=project_restore)
+    router.register(route_id="projects.assets_add", method="POST", path="/api/projects/{project_id}/assets", domain="projects", owner=owner, handler=project_assets_add)
+    router.register(route_id="projects.compare_update", method="POST", path="/api/projects/{project_id}/compare", domain="projects", owner=owner, handler=project_compare_update)
+    router.register(route_id="projects.update", method="PUT", path="/api/projects/{project_id}", domain="projects", owner=owner, handler=project_update)
+    router.register(route_id="projects.delete", method="DELETE", path="/api/projects/{project_id}", domain="projects", owner=owner, handler=project_delete)

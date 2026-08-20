@@ -20,6 +20,7 @@ def rows() -> list[dict[str, object]]:
             route_id=route.route_id, method=route.method, path=route.path,
             domain=route.domain, owner=route.owner, service=route.domain,
             streaming=route.streaming, transport="router",
+            transport_class=route.transport_class,
         )
         for route in build_router().routes()
     ]

@@ -85,6 +85,29 @@ def cancel_job(request: ApiRequest, context: ApiContext, params: Mapping[str, st
     return ApiResponse(202 if result.get("status") == "cancelling" else 409, result)
 
 
+def import_plan(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    body = request.json(strict=True)
+    if set(body) - {"selection_id", "mode"} or not isinstance(body.get("selection_id"), str) or not isinstance(body.get("mode"), str):
+        return ApiResponse(400, {"status": "invalid", "error": "component_import_payload_invalid", "execution": "not_run", "dry_run": True})
+    return ApiResponse(200, context.call("component_plan_import", body["selection_id"], mode=body["mode"]))
+
+
+def import_confirm(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    body = request.json(strict=True)
+    if set(body) - {"plan_id", "confirmed"} or not isinstance(body.get("plan_id"), str) or type(body.get("confirmed")) is not bool:
+        return ApiResponse(400, {"status": "invalid", "error": "component_confirmation_invalid", "execution": "not_run", "dry_run": True})
+    result = context.call("component_confirm_import", body["plan_id"], confirmed=body["confirmed"])
+    return ApiResponse(200 if result.get("status") not in {"invalid", "error", "conflict"} else 409, result)
+
+
+def action_plan(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    body = request.json(strict=True)
+    action = params.get("action")
+    if set(body) - {"component_id"} or not isinstance(body.get("component_id"), str) or action not in {"repair", "update", "uninstall"}:
+        return ApiResponse(400, {"status": "invalid", "error": "component_maintenance_payload_invalid", "execution": "not_run", "dry_run": True})
+    return ApiResponse(200, context.call("component_plan_maintenance", body["component_id"], action=action))
+
+
 def register(router: Router) -> None:
     owner = "src/services/api/routes/components.py"
     router.register(route_id="components.snapshot", method="GET", path="/api/components", domain="components", owner=owner, handler=snapshot)
@@ -96,6 +119,10 @@ def register(router: Router) -> None:
     router.register(route_id="components.install_apply", method="POST", path="/api/components/install/apply", domain="components", owner=owner, handler=confirm_install_body)
     router.register(route_id="components.plan_confirm", method="POST", path="/api/components/plans/{plan_id}/confirm", domain="components", owner=owner, handler=confirm_install)
     router.register(route_id="components.verify_plan", method="POST", path="/api/components/verify/plan", domain="components", owner=owner, handler=plan_verify)
+    router.register(route_id="components.import_plan", method="POST", path="/api/components/import/plan", domain="components", owner=owner, handler=import_plan)
+    router.register(route_id="components.import_confirm", method="POST", path="/api/components/import/confirm", domain="components", owner=owner, handler=import_confirm)
     router.register(route_id="components.maintenance_plan", method="POST", path="/api/components/maintenance/plan", domain="components", owner=owner, handler=maintenance_plan)
+    for action in ("repair", "update", "uninstall"):
+        router.register(route_id=f"components.{action}_plan", method="POST", path=f"/api/components/{action}/plan", domain="components", owner=owner, handler=action_plan)
     router.register(route_id="components.maintenance_confirm", method="POST", path="/api/components/maintenance/{plan_id}/confirm", domain="components", owner=owner, handler=confirm_maintenance)
     router.register(route_id="components.cancel", method="POST", path="/api/components/jobs/{job_id}/cancel", domain="components", owner=owner, handler=cancel_job)

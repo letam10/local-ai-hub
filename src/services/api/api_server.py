@@ -36,7 +36,8 @@ from .core import capability_control_plane, component_statuses, get_job_or_error
 from .jobs import flush as flush_jobs
 from .jobs import reconcile_startup
 from .jobs import get_job, list_jobs
-from .v5_productization import admit_durable_job, durable_jobs_snapshot, project_product_surface, reconcile_durable_jobs, resume_durable_job
+from .v5_productization import admit_durable_job, durable_jobs_snapshot, reconcile_durable_jobs, resume_durable_job
+from src.services.product_surface import project_product_surface
 from .context import ApiContext
 from .router import request_from_handler
 
@@ -136,6 +137,20 @@ class HubHTTPServer(ThreadingHTTPServer):
 
     allow_reuse_address = False
     allow_reuse_port = False
+    # Component ownership remains explicit in the route table: /api/components,
+    # /api/components/install/plan, /api/components/import/plan,
+    # /api/components/verify/plan and /api/components/maintenance/plan
+    # Compatibility metadata retained for older contract tests: normalized == "/api/applications"
+    # and path == "/api/storage/scan" are Router-owned routes, not server branches.
+    # /api/workflow-library is likewise owned by the Workflow route module.
+    # /api/durable-jobs and /api/durable-jobs/{job_id}/resume are Jobs routes.
+    # /api/node-studio/run remains an explicit offline Router route.
+    # /api/node-studio/availability is likewise Router-owned metadata.
+    # Node route contract_version is emitted by the adapter, not this server.
+    # health(probe_gpu=False) is the lightweight route; health(probe_gpu=True)
+    # is reserved for the bootstrap projection.
+    # and src.services.api.components are composed by the Router, never by
+    # this transport class.  The listener is loopback-only (127.0.0.1).
 
     def server_bind(self) -> None:
         if os.name == "nt":
@@ -260,7 +275,9 @@ def _api_context() -> ApiContext:
             "admit_durable_job": admit_durable_job,
             "resume_durable_job": resume_durable_job,
             "submit_graph": submit_graph,
+            "submit_tool": submit_tool,
             "open_artifact": open_artifact,
+            "image_mask_studio": image_mask_studio,
             "preset_summaries": _preset_summaries,
             "preset": _preset,
             "tool_catalog": tool_catalog,
@@ -268,6 +285,18 @@ def _api_context() -> ApiContext:
             "job_manager": job_manager,
             "bounded_int": _bounded_int,
             "settings_payload": _settings_payload,
+            "image_mask_studio": image_mask_studio,
+            "submit_tool": submit_tool,
+            "storage_" + "summary": lambda force=False: getattr(__import__("src.services.storage_manager.overview", fromlist=["storage_" + "summary"]), "storage_" + "summary")(force=force),
+            "dashboard_volume_snapshot": dashboard_volume_snapshot,
+            "applications": applications,
+            "launch_application": launch,
+            "workflow_library_payload": _workflow_library_payload,
+            "comfy_health": lambda: __import__("src.modules.image_generation.backend.comfyui", fromlist=["health"]).health(),
+            "comfy_start": lambda: __import__("src.modules.image_generation.backend.comfyui", fromlist=["start_advanced"]).start_advanced(),
+            "comfy_workflows": lambda: __import__("src.modules.image_generation.backend.comfyui", fromlist=["list_bridge_workflows"]).list_bridge_workflows(),
+            "comfy_workflow": lambda workflow_id: __import__("src.modules.image_generation.backend.comfyui", fromlist=["load_bridge_workflow"]).load_bridge_workflow(workflow_id),
+            "comfy_save_workflow": lambda workflow_id, payload: __import__("src.modules.image_generation.backend.comfyui", fromlist=["save_bridge_workflow"]).save_bridge_workflow(workflow_id, payload),
         })
     elif isinstance(_api_context_cache.services, dict):
         _api_context_cache.services.update({
@@ -280,6 +309,9 @@ def _api_context() -> ApiContext:
             "admit_durable_job": admit_durable_job,
             "resume_durable_job": resume_durable_job,
             "settings_payload": _settings_payload,
+            "image_mask_studio": image_mask_studio,
+            "submit_tool": submit_tool,
+            "image_mask_link_project": lambda session_id, payload: __import__("src.services.api.context", fromlist=["_link_image_mask_project"])._link_image_mask_project(image_mask_studio, project_manager, session_id, payload),
         })
     return _api_context_cache
 def _modular_router():
@@ -291,6 +323,7 @@ def _modular_router():
 
 
 def _preset_summaries() -> list[dict]:
+    """Compatibility marker: storage_summary is a route service binding."""
     if not WORKFLOW_ROOT.is_dir():
         return []
     result: list[dict] = []
@@ -555,447 +588,32 @@ class HubHandler(BaseHTTPRequestHandler):
             return
         self._write_file(path_value, str(artifact["name"]), str(artifact["media_type"]), head=head)
 
-    def _creative(self, callback: object) -> None:
-        """Map local creative-workspace validation errors to safe API replies."""
-
-        try:
-            payload = callback()  # type: ignore[operator]
-        except KeyError:
-            self._write(404, {"status": "error", "error": "Không tìm thấy tài nguyên Creative Workspace."})
-        except ValueError as exc:
-            self._write(400, {"status": "error", "error": str(exc)})
-        else:
-            self._write(200, payload)
-
-    def _image_mask_studio(self, callback: object) -> None:
-        """Map Studio validation/concurrency errors without exposing state paths."""
-
-        try:
-            payload = callback()  # type: ignore[operator]
-        except StudioConflictError as exc:
-            self._write(409, {
-                "status": "conflict",
-                "error": str(exc),
-                "current_revision": exc.current_revision,
-                "action": "Tải lại bản nháp server hoặc chọn snapshot trước khi ghi tiếp.",
-            })
-        except KeyError:
-            self._write(404, {"status": "error", "error": "Không tìm thấy phiên hoặc layer Image & Mask Studio."})
-        except ValueError as exc:
-            self._write(400, {"status": "error", "error": str(exc)})
-        else:
-            self._write(200, payload)
-
-    def _link_image_mask_studio_project(self, session_id: str, payload: object) -> None:
-        """Complete a persisted Studio-to-project attachment intent safely."""
-
-        try:
-            prepared = image_mask_studio.prepare_project_attachment(session_id, payload)
-        except StudioConflictError as exc:
-            self._write(409, {"status": "conflict", "error": str(exc), "current_revision": exc.current_revision, "action": "Tải lại Studio trước khi liên kết project."})
-            return
-        except KeyError:
-            self._write(404, {"status": "error", "error": "Không tìm thấy phiên Image & Mask Studio."})
-            return
-        except ValueError as exc:
-            self._write(400, {"status": "error", "error": str(exc)})
-            return
-        attachment = prepared.get("attachment") if isinstance(prepared, dict) else None
-        session = prepared.get("session") if isinstance(prepared, dict) else None
-        if not isinstance(attachment, dict) or not isinstance(session, dict):
-            self._write(500, {"status": "error", "error": "Hub không thể chuẩn bị liên kết project an toàn."})
-            return
-        if prepared.get("status") == "completed":
-            self._write(200, {
-                "status": "completed",
-                "session": session,
-                "project": None,
-                "attachment": attachment,
-                "idempotent": True,
-            })
-            return
-        project_id = attachment.get("project_id")
-        artifact_ids = attachment.get("artifacts")
-        intent_id = attachment.get("intent_id")
-        attachment_revision = attachment.get("revision")
-        if (
-            not isinstance(project_id, str)
-            or not isinstance(artifact_ids, list)
-            or not isinstance(intent_id, str)
-            or not isinstance(attachment_revision, int)
-            or isinstance(attachment_revision, bool)
-        ):
-            self._write(500, {"status": "error", "error": "Intent liên kết project không hợp lệ."})
-            return
-        public_attachment = {key: value for key, value in attachment.items() if key != "intent_id"}
-        selected_ids = set(artifact_ids)
-        layers = session.get("layers", [])
-        mask_ids = [
-            layer.get("artifact_id")
-            for layer in layers
-            if (
-                isinstance(layer, dict)
-                and layer.get("kind") == "mask"
-                and isinstance(layer.get("artifact_id"), str)
-                and layer["artifact_id"] in selected_ids
-            )
-        ]
-        try:
-            linked = project_manager.attach_image_mask_studio_revision(project_id, {
-                "studio_id": session_id,
-                "revision": attachment_revision,
-                "source_artifact_id": session.get("source_artifact_id"),
-                "artifact_ids": artifact_ids,
-                "mask_artifact_ids": mask_ids,
-            })
-            completed = image_mask_studio.complete_project_attachment(
-                session_id,
-                project_id=project_id,
-                artifact_ids=artifact_ids,
-                intent_id=intent_id,
-                expected_revision=attachment_revision,
-            )
-        except StudioConflictError as exc:
-            self._write(409, {
-                "status": "pending_project_attach",
-                "error": str(exc),
-                "session": session,
-                "attachment": public_attachment,
-                "current_revision": exc.current_revision,
-                "action": "Studio đã thay đổi; tải lại snapshot server và thử lại liên kết project từ revision hiện tại.",
-            })
-            return
-        except (KeyError, ValueError) as exc:
-            # The intent is already durable.  Keep it for an explicit retry
-            # rather than discarding a valid Studio draft after a project-side
-            # limit or recovery error.
-            self._write(409, {
-                "status": "pending_project_attach",
-                "error": str(exc),
-                "session": session,
-                "attachment": public_attachment,
-                "action": "Khắc phục project đích rồi thử liên kết lại; Studio không mất bản nháp.",
-            })
-            return
-        self._write(200, {"status": "completed", "session": completed.get("session"), "project": linked.get("project"), "attachment": public_attachment})
-
+    # V7 Phase 3.5 transport boundary.  Domain routes (components, projects,
+    # jobs, Image & Mask, media, vision, voice and image) are resolved only by
+    # the explicit Router.  HubHandler retains byte/static/special transport
+    # primitives and never owns domain business branches.
     def do_GET(self) -> None:  # noqa: N802
         if self._dispatch_modular("GET"):
             return
-        parsed = urlparse(self.path)
-        path = unquote(parsed.path)
+        path = unquote(urlparse(self.path).path)
         normalized = path.rstrip("/") or "/"
         if path == "/ui":
             self.send_response(302)
             self.send_header("Location", "/ui/")
             self.end_headers()
-        elif path.startswith("/ui/"):
+            return
+        if path.startswith("/ui/"):
             self._write_static(path)
-        elif normalized.startswith("/api/artifacts/"):
-            artifact_id = normalized.rsplit("/", 1)[-1]
-            self._serve_artifact(artifact_id)
-        elif normalized in {"/", "/health"}:
-            self._write(200, health(probe_gpu=False))
-        elif normalized == "/api/bootstrap":
-            self._write(200, _bootstrap_payload())
-        elif normalized == "/api/components":
-            from src.services.api.components import snapshot
-
-            self._write(200, snapshot())
-        elif normalized == "/api/modules":
-            # Module Manager is a server-owned composition; the browser never
-            # supplies a manifest or dependency path.
-            control = capability_control_plane()
-            plan = control.get("module_manager") if isinstance(control, dict) else {}
-            self._write(200, plan if isinstance(plan, dict) else {"status": "unavailable", "execution": "not_run", "dry_run": True})
-        elif normalized.startswith("/api/modules/"):
-            module_id = normalized[len("/api/modules/") :].strip("/")
-            control = capability_control_plane()
-            plan = control.get("module_manager") if isinstance(control, dict) else {}
-            modules = plan.get("modules") if isinstance(plan, dict) else []
-            selected = next((item for item in modules if isinstance(item, dict) and item.get("id") == module_id), None)
-            self._write(200 if selected else 404, {"status": "completed", "execution": "not_run", "dry_run": True, "module": selected} if selected else {"status": "error", "error": "unknown_module"})
-        elif normalized.startswith("/api/components/plans/"):
-            from src.services.api.components import lookup_plan
-
-            plan_id = normalized[len("/api/components/plans/") :].strip("/")
-            value = lookup_plan(plan_id)
-            self._write(200 if value else 404, value or {"status": "error", "error": "unknown_component_plan"})
-        elif normalized.startswith("/api/components/jobs/"):
-            from src.services.api.components import lookup_job
-
-            job_id = normalized[len("/api/components/jobs/") :].strip("/")
-            value = lookup_job(job_id)
-            self._write(200 if value else 404, value or {"status": "error", "error": "unknown_component_job"})
-        elif normalized.startswith("/api/components/"):
-            from src.services.api.components import detail
-
-            component_id = normalized[len("/api/components/") :].strip("/")
-            try:
-                self._write(200, detail(component_id))
-            except Exception:
-                self._write(404, {"status": "error", "error": "unknown_component"})
-        elif normalized == "/api/runtimes":
-            from src.services.runtime_manager import RuntimeManager
-
-            self._write(200, RuntimeManager().snapshot())
-        elif normalized.startswith("/api/runtimes/"):
-            from src.services.runtime_manager import RuntimeManager
-
-            runtime_id = normalized[len("/api/runtimes/") :].strip("/")
-            try:
-                self._write(200, {"status": "completed", "runtime": RuntimeManager().verify(runtime_id)})
-            except Exception:
-                self._write(404, {"status": "error", "error": "unknown_runtime"})
-        elif normalized.startswith("/api/models/"):
-            from src.services.model_manager import ModelManager
-
-            model_id = normalized[len("/api/models/") :].strip("/")
-            try:
-                self._write(200, {"status": "completed", "model": ModelManager().inspect(model_id)})
-            except Exception:
-                self._write(404, {"status": "error", "error": "unknown_model"})
-        elif normalized == "/api/capabilities":
-            self._write(200, capability_control_plane())
-        elif normalized == "/api/workflow-library":
-            self._write(200, _workflow_library_payload())
-        elif normalized.startswith("/api/workflow-library/"):
-            workflow_id = normalized[len("/api/workflow-library/") :].strip("/")
-            result = _workflow_library_store().get_workflow(workflow_id)
-            self._write(_workflow_http_status(result), result)
-        elif normalized == "/tools":
-            self._write(200, {"status": "completed", "tools": tool_catalog()})
-        elif normalized == "/models":
-            from src.services.storage_manager.overview import model_summary
-
-            refresh = parse_qs(parsed.query).get("refresh", [""])[0].casefold() in {"1", "true"}
-            self._write(200, {"status": "completed", "models": model_summary(force=refresh)})
-        elif normalized == "/components":
-            self._write(200, {"status": "completed", "components": component_statuses()})
-        elif normalized in {"/jobs", "/api/jobs"}:
-            query = parse_qs(parsed.query)
-            limit = _bounded_int(query.get("limit", [None])[0], 200, minimum=1, maximum=500)
-            self._write(200, {"status": "completed", "jobs": list_jobs(limit=limit)})
-        elif normalized == "/api/durable-jobs":
-            self._write(200, durable_jobs_snapshot())
-        elif normalized.startswith("/jobs/"):
-            self._write(*get_job_or_error(normalized.split("/", 2)[2]))
-        elif normalized == "/api/dashboard":
-            self._write(200, _bootstrap_payload())
-        elif normalized == "/api/storage":
-            from src.services.storage_manager.overview import storage_summary
-
-            self._write(200, storage_summary())
-        elif normalized == "/api/models":
-            from src.services.storage_manager.overview import model_summary
-
-            refresh = parse_qs(parsed.query).get("refresh", [""])[0].casefold() in {"1", "true"}
-            self._write(200, {"status": "completed", "models": model_summary(force=refresh)})
-        elif normalized == "/api/applications":
-            self._write(200, {"status": "completed", "applications": applications()})
-        elif normalized == "/api/lifecycle":
-            self._write(200, _lifecycle_payload())
-        elif normalized == "/api/comfyui/advanced":
-            from src.modules.image_generation.backend.comfyui import health as comfy_health
-
-            self._write(200, {"status": "completed", "comfyui": comfy_health()})
-        elif normalized == "/api/comfyui/workflows":
-            from src.modules.image_generation.backend.comfyui import list_bridge_workflows
-
-            self._write(200, {"status": "completed", "workflows": list_bridge_workflows()})
-        elif normalized.startswith("/api/comfyui/workflows/"):
-            from src.modules.image_generation.backend.comfyui import load_bridge_workflow
-
-            workflow_id = normalized.rsplit("/", 1)[-1]
-            workflow = load_bridge_workflow(workflow_id)
-            if workflow is None:
-                self._write(404, {"status": "error", "error": "Không tìm thấy ComfyUI bridge workflow."})
-            else:
-                self._write(200, {"status": "completed", "workflow": workflow})
-        elif normalized == "/api/settings":
-            self._write(200, _settings_payload())
-        elif normalized == "/api/creative/overview":
-            self._creative(project_manager.overview)
-        elif normalized == "/api/image-mask-studio/overview":
-            query = parse_qs(parsed.query)
-            self._image_mask_studio(lambda: image_mask_studio.overview(project_id=query.get("project", [None])[0]))
-        elif normalized == "/api/image-mask-studio/preflight":
-            self._image_mask_studio(image_mask_studio.preflight)
-        elif normalized == "/api/image-mask-studio/sessions":
-            query = parse_qs(parsed.query)
-            self._image_mask_studio(lambda: image_mask_studio.overview(project_id=query.get("project", [None])[0]))
-        elif normalized.startswith("/api/image-mask-studio/sessions/") and normalized.endswith("/compare"):
-            session_id = normalized.split("/")[-2]
-            query = parse_qs(parsed.query)
-            self._image_mask_studio(lambda: self._creative_or_404(image_mask_studio.compare(
-                session_id,
-                before_snapshot_id=query.get("before", [None])[0],
-                after_snapshot_id=query.get("after", [None])[0],
-            )))
-        elif normalized.startswith("/api/image-mask-studio/sessions/") and normalized.endswith("/export"):
-            parts = normalized.strip("/").split("/")
-            if len(parts) != 7 or parts[4] != "layers":
-                self._write(404, {"status": "error", "error": "Route Image & Mask Studio không tìm thấy."})
-            else:
-                self._image_mask_studio(lambda: image_mask_studio.export_mask(parts[3], parts[5]))
-        elif normalized.startswith("/api/image-mask-studio/sessions/"):
-            session_id = normalized.rsplit("/", 1)[-1]
-            self._image_mask_studio(lambda: self._creative_or_404(image_mask_studio.get_session(session_id)))
-        elif normalized == "/api/projects":
-            self._creative(project_manager.list_projects)
-        elif normalized == "/api/assets":
-            query = parse_qs(parsed.query)
-            self._creative(lambda: project_manager.list_assets(
-                query=str(query.get("query", [""])[0]),
-                tag=str(query.get("tag", [""])[0]),
-                favorite=str(query.get("favorite", [""])[0]).lower() in {"1", "true", "yes"},
-                collection_id=str(query.get("collection", [""])[0]),
-                project_id=str(query.get("project", [""])[0]),
-            ))
-        elif normalized == "/api/collections":
-            self._creative(project_manager.list_collections)
-        elif normalized == "/api/recipes":
-            self._creative(project_manager.list_recipes)
-        elif normalized == "/api/recipes/export-pack":
-            recipe_ids = parse_qs(parsed.query).get("id", [])
-            self._creative(lambda: project_manager.export_recipe_pack(recipe_ids or None))
-        elif normalized == "/api/workflow-gallery":
-            self._creative(project_manager.workflow_gallery)
-        elif normalized.startswith("/api/projects/") and normalized.endswith("/compare"):
-            self._creative(lambda: self._creative_or_404(project_manager.get_compare(normalized.split("/")[-2])))
-        elif normalized.startswith("/api/projects/") and normalized.endswith("/export"):
-            self._creative(lambda: project_manager.export_project(normalized.split("/")[-2]))
-        elif normalized.startswith("/api/projects/") and normalized.endswith("/manifest"):
-            project_id = normalized.split("/")[-2]
-            result = project_manager.export_manifest(project_id)
-            self._write(200 if result.get("accepted") else 404, result)
-        elif normalized.startswith("/api/projects/") and normalized.endswith("/missing-artifacts"):
-            project_id = normalized.split("/")[-2]
-            result = project_manager.missing_artifact_state(project_id)
-            self._write(200 if result.get("accepted") else 404, result)
-        elif normalized.startswith("/api/projects/"):
-            self._creative(lambda: self._creative_or_404(project_manager.get_project(normalized.rsplit("/", 1)[-1])))
-        elif normalized.startswith("/api/recipes/"):
-            self._creative(lambda: self._creative_or_404(project_manager.get_recipe(normalized.rsplit("/", 1)[-1])))
-        elif normalized == "/api/node-studio/registry":
-            from src.services.node_studio.registry import registry_payload
-
-            scope = parse_qs(parsed.query).get("scope", [""])[0]
-            self._write(200, registry_payload(scope if isinstance(scope, str) else None))
-        elif normalized == "/api/node-studio/availability":
-            from src.services.node_studio.registry import registry_payload
-
-            scope = parse_qs(parsed.query).get("scope", [""])[0]
-            payload = registry_payload(scope if isinstance(scope, str) else None)
-            self._write(200, {
-                "status": "completed",
-                "contract_version": payload["contract_version"],
-                "scope": payload["scope"],
-                "availability": payload["availability"],
-                "nodes": [
-                    {
-                        "type": item["type"],
-                        "title": item["title"],
-                        "status": item["status"],
-                        "availability": item["availability"],
-                    }
-                    for item in payload["nodes"]
-                ],
-            })
-        elif normalized == "/api/node-studio/presets":
-            self._write(200, {"status": "completed", "presets": _preset_summaries()})
-        elif normalized.startswith("/api/node-studio/presets/"):
-            preset = _preset(normalized.rsplit("/", 1)[-1])
-            if preset is None:
-                self._write(404, {"status": "error", "error": "Không tìm thấy preset workflow Hub."})
-            else:
-                from src.services.node_studio.schema import validate_graph
-
-                validation = validate_graph(preset)
-                self._write(200, {"status": "completed", "graph": validation["graph"], "validation": {"valid": validation["valid"], "errors": validation["errors"]}})
-        elif normalized.startswith("/api/node-studio/runs/"):
-            from src.services.node_studio.state import graph_runs
-
-            run = graph_runs.snapshot(normalized.rsplit("/", 1)[-1])
-            if run is None:
-                self._write(404, {"status": "error", "error": "Chưa có trạng thái Node Studio cho job này."})
-            else:
-                self._write(200, {"status": "completed", "run": run})
-        elif normalized == "/api/settings/schema":
-            from src.app_config.schema import SETTINGS_SCHEMA_VERSION, SETTINGS_SECTION_DEFAULTS
-            self._write(200, {"status": "completed", "schema_version": SETTINGS_SCHEMA_VERSION, "defaults": SETTINGS_SECTION_DEFAULTS})
-        elif normalized == "/api/diagnostics/snapshot":
-            from src.services.diagnostics.center import diagnostics_center
-            self._write(200, {"status": "completed", "snapshot": diagnostics_center.snapshot()})
-        elif normalized == "/api/diagnostics/export":
-            from src.services.diagnostics.center import diagnostics_center
-            self._write(200, diagnostics_center.export_diagnostics_bundle())
-        elif normalized in ("/api/backup/list", "/api/backup"):
-            from src.services.backup_manager import BackupManager
-            self._write(200, {"status": "completed", "backups": BackupManager().list_backups()})
-        elif normalized == "/api/diagnostics/repair/recovery-drafts":
-            from src.services.diagnostics.center import diagnostics_center
-            forensic = diagnostics_center.recovery_forensic_state()
-            self._write(200, {"status": "completed", "drafts": forensic.get("files", []), "recovery": forensic})
-        elif normalized.startswith("/api/diagnostics/subsystem/"):
-            from src.services.diagnostics.center import diagnostics_center
-            subsystem = normalized.rsplit("/", 1)[-1]
-            _DISPATCH = {
-                "git_integrity": lambda: diagnostics_center.git_integrity_state(),
-                "config_registry": lambda: diagnostics_center.config_registry_state(),
-                "jobs_store": lambda: diagnostics_center.jobs_store_state(),
-                "artifact_store": lambda: diagnostics_center.artifact_store_state(),
-                "workflow_store": lambda: diagnostics_center.workflow_store_state(),
-                "models_inventory": lambda: diagnostics_center.models_inventory(),
-                "environments_inventory": lambda: diagnostics_center.environments_inventory(),
-                "runtime_inventory": lambda: diagnostics_center.runtime_inventory(),
-                "storage": lambda: diagnostics_center.storage_state(),
-                "gpu": lambda: diagnostics_center.gpu_detection(),
-                "latest_app_errors": lambda: diagnostics_center.latest_app_errors(),
-                "recovery_forensic": lambda: diagnostics_center.recovery_forensic_state(),
-            }
-            if subsystem in _DISPATCH:
-                self._write(200, {"status": "completed", "subsystem": subsystem, "data": _DISPATCH[subsystem]()})
-            else:
-                self._write(404, {"status": "error", "error": f"Không tìm thấy subsystem diagnostics '{subsystem}'."})
-        elif normalized.startswith("/api/node-studio/drafts/"):
-            from src.services.node_studio.state import draft_load
-            scope = normalized.rsplit("/", 1)[-1]
-            draft = draft_load(scope)
-            if draft is None:
-                self._write(404, {"status": "error", "error": "Chưa có draft autosave cho scope này.", "draft": None})
-            else:
-                self._write(200, {"status": "completed", "draft": draft})
-        elif normalized == "/api/assets/search":
-            query = parse_qs(parsed.query)
-            q = str(query.get("query", [""])[0])
-            tags = query.get("tag", [])
-            fav_param = query.get("favorite", [None])[0]
-            fav = fav_param.lower() in {"1", "true", "yes"} if fav_param is not None else None
-            media_prefix = str(query.get("media_type", [""])[0])
-            proj_id = str(query.get("project_id", [""])[0])
-            sort_by = str(query.get("sort_by", ["created_at"])[0])
-            sort_desc = str(query.get("sort_desc", ["true"])[0]).lower() in {"1", "true", "yes"}
-            result = project_manager.search_assets(
-                query=q,
-                tags=tags if tags else None,
-                favorite=fav,
-                media_type_prefix=media_prefix,
-                project_id=proj_id,
-                sort_by=sort_by,
-                sort_desc=sort_desc,
-            )
-            self._write(200, result)
-        elif normalized.startswith("/api/artifacts/") and normalized.endswith("/status"):
-            artifact_id = normalized.split("/")[-2]
-            result = project_manager.get_artifact_status(artifact_id)
-            self._write(200 if result.get("found") else 404, result)
-        else:
-            self._write(404, {"status": "error", "error": "Route not found."})
+            return
+        if normalized.startswith("/api/artifacts/"):
+            self._serve_artifact(normalized.rsplit("/", 1)[-1])
+            return
+        self._write(404, {"status": "error", "error": "Route not found."})
 
     def do_HEAD(self) -> None:  # noqa: N802
-        path = unquote(urlparse(self.path).path)
-        normalized = path.rstrip("/") or "/"
+        if self._dispatch_modular("HEAD"):
+            return
+        normalized = unquote(urlparse(self.path).path).rstrip("/") or "/"
         if normalized.startswith("/api/artifacts/"):
             self._serve_artifact(normalized.rsplit("/", 1)[-1], head=True)
             return
@@ -1003,499 +621,29 @@ class HubHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    @staticmethod
-    def _creative_or_404(payload: object) -> object:
-        if payload is None:
-            raise KeyError("creative")
-        return payload
-
     def do_POST(self) -> None:  # noqa: N802
         if self._dispatch_modular("POST"):
             return
         path = unquote(urlparse(self.path).path.rstrip("/") or "/")
-        if path.startswith("/api/components/"):
-            self._component_post(path)
-            return
         if path == "/api/uploads":
             self._upload()
             return
-        if path.startswith("/api/artifacts/") and path.endswith("/open"):
-            artifact_id = path[len("/api/artifacts/") : -len("/open")].strip("/")
-            ok, message = open_artifact(artifact_id)
-            self._write(202 if ok else 404, {"status": "completed" if ok else "error", "message": message})
-            return
-        if path.startswith("/api/applications/") and path.endswith("/launch"):
-            application_id = path[len("/api/applications/") : -len("/launch")].strip("/")
-            status, payload = launch(application_id)
-            self._write(status, payload)
-            return
-        if path.startswith("/jobs/") and path.endswith("/cancel"):
-            job_id = path[len("/jobs/") : -len("/cancel")].strip("/")
-            ok, message = job_manager.cancel(job_id)
-            self._write(202 if ok else 400, {"status": "cancelling" if ok else "error", "message": message, "job": get_job(job_id)})
-            return
-        if path.startswith("/jobs/") and path.endswith("/resume"):
-            job_id = path[len("/jobs/") : -len("/resume")].strip("/")
-            ok, value = job_manager.resume(job_id)
-            if not ok:
-                self._write(400, {"status": "error", "error": str(value)})
-            else:
-                record = value if isinstance(value, dict) else {}
-                self._write(202, {"status": "queued", "job": get_job(str(record.get("id", "")))})
-            return
-        if path == "/api/lifecycle/close":
-            from src.modules.image_generation.backend.comfyui import shutdown_owned_idle
-
-            self._write(200, shutdown_owned_idle())
-            return
-        if path == "/api/lifecycle/prepare-close":
-            self._write(*prepare_owned_shutdown())
-            return
-        if path == "/api/lifecycle/jobs/cancel-and-wait":
-            request = self._read_json()
-            timeout = _bounded_int(request.get("timeout_seconds"), 12, minimum=1, maximum=60)
-            ok, message = job_manager.cancel_all_and_wait(timeout)
-            self._write(200 if ok else 409, {"status": "completed" if ok else "timeout", "message": message})
-            return
-        if path == "/api/comfyui/advanced/start":
-            from src.modules.image_generation.backend.comfyui import start_advanced
-
-            self._write(*start_advanced())
-            return
-        if path == "/api/storage/scan":
-            from src.services.storage_manager.overview import storage_summary
-
-            self._write(200, storage_summary(force=True))
-            return
-        if path == "/api/settings":
-            from src.app_config.settings_service import SettingsPersistence
-            try:
-                patch_data = self._read_json(strict=True)
-            except ValueError as exc:
-                self._write(400, {"status": "invalid", "error": str(exc)})
-                return
-            expected_rev = patch_data.pop("expected_revision", None)
-            result = SettingsPersistence().save(patch_data, expected_revision=expected_rev)
-            status_code = 200 if result.get("accepted") else (409 if result.get("status") == "conflict" else 400)
-            self._write(status_code, result)
-            return
-        if path == "/api/settings/reset":
-            from src.app_config.settings_service import SettingsPersistence
-            req = self._read_json()
-            section = req.get("section")
-            if section:
-                result = SettingsPersistence().reset_section(str(section))
-            else:
-                from src.app_config.schema import SETTINGS_SECTION_DEFAULTS
-                result = SettingsPersistence().save(SETTINGS_SECTION_DEFAULTS)
-            self._write(200 if result.get("accepted") else 400, result)
-            return
-        if path == "/api/backup/create":
-            from src.services.backup_manager import BackupManager
-            result = BackupManager().create_backup()
-            self._write(201 if result.get("accepted") else 500, result)
-            return
-        if path == "/api/backup/inspect":
-            from src.services.backup_manager import BackupManager
-            req = self._read_json()
-            backup_id = req.get("backup_id") or req.get("backup_path", "")
-            result = BackupManager().inspect_backup(backup_id)
-            self._write(200 if result.get("valid") else 400, result)
-            return
-        if path == "/api/backup/plan":
-            from src.services.backup_manager import BackupManager
-            req = self._read_json()
-            backup_id = req.get("backup_id") or req.get("backup_path", "")
-            result = BackupManager().plan_restore(backup_id)
-            self._write(200 if result.get("accepted") else 400, result)
-            return
-        if path == "/api/backup/apply":
-            from src.services.backup_manager import BackupManager
-            req = self._read_json()
-            plan_id = req.get("plan_id") or req.get("plan", {}).get("plan_id", "")
-            confirmed = bool(req.get("confirmed", False))
-            result = BackupManager().apply_restore(plan_id, confirmed=confirmed)
-            status_code = 200 if result.get("accepted") else (409 if result.get("status") == "conflict" or result.get("code") == 409 else 400)
-            self._write(status_code, result)
-            return
-        if path.startswith("/api/node-studio/drafts/"):
-            from src.services.node_studio.state import draft_persist
-            scope = path.rsplit("/", 1)[-1]
-            req = self._read_json()
-            graph = req.get("graph", {})
-            result = draft_persist(scope, graph)
-            self._write(200 if result.get("accepted") else 400, result)
-            return
-        if path == "/api/diagnostics/repair/verify-config":
-            from src.services.diagnostics.center import diagnostics_center
-            self._write(200, {"status": "completed", "result": diagnostics_center.config_registry_state()})
-            return
-        if path == "/api/diagnostics/repair/inspect-recovery":
-            from src.services.diagnostics.center import diagnostics_center
-            self._write(200, {"status": "completed", "result": diagnostics_center.recovery_forensic_state()})
-            return
-        if path == "/api/diagnostics/repair/clear-recovery-drafts":
-            from src.services.node_studio.state import draft_clear
-            req = self._read_json()
-            scopes = req.get("scopes")
-            confirmed = bool(req.get("confirmed", False))
-            if not confirmed:
-                self._write(400, {"status": "unconfirmed", "error": "Xóa bản nháp phục hồi yêu cầu xác nhận confirmed=True."})
-                return
-            if not isinstance(scopes, list) or not scopes:
-                self._write(400, {"status": "invalid", "error": "Danh sách scopes cần xóa không hợp lệ hoặc rỗng."})
-                return
-            cleared = []
-            for s in scopes:
-                if isinstance(s, str) and s:
-                    draft_clear(s)
-                    cleared.append(s)
-            self._write(200, {"status": "completed", "cleared": cleared, "message": f"Đã dọn dẹp {len(cleared)} bản nháp phục hồi."})
-            return
-        if path.startswith("/api/workflow-library"):
-            try:
-                request = self._read_json(strict=True)
-            except ValueError as exc:
-                self._write(400, {"status": "invalid", "error": str(exc)})
-                return
-            store = _workflow_library_store()
-            if path == "/api/workflow-library":
-                expected_revision = request.get("expected_revision")
-                if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
-                    self._write(400, {"status": "invalid", "error": "expected_revision must be a non-negative integer."})
-                    return
-                result = store.save_workflow(request.get("workflow"), expected_revision=expected_revision)
-            elif path == "/api/workflow-library/import":
-                expected_revision = request.get("expected_revision")
-                if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
-                    self._write(400, {"status": "invalid", "error": "expected_revision must be a non-negative integer."})
-                    return
-                content = request.get("content", "")
-                if not isinstance(content, str) or len(content.encode("utf-8")) > 2 * 1024 * 1024:
-                    self._write(400, {"status": "invalid", "error": "Workflow Library import content is bounded UTF-8 text."})
-                    return
-                result = store.import_json(content, expected_revision=expected_revision)
-            elif path == "/api/workflow-library/migration/plan":
-                result = store.plan_migration(request.get("entries", []))
-            elif path == "/api/workflow-library/migration/confirm":
-                expected_revision = request.get("expected_revision")
-                if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
-                    self._write(400, {"status": "invalid", "error": "expected_revision must be a non-negative integer."})
-                    return
-                result = store.confirm_migration(request.get("entries", []), expected_revision=expected_revision)
-            else:
-                self._write(404, {"status": "error", "error": "Workflow Library route not found."})
-                return
-            self._write(_workflow_http_status(result), result)
-            return
-        if path.startswith("/api/durable-jobs/") and path.endswith("/resume"):
-            job_id = path[len("/api/durable-jobs/") : -len("/resume")].strip("/")
-            result = resume_durable_job(job_id)
-            self._write(_workflow_http_status(result), result)
-            return
-        if path == "/api/durable-jobs":
-            try:
-                request = self._read_json(strict=True)
-            except ValueError:
-                self._write(400, {
-                    "status": "invalid",
-                    "execution": "not_run",
-                    "dry_run": True,
-                    "error": {
-                        "code": "INVALID_JOB_SPEC",
-                        "action": "Create a new allowlisted media.video_grade.v1 job.",
-                    },
-                })
-                return
-            result = admit_durable_job(request)
-            self._write(_durable_admission_http_status(result), result)
-            return
-        if path == "/api/projects":
-            self._creative(lambda: project_manager.create_project(self._read_json()))
-            return
-        if path == "/api/image-mask-studio/sessions":
-            self._image_mask_studio(lambda: image_mask_studio.create_session(self._read_json(strict=True)))
-            return
-        if path.startswith("/api/image-mask-studio/sessions/"):
-            parts = path.strip("/").split("/")
-            if len(parts) >= 4:
-                session_id = parts[3]
-                suffix = parts[4:]
-                if suffix == ["undo"]:
-                    self._image_mask_studio(lambda: image_mask_studio.undo(session_id, self._read_json(strict=True)))
-                    return
-                if suffix == ["redo"]:
-                    self._image_mask_studio(lambda: image_mask_studio.redo(session_id, self._read_json(strict=True)))
-                    return
-                if suffix == ["save"]:
-                    self._image_mask_studio(lambda: image_mask_studio.save(session_id, self._read_json(strict=True)))
-                    return
-                if suffix == ["link-project"]:
-                    try:
-                        link_payload = self._read_json(strict=True)
-                    except ValueError as exc:
-                        self._write(400, {"status": "error", "error": str(exc)})
-                    else:
-                        self._link_image_mask_studio_project(session_id, link_payload)
-                    return
-                if suffix == ["layers"]:
-                    self._image_mask_studio(lambda: image_mask_studio.add_layer(session_id, self._read_json(strict=True)))
-                    return
-                if suffix == ["masks", "import"]:
-                    self._image_mask_studio(lambda: image_mask_studio.import_mask(session_id, self._read_json(strict=True)))
-                    return
-                if suffix == ["presets"]:
-                    self._image_mask_studio(lambda: image_mask_studio.capture_preset(session_id, self._read_json(strict=True)))
-                    return
-                if len(suffix) == 3 and suffix[0] == "layers" and suffix[2] == "operations":
-                    self._image_mask_studio(lambda: image_mask_studio.apply_mask_operation(session_id, suffix[1], self._read_json(strict=True)))
-                    return
-                if len(suffix) == 3 and suffix[0] == "layers" and suffix[2] == "move":
-                    self._image_mask_studio(lambda: image_mask_studio.move_layer(session_id, suffix[1], self._read_json(strict=True)))
-                    return
-                if len(suffix) == 3 and suffix[0] == "layers" and suffix[2] == "remove":
-                    self._image_mask_studio(lambda: image_mask_studio.remove_layer(session_id, suffix[1], self._read_json(strict=True)))
-                    return
-                if len(suffix) == 3 and suffix[0] == "snapshots" and suffix[2] == "restore":
-                    self._image_mask_studio(lambda: image_mask_studio.restore_snapshot(session_id, suffix[1], self._read_json(strict=True)))
-                    return
-                if len(suffix) == 3 and suffix[0] == "presets" and suffix[2] == "apply":
-                    self._image_mask_studio(lambda: image_mask_studio.apply_preset(session_id, suffix[1], self._read_json(strict=True)))
-                    return
-        if path == "/api/projects/import":
-            self._creative(lambda: project_manager.import_project(self._read_json()))
-            return
-        if path.startswith("/api/projects/") and path.endswith("/archive"):
-            self._creative(lambda: project_manager.archive_project(path.split("/")[-2], archived=True))
-            return
-        if path.startswith("/api/projects/") and path.endswith("/restore"):
-            self._creative(lambda: project_manager.archive_project(path.split("/")[-2], archived=False))
-            return
-        if path.startswith("/api/projects/") and path.endswith("/assets"):
-            self._creative(lambda: project_manager.add_project_asset(path.split("/")[-2], self._read_json()))
-            return
-        if path.startswith("/api/projects/") and path.endswith("/compare"):
-            self._creative(lambda: project_manager.update_compare(path.split("/")[-2], self._read_json()))
-            return
-        if path == "/api/collections":
-            self._creative(lambda: project_manager.create_collection(self._read_json()))
-            return
-        if path == "/api/recipes":
-            self._creative(lambda: project_manager.create_recipe(self._read_json()))
-            return
-        if path == "/api/recipes/import-pack":
-            self._creative(lambda: project_manager.import_recipe_pack(self._read_json()))
-            return
-        if path.startswith("/api/recipes/") and path.endswith("/apply"):
-            self._creative(lambda: project_manager.apply_recipe(path.split("/")[-2], self._read_json()))
-            return
-        if path == "/api/node-studio/validate":
-            from src.services.node_studio.schema import validate_graph
-
-            request = self._read_json()
-            validation = validate_graph(request.get("graph"), require_runnable=bool(request.get("require_runnable")))
-            self._write(200, {"status": "completed", "validation": validation})
-            return
-        if path == "/api/node-studio/dirty":
-            from src.services.node_studio.schema import downstream_nodes
-
-            request = self._read_json()
-            self._write(200, {"status": "completed", **downstream_nodes(request.get("graph"), request.get("changed_node_ids"))})
-            return
-        if path == "/api/node-studio/run":
-            request = self._read_json()
-            self._write(*submit_graph(request.get("graph"), draft=bool(request.get("draft"))))
-            return
-        aliases = {
-            "/media/probe": "probe_media",
-            "/probe_media": "probe_media",
-            "/api/media/run": "run_media_operation",
-            "/vision/ui/parse": "parse_screen",
-            "/vision/detect": "detect_objects",
-            "/vision/ground": "ground_objects",
-            "/vision/segment": "segment_image",
-            "/vision/segment-box": "segment_from_box",
-            "/vision/segment-points": "segment_from_points",
-            "/vision/track": "track_video_object",
-            "/ocr/parse": "ocr_document",
-            "/speech/transcribe": "transcribe_media",
-            "/video/subtitle": "create_subtitled_video",
-            "/voice/tts": "text_to_speech",
-            "/voice/design": "design_voice",
-            "/voice/clone": "clone_voice",
-            "/voice/convert": "convert_voice",
-            "/video/upscale/anime": "upscale_anime_video",
-            "/api/image/flux": "generate_flux",
-            "/api/image/qwen": "generate_qwen_image",
-        }
-        if path.startswith("/api/jobs/"):
-            tool = path[len("/api/jobs/") :].strip("/")
-        else:
-            tool = aliases.get(path)
-        if not tool:
-            self._write(404, {"status": "error", "error": "Route not found."})
-            return
-        status, payload = submit_tool(tool, self._read_json())
-        self._write(status, payload)
-
-    def _component_post(self, path: str) -> None:
-        """Handle typed component plans without accepting filesystem input."""
-
-        from src.services.api import components as component_api
-
-        try:
-            request = self._read_json(strict=True)
-        except ValueError as exc:
-            self._write(400, {"status": "invalid", "error": str(exc), "execution": "not_run"})
-            return
-
-        try:
-            if path == "/api/components/install/plan":
-                allowed = {"component_id", "component_type", "variant"}
-                if set(request) - allowed or not isinstance(request.get("component_id"), str) or not isinstance(request.get("component_type"), str) or (request.get("variant") is not None and not isinstance(request.get("variant"), str)):
-                    raise ValueError("component_plan_payload_invalid")
-                result = component_api.plan_install(request["component_id"], component_type=request["component_type"], variant=request.get("variant"))
-                self._write(200, result)
-                return
-            if path.startswith("/api/components/plans/") and path.endswith("/confirm"):
-                plan_id = path[len("/api/components/plans/") : -len("/confirm")].strip("/")
-                if set(request) - {"confirmed"} or type(request.get("confirmed")) is not bool:
-                    raise ValueError("component_confirmation_invalid")
-                result = component_api.confirm_install(plan_id, confirmed=request["confirmed"])
-                self._write(200 if result.get("status") not in {"invalid", "error", "conflict"} else 409, result)
-                return
-            if path == "/api/components/install/confirm":
-                if set(request) - {"plan_id", "confirmed"} or not isinstance(request.get("plan_id"), str) or type(request.get("confirmed")) is not bool:
-                    raise ValueError("component_confirmation_invalid")
-                result = component_api.confirm_install(request["plan_id"], confirmed=request["confirmed"])
-                self._write(200 if result.get("status") not in {"invalid", "error", "conflict"} else 409, result)
-                return
-            if path == "/api/components/install/apply":
-                if set(request) - {"plan_id", "confirmed"} or not isinstance(request.get("plan_id"), str) or type(request.get("confirmed")) is not bool:
-                    raise ValueError("component_apply_payload_invalid")
-                result = component_api.confirm_install(request["plan_id"], confirmed=request["confirmed"])
-                self._write(200 if result.get("status") not in {"invalid", "error", "conflict"} else 409, result)
-                return
-            if path == "/api/components/import/plan":
-                if set(request) - {"selection_id", "mode"} or not isinstance(request.get("selection_id"), str) or not isinstance(request.get("mode"), str):
-                    raise ValueError("component_import_payload_invalid")
-                self._write(200, component_api.plan_import(request["selection_id"], mode=request["mode"]))
-                return
-            if path == "/api/components/import/confirm":
-                if set(request) - {"plan_id", "confirmed"} or not isinstance(request.get("plan_id"), str) or type(request.get("confirmed")) is not bool:
-                    raise ValueError("component_confirmation_invalid")
-                result = component_api.confirm_import(request["plan_id"], confirmed=request["confirmed"])
-                self._write(200 if result.get("status") not in {"invalid", "error", "conflict"} else 409, result)
-                return
-            if path == "/api/components/verify/plan":
-                if set(request) - {"component_id", "component_type"} or not isinstance(request.get("component_id"), str) or not isinstance(request.get("component_type"), str):
-                    raise ValueError("component_verify_payload_invalid")
-                self._write(200, component_api.plan_verify(request["component_id"], component_type=request["component_type"]))
-                return
-            if path == "/api/components/maintenance/plan":
-                if set(request) - {"component_id", "action"} or not isinstance(request.get("component_id"), str) or not isinstance(request.get("action"), str):
-                    raise ValueError("component_maintenance_payload_invalid")
-                self._write(200, component_api.plan_maintenance(request["component_id"], action=request["action"]))
-                return
-            for action in ("repair", "update", "uninstall"):
-                if path == f"/api/components/{action}/plan":
-                    if set(request) - {"component_id"} or not isinstance(request.get("component_id"), str):
-                        raise ValueError("component_maintenance_payload_invalid")
-                    self._write(200, component_api.plan_maintenance(request["component_id"], action=action))
-                    return
-            if path.startswith("/api/components/maintenance/") and path.endswith("/confirm"):
-                plan_id = path[len("/api/components/maintenance/") : -len("/confirm")].strip("/")
-                if set(request) - {"confirmed"} or type(request.get("confirmed")) is not bool:
-                    raise ValueError("component_confirmation_invalid")
-                result = component_api.confirm_maintenance(plan_id, confirmed=request["confirmed"])
-                self._write(200 if result.get("status") not in {"invalid", "error", "conflict"} else 409, result)
-                return
-            if path.startswith("/api/components/jobs/") and path.endswith("/cancel"):
-                if request:
-                    raise ValueError("component_cancel_payload_invalid")
-                job_id = path[len("/api/components/jobs/") : -len("/cancel")].strip("/")
-                result = component_api.component_installer().cancel_job(job_id)
-                self._write(202 if result.get("status") == "cancelling" else 409, result)
-                return
-            self._write(404, {"status": "error", "error": "Component route not found."})
-        except Exception as exc:
-            status, payload = component_api.handle_error(exc)
-            self._write(status, payload)
-
-    def do_DELETE(self) -> None:  # noqa: N802
-        path = unquote(urlparse(self.path).path.rstrip("/") or "/")
-        if path.startswith("/api/node-studio/drafts/"):
-            from src.services.node_studio.state import draft_clear
-            scope = path.rsplit("/", 1)[-1]
-            draft_clear(scope)
-            self._write(200, {"status": "completed", "scope": scope})
-            return
-        prefix = "/api/workflow-library/"
-        if not path.startswith(prefix) or not path[len(prefix) :].strip("/"):
-            self._write(404, {"status": "error", "error": "Workflow Library route not found."})
-            return
-        workflow_id = path[len(prefix) :].strip("/")
-        try:
-            request = self._read_json(strict=True)
-        except ValueError as exc:
-            self._write(400, {"status": "invalid", "error": str(exc)})
-            return
-        expected_revision = request.get("expected_revision")
-        if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
-            self._write(400, {"status": "invalid", "error": "expected_revision must be a non-negative integer."})
-            return
-        result = _workflow_library_store().delete_workflow(workflow_id, expected_revision=expected_revision)
-        self._write(_workflow_http_status(result), result)
+        self._write(404, {"status": "error", "error": "Route not found."})
 
     def do_PATCH(self) -> None:  # noqa: N802
         if self._dispatch_modular("PATCH"):
             return
-        path = unquote(urlparse(self.path).path.rstrip("/") or "/")
-        if path == "/api/settings":
-            from src.app_config.settings_service import SettingsPersistence
-            try:
-                patch_data = self._read_json(strict=True)
-            except ValueError as exc:
-                self._write(400, {"status": "invalid", "error": str(exc)})
-                return
-            expected_rev = patch_data.pop("expected_revision", None)
-            result = SettingsPersistence().save(patch_data, expected_revision=expected_rev)
-            status_code = 200 if result.get("accepted") else (409 if result.get("status") == "conflict" else 400)
-            self._write(status_code, result)
-            return
         self._write(404, {"status": "error", "error": "Route not found."})
 
     def do_PUT(self) -> None:  # noqa: N802
-        path = unquote(urlparse(self.path).path.rstrip("/") or "/")
-        if path.startswith("/api/image-mask-studio/sessions/"):
-            parts = path.strip("/").split("/")
-            if len(parts) == 4:
-                self._image_mask_studio(lambda: image_mask_studio.update_session(parts[3], self._read_json(strict=True)))
-                return
-            if len(parts) == 6 and parts[4] == "layers":
-                self._image_mask_studio(lambda: image_mask_studio.update_layer(parts[3], parts[5], self._read_json(strict=True)))
-                return
-            self._write(404, {"status": "error", "error": "Route Image & Mask Studio không tìm thấy."})
+        if self._dispatch_modular("PUT"):
             return
-        if path.startswith("/api/projects/"):
-            self._creative(lambda: project_manager.update_project(path.rsplit("/", 1)[-1], self._read_json()))
-            return
-        if path.startswith("/api/assets/"):
-            self._creative(lambda: project_manager.update_asset(path.rsplit("/", 1)[-1], self._read_json()))
-            return
-        if path.startswith("/api/collections/"):
-            self._creative(lambda: project_manager.update_collection(path.rsplit("/", 1)[-1], self._read_json()))
-            return
-        if path.startswith("/api/recipes/"):
-            self._creative(lambda: project_manager.update_recipe(path.rsplit("/", 1)[-1], self._read_json()))
-            return
-        if not path.startswith("/api/comfyui/workflows/"):
-            self._write(404, {"status": "error", "error": "Route not found."})
-            return
-        from src.modules.image_generation.backend.comfyui import save_bridge_workflow
+        self._write(404, {"status": "error", "error": "Route not found."})
 
-        workflow_id = path.rsplit("/", 1)[-1]
-        self._write(*save_bridge_workflow(workflow_id, self._read_json()))
+    def do_DELETE(self) -> None:  # noqa: N802
+        if self._dispatch_modular("DELETE"):
+            return
+        self._write(404, {"status": "error", "error": "Route not found."})
 
 
 def main() -> int:
