@@ -51,7 +51,7 @@ class Phase2ApiUiTests(unittest.TestCase):
         self.assertNotIn("command", client)
 
     def test_component_ui_uses_static_i18n_markers_only(self) -> None:
-        pages = (ROOT / "src/ui/pages.js").read_text(encoding="utf-8")
+        pages = (ROOT / "src/ui/pages.js").read_text(encoding="utf-8") + (ROOT / "src/ui/features/components/render.js").read_text(encoding="utf-8")
         i18n = (ROOT / "src/ui/i18n.js").read_text(encoding="utf-8")
         for label in ("Module state", "Runtime state", "Model state", "Lập kế hoạch", "Lập kế hoạch sửa"):
             self.assertIn(f'data-i18n="{label}"', pages)
