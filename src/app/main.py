@@ -39,9 +39,35 @@ _api_process_lock = threading.RLock()
 _shutdown_started = False
 
 
+def _configured_port() -> int:
+    """Read the machine-local API port, retaining 8765 as the safe default."""
+
+    candidate = os.environ.get("LOCALAIHUB_PORT")
+    if candidate is None:
+        try:
+            config_path = get_paths(app_root=ROOT).config_root / "hub_config.json"
+            value = json.loads(config_path.read_text(encoding="utf-8"))
+            candidate = value.get("api_port") if isinstance(value, dict) else None
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            candidate = None
+    try:
+        port = int(candidate)
+    except (TypeError, ValueError):
+        return PORT
+    return port if 1024 <= port <= 65535 else PORT
+
+
+def _api_base_url() -> str:
+    return f"http://{HOST}:{_configured_port()}"
+
+
+def _ui_url() -> str:
+    return f"{_api_base_url()}/ui/"
+
+
 def _api_ready() -> bool:
     try:
-        with urllib.request.urlopen(f"http://{HOST}:{PORT}/health", timeout=0.35) as response:
+        with urllib.request.urlopen(f"{_api_base_url()}/health", timeout=0.35) as response:
             return response.status == 200
     except OSError:
         return False
@@ -67,7 +93,7 @@ def ensure_api(timeout_seconds: float = 20.0) -> subprocess.Popen[object] | None
         if not acquired:
             if _wait_for_api(deadline):
                 return None
-            raise RuntimeError(f"Local AI Hub API startup lock timed out at {HOST}:{PORT}.")
+            raise RuntimeError(f"Local AI Hub API startup lock timed out at {_api_base_url()}.")
         # Resolve the same Core interpreter used by the desktop launcher.  An
         # explicit environment override remains a development-only escape
         # hatch, but is accepted only when it is a regular file under a
@@ -96,7 +122,7 @@ def ensure_api(timeout_seconds: float = 20.0) -> subprocess.Popen[object] | None
             )
         if _wait_for_api(deadline):
             return process if process.poll() is None else None
-    raise RuntimeError(f"Local AI Hub API did not become ready at {HOST}:{PORT}.")
+    raise RuntimeError(f"Local AI Hub API did not become ready at {_api_base_url()}.")
 
 
 def _remember_owned_api(process: subprocess.Popen[object] | None) -> None:
@@ -137,7 +163,7 @@ def close_owned_idle_backends() -> None:
         # An API started by another shell/service owns its own lifecycle.  The
         # desktop must neither terminate it nor ask it to unload backends.
         return
-    request = urllib.request.Request(f"http://{HOST}:{PORT}/api/lifecycle/close", data=b"{}", method="POST", headers={"Content-Type": "application/json"})
+    request = urllib.request.Request(f"{_api_base_url()}/api/lifecycle/close", data=b"{}", method="POST", headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=4):
             pass
@@ -149,7 +175,7 @@ def close_owned_idle_backends() -> None:
 def _api_active_job_count() -> int:
     """Return the truthful loopback count; callers veto close on any failure."""
 
-    with urllib.request.urlopen(f"http://{HOST}:{PORT}/health", timeout=1.0) as response:
+    with urllib.request.urlopen(f"{_api_base_url()}/health", timeout=1.0) as response:
         value = json.loads(response.read().decode("utf-8"))
     if not isinstance(value, dict):
         raise RuntimeError("Phản hồi health của Hub không hợp lệ.")
@@ -162,7 +188,7 @@ def _prepare_owned_api_close() -> tuple[bool, int, str]:
     if not _owns_live_api():
         return True, 0, ""
     request = urllib.request.Request(
-        f"http://{HOST}:{PORT}/api/lifecycle/prepare-close",
+        f"{_api_base_url()}/api/lifecycle/prepare-close",
         data=b"{}",
         method="POST",
         headers={"Content-Type": "application/json"},
@@ -190,7 +216,7 @@ def _cancel_api_jobs_and_wait(timeout_seconds: float) -> tuple[bool, str]:
 
     body = json.dumps({"timeout_seconds": max(1, min(60, int(timeout_seconds)))}, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
-        f"http://{HOST}:{PORT}/api/lifecycle/jobs/cancel-and-wait",
+        f"{_api_base_url()}/api/lifecycle/jobs/cancel-and-wait",
         data=body,
         method="POST",
         headers={"Content-Type": "application/json; charset=utf-8"},
@@ -311,7 +337,7 @@ class DesktopBridge:
         if result.get("status") == "completed" and self._close_prompt_fallback:
             window = self._window
             try:
-                window.load_url(UI_URL)  # type: ignore[attr-defined]
+                window.load_url(_ui_url())  # type: ignore[attr-defined]
                 self._close_prompt_fallback = False
             except Exception:
                 result = {"status": "error", "message": "Không thể trở lại giao diện Hub; cửa sổ vẫn được giữ mở an toàn."}
@@ -421,7 +447,7 @@ def _load_ui_when_ready(window: object) -> None:
             return
         return
     try:
-        window.load_url(UI_URL)  # type: ignore[attr-defined]
+        window.load_url(_ui_url())  # type: ignore[attr-defined]
     except Exception:
         # The user can still close the loading window normally if WebView2 fails.
         return
