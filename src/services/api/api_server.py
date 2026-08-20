@@ -37,6 +37,8 @@ from .jobs import flush as flush_jobs
 from .jobs import reconcile_startup
 from .jobs import get_job, list_jobs
 from .v5_productization import admit_durable_job, durable_jobs_snapshot, project_product_surface, reconcile_durable_jobs, resume_durable_job
+from .context import ApiContext
+from .router import request_from_handler
 
 
 LOG = logging.getLogger("local-ai-hub")
@@ -45,6 +47,8 @@ WORKFLOW_ROOT = (ROOT / "workflows").resolve()
 _BOOTSTRAP_CACHE_SECONDS = 5.0
 _bootstrap_cache: tuple[float, dict] | None = None
 _bootstrap_lock = threading.RLock()
+_api_router = None
+_api_context_cache: ApiContext | None = None
 _PRESET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 ARTIFACT_CHUNK_BYTES = 1024 * 1024
 
@@ -234,6 +238,158 @@ def _bootstrap_payload(*, force: bool = False) -> dict:
     return payload
 
 
+def _api_context() -> ApiContext:
+    """Compose shared application services once for modular route adapters."""
+
+    global _api_context_cache
+    if _api_context_cache is not None:
+        # Tests and the existing application composition may replace a
+        # singleton during an isolated server fixture.  Refresh only the
+        # application-owned bindings; expensive manager instances inside the
+        # context remain cached and are not reconstructed per request.
+        if isinstance(_api_context_cache.services, dict):
+            _api_context_cache.services.update({
+                "project_manager": project_manager,
+                "health": health,
+                "component_statuses": component_statuses,
+                "list_jobs": list_jobs,
+                "get_job": get_job,
+                "durable_jobs_snapshot": durable_jobs_snapshot,
+                "admit_durable_job": admit_durable_job,
+                "resume_durable_job": resume_durable_job,
+                "settings_payload": _settings_payload,
+            })
+        return _api_context_cache
+    from src.app_config.schema import SETTINGS_SECTION_DEFAULTS, SETTINGS_SCHEMA_VERSION
+    from src.app_config.settings_service import SettingsPersistence
+    from src.services.api import components as component_api
+    from src.services.backup_manager import BackupManager
+    from src.services.diagnostics.center import diagnostics_center
+    from src.services.model_manager import ModelManager
+    from src.services.runtime_manager import RuntimeManager
+    from src.services.storage_manager.overview import model_summary
+    from src.services.node_studio.state import draft_clear
+
+    model_manager: ModelManager | None = None
+    runtime_manager = None
+
+    def model_service() -> ModelManager:
+        nonlocal model_manager
+        if model_manager is None:
+            model_manager = ModelManager()
+        return model_manager
+
+    def runtime_service():
+        nonlocal runtime_manager
+        if runtime_manager is None:
+            runtime_manager = RuntimeManager()
+        return runtime_manager
+
+    def prepare_shutdown() -> dict:
+        status, payload = prepare_owned_shutdown()
+        return {**payload, "http_status": status}
+
+    def close_idle() -> dict:
+        from src.modules.image_generation.backend.comfyui import shutdown_owned_idle
+        return shutdown_owned_idle()
+
+    def cancel_jobs(timeout: object) -> dict:
+        value = _bounded_int(timeout, 12, minimum=1, maximum=60)
+        ok, message = job_manager.cancel_all_and_wait(value)
+        return {"status": "completed" if ok else "timeout", "message": message, "http_status": 200 if ok else 409}
+
+    def clear_drafts(scopes: list[str]) -> dict:
+        cleared: list[str] = []
+        for scope in scopes:
+            draft_clear(scope)
+            cleared.append(scope)
+        return {"status": "completed", "cleared": cleared, "message": f"Đã dọn dẹp {len(cleared)} bản nháp phục hồi."}
+
+    _api_context_cache = ApiContext({
+        "health": health,
+        "bootstrap_payload": _bootstrap_payload,
+        "capability_control_plane": capability_control_plane,
+        "lifecycle_payload": _lifecycle_payload,
+        "tools_payload": lambda: {"status": "completed", "tools": tool_catalog(component_statuses())},
+        "component_statuses": component_statuses,
+        "component_snapshot": component_api.snapshot,
+        "component_detail": component_api.detail,
+        "component_plan_lookup": component_api.lookup_plan,
+        "component_job_lookup": component_api.lookup_job,
+        "component_plan_install": component_api.plan_install,
+        "component_confirm_install": component_api.confirm_install,
+        "component_plan_verify": component_api.plan_verify,
+        "component_plan_maintenance": component_api.plan_maintenance,
+        "component_confirm_maintenance": component_api.confirm_maintenance,
+        "component_cancel_job": lambda job_id: component_api.component_installer().cancel_job(job_id),
+        "project_manager": project_manager,
+        "workflow_library_store": _workflow_library_store,
+        "list_jobs": list_jobs,
+        "get_job": get_job,
+        "durable_jobs_snapshot": durable_jobs_snapshot,
+        "admit_durable_job": admit_durable_job,
+        "resume_durable_job": resume_durable_job,
+        "submit_graph": submit_graph,
+        "open_artifact": open_artifact,
+        "artifact_status": project_manager.get_artifact_status,
+        "node_registry_payload": lambda scope=None: __import__("src.services.node_studio.registry", fromlist=["registry_payload"]).registry_payload(scope),
+        "node_preset_summaries": _preset_summaries,
+        "node_preset": _preset,
+        "node_validate": lambda graph, require_runnable=False: __import__("src.services.node_studio.schema", fromlist=["validate_graph"]).validate_graph(graph, require_runnable=require_runnable),
+        "node_downstream": lambda graph, changed: __import__("src.services.node_studio.schema", fromlist=["downstream_nodes"]).downstream_nodes(graph, changed),
+        "node_draft_load": lambda scope: __import__("src.services.node_studio.state", fromlist=["draft_load"]).draft_load(scope),
+        "node_draft_persist": lambda scope, graph: __import__("src.services.node_studio.state", fromlist=["draft_persist"]).draft_persist(scope, graph),
+        "node_draft_clear": lambda scope: __import__("src.services.node_studio.state", fromlist=["draft_clear"]).draft_clear(scope),
+        "node_run_snapshot": lambda run_id: __import__("src.services.node_studio.state", fromlist=["graph_runs"]).graph_runs.snapshot(run_id),
+        "model_summary": model_summary,
+        "model_manager_inspect": lambda model_id: model_service().inspect(model_id),
+        "runtime_manager_snapshot": lambda: runtime_service().snapshot(),
+        "runtime_manager_verify": lambda runtime_id: runtime_service().verify(runtime_id),
+        "settings_payload": _settings_payload,
+        "settings_schema": lambda: {"status": "completed", "schema_version": SETTINGS_SCHEMA_VERSION, "defaults": SETTINGS_SECTION_DEFAULTS},
+        "settings_save": lambda payload, expected_revision=None: SettingsPersistence().save(payload, expected_revision=expected_revision),
+        "settings_reset": lambda section: SettingsPersistence().reset_section(section),
+        "settings_reset_all": lambda: SettingsPersistence().save(SETTINGS_SECTION_DEFAULTS),
+        "diagnostics_snapshot": diagnostics_center.snapshot,
+        "diagnostics_export": diagnostics_center.export_diagnostics_bundle,
+        "diagnostics_config_registry": diagnostics_center.config_registry_state,
+        "diagnostics_recovery_state": diagnostics_center.recovery_forensic_state,
+        "diagnostics_recovery_drafts": lambda: {"status": "completed", "drafts": diagnostics_center.recovery_forensic_state().get("files", []), "recovery": diagnostics_center.recovery_forensic_state()},
+        "diagnostics_subsystem": lambda subsystem: _diagnostic_subsystem(diagnostics_center, subsystem),
+        "clear_recovery_drafts": clear_drafts,
+        "backup_list": lambda: BackupManager().list_backups(),
+        "backup_create": lambda: BackupManager().create_backup(),
+        "backup_inspect": lambda backup_id: BackupManager().inspect_backup(backup_id),
+        "backup_plan": lambda backup_id: BackupManager().plan_restore(backup_id),
+        "backup_apply": lambda plan_id, confirmed=False: BackupManager().apply_restore(plan_id, confirmed=confirmed),
+        "prepare_owned_shutdown": prepare_shutdown,
+        "close_owned_idle": close_idle,
+        "cancel_owned_jobs_and_wait": cancel_jobs,
+    })
+    return _api_context_cache
+
+
+def _diagnostic_subsystem(center: object, subsystem: str) -> dict | None:
+    methods = {
+        "git_integrity": "git_integrity_state", "config_registry": "config_registry_state", "jobs_store": "jobs_store_state",
+        "artifact_store": "artifact_store_state", "workflow_store": "workflow_store_state", "models_inventory": "models_inventory",
+        "environments_inventory": "environments_inventory", "runtime_inventory": "runtime_inventory", "storage": "storage_state",
+        "gpu": "gpu_detection", "latest_app_errors": "latest_app_errors", "recovery_forensic": "recovery_forensic_state",
+    }
+    method = methods.get(str(subsystem))
+    if method is None or not hasattr(center, method):
+        return None
+    return {"status": "completed", "subsystem": subsystem, "data": getattr(center, method)()}
+
+
+def _modular_router():
+    global _api_router
+    if _api_router is None:
+        from .router_registry import build_router
+        _api_router = build_router()
+    return _api_router
+
+
 def _preset_summaries() -> list[dict]:
     if not WORKFLOW_ROOT.is_dir():
         return []
@@ -293,6 +449,22 @@ class HubHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _dispatch_modular(self, method: str) -> bool:
+        """Try the explicit route table before the compatibility dispatcher."""
+
+        parsed = urlparse(self.path)
+        self._route_parsed_path = urlparse(unquote(parsed.path) + (("?" + parsed.query) if parsed.query else ""))
+        request = request_from_handler(self, method)
+        router = _modular_router()
+        if router.resolve(request) is None:
+            return False
+        response = router.dispatch(request, _api_context())
+        if response is None:
+            return False
+        status = int(response.payload.pop("http_status", response.status)) if isinstance(response.payload, dict) else response.status
+        self._write(status, response.payload)
+        return True
 
     @staticmethod
     def _range_bounds(value: str | None, size: int) -> tuple[int, int] | None | bool:
@@ -608,6 +780,8 @@ class HubHandler(BaseHTTPRequestHandler):
         self._write(200, {"status": "completed", "session": completed.get("session"), "project": linked.get("project"), "attachment": public_attachment})
 
     def do_GET(self) -> None:  # noqa: N802
+        if self._dispatch_modular("GET"):
+            return
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         normalized = path.rstrip("/") or "/"
@@ -936,6 +1110,8 @@ class HubHandler(BaseHTTPRequestHandler):
         return payload
 
     def do_POST(self) -> None:  # noqa: N802
+        if self._dispatch_modular("POST"):
+            return
         path = unquote(urlparse(self.path).path.rstrip("/") or "/")
         if path.startswith("/api/components/"):
             self._component_post(path)
@@ -1372,6 +1548,8 @@ class HubHandler(BaseHTTPRequestHandler):
         self._write(_workflow_http_status(result), result)
 
     def do_PATCH(self) -> None:  # noqa: N802
+        if self._dispatch_modular("PATCH"):
+            return
         path = unquote(urlparse(self.path).path.rstrip("/") or "/")
         if path == "/api/settings":
             from src.app_config.settings_service import SettingsPersistence

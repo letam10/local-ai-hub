@@ -1,8 +1,11 @@
-"""Typed, loopback-only component management façade.
+"""COMPATIBILITY façade for the Phase 2 Component Manager routes.
 
-The HTTP handler imports this module instead of exposing ModelManager or
+The modular route adapter imports this module instead of exposing ModelManager or
 RuntimeManager internals.  All plans are server-owned and browser payloads
 contain only fixed IDs, variants and opaque plan/selection identifiers.
+
+This module remains intentionally small and keeps existing imports stable;
+new transport registration lives in ``src.services.api.routes.components``.
 """
 
 from __future__ import annotations
