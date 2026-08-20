@@ -86,9 +86,14 @@ class ComponentInstaller:
 
     def __init__(self, *, paths: HubPaths | None = None, model_manager: ModelManager | None = None, runtime_manager: RuntimeManager | None = None, catalog_binding_provider: Any | None = None) -> None:
         self.paths = paths or get_paths()
-        self.model_manager = model_manager or ModelManager(paths=self.paths)
-        self.runtime_manager = runtime_manager or RuntimeManager(paths=self.paths)
+        self.model_manager = model_manager or ModelManager(paths=self.paths, catalog_binding_provider=catalog_binding_provider)
+        self.runtime_manager = runtime_manager or RuntimeManager(paths=self.paths, catalog_binding_provider=catalog_binding_provider)
         self._catalog_binding_provider = catalog_binding_provider if callable(catalog_binding_provider) else None
+        if callable(self._catalog_binding_provider):
+            if not callable(getattr(self.model_manager, "_catalog_binding_provider", None)):
+                self.model_manager._catalog_binding_provider = self._catalog_binding_provider
+            if not callable(getattr(self.runtime_manager, "_catalog_binding_provider", None)):
+                self.runtime_manager._catalog_binding_provider = self._catalog_binding_provider
         self._plans: dict[str, dict[str, Any]] = {}
         self._selections: dict[str, dict[str, Any]] = {}
         self._jobs: dict[str, dict[str, Any]] = {}

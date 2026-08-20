@@ -58,6 +58,9 @@ Every confirmed verify, reuse, repair, install or maintenance action rebuilds
 the current server-owned binding and compares all four fields with the plan.
 Missing or changed V2 context returns `stale_binding` before deep verification,
 receipt writes or any executor path.
+Direct model/runtime manager verification uses the same current-binding guard;
+without a V2 provider it refuses V2 rather than treating a V1 reader as the
+current V2 catalog.
 Verified leaves additionally carry observed/verified size, SHA-256 and the
 `sha256` algorithm.  Duplicate keys, unknown fields, absolute paths, URLs,
 commands, executables, secrets and oversized documents fail closed.  Writes

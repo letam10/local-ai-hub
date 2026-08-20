@@ -81,13 +81,13 @@ class V7ComponentVerificationReuseTests(unittest.TestCase):
         models._records[0]["source_identity"] = "catalog:demo-model"
         models._by_id["demo-model"] = models._records[0]
         runtimes._records[0]["source_identity"] = None
-        current = {"version": "2026.08.21", "fingerprint": "a" * 64, "model_source": "catalog:demo-model"}
+        current: dict[str, object] = {"version": "2026.08.21", "fingerprint": "a" * 64, "model_source": "catalog:demo-model", "runtime_source": None}
 
         def provider(component_type: str, _record: Mapping[str, Any]) -> CatalogBindingContext:
             return CatalogBindingContext.for_v2(
                 catalog_version=current["version"],
                 catalog_fingerprint=current["fingerprint"],
-                source_identity=current["model_source"] if component_type == "model" else None,
+                source_identity=current["model_source"] if component_type == "model" else current["runtime_source"],
             )
 
         installer = ComponentInstaller(paths=self.paths, model_manager=models, runtime_manager=runtimes, catalog_binding_provider=provider)
@@ -399,6 +399,59 @@ class V7ComponentVerificationReuseTests(unittest.TestCase):
         installer._catalog_binding_provider = None
         missing_context_result = installer.confirm_reuse(missing_context_plan["plan_id"], confirmed=True)
         self.assertEqual(missing_context_result["code"], "stale_binding")
+
+    def test_direct_model_and_runtime_verify_revalidate_current_binding(self) -> None:
+        installer, current = self._v2_installer()
+        model = installer.model_manager
+        runtime = installer.runtime_manager
+        model_target = self.paths.models_root / "demo-model" / "demo.bin"
+        model_target.parent.mkdir(parents=True, exist_ok=True)
+        model_target.write_bytes(b"model")
+        runtime_target = self.paths.runtime_root / "bin" / "demo.exe"
+        runtime_target.parent.mkdir(parents=True, exist_ok=True)
+        runtime_target.write_bytes(b"runtime")
+        model_context = CatalogBindingContext.for_v2(catalog_version=current["version"], catalog_fingerprint=current["fingerprint"], source_identity=current["model_source"])
+        runtime_context = CatalogBindingContext.for_v2(catalog_version=current["version"], catalog_fingerprint=current["fingerprint"], source_identity=current["runtime_source"])
+
+        valid_model = model.verify("demo-model", catalog_binding=model_context)
+        valid_runtime = runtime.verify("demo-runtime", catalog_binding=runtime_context)
+        self.assertEqual(valid_model["status"], "completed")
+        self.assertEqual(valid_runtime["status"], "completed")
+        self.assertFalse(valid_model["operational"])
+        self.assertFalse(valid_runtime["operational"])
+
+        stale_cases = (
+            (model, "demo-model", model_context, "version", "2026.08.22"),
+            (model, "demo-model", model_context, "fingerprint", "b" * 64),
+            (model, "demo-model", model_context, "model_source", "catalog:changed-model"),
+            (runtime, "demo-runtime", runtime_context, "runtime_source", "catalog:runtime-digest"),
+        )
+        for manager, component_id, supplied, field, changed in stale_cases:
+            receipt_path = self.paths.config_root / "component_install_receipts.json"
+            receipt_path.write_bytes(b"direct-manager-prior\n")
+            before = receipt_path.read_bytes()
+            current[field] = changed
+            with patch.object(DeepComponentVerifier, "verify", side_effect=AssertionError("stale binding reached deep verifier")), patch("src.services.component_installer.receipts.write_component_receipt", side_effect=AssertionError("stale binding reached receipt writer")):
+                result = manager.verify(component_id, catalog_binding=supplied)
+            self.assertEqual(result["status"], "conflict")
+            self.assertEqual(result["code"], "stale_binding")
+            self.assertNotIn(str(changed), json.dumps(result))
+            self.assertNotIn(str(self.temp.name), json.dumps(result))
+            self.assertEqual(receipt_path.read_bytes(), before)
+            current[field] = "2026.08.21" if field == "version" else "a" * 64 if field == "fingerprint" else "catalog:demo-model" if field == "model_source" else None
+
+        v1_context = CatalogBindingContext.for_v1(component_type="model", record=model._record("demo-model"), catalog_fingerprint=model.catalog_fingerprint)
+        receipt_path = self.paths.config_root / "component_install_receipts.json"
+        receipt_path.write_bytes(b"schema-family-prior\n")
+        with patch.object(DeepComponentVerifier, "verify", side_effect=AssertionError("schema mismatch reached deep verifier")):
+            schema_result = model.verify("demo-model", catalog_binding=v1_context)
+        self.assertEqual(schema_result["code"], "stale_binding")
+        self.assertEqual(receipt_path.read_bytes(), b"schema-family-prior\n")
+
+        model._catalog_binding_provider = None
+        with patch.object(DeepComponentVerifier, "verify", side_effect=AssertionError("missing context reached deep verifier")):
+            missing_result = model.verify("demo-model", catalog_binding=model_context)
+        self.assertEqual(missing_result["code"], "stale_binding")
 
     def test_v2_lifecycle_confirmations_reject_current_catalog_drift(self) -> None:
         from src.services.productization.lifecycle import ComponentLifecycle

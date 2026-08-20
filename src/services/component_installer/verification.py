@@ -112,6 +112,53 @@ def _catalog_binding(
     return binding
 
 
+def revalidate_catalog_binding(
+    *,
+    component_type: str,
+    record: Mapping[str, Any],
+    catalog_fingerprint: str,
+    catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None,
+    provider: Any | None = None,
+) -> tuple[CatalogBindingContext | None, str | None]:
+    """Rebuild current manager binding and compare an optional supplied context."""
+
+    try:
+        planned: CatalogBindingContext | None
+        if isinstance(catalog_binding, CatalogBindingContext):
+            planned = catalog_binding
+        elif isinstance(catalog_binding, Mapping):
+            planned = CatalogBindingContext.from_mapping(catalog_binding)
+        elif catalog_binding is None:
+            planned = None
+        else:
+            return None, "stale_binding"
+
+        current_source: CatalogBindingContext | Mapping[str, Any] | None = None
+        if callable(provider):
+            try:
+                candidate = provider(component_type, record)
+            except Exception:
+                return None, "stale_binding"
+            if not isinstance(candidate, (CatalogBindingContext, Mapping)):
+                return None, "stale_binding"
+            current_source = candidate
+        elif planned is not None and planned.catalog_schema == "v7-production-catalog.v2":
+            keys = ("catalog_schema", "catalog_revision", "catalog_fingerprint", "source_identity")
+            if not all(key in record for key in keys):
+                return None, "stale_binding"
+            current_source = {key: record.get(key) for key in keys}
+
+        if current_source is not None:
+            current = _catalog_binding(record, component_type, catalog_fingerprint, current_source)
+        else:
+            current = _catalog_binding(record, component_type, catalog_fingerprint, None)
+        if planned is not None and planned.as_record_fields() != current.as_record_fields():
+            return None, "stale_binding"
+        return current, None
+    except (ReceiptError, TypeError, ValueError):
+        return None, "stale_binding"
+
+
 def _root_class(record: Mapping[str, Any], component_type: str) -> str | None:
     if component_type == "model":
         return "models_root"
@@ -377,6 +424,6 @@ def verify_installation(**kwargs: Any) -> dict[str, Any]:
 
 
 __all__ = [
-    "DeepComponentVerifier", "FastComponentInspector", "HASH_CHUNK_SIZE", "deep_verify",
+    "DeepComponentVerifier", "FastComponentInspector", "HASH_CHUNK_SIZE", "deep_verify", "revalidate_catalog_binding",
     "fast_inspect", "stream_sha256", "verify_installation",
 ]
