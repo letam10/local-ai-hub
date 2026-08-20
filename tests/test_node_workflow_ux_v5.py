@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class NodeWorkflowUxV5Tests(unittest.TestCase):
     def test_litegraph_adapter_has_one_editor_and_v5_focus_contract(self) -> None:
-        source = (ROOT / "src" / "ui" / "node_studio.js").read_text(encoding="utf-8")
+        source = (ROOT / "src" / "ui" / "features" / "node_studio" / "studio.js").read_text(encoding="utf-8")
         self.assertEqual(source.count("new globalThis.LiteGraph.LGraphCanvas"), 1)
         self.assertEqual(source.count("new globalThis.LiteGraph.LGraph()"), 1)
         for marker in (
@@ -42,7 +42,7 @@ class NodeWorkflowUxV5Tests(unittest.TestCase):
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const source = readFileSync("src/ui/node_studio.js", "utf8");
+const source = readFileSync("src/ui/features/node_studio/studio.js", "utf8");
 const start = source.indexOf("const NODE_UI_STATE_VERSION");
 const end = source.indexOf("function readWorkflowIndex", start);
 const moduleSource = "const LOCAL_PREFIX = 'test';" + String.fromCharCode(10) + source.slice(start, end);
@@ -379,7 +379,7 @@ assert.equal(normalized.pickerSearch, "typed");
         self.assertEqual(get_definition("video_generate").status, "unavailable")
 
     def test_ui_static_contract_has_no_raw_artifact_preview_or_second_engine(self) -> None:
-        source = (ROOT / "src" / "ui" / "node_studio.js").read_text(encoding="utf-8")
+        source = (ROOT / "src" / "ui" / "features" / "node_studio" / "studio.js").read_text(encoding="utf-8")
         registry = (ROOT / "src" / "services" / "node_studio" / "registry.py").read_text(encoding="utf-8")
         self.assertIn("safeArtifactProjection", source)
         self.assertIn("SAFE_ARTIFACT_URL", source)

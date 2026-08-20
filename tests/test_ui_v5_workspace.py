@@ -14,7 +14,7 @@ class V5WorkspaceUiContractTests(unittest.TestCase):
         cls.pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
         cls.shared_renderer = (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
         cls.renderers = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src" / "ui" / "features").rglob("*.js"))
-        cls.nodes = (ROOT / "src" / "ui" / "node_studio.js").read_text(encoding="utf-8")
+        cls.nodes = (ROOT / "src" / "ui" / "features" / "node_studio" / "studio.js").read_text(encoding="utf-8")
         cls.adapter = (ROOT / "src" / "ui" / "workflow_library.js").read_text(encoding="utf-8")
         cls.styles = (ROOT / "src" / "ui" / "styles.css").read_text(encoding="utf-8")
         cls.version = (ROOT / "src" / "shared" / "version.py").read_text(encoding="utf-8")

@@ -14,9 +14,12 @@ catalog and one-click lifecycle; `src/services/model_manager/`,
 implementations for owner and clean-machine fixtures.
 
 `pages.js` is now a small compatibility composition facade and `app.js` owns
-bootstrap/navigation/global lifecycle. They may compose features but must not
-grow new feature business logic. New catalog data enters through `/api/productization/catalog` and
-opaque plans through `/api/productization/plans`.
+bootstrap/navigation/global lifecycle. Node Studio's canvas/LiteGraph
+implementation is feature-owned in `src/ui/features/node_studio/studio.js`,
+while `src/ui/node_studio.js` remains only a compatibility facade for legacy
+extensions and fixtures. These facades may compose features but must not grow
+new feature business logic. New catalog data enters through
+`/api/productization/catalog` and opaque plans through `/api/productization/plans`.
 
 ## State truth
 

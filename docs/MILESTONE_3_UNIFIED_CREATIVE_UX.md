@@ -71,7 +71,7 @@ Functional video re-smoke vì vậy được ghi là `deferred due GPU/resource 
   history và artifact view.
 - `src/ui/app.js`: state snapshot, route/event delegation, responsive drawer,
   preview modal và API lifecycle.
-- `src/ui/node_studio.js`: editor canvas, template/recent/autosave/import/export và
+- `src/ui/features/node_studio/studio.js`: editor canvas, template/recent/autosave/import/export và
   local unsaved guard; không sở hữu worker hay filesystem runtime.
 - `src/services/api/core.py`: tool catalog, truthful readiness và action contract.
 - `src/services/api/api_server.py`: loopback routes; không nhận shell command/path từ UI.
@@ -89,7 +89,7 @@ Không benchmark và không chạy workload video/GPU trong milestone này. Ki�
 ```powershell
 node --check src/ui/app.js
 node --check src/ui/pages.js
-node --check src/ui/node_studio.js
+node --check src/ui/features/node_studio/studio.js
 python -m unittest -q tests/test_milestone3_contracts.py tests/test_unified_ui.py tests/test_v4_node_studio.py
 python scripts/ci_validate.py
 git diff --check

@@ -457,7 +457,7 @@ class NodeStudioContractTests(unittest.TestCase):
         self.assertEqual(snapshot["next_action"], "Kiểm tra preview.")
 
     def test_ui_and_api_keep_node_studio_offline_and_bounded(self) -> None:
-        ui = (ROOT / "src" / "ui" / "node_studio.js").read_text(encoding="utf-8")
+        ui = (ROOT / "src" / "ui" / "features" / "node_studio" / "studio.js").read_text(encoding="utf-8")
         api = (ROOT / "src" / "services" / "api" / "api_server.py").read_text(encoding="utf-8")
         schema = (ROOT / "src" / "services" / "node_studio" / "schema.py").read_text(encoding="utf-8")
         self.assertIn("Auto Preview", ui)

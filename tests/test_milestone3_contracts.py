@@ -18,7 +18,7 @@ class Milestone3ContractTests(unittest.TestCase):
         feature_sources = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src" / "ui" / "features").rglob("*.js"))
         render_sources = pages + "\n" + shared + "\n" + feature_sources
         app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
-        node = (ROOT / "src" / "ui" / "node_studio.js").read_text(encoding="utf-8")
+        node = (ROOT / "src" / "ui" / "features" / "node_studio" / "studio.js").read_text(encoding="utf-8")
         css = (ROOT / "src" / "ui" / "styles.css").read_text(encoding="utf-8")
         for token in (
             "workspaceState",
@@ -143,7 +143,7 @@ class Milestone3ContractTests(unittest.TestCase):
 
     def test_recent_catalog_updates_title_selects_copy_and_caps_at_twelve(self) -> None:
         script = """
-        const module = await import('./src/ui/node_studio.js');
+        const module = await import('./src/ui/features/node_studio/studio.js');
         const index = [{id: 'copy', title: 'QA Milestone 3 Copy', source: 'duplicate'},
           ...Array.from({length: 14}, (_, i) => ({id: `wf-${i}`, title: `Workflow ${i}`, source: 'autosave'}))];
         const options = module.buildRecentWorkflowOptions(index, 'copy');

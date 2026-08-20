@@ -22,7 +22,7 @@ class V6CapabilityEvidenceUiTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
         cls.shared_renderer = (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
-        cls.node = (ROOT / "src" / "ui" / "node_studio.js").read_text(encoding="utf-8")
+        cls.node = (ROOT / "src" / "ui" / "features" / "node_studio" / "studio.js").read_text(encoding="utf-8")
         cls.app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
         cls.styles = (ROOT / "src" / "ui" / "styles.css").read_text(encoding="utf-8")
 
@@ -180,7 +180,7 @@ process.stdout.write(html);
 
     def test_completed_scope_cannot_run_generic_operational_media_node(self) -> None:
         script = """
-import { mediaGraphRunEligibility } from './src/ui/node_studio.js';
+import { mediaGraphRunEligibility } from './src/ui/features/node_studio/studio.js';
 const scope = {status: 'operational', execution: 'completed', evidenceVerified: true, availableOperations: ['video_grade', 'logo_overlay', 'encode'], operationStatus: {video_grade: 'operational', logo_overlay: 'operational', encode: 'operational'}};
 const exact = {nodes: [{type: 'video_grade'}, {type: 'encode'}]};
 const generic = {nodes: [{type: 'generic_media', status: 'operational'}]};

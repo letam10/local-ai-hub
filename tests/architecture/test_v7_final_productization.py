@@ -45,8 +45,12 @@ class V7FinalArchitectureTests(unittest.TestCase):
     def test_ui_facade_and_feature_ownership_boundary(self) -> None:
         pages = ROOT / "src/ui/pages.js"
         shared = ROOT / "src/ui/shared/rendering.js"
+        node_facade = ROOT / "src/ui/node_studio.js"
+        node_feature = ROOT / "src/ui/features/node_studio/studio.js"
         self.assertTrue(shared.is_file())
+        self.assertTrue(node_feature.is_file())
         self.assertLess(pages.stat().st_size, 20_000, "pages.js must remain a thin composition facade")
+        self.assertLess(node_facade.stat().st_size, 4_000, "node_studio.js must remain a compatibility facade")
         ownership = (ROOT / "architecture/ui_features.yaml").read_text(encoding="utf-8")
         feature_ids = re.findall(r"^\s*- id: ([a-z0-9_]+)\s*$", ownership, re.MULTILINE)
         self.assertEqual(len(feature_ids), len(set(feature_ids)))

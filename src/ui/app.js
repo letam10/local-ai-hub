@@ -93,7 +93,7 @@ import {
   uploadFile,
   escapeHtml,
 } from "./api.js";
-import { disposeNodeStudios, mountNodeStudios } from "./node_studio.js";
+import { disposeNodeStudios, mountNodeStudios } from "./features/node_studio/studio.js";
 import { mountImageMaskCanvases } from "./image_mask_studio.js";
 import { createWorkflowLibraryAdapter } from "./workflow_library.js";
 import { NAVIGATION, jobRecoverySnapshot, renderPage } from "./pages.js";

@@ -149,7 +149,7 @@ class CreativeProjectManagerTests(unittest.TestCase):
 
     def test_recipe_application_updates_editable_graph_only(self) -> None:
         script = """
-import { applyRecipeToGraph } from './src/ui/node_studio.js';
+import { applyRecipeToGraph } from './src/ui/features/node_studio/studio.js';
 const source = {nodes:[
   {id:'prompt',type:'prompt_text',data:{text:'old'}},
   {id:'generate',type:'flux_generate',data:{width:512,height:512,steps:4,seed:1}},

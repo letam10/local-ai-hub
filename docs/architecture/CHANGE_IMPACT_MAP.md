@@ -9,7 +9,7 @@ machine data. Never infer permission from a filename alone.
 | Desktop lifecycle | `src/app/` | shell/launcher | startup/lifecycle tests | single-window/process ownership |
 | Artifact Store | `src/services/artifact_store.py` | jobs/artifact routes | durable output tests | Output-only publication; opaque IDs |
 | Job Manager | `src/services/job_manager/` | Jobs page | job recovery/atomicity | lifecycle reconciliation; no orphan artifacts |
-| Node Studio | `src/services/node_studio/`, `src/ui/node_studio.js` | node routes/editor | node workflow tests | no raw path from browser |
+| Node Studio | `src/services/node_studio/`, `src/ui/features/node_studio/studio.js` (legacy facade: `src/ui/node_studio.js`) | node routes/editor | node workflow tests | no raw path from browser |
 | Projects/workflows | project/workflow services | workspace UI | project/workflow tests | metadata only; preserve user data |
 | SAM2 | `src/modules/sam2/` | vision routes/features | SAM2 contract + bounded smoke | model/runtime containment and GPU gate |
 | AnimeSR/RIFE/ESR | respective `src/modules/` | video routes | video runtime contract | fixed model leaves; no arbitrary executable/path |
