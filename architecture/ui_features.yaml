@@ -83,6 +83,14 @@ features:
     i18n_namespace: runtimes
     tests: [tests/test_v7_final_productization.py, tests/test_runtime_manager.py]
     related_services: [src/services/runtime_manager, src/services/productization]
+  - id: updates
+    owner: src/ui/features/updates/
+    api_dependencies: [updates, components, productization]
+    state_owner: app.updateCenter
+    styles: src/ui/styles.css
+    i18n_namespace: updates
+    tests: [tests/test_v7_operational_source_updates.py, tests/test_v7_bundle_reuse.py]
+    related_services: [src/services/operational_closure, src/services/component_installer]
   - id: node_studio
     owner: src/ui/features/node_studio/
     api_dependencies: [workflow_library, node_graph]

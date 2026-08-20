@@ -36,3 +36,9 @@ rules:
     text: Installed file presence never promotes a module to operational without matching bounded runtime evidence.
   - id: feature-ownership
     text: New UI business logic belongs under src/ui/features; app.js/pages.js remain composition facades.
+  - id: composite-bundle-ownership
+    text: Component bundles expand only catalog-owned runtime/dependency edges and apply ordered child plans; clients cannot add paths or edges.
+  - id: existing-install-reuse
+    text: Existing install reuse may write only a catalog-bound receipt after exact leaf/reparse validation; it never copies, redownloads or overwrites bytes.
+  - id: update-delta-preservation
+    text: Update activation preserves unchanged component files and a rollback slot; only the reviewed candidate leaf is replaced.

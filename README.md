@@ -4,6 +4,8 @@ V5 and V6 remain preserved product lines. The V7 foundation is an incremental
 architecture layer: source checkout and machine data roots are resolved through
 `src/platform/paths.py`, AI modules use validated `module.json` manifests, and
 Model/Runtime Managers inspect and plan without downloading or running models.
+The tracked production catalog is versioned as `v7-production-catalog.v2` and
+keeps source availability separate from local installation state.
 For a clean clone, use `.\scripts\setup_local_ai_hub.ps1`; it is plan-only by
 default and initializes only missing Core state after explicit `-Apply`.
 The desktop shortcut is created only after a Hub-capable `pythonw.exe` is
@@ -22,9 +24,13 @@ Set-Location .\local-ai-hub
 The Core launches without models. **Models & Storage** lists every tracked
 production model/runtime with disposition, installation state, actual receipt
 size (or `Size unavailable`), resource requirements, reason and next action.
-The Components page uses the same server-owned dependency plan for the owner
-installation and a fresh clone. Missing optional capabilities remain visible
-as `Not installed`, `Partial`, `Manual review` or `Unavailable`.
+The Components page uses the same server-owned dependency/bundle plan for the
+owner installation and a fresh clone. A catalog disposition is not a promise
+that every model is one-click: only records marked `AUTO_INSTALL_READY` expose
+Download & Install. Other capabilities remain visible as `Not installed`,
+`Partial`, `Manual review`, `Auth required` or `Unavailable`, with native
+Manual Import and Existing Install Reuse where appropriate. Update detection is
+manual by default (or an optional lightweight schedule); it never auto-installs.
 
 ## V7 Phase 2 — clean clone and managed components
 
