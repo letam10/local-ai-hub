@@ -54,6 +54,10 @@ class, relative leaves, bounded timestamps, state and `operational: false`.
 For V2 the schema/revision/fingerprint/source fields are copied only from the
 explicit server-owned catalog context; a component's own revision is not used
 as the catalog revision.
+Every confirmed verify, reuse, repair, install or maintenance action rebuilds
+the current server-owned binding and compares all four fields with the plan.
+Missing or changed V2 context returns `stale_binding` before deep verification,
+receipt writes or any executor path.
 Verified leaves additionally carry observed/verified size, SHA-256 and the
 `sha256` algorithm.  Duplicate keys, unknown fields, absolute paths, URLs,
 commands, executables, secrets and oversized documents fail closed.  Writes

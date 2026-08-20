@@ -76,6 +76,46 @@ class ComponentLifecycle:
             catalog_binding=catalog_binding or self._catalog_binding(component_type, record),
         )
 
+    def _fresh_plan_binding(self, plan: Mapping[str, Any]) -> tuple[CatalogBindingContext | None, Mapping[str, Any] | None, str | None]:
+        """Rebuild the current catalog binding before any confirmed action."""
+
+        if not isinstance(plan, Mapping):
+            return None, None, "stale_binding"
+        component_id = plan.get("component_id")
+        component_type = plan.get("component_type")
+        if not isinstance(component_id, str) or component_type not in {"model", "runtime"}:
+            return None, None, "stale_binding"
+        try:
+            current_type, record = self._record(component_id)
+            if current_type != component_type or not isinstance(record, Mapping):
+                return None, None, "stale_binding"
+            planned_value = plan.get("_catalog_binding")
+            if isinstance(planned_value, CatalogBindingContext):
+                planned = planned_value
+            elif isinstance(planned_value, Mapping):
+                planned = CatalogBindingContext.from_mapping(planned_value)
+            else:
+                return None, None, "stale_binding"
+            current = self._catalog_binding(current_type, record)
+            if planned.as_record_fields() != current.as_record_fields():
+                return None, None, "stale_binding"
+            if plan.get("catalog_fingerprint") != current.catalog_fingerprint:
+                return None, None, "stale_binding"
+            return current, record, None
+        except (TypeError, ValueError, LifecycleError):
+            return None, None, "stale_binding"
+
+    @staticmethod
+    def _binding_refusal(plan_id: object, code: str = "stale_binding") -> dict[str, Any]:
+        return {
+            "status": "conflict",
+            "code": code,
+            "plan_id": plan_id,
+            "execution": "not_run",
+            "dry_run": True,
+            "next_action": "Create a fresh server-owned component plan.",
+        }
+
     def snapshot(self) -> dict[str, Any]:
         value = self.catalog.snapshot()
         value["lifecycle_schema"] = "component-lifecycle.v1"
@@ -122,13 +162,11 @@ class ComponentLifecycle:
             return {"status": "error", "code": "unknown_plan", "execution": "not_run"}
         if not confirmed:
             return {"status": "waiting_confirmation", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
-        if plan.get("catalog_fingerprint") != self.catalog.fingerprint:
-            return {"status": "conflict", "code": "catalog_changed", "plan_id": plan_id, "execution": "not_run"}
+        current_binding, record, binding_error = self._fresh_plan_binding(plan)
+        if current_binding is None or record is None:
+            return self._binding_refusal(plan_id, binding_error or "stale_binding")
         if plan.get("disposition") != "AUTO_INSTALL_READY":
             return {"status": "unavailable", "code": "manual_review_required", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": "Use the explicitly documented import/license/authentication flow."}
-        record = plan.get("record") if isinstance(plan.get("record"), Mapping) else None
-        if not isinstance(record, Mapping):
-            return {"status": "unavailable", "code": "catalog_record_unavailable", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
         dependency_block = next((item for item in plan.get("dependencies", []) if item.get("kind") == "runtime" and item.get("id") != plan.get("component_id") and item.get("status") not in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"}), None)
         if dependency_block is not None:
             return {"status": "unavailable", "code": "dependency_unavailable", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "dependency": {key: dependency_block.get(key) for key in ("kind", "id", "status")}, "next_action": "Install or reuse the server-owned runtime dependency before this component."}
@@ -194,6 +232,9 @@ class ComponentLifecycle:
         plan = self._plans.get(plan_id)
         if not confirmed or not isinstance(plan, Mapping):
             return {"status": "waiting_confirmation", "execution": "not_run", "dry_run": True}
+        current_binding, record, binding_error = self._fresh_plan_binding(plan)
+        if current_binding is None or record is None:
+            return self._binding_refusal(plan_id, binding_error or "stale_binding")
         if plan.get("disposition") != "AUTO_INSTALL_READY":
             return {"status": "unavailable", "code": "manual_review_required", "execution": "not_run"}
         from src.services.model_manager import ModelManager
@@ -229,6 +270,9 @@ class ComponentLifecycle:
         plan = self._plans.get(plan_id)
         if not confirmed or not isinstance(plan, Mapping) or plan.get("schema_version") != "v7-component-maintenance-plan.v1":
             return {"status": "waiting_confirmation", "execution": "not_run", "dry_run": True}
+        current_binding, record, binding_error = self._fresh_plan_binding(plan)
+        if current_binding is None or record is None:
+            return self._binding_refusal(plan_id, binding_error or "stale_binding")
         marker = self.paths.config_root / "v7_fixture_receipts.json"
         try:
             records = json.loads(marker.read_text(encoding="utf-8"))

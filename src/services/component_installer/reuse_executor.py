@@ -85,7 +85,7 @@ class ExistingInstallReuseExecutor:
         root_class = "models_root" if component_type == "model" else record.get("root_class")
         return resolve_component_root(self.paths, component_id, component_type, root_class, require_exists=False)
 
-    def apply(self, plan: Mapping[str, Any], *, confirmed: bool) -> dict[str, Any]:
+    def apply(self, plan: Mapping[str, Any], *, confirmed: bool, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> dict[str, Any]:
         if not confirmed:
             return {"status": "waiting_confirmation", "execution": "not_run", "dry_run": True}
         component_id = plan.get("component_id")
@@ -95,13 +95,19 @@ class ExistingInstallReuseExecutor:
         record = self._record(component_id, str(component_type))
         if not isinstance(record, Mapping):
             return {"status": "error", "code": "unknown_component", "execution": "not_run"}
+        resolver = getattr(self.manager, "_fresh_binding_for_plan", None)
+        if not callable(resolver):
+            return {"status": "unavailable", "code": "stale_binding", "execution": "not_run", "dry_run": True, "next_action": "Create a fresh server-owned component plan."}
+        current_binding, binding_error = resolver(plan, catalog_binding=catalog_binding)
+        if current_binding is None:
+            return {"status": "conflict", "code": binding_error or "stale_binding", "execution": "not_run", "dry_run": True, "next_action": "Create a fresh server-owned component plan."}
         result = DeepComponentVerifier().verify(
             paths=self.paths,
             component_id=component_id,
             component_type=str(component_type),
             record=record,
             catalog_fingerprint=plan.get("catalog_fingerprint") if isinstance(plan.get("catalog_fingerprint"), str) else None,
-            catalog_binding=plan.get("_catalog_binding") if isinstance(plan.get("_catalog_binding"), (CatalogBindingContext, Mapping)) else None,
+            catalog_binding=current_binding,
             source="existing_install_reuse",
         )
         if result.get("status") != "completed":
@@ -114,7 +120,7 @@ class ExistingInstallReuseExecutor:
                 self.paths.config_root,
                 component_id,
                 result["receipt"],
-                catalog_binding=plan.get("_catalog_binding") if isinstance(plan.get("_catalog_binding"), (CatalogBindingContext, Mapping)) else None,
+                catalog_binding=current_binding,
             )
         except (OSError, ReceiptError, KeyError, TypeError):
             return {"status": "failed", "code": "receipt_write_failed", "execution": "not_run"}

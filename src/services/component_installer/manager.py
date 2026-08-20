@@ -84,10 +84,11 @@ def _binding_context(component_type: str, record: Mapping[str, Any], catalog_fin
 class ComponentInstaller:
     """Compose, validate and execute only server-owned component plans."""
 
-    def __init__(self, *, paths: HubPaths | None = None, model_manager: ModelManager | None = None, runtime_manager: RuntimeManager | None = None) -> None:
+    def __init__(self, *, paths: HubPaths | None = None, model_manager: ModelManager | None = None, runtime_manager: RuntimeManager | None = None, catalog_binding_provider: Any | None = None) -> None:
         self.paths = paths or get_paths()
         self.model_manager = model_manager or ModelManager(paths=self.paths)
         self.runtime_manager = runtime_manager or RuntimeManager(paths=self.paths)
+        self._catalog_binding_provider = catalog_binding_provider if callable(catalog_binding_provider) else None
         self._plans: dict[str, dict[str, Any]] = {}
         self._selections: dict[str, dict[str, Any]] = {}
         self._jobs: dict[str, dict[str, Any]] = {}
@@ -129,6 +130,78 @@ class ComponentInstaller:
         if record is None:
             raise InstallPlanError("unknown_component")
         return record
+
+    @staticmethod
+    def _same_catalog_binding(left: CatalogBindingContext, right: CatalogBindingContext) -> bool:
+        return left.as_record_fields() == right.as_record_fields()
+
+    def _current_catalog_binding_source(self, component_type: str, record: Mapping[str, Any]) -> CatalogBindingContext | Mapping[str, Any] | None:
+        provider = self._catalog_binding_provider
+        if callable(provider):
+            try:
+                supplied = provider(component_type, record)
+            except Exception:
+                return None
+            if isinstance(supplied, (CatalogBindingContext, Mapping)):
+                return supplied
+            return None
+        keys = ("catalog_schema", "catalog_revision", "catalog_fingerprint", "source_identity")
+        if all(key in record for key in keys):
+            return {key: record.get(key) for key in keys}
+        return None
+
+    def _fresh_binding_for_plan(self, plan: Mapping[str, Any], *, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> tuple[CatalogBindingContext | None, str | None]:
+        """Rebuild and compare the current server-owned binding at a boundary."""
+
+        if not isinstance(plan, Mapping):
+            return None, "stale_binding"
+        component_id = plan.get("component_id")
+        component_type = plan.get("component_type")
+        if not isinstance(component_id, str) or component_type not in {"model", "runtime"}:
+            return None, "stale_binding"
+        try:
+            record = self._catalog_record(component_id, str(component_type))
+            planned_value = plan.get("_catalog_binding")
+            if isinstance(planned_value, CatalogBindingContext):
+                planned = planned_value
+            elif isinstance(planned_value, Mapping):
+                planned = CatalogBindingContext.from_mapping(planned_value)
+            else:
+                return None, "stale_binding"
+            current_fingerprint = self.model_manager.catalog_fingerprint if component_type == "model" else self.runtime_manager._catalog_fingerprint()
+            if callable(self._catalog_binding_provider):
+                source = self._current_catalog_binding_source(str(component_type), record)
+                if source is None:
+                    return None, "stale_binding"
+                current = _binding_context(str(component_type), record, current_fingerprint, source)
+            elif catalog_binding is not None:
+                current = _binding_context(str(component_type), record, current_fingerprint, catalog_binding)
+            elif planned.catalog_schema in {"model-catalog.v1", "runtime-catalog.v1"}:
+                current = _binding_context(str(component_type), record, current_fingerprint)
+            else:
+                source = self._current_catalog_binding_source(str(component_type), record)
+                if source is None:
+                    return None, "stale_binding"
+                current = _binding_context(str(component_type), record, current_fingerprint, source)
+            if not self._same_catalog_binding(planned, current):
+                return None, "stale_binding"
+            planned_fingerprint = plan.get("catalog_fingerprint")
+            if planned_fingerprint is not None and planned_fingerprint != current.catalog_fingerprint:
+                return None, "stale_binding"
+            return current, None
+        except (InstallPlanError, ReceiptError, TypeError, ValueError):
+            return None, "stale_binding"
+
+    @staticmethod
+    def _binding_refusal(plan_id: object, code: str = "stale_binding") -> dict[str, Any]:
+        return {
+            "status": "conflict",
+            "code": code,
+            "plan_id": plan_id,
+            "execution": "not_run",
+            "dry_run": True,
+            "next_action": "Create a fresh server-owned component plan.",
+        }
 
     def _dependency_steps(self, component_id: str, component_type: str, record: Mapping[str, Any], *, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
         """Build a fixed server-owned dependency graph for one plan."""
@@ -296,13 +369,16 @@ class ComponentInstaller:
             "next_action": "Confirm this exact plan or choose a managed manual-import flow.",
         }
 
-    def confirm_plan(self, plan_id: str, *, confirmed: bool = False) -> dict[str, Any]:
+    def confirm_plan(self, plan_id: str, *, confirmed: bool = False, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> dict[str, Any]:
         internal = self._plans.get(plan_id)
         if not internal:
             return {"status": "error", "code": "unknown_install_plan"}
         if not confirmed:
             return {"status": "waiting_confirmation", "plan_id": plan_id, "execution": "not_run"}
-        current = self._inspect(internal["component_id"], internal["component_type"], catalog_binding=internal.get("_catalog_binding"))
+        current_binding, binding_error = self._fresh_binding_for_plan(internal, catalog_binding=catalog_binding)
+        if current_binding is None:
+            return self._binding_refusal(plan_id, binding_error or "stale_binding")
+        current = self._inspect(internal["component_id"], internal["component_type"], catalog_binding=current_binding)
         if _state_fingerprint(current) != internal["expected_state_fingerprint"]:
             return {"status": "conflict", "code": "stale_install_plan", "plan_id": plan_id, "next_action": "Create a fresh plan."}
         if not internal["auto_install_supported"]:
@@ -310,9 +386,9 @@ class ComponentInstaller:
         dependency_block = next((item for item in internal.get("dependencies", []) if item.get("status") not in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"}), None)
         if dependency_block is not None:
             return {"status": "unavailable", "code": "dependency_unavailable", "plan_id": plan_id, "execution": "not_run", "dependency": {key: dependency_block.get(key) for key in ("kind", "component_id", "status", "disposition")}, "next_action": "Review or install the exact server-owned dependency before confirming this bundle."}
-        return self.apply_plan(plan_id, confirmed=True)
+        return self.apply_plan(plan_id, confirmed=True, catalog_binding=current_binding)
 
-    def apply_plan(self, plan_id: str, *, confirmed: bool = False, cancel_event: Any | None = None) -> dict[str, Any]:
+    def apply_plan(self, plan_id: str, *, confirmed: bool = False, cancel_event: Any | None = None, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Execute a complete trusted one-leaf plan through bounded staging.
 
         The public API can only reach this method after an opaque plan and an
@@ -326,7 +402,10 @@ class ComponentInstaller:
             return {"status": "error", "code": "unknown_install_plan", "execution": "not_run"}
         if not confirmed:
             return {"status": "waiting_confirmation", "plan_id": plan_id, "execution": "not_run"}
-        current = self._inspect(plan["component_id"], plan["component_type"], catalog_binding=plan.get("_catalog_binding"))
+        current_binding, binding_error = self._fresh_binding_for_plan(plan, catalog_binding=catalog_binding)
+        if current_binding is None:
+            return self._binding_refusal(plan_id, binding_error or "stale_binding")
+        current = self._inspect(plan["component_id"], plan["component_type"], catalog_binding=current_binding)
         if _state_fingerprint(current) != plan["expected_state_fingerprint"]:
             return {"status": "conflict", "code": "stale_install_plan", "plan_id": plan_id, "next_action": "Create a fresh plan."}
         if not plan.get("auto_install_supported"):
@@ -334,7 +413,10 @@ class ComponentInstaller:
         dependency_block = next((item for item in plan.get("dependencies", []) if item.get("status") not in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"}), None)
         if dependency_block is not None:
             return {"status": "unavailable", "code": "dependency_unavailable", "plan_id": plan_id, "execution": "not_run", "dependency": {key: dependency_block.get(key) for key in ("kind", "component_id", "status", "disposition")}, "next_action": "Install or reuse the dependency before applying this bundle."}
-        record = plan.get("record") if isinstance(plan.get("record"), Mapping) else {}
+        try:
+            record = self._catalog_record(str(plan["component_id"]), str(plan["component_type"]))
+        except InstallPlanError:
+            return {"status": "unavailable", "code": "catalog_record_unavailable", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
         source = record.get("official_source")
         if not trusted_source(source, fixture_mode=False):
             return {"status": "unavailable", "code": "source_not_trusted", "plan_id": plan_id, "execution": "not_run"}
@@ -376,9 +458,7 @@ class ComponentInstaller:
                 self._cancel_events.pop(job_id, None)
                 return {"status": "failed", "code": "finalization_failed", "job_id": job_id, "plan_id": plan_id, "execution": "not_run"}
             try:
-                binding = plan.get("_catalog_binding")
-                if not isinstance(binding, CatalogBindingContext):
-                    binding = _binding_context(plan["component_type"], record, str(plan.get("catalog_fingerprint") or ""), binding if isinstance(binding, Mapping) else None)
+                binding = current_binding
                 root_class = "models_root" if plan["component_type"] == "model" else record.get("root_class", "runtime_root")
                 managed_root = resolve_component_root(self.paths, plan["component_id"], plan["component_type"], root_class, require_exists=True)
                 if plan["component_type"] == "model":
@@ -503,7 +583,7 @@ class ComponentInstaller:
             "next_action": "Confirm a separately authorized bounded verification operation.",
         }
 
-    def confirm_verify(self, plan_id: str, *, confirmed: bool = False) -> dict[str, Any]:
+    def confirm_verify(self, plan_id: str, *, confirmed: bool = False, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Run the explicit receipt-only deep verifier after confirmation."""
 
         plan = self._plans.get(plan_id)
@@ -515,13 +595,16 @@ class ComponentInstaller:
         component_type = plan.get("component_type")
         if not isinstance(component_id, str) or not isinstance(component_type, str) or component_type not in {"model", "runtime"}:
             return {"status": "error", "code": "verify_plan_invalid", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
-        current = self._inspect(component_id, str(component_type), catalog_binding=plan.get("_catalog_binding"))
+        current_binding, binding_error = self._fresh_binding_for_plan(plan, catalog_binding=catalog_binding)
+        if current_binding is None:
+            return self._binding_refusal(plan_id, binding_error or "stale_binding")
+        current = self._inspect(component_id, str(component_type), catalog_binding=current_binding)
         if _state_fingerprint(current) != plan.get("expected_state_fingerprint"):
             return {"status": "conflict", "code": "stale_verify_plan", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": "Create a fresh verification plan."}
         if component_type == "model":
-            result = self.model_manager.verify(component_id, catalog_binding=plan.get("_catalog_binding"))
+            result = self.model_manager.verify(component_id, catalog_binding=current_binding)
         else:
-            result = self.runtime_manager.verify(component_id, catalog_binding=plan.get("_catalog_binding"))
+            result = self.runtime_manager.verify(component_id, catalog_binding=current_binding)
         result["plan_id"] = plan_id
         result.setdefault("execution", "not_run")
         result.setdefault("dry_run", True)
@@ -600,16 +683,19 @@ class ComponentInstaller:
         self._plans[plan_id] = {**body, "plan_id": plan_id, "plan_fingerprint": fingerprint, "record": record, "_catalog_binding": binding}
         return {**body, "plan_id": plan_id, "plan_fingerprint": fingerprint, "status": "planned", "next_action": "Confirm only if every catalog leaf is already present under the managed root."}
 
-    def confirm_reuse(self, plan_id: str, *, confirmed: bool = False) -> dict[str, Any]:
+    def confirm_reuse(self, plan_id: str, *, confirmed: bool = False, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> dict[str, Any]:
         plan = self._plans.get(plan_id)
         if not isinstance(plan, Mapping) or plan.get("schema_version") != "component-reuse-plan.v1":
             return {"status": "error", "code": "unknown_reuse_plan", "execution": "not_run"}
         if not confirmed:
             return {"status": "waiting_confirmation", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
-        current = self._inspect(str(plan["component_id"]), str(plan["component_type"]), catalog_binding=plan.get("_catalog_binding"))
+        current_binding, binding_error = self._fresh_binding_for_plan(plan, catalog_binding=catalog_binding)
+        if current_binding is None:
+            return self._binding_refusal(plan_id, binding_error or "stale_binding")
+        current = self._inspect(str(plan["component_id"]), str(plan["component_type"]), catalog_binding=current_binding)
         if _state_fingerprint(current) != plan.get("expected_state_fingerprint"):
             return {"status": "conflict", "code": "stale_reuse_plan", "plan_id": plan_id, "execution": "not_run", "next_action": "Create a fresh existing-install reuse plan."}
-        result = ExistingInstallReuseExecutor(paths=self.paths, manager=self).apply(plan, confirmed=True)
+        result = ExistingInstallReuseExecutor(paths=self.paths, manager=self).apply(plan, confirmed=True, catalog_binding=current_binding)
         result["plan_id"] = plan_id
         return result
 
@@ -630,13 +716,16 @@ class ComponentInstaller:
         self._plans[plan_id] = {**body, "plan_id": plan_id, "plan_fingerprint": fingerprint, "_catalog_binding": binding}
         return {**body, "plan_id": plan_id, "plan_fingerprint": fingerprint, "status": "planned", "execution": "not_run", "dry_run": True, "current_status": state["status"], "next_action": "Review the plan and explicit destructive confirmation policy."}
 
-    def confirm_maintenance(self, plan_id: str, *, confirmed: bool = False) -> dict[str, Any]:
+    def confirm_maintenance(self, plan_id: str, *, confirmed: bool = False, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> dict[str, Any]:
         plan = self._plans.get(plan_id)
         if not plan or not plan.get("action"):
             return {"status": "error", "code": "unknown_maintenance_plan"}
         if not confirmed:
             return {"status": "waiting_confirmation", "plan_id": plan_id, "execution": "not_run"}
-        current = self._inspect(plan["component_id"], plan["component_type"], catalog_binding=plan.get("_catalog_binding"))
+        current_binding, binding_error = self._fresh_binding_for_plan(plan, catalog_binding=catalog_binding)
+        if current_binding is None:
+            return self._binding_refusal(plan_id, binding_error or "stale_binding")
+        current = self._inspect(plan["component_id"], plan["component_type"], catalog_binding=current_binding)
         if _state_fingerprint(current) != plan["expected_state_fingerprint"]:
             return {"status": "conflict", "code": "stale_maintenance_plan", "plan_id": plan_id}
         if plan.get("action") == "repair":
@@ -651,13 +740,13 @@ class ComponentInstaller:
                 component_type=plan["component_type"],
                 record=record,
                 catalog_fingerprint=catalog_fingerprint,
-                catalog_binding=plan.get("_catalog_binding"),
+                catalog_binding=current_binding,
                 source="existing_install_reuse",
             )
             if verified.get("status") != "completed":
                 return {"status": verified.get("status", "unavailable"), "code": verified.get("code", "repair_unavailable"), "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": verified.get("next_action", "Review the managed installation.")}
             try:
-                write_component_receipt(self.paths.config_root, plan["component_id"], verified["receipt"], catalog_binding=plan.get("_catalog_binding"))
+                write_component_receipt(self.paths.config_root, plan["component_id"], verified["receipt"], catalog_binding=current_binding)
             except (OSError, ReceiptError, KeyError, TypeError):
                 return {"status": "unavailable", "code": "receipt_write_failed", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": "Retry the explicit receipt-only repair after reviewing receipt storage."}
             return {"status": "completed", "action": "repair", "component_id": plan["component_id"], "state": verified["state"], "execution": "not_run", "dry_run": True, "verified": verified["state"] == "INSTALLED_VERIFIED", "operational": False, "next_action": verified["next_action"]}

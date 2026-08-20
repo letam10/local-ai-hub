@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 import json
 import os
@@ -10,10 +11,14 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from typing import Any
 
 from src.platform.paths import ComponentPathError, HubPaths, resolve_component_leaf, resolve_component_root
+from src.services.component_installer import ComponentInstaller
 from src.services.component_installer.receipts import CatalogBindingContext, ReceiptConflict, ReceiptError, read_receipts, write_component_receipt
 from src.services.component_installer.verification import DeepComponentVerifier, FastComponentInspector, stream_sha256
+from src.services.model_manager import ModelManager
+from src.services.runtime_manager import RuntimeManager
 
 
 class V7ComponentVerificationReuseTests(unittest.TestCase):
@@ -50,6 +55,43 @@ class V7ComponentVerificationReuseTests(unittest.TestCase):
         target.write_bytes(payload)
         digest = hashlib.sha256(payload).hexdigest()
         return target, self._record(digest=digest, size=len(payload)), digest
+
+    def _v2_installer(self) -> tuple[ComponentInstaller, dict[str, str]]:
+        model_catalog = self.paths.app_root / "Config" / "model_catalog.json"
+        model_catalog.write_text(json.dumps({
+            "schema_version": "model-catalog.v1",
+            "models": [{
+                "model_id": "demo-model", "display_name": "Demo model", "provider": "fixture", "version": "1", "revision": "model-r1",
+                "official_source": "local", "install_supported": False, "modules_using_model": ["demo"], "runtime_id": "demo-runtime",
+                "files": [{"relative_path": "demo.bin", "size_bytes": 5, "sha256": hashlib.sha256(b"model").hexdigest()}],
+                "estimated_download_size": 5, "estimated_disk_size": 5,
+            }],
+        }), encoding="utf-8")
+        runtime_catalog = self.paths.app_root / "Config" / "runtime_catalog.json"
+        runtime_catalog.write_text(json.dumps({
+            "schema_version": "runtime-catalog.v1",
+            "runtimes": [{
+                "runtime_id": "demo-runtime", "display_name": "Demo runtime", "kind": "tool", "version": "1", "revision": "runtime-r1",
+                "root_class": "runtime_root", "required_leaves": ["bin/demo.exe"], "modules": ["demo"], "official_source": "local",
+                "install_supported": False, "install_strategy": "reference_existing", "estimated_download_size": 0, "estimated_disk_size": 0,
+            }],
+        }), encoding="utf-8")
+        models = ModelManager(paths=self.paths, catalog_path=model_catalog)
+        runtimes = RuntimeManager(paths=self.paths, catalog_path=runtime_catalog)
+        models._records[0]["source_identity"] = "catalog:demo-model"
+        models._by_id["demo-model"] = models._records[0]
+        runtimes._records[0]["source_identity"] = None
+        current = {"version": "2026.08.21", "fingerprint": "a" * 64, "model_source": "catalog:demo-model"}
+
+        def provider(component_type: str, _record: Mapping[str, Any]) -> CatalogBindingContext:
+            return CatalogBindingContext.for_v2(
+                catalog_version=current["version"],
+                catalog_fingerprint=current["fingerprint"],
+                source_identity=current["model_source"] if component_type == "model" else None,
+            )
+
+        installer = ComponentInstaller(paths=self.paths, model_manager=models, runtime_manager=runtimes, catalog_binding_provider=provider)
+        return installer, current
 
     def test_canonical_resolver_maps_all_roots_and_rejects_caller_paths(self) -> None:
         model_root = resolve_component_root(self.paths, "demo-model", "model", "models_root", require_exists=False)
@@ -296,6 +338,105 @@ class V7ComponentVerificationReuseTests(unittest.TestCase):
         self.assertEqual(binding.catalog_schema, "v7-production-catalog.v2")
         self.assertEqual(binding.catalog_revision, "2026.08.21")
         self.assertEqual(binding.source_identity, "catalog:demo-model")
+
+    def test_v2_manager_confirm_boundaries_reject_stale_binding_before_verify_or_write(self) -> None:
+        from src.services.component_installer.reuse_executor import ExistingInstallReuseExecutor
+
+        target = self.paths.models_root / "demo-model" / "demo.bin"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"model")
+
+        for field, changed in (("version", "2026.08.22"), ("fingerprint", "b" * 64), ("model_source", "catalog:changed-model")):
+            installer, current = self._v2_installer()
+            initial = CatalogBindingContext.for_v2(catalog_version=current["version"], catalog_fingerprint=current["fingerprint"], source_identity=current["model_source"])
+            plan = installer.plan_reuse("demo-model", component_type="model", catalog_binding=initial)
+            receipt_path = self.paths.config_root / "component_install_receipts.json"
+            receipt_path.write_bytes(b"prior-receipt\n")
+            before = receipt_path.read_bytes()
+            current[field] = changed
+            with patch.object(DeepComponentVerifier, "verify", side_effect=AssertionError("stale binding reached deep verifier")):
+                result = installer.confirm_reuse(plan["plan_id"], confirmed=True)
+            self.assertEqual(result["status"], "conflict")
+            self.assertEqual(result["code"], "stale_binding")
+            self.assertNotIn(changed, json.dumps(result))
+            self.assertEqual(receipt_path.read_bytes(), before)
+
+        installer, current = self._v2_installer()
+        initial = CatalogBindingContext.for_v2(catalog_version=current["version"], catalog_fingerprint=current["fingerprint"], source_identity=current["model_source"])
+        verify_plan = installer.plan_verify("demo-model", component_type="model", catalog_binding=initial)
+        current["fingerprint"] = "c" * 64
+        with patch.object(DeepComponentVerifier, "verify", side_effect=AssertionError("stale binding reached deep verifier")):
+            verify_result = installer.confirm_verify(verify_plan["plan_id"], confirmed=True)
+        self.assertEqual(verify_result["code"], "stale_binding")
+
+        installer, current = self._v2_installer()
+        initial = CatalogBindingContext.for_v2(catalog_version=current["version"], catalog_fingerprint=current["fingerprint"], source_identity=current["model_source"])
+        maintenance_plan = installer.plan_maintenance("demo-model", action="repair", catalog_binding=initial)
+        current["version"] = "2026.08.23"
+        with patch.object(DeepComponentVerifier, "verify", side_effect=AssertionError("stale binding reached deep verifier")):
+            maintenance_result = installer.confirm_maintenance(maintenance_plan["plan_id"], confirmed=True)
+        self.assertEqual(maintenance_result["code"], "stale_binding")
+
+        installer, current = self._v2_installer()
+        initial = CatalogBindingContext.for_v2(catalog_version=current["version"], catalog_fingerprint=current["fingerprint"], source_identity=current["model_source"])
+        install_plan = installer.plan_install("demo-model", component_type="model", catalog_binding=initial)
+        current["fingerprint"] = "d" * 64
+        with patch("src.services.component_installer.manager.TrustedDownloader", side_effect=AssertionError("stale binding reached downloader")):
+            apply_result = installer.apply_plan(install_plan["plan_id"], confirmed=True)
+        self.assertEqual(apply_result["code"], "stale_binding")
+
+        installer, current = self._v2_installer()
+        initial = CatalogBindingContext.for_v2(catalog_version=current["version"], catalog_fingerprint=current["fingerprint"], source_identity=current["model_source"])
+        reuse_plan = installer.plan_reuse("demo-model", component_type="model", catalog_binding=initial)
+        current["model_source"] = "catalog:executor-stale"
+        with patch.object(DeepComponentVerifier, "verify", side_effect=AssertionError("stale binding reached deep verifier")):
+            direct_result = ExistingInstallReuseExecutor(paths=self.paths, manager=installer).apply(reuse_plan, confirmed=True)
+        self.assertEqual(direct_result["code"], "stale_binding")
+
+        installer, current = self._v2_installer()
+        initial = CatalogBindingContext.for_v2(catalog_version=current["version"], catalog_fingerprint=current["fingerprint"], source_identity=current["model_source"])
+        missing_context_plan = installer.plan_reuse("demo-model", component_type="model", catalog_binding=initial)
+        installer._catalog_binding_provider = None
+        missing_context_result = installer.confirm_reuse(missing_context_plan["plan_id"], confirmed=True)
+        self.assertEqual(missing_context_result["code"], "stale_binding")
+
+    def test_v2_lifecycle_confirmations_reject_current_catalog_drift(self) -> None:
+        from src.services.productization.lifecycle import ComponentLifecycle
+
+        model = {
+            "model_id": "demo-model", "display_name": "V2 demo model", "kind": "model", "category": "fixture",
+            "provider": "fixture", "version": "1", "revision": "model-r1", "runtime_id": "demo-runtime",
+            "modules": ["demo"], "files": [{"relative_path": "weights/demo.bin", "verification": "unverified"}],
+            "source_identity": "catalog:demo-model", "root_class": "models_root",
+            "disposition": "MANUAL_IMPORT_ONLY", "install_strategy": "manual_import",
+        }
+        runtime = {
+            "runtime_id": "demo-runtime", "display_name": "V2 demo runtime", "kind": "tool", "provider": "fixture",
+            "version": "1", "revision": "runtime-r1", "root_class": "runtime_root", "required_leaves": ["bin/demo.exe"],
+            "modules": ["demo"], "source_identity": None, "disposition": "REFERENCE_EXISTING", "install_strategy": "reference_existing",
+        }
+        catalog = SimpleNamespace(
+            catalog_schema_version="v7-production-catalog.v2", catalog_version="2026.08.21", fingerprint="e" * 64,
+            models={"demo-model": model}, runtimes={"demo-runtime": runtime},
+        )
+        lifecycle = ComponentLifecycle(paths=self.paths, catalog=catalog)
+        one_click = lifecycle.plan_one_click("demo-model")
+        catalog.catalog_version = "2026.08.22"
+        result = lifecycle.confirm(one_click["plan_id"], confirmed=True)
+        self.assertEqual(result["code"], "stale_binding")
+        self.assertNotIn("2026.08.22", json.dumps(result))
+
+        catalog.catalog_version = "2026.08.21"
+        maintenance = lifecycle.plan_maintenance("demo-model", "repair")
+        catalog.fingerprint = "f" * 64
+        result = lifecycle.confirm(maintenance["plan_id"], confirmed=True)
+        self.assertEqual(result["code"], "stale_binding")
+
+        catalog.fingerprint = "e" * 64
+        maintenance_source = lifecycle.plan_maintenance("demo-model", "repair")
+        catalog.models["demo-model"]["source_identity"] = "catalog:changed-model"
+        result = lifecycle.confirm(maintenance_source["plan_id"], confirmed=True)
+        self.assertEqual(result["code"], "stale_binding")
 
 
 if __name__ == "__main__":
