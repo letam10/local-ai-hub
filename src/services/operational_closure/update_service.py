@@ -145,6 +145,10 @@ class UpdateResolver:
         catalog_version = getattr(self.catalog, "catalog_version", None)
         catalog_version = catalog_version if isinstance(catalog_version, str) else None
         catalog_schema = getattr(self.catalog, "catalog_schema_version", None)
+        # V1 has no versioned catalog context.  Keep its explicit record-bound
+        # legacy cache behavior; V2 always carries the complete catalog binding.
+        if catalog_schema != "v7-production-catalog.v2":
+            return None
         catalog_fingerprint = getattr(self.catalog, "fingerprint", None)
         revision = record.get("revision") if isinstance(record.get("revision"), str) else None
         return {

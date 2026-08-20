@@ -15,9 +15,11 @@ source fingerprints, timestamps, and retry bounds are persisted. URLs, local
 paths, credentials, response bodies, and arbitrary probe text are never
 persisted or returned.
 
-`ProductionCatalog` and `UpdateResolver` construct the current binding from
-their server-owned catalog record before reading or refreshing source status.
-Missing context, catalog drift, source drift, component mismatch, and legacy
+`ProductionCatalog` constructs the current binding from its server-owned
+catalog record before reading source status. V2 `UpdateResolver` checks carry
+the full catalog binding; the legacy V1 resolver path uses an explicit
+record-only binding because V1 has no versioned catalog context. Missing
+context, V2 catalog drift, source drift, component mismatch, and legacy
 unbound cache records fail closed to `UNKNOWN` / `not_checked`. A force check
 is the only path allowed to perform the existing bounded HTTPS probe; it does
 not install, apply, or promote a component to operational.
