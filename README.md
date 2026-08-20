@@ -1,13 +1,30 @@
-# Local AI Hub — Unified Workspace V5/V6 with V7 architecture foundation
+# Local AI Hub — V7 Final Productization
 
 V5 and V6 remain preserved product lines. The V7 foundation is an incremental
 architecture layer: source checkout and machine data roots are resolved through
 `src/platform/paths.py`, AI modules use validated `module.json` manifests, and
 Model/Runtime Managers inspect and plan without downloading or running models.
-For a clean clone, use `.\scripts\bootstrap_core.ps1`; it initializes only missing
-local configuration from examples and opens the core without requiring AI
-weights. See `docs/architecture/ARCHITECTURE.md` and
-`docs/architecture/V7_MIGRATION_PLAN.md`.
+For a clean clone, use `.\scripts\setup_local_ai_hub.ps1`; it is plan-only by
+default and initializes only missing Core state after explicit `-Apply`.
+The desktop shortcut is created only after a Hub-capable `pythonw.exe` is
+verified. See `docs/V7_FINAL_PRODUCTIZATION.md` and
+`docs/architecture/ARCHITECTURE.md`.
+
+## V7 final first-run flow
+
+```powershell
+git clone <repository-url>
+Set-Location .\local-ai-hub
+.\scripts\setup_local_ai_hub.ps1       # inspect/plan, no writes
+.\scripts\setup_local_ai_hub.ps1 -Apply
+```
+
+The Core launches without models. **Models & Storage** lists every tracked
+production model/runtime with disposition, installation state, actual receipt
+size (or `Size unavailable`), resource requirements, reason and next action.
+The Components page uses the same server-owned dependency plan for the owner
+installation and a fresh clone. Missing optional capabilities remain visible
+as `Not installed`, `Partial`, `Manual review` or `Unavailable`.
 
 ## V7 Phase 2 — clean clone and managed components
 

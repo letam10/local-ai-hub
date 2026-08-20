@@ -3,7 +3,7 @@
 ; Preserves machine-local data (Models, Environments, runtime, Output, Config, Backups, Reports)
 
 #define MyAppName "Local AI Hub"
-#define MyAppVersion "6.0.0"
+#define MyAppVersion "7.0.0"
 #define MyAppPublisher "Local AI Hub Project"
 #define MyAppURL "https://github.com/letam10/local-ai-hub"
 #define DefaultInstallDir "D:\LocalAIHub"
@@ -22,7 +22,7 @@ DirExistsWarning=no
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist
-OutputBaseFilename=LocalAIHub-Setup-Win64-v6.0.0
+OutputBaseFilename=LocalAIHub-Setup-Win64-v7.0.0
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -44,6 +44,7 @@ Source: "..\src\*"; DestDir: "{app}\src"; Flags: recursesubdirs createallsubdirs
 Source: "..\scripts\*"; DestDir: "{app}\scripts"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "..\distribution\*"; DestDir: "{app}\distribution"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "..\docs\*"; DestDir: "{app}\docs"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "..\architecture\*"; DestDir: "{app}\architecture"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "..\requirements-hub.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dependencies.lock.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion

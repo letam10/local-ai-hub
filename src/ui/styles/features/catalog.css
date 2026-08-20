@@ -1,0 +1,4 @@
+.catalog-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--hub-space-4); }
+.catalog-card { min-width: 0; }
+.catalog-card__meta { display: flex; flex-wrap: wrap; gap: var(--hub-space-2); color: var(--hub-color-muted); }
+.catalog-card__action { margin-top: var(--hub-space-3); }

@@ -63,6 +63,24 @@ Presence of a file or runtime is only an installation observation. A module is
 Both new managers are offline/read-only at startup. Real installation is an
 explicit future action with source, license, checksum, disk and user approval.
 
+## Final V7 productization
+
+`src/services/productization/` composes the production model/runtime catalog
+and the one-click dependency plan. It does not create a second inference
+implementation: fixture acceptance and future manager execution call the same
+Model Manager, Runtime Manager, Component Installer, Job Manager and Artifact
+Store used by the owner installation. Catalog records expose a disposition
+(`AUTO_INSTALL_READY`, `AUTH_REQUIRED`, `LICENSE_REQUIRED`,
+`MANUAL_IMPORT_ONLY`, or `UNSUPPORTED_SOURCE`) instead of pretending that a
+metadata-only URL is downloadable.
+
+`src/ui/features/` is the feature ownership registry and migration seam. The
+legacy `pages.js`/`app.js` files are compatibility facades; new feature data is
+owned by its feature namespace and arrives through typed API routes. CSS tokens,
+layout and catalog styles are loaded as small feature-owned modules. The
+canonical first-run command is `scripts/setup_local_ai_hub.ps1`; it is
+plan-by-default and creates only absent Core state when explicitly applied.
+
 ## Compatibility
 
 Existing `job.v2`, `node-run.v2`, opaque artifact IDs, project/backup/settings

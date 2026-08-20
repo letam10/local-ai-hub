@@ -1,26 +1,15 @@
-# Clean-clone core bootstrap
+# Clean-clone bootstrap (V7)
 
-From a fresh checkout:
+1. Clone the repository and enter the checkout.
+2. Run `scripts/setup_local_ai_hub.ps1` without `-Apply` to inspect Core,
+   WebView2 and the production catalog.
+3. Review the dry-run plan. It contains no model URL, command, credential or
+   machine path.
+4. Run `scripts/setup_local_ai_hub.ps1 -Apply` to create only absent Core
+   folders/configuration and the verified managed shortcut.
+5. Double-click **Local AI Hub**. The desktop shell starts the same loopback
+   API and workspace even when Models/Environments/runtime are empty.
 
-```powershell
-git clone https://github.com/letam10/local-ai-hub.git
-Set-Location .\local-ai-hub
-.\scripts\bootstrap_core.ps1
-```
-
-The bootstrap resolves the checkout dynamically, creates ignored machine roots
-and initializes missing local Config JSON from tracked examples without
-overwriting existing files. It checks only the core Python/WebView readiness
-surface. It does **not** download AI models, install module GPU dependencies,
-start a server/worker or change system Python, CUDA or drivers.
-
-The output is a sanitized JSON receipt. AI modules show `NOT_INSTALLED` or
-`UNAVAILABLE` until an explicit Module/Model Manager plan is approved.
-
-After Core is available, open `Components / AI Setup` in the same Hub shell.
-It reads the tracked model/runtime catalogs through server-owned APIs and
-offers inspect, install-plan, import-plan, verify and maintenance-plan
-actions. Plan responses expose only safe location classes (`models_root`,
-`runtime_root`, `environment_root`) and opaque plan IDs. The current example
-catalogs deliberately remain manual-import/review-only until a pinned source,
-size and digest are reviewed.
+The setup command never downloads models or installs optional environments.
+Use Models & Storage / Components to review a separate dependency plan. A
+missing or unauthenticated source stays visible with a truthful action.

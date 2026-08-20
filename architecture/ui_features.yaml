@@ -1,0 +1,45 @@
+schema_version: ui-feature-ownership.v1
+facade_policy:
+  pages_js: compatibility_composition_only
+  app_js: bootstrap_navigation_state_only
+features:
+  - id: dashboard
+    owner: src/ui/features/dashboard/
+  - id: projects
+    owner: src/ui/features/projects/
+  - id: workflow_library
+    owner: src/ui/features/workflow_library/
+  - id: jobs
+    owner: src/ui/features/jobs/
+  - id: artifacts
+    owner: src/ui/features/artifacts/
+  - id: settings
+    owner: src/ui/features/settings/
+  - id: diagnostics
+    owner: src/ui/features/diagnostics/
+  - id: components
+    owner: src/ui/features/components/
+  - id: models
+    owner: src/ui/features/models/
+  - id: runtimes
+    owner: src/ui/features/runtimes/
+  - id: node_studio
+    owner: src/ui/features/node_studio/
+  - id: image_ai
+    owner: src/ui/features/image_ai/
+  - id: image_mask
+    owner: src/ui/features/image_mask/
+  - id: sam2
+    owner: src/ui/features/sam2/
+  - id: animesr
+    owner: src/ui/features/animesr/
+  - id: media
+    owner: src/ui/features/media/
+  - id: whisper
+    owner: src/ui/features/whisper/
+  - id: vision
+    owner: src/ui/features/vision/
+  - id: voice
+    owner: src/ui/features/voice/
+  - id: ocr
+    owner: src/ui/features/ocr/

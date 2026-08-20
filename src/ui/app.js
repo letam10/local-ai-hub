@@ -98,12 +98,16 @@ import { mountImageMaskCanvases } from "./image_mask_studio.js";
 import { createWorkflowLibraryAdapter } from "./workflow_library.js";
 import { NAVIGATION, jobRecoverySnapshot, renderPage } from "./pages.js";
 import { currentLanguage, localizeDocument, setLanguage, translateText } from "./i18n.js";
+import { FEATURE_REGISTRY } from "./core/feature_registry.js";
+import { confirmComponentInstall, getProductionCatalog, planComponentInstall } from "./shared/api/catalog.js";
 
 const state = {
   health: {}, capabilities: {}, productization: {}, components: [], componentManager: {}, componentPlans: {}, tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", apiStatus: "loading", apiError: "",
   creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
   workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trong V5-D trước khi đồng bộ." },
+  productionCatalog: { status: "partial", models: [], runtimes: [] },
+  featureRegistry: FEATURE_REGISTRY,
 };
 const view = document.querySelector("#module-view");
 const nav = document.querySelector("#sidebar-nav");
@@ -636,6 +640,7 @@ const applyBootstrap = (payload) => {
   state.applications = payload.applications || [];
   state.jobs = payload.jobs || [];
   state.durableJobs = payload.durable_jobs?.records || [];
+  state.productionCatalog = payload.production_catalog || state.productionCatalog;
   state.tools = payload.tools || [];
   state.settings = payload.settings || {};
   state.lifecycle = payload.lifecycle || {};
@@ -718,17 +723,20 @@ const loadRouteData = async ({ scan = false } = {}) => {
   const route = routeId();
   if (route === "models") {
     if (routeLoad) return routeLoad;
-    routeLoad = Promise.allSettled([getModels(), scan ? scanStorage() : getStorage()]).then((results) => {
+    routeLoad = Promise.allSettled([getModels(), scan ? scanStorage() : getStorage(), getProductionCatalog()]).then((results) => {
       if (results[0].status === "fulfilled") state.models = results[0].value.models || [];
       if (results[1].status === "fulfilled") state.storage = results[1].value || {};
+      if (results[2].status === "fulfilled") state.productionCatalog = results[2].value || state.productionCatalog;
       render();
     }).catch(() => {}).finally(() => { routeLoad = null; });
     return routeLoad;
   }
   if (route === "components") {
     if (routeLoad) return routeLoad;
-    routeLoad = getComponents().then((payload) => {
+    routeLoad = Promise.allSettled([getComponents(), getProductionCatalog()]).then((results) => {
+      const payload = results[0].status === "fulfilled" ? results[0].value : {};
       state.componentManager = payload || {};
+      if (results[1].status === "fulfilled") state.productionCatalog = results[1].value || state.productionCatalog;
       render();
     }).catch((error) => {
       showToast(error.message || "Không thể tải Component Manager.", "error");
@@ -1134,6 +1142,19 @@ document.addEventListener("click", async (event) => {
       state.componentManager = await getComponents(); render();
     } catch (error) { showToast(error.message || "Không thể xác nhận kế hoạch.", "error"); }
     finally { componentConfirm.disabled = false; }
+    return;
+  }
+  const productPlanButton = event.target.closest("[data-product-plan]");
+  if (productPlanButton) {
+    productPlanButton.disabled = true;
+    try {
+      const plan = await planComponentInstall(productPlanButton.dataset.productPlan || "");
+      if (plan?.plan_id) {
+        const result = await confirmComponentInstall(plan.plan_id, false);
+        showToast(result?.reason || plan.reason || "Đã tạo kế hoạch catalog.", result?.status === "unavailable" ? "warning" : "success");
+      } else showToast(plan?.reason || "Không thể lập kế hoạch catalog.", "warning");
+    } catch (error) { showToast(error.message || "Không thể lập kế hoạch catalog.", "error"); }
+    finally { productPlanButton.disabled = false; }
     return;
   }
   const maintenanceButton = event.target.closest("[data-component-maintenance]");

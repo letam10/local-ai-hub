@@ -1,7 +1,7 @@
 """
 /*
   FILE NOTE
-  - Mục đích: Packaging and release manifest builder cho Local AI Hub V6 — biên dịch Inno Setup installer EXE, tạo core release ZIP, kiểm tra SHA-256, và xuất release manifest
+  - Mục đích: Packaging and release manifest builder cho Local AI Hub V7 — biên dịch Inno Setup installer EXE, tạo core release ZIP, kiểm tra SHA-256, và xuất release manifest
   - Liên kết trực tiếp: distribution/installer.iss, distribution/release_manifest.json, scripts/build_core_release.py
   - Vùng ảnh hưởng khi sửa: Quy trình đóng gói và xuất artifact release
 */
@@ -20,6 +20,8 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from src.shared.version import PRODUCT_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -75,7 +77,7 @@ def compile_installer() -> tuple[Path | None, str | None]:
     cmd = [iscc, str(ISS_PATH)]
     try:
         proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=True)
-        exe_path = DIST_DIR / "LocalAIHub-Setup-Win64-v6.0.0.exe"
+        exe_path = DIST_DIR / f"LocalAIHub-Setup-Win64-v{PRODUCT_VERSION}.exe"
         if exe_path.exists():
             return exe_path, None
         return None, "Installer compilation completed but output EXE not found."
@@ -86,12 +88,12 @@ def compile_installer() -> tuple[Path | None, str | None]:
 def build_release_package(output_zip: Path | None = None, compile_exe: bool = True) -> dict[str, Any]:
     """Build the clean Core release zip and Inno Setup installer, creating release manifest."""
     DIST_DIR.mkdir(parents=True, exist_ok=True)
-    out_zip = output_zip or (DIST_DIR / "LocalAIHub-Core-Win64-v6.0.0.zip")
+    out_zip = output_zip or (DIST_DIR / f"LocalAIHub-Core-Win64-v{PRODUCT_VERSION}.zip")
 
     commit, branch = get_git_info()
     timestamp = datetime.now(timezone.utc).isoformat()
 
-    included_roots = ["src", "scripts", "distribution", "docs", "workflows"]
+    included_roots = ["src", "scripts", "distribution", "docs", "workflows", "architecture"]
     included_files = [
         "requirements-hub.txt",
         "dependencies.lock.json",
@@ -147,7 +149,7 @@ def build_release_package(output_zip: Path | None = None, compile_exe: bool = Tr
     manifest = {
         "schema_version": 1,
         "application_name": "Local AI Hub",
-        "version": "6.0.0",
+        "version": PRODUCT_VERSION,
         "git_commit": commit,
         "git_branch": branch,
         "build_timestamp": timestamp,

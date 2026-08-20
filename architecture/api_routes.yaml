@@ -877,6 +877,63 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "productization.catalog",
+      "method": "GET",
+      "path": "/api/productization/catalog",
+      "domain": "productization",
+      "owner": "src/services/api/routes/productization.py",
+      "service": "productization",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "productization.detail",
+      "method": "GET",
+      "path": "/api/productization/catalog/{component_id}",
+      "domain": "productization",
+      "owner": "src/services/api/routes/productization.py",
+      "service": "productization",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "productization.lookup",
+      "method": "GET",
+      "path": "/api/productization/plans/{plan_id}",
+      "domain": "productization",
+      "owner": "src/services/api/routes/productization.py",
+      "service": "productization",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "projects.list",
       "method": "GET",
       "path": "/api/projects",
@@ -2194,6 +2251,63 @@
       "domain": "node_studio",
       "owner": "src/services/api/routes/node_studio.py",
       "service": "node_studio",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "productization.maintenance",
+      "method": "POST",
+      "path": "/api/productization/maintenance",
+      "domain": "productization",
+      "owner": "src/services/api/routes/productization.py",
+      "service": "productization",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "productization.plan",
+      "method": "POST",
+      "path": "/api/productization/plans",
+      "domain": "productization",
+      "owner": "src/services/api/routes/productization.py",
+      "service": "productization",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "productization.confirm",
+      "method": "POST",
+      "path": "/api/productization/plans/{plan_id}/confirm",
+      "domain": "productization",
+      "owner": "src/services/api/routes/productization.py",
+      "service": "productization",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [

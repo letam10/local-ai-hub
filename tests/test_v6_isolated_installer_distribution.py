@@ -32,8 +32,8 @@ class TestIsolatedInstallerDistribution(unittest.TestCase):
     def setUpClass(cls) -> None:
         # Build clean release package
         cls.manifest = build_mod.build_release_package(compile_exe=True)
-        cls.dist_zip = build_mod.DIST_DIR / "LocalAIHub-Core-Win64-v6.0.0.zip"
-        cls.setup_exe = build_mod.DIST_DIR / "LocalAIHub-Setup-Win64-v6.0.0.exe"
+        cls.dist_zip = build_mod.DIST_DIR / f"LocalAIHub-Core-Win64-v{build_mod.PRODUCT_VERSION}.zip"
+        cls.setup_exe = build_mod.DIST_DIR / f"LocalAIHub-Setup-Win64-v{build_mod.PRODUCT_VERSION}.exe"
 
     def test_01_artifacts_exist_and_match_manifest(self) -> None:
         self.assertTrue(self.dist_zip.exists(), "Release ZIP must exist")

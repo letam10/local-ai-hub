@@ -226,6 +226,11 @@ def _bootstrap_payload(*, force: bool = False) -> dict:
     storage_snapshot = dashboard_volume_snapshot()
     jobs = list_jobs()
     durable_jobs = durable_jobs_snapshot()
+    try:
+        from src.services.productization import catalog_snapshot
+        production_catalog = catalog_snapshot()
+    except Exception:
+        production_catalog = {"schema_version": "v7-production-catalog-snapshot.v1", "status": "unavailable", "execution": "not_run", "dry_run": True, "models": [], "runtimes": [], "counts": {"models": 0, "runtimes": 0, "installed_models": 0, "install_ready": 0}, "reason": "Tracked production catalog is unavailable.", "next_action": "Run Core setup, then refresh the catalog."}
     product_surface = project_product_surface(
         control_plane=capabilities,
         health=health_snapshot,
@@ -247,6 +252,7 @@ def _bootstrap_payload(*, force: bool = False) -> dict:
         "productization": product_surface,
         "storage": product_surface["storage"],
         "workflow_library": workflow_library,
+        "production_catalog": production_catalog,
     }
     with _bootstrap_lock:
         _bootstrap_cache = (now, payload)

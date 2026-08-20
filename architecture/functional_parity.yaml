@@ -1,0 +1,53 @@
+schema_version: functional-parity.v1
+principle: owner_and_fresh_user_share_one_execution_architecture
+surfaces:
+  - id: dashboard
+    owner: src/ui/features/dashboard/
+    adapter: src/services/api/routes/bootstrap.py
+    status: structural
+  - id: projects
+    owner: src/ui/features/projects/
+    adapter: src/services/project_manager/
+    status: structural
+  - id: workflow_library
+    owner: src/ui/features/workflow_library/
+    adapter: src/services/api/routes/workflows.py
+    status: structural
+  - id: jobs
+    owner: src/ui/features/jobs/
+    adapter: src/services/job_manager/
+    status: structural
+  - id: artifacts
+    owner: src/ui/features/artifacts/
+    adapter: src/services/artifact_store.py
+    status: structural
+  - id: models
+    owner: src/ui/features/models/
+    adapter: src/services/productization/catalog.py
+    status: structural
+  - id: runtimes
+    owner: src/ui/features/runtimes/
+    adapter: src/services/runtime_manager/
+    status: structural
+  - id: components
+    owner: src/ui/features/components/
+    adapter: src/services/productization/lifecycle.py
+    status: structural
+  - id: image_mask
+    owner: src/ui/features/image_mask/
+    adapter: src/services/image_mask_studio/
+    status: structural
+  - id: node_studio
+    owner: src/ui/features/node_studio/
+    adapter: src/services/node_studio/
+    status: structural
+  - id: optional_ai
+    owner: src/modules/
+    adapter: src/services/job_manager/
+    status: partial_until_bounded_smoke
+rules:
+  - owner_and_fresh_user_use_same_adapter
+  - no_clone_mode_backend
+  - no_demo_backend
+  - missing_optional_models_remain_visible
+  - operational_requires_matching_runtime_evidence

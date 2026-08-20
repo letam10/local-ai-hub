@@ -202,7 +202,8 @@ class ModelManager:
             records = existing.get("records") if isinstance(existing, Mapping) else None
             if not isinstance(records, dict):
                 records = {}
-            records[model_id] = {"status": "INSTALLED_UNVERIFIED", "catalog_fingerprint": self.catalog_fingerprint, "installed_at": int(time.time()), "location_class": "models_root"}
+            installed_size = sum(path.stat().st_size for path in destination.rglob("*") if path.is_file() and not _is_reparse(path))
+            records[model_id] = {"status": "INSTALLED_UNVERIFIED", "catalog_fingerprint": self.catalog_fingerprint, "installed_at": int(time.time()), "location_class": "models_root", "installed_size_bytes": installed_size, "size_source": "installation_receipt"}
             temporary = receipt.with_suffix(".tmp")
             with temporary.open("w", encoding="utf-8", newline="\n") as handle:
                 handle.write(json.dumps({"schema_version": "model-install-receipts.v1", "records": records}, indent=2, sort_keys=True) + "\n")

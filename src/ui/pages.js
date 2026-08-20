@@ -7,6 +7,7 @@
 
 import { escapeHtml, formatGb, formatStatus } from "./api.js";
 import { translateText } from "./i18n.js";
+import { renderProductionModels } from "./features/models/models.js";
 
 // Page templates contain a mixture of fixed UI copy and server-owned snapshot
 // values.  Translate only values supplied by the template itself; all values
@@ -1128,15 +1129,7 @@ function renderJobs(state) {
 }
 
 function renderModels(state) {
-  const storage = state.storage || {};
-  const models = state.models || [];
-  const areas = Object.entries(storage.areas || {});
-  return heading("STORAGE", "Models & Storage", "Model store canonical không nhân bản. Legacy cleanup chỉ xử lý mục đã phân loại và xác minh, không tự xoá UNKNOWN hoặc user media.", `<button class="button" type="button" data-refresh-storage>Quét lại</button>`) + `
-    <div class="workspace-grid workspace-grid--two">
-      ${card("Dung lượng", `<div class="row-list">${areas.map(([name, value]) => `<div class="row-item"><span>${escapeHtml(name)}</span><strong>${formatGb(value.bytes)}</strong></div>`).join("") || `<div class="empty-state compact">Chưa có số liệu storage.</div>`}</div>`)}
-      ${card("Legacy cleanup", `<div class="metric-inline"><strong>${escapeHtml(storage.legacy_counts?.total || 0)}</strong><span>legacy paths đã inventory</span></div><div class="callout callout--warning">Cleanup V3 tách REAL_DIRECTORY/JUNCTION, kiểm tra reference và user data trước. Mục active hoặc unknown sẽ được giữ cùng lý do/rollback.</div>`, "", "card--flat")}
-    </div>
-    ${card("Model registry", models.length ? `<div class="table-wrap"><table><thead><tr><th>Model</th><th>Engine</th><th>Size</th><th>Status</th></tr></thead><tbody>${models.map((item) => `<tr><td>${escapeHtml(item.model_name)}</td><td>${escapeHtml(item.engine)}</td><td>${formatGb(item.size?.bytes)}</td><td>${statusPill(item.installed ? "installed" : "not_installed")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state compact">Chưa có model registry.</div>`, "", "card--wide")}`;
+  return renderProductionModels({ productionCatalog: state.productionCatalog, legacyModels: state.models, storage: state.storage, escapeHtml, formatGb, statusPill, card, heading });
 }
 
 function renderComponents(state) {

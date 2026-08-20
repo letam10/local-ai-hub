@@ -31,3 +31,12 @@ complete pinned assets/digests, so automatic download is disabled. Existing
 compatible files are reused and remain untouched; manual import is the safe
 route until a reviewed source recipe exists. Shared models are retained while
 any module references them.
+
+## V7 production disposition
+
+`Config/v7_production_catalog.example.json` is the final user-facing catalog.
+Every entry declares `AUTO_INSTALL_READY`, `AUTH_REQUIRED`,
+`LICENSE_REQUIRED`, `MANUAL_IMPORT_ONLY`, or `UNSUPPORTED_SOURCE`. The UI
+shows a matching action and never invents a download size. Installed size is
+read from a receipt/cache or shown as `Size unavailable`; a bounded size scan is
+explicitly requested and never runs during every refresh.

@@ -25,3 +25,10 @@ write an atomic receipt. It must not accept commands from catalog JSON, move
 an existing environment, alter NVIDIA drivers/system CUDA, or overwrite a
 working runtime. The example catalog has no pinned production assets, so its
 plans remain review/manual only.
+
+The final V7 catalog is `Config/v7_production_catalog.example.json`. It lists
+all supported module environments and portable tools, including FFmpeg,
+ComfyUI, SAM2, AnimeSR, Whisper, OCR, vision and voice profiles. The explicit
+`src.services.productization.runtime_probe.verify_python_environment` helper
+can run a bounded version/import/pip check for a fixed environment after
+review; discovery itself never launches Python or installs packages.

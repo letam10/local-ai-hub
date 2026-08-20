@@ -195,7 +195,8 @@ class RuntimeManager:
             records = current.get("records") if isinstance(current, Mapping) else None
             if not isinstance(records, dict):
                 records = {}
-            records[runtime_id] = {"status": "INSTALLED_UNVERIFIED", "installed_at": int(time.time()), "location_class": record["root_class"], "required_leaves": list(record["required_leaves"])}
+            installed_size = sum((root / relative).stat().st_size for relative in record["required_leaves"] if (root / relative).is_file() and not _is_reparse(root / relative))
+            records[runtime_id] = {"status": "INSTALLED_UNVERIFIED", "installed_at": int(time.time()), "location_class": record["root_class"], "required_leaves": list(record["required_leaves"]), "installed_size_bytes": installed_size, "size_source": "installation_receipt"}
             temporary = receipt_path.with_suffix(".tmp")
             with temporary.open("w", encoding="utf-8", newline="\n") as handle:
                 handle.write(json.dumps({"schema_version": "runtime-install-receipts.v1", "records": records}, ensure_ascii=True, sort_keys=True, indent=2) + "\n")

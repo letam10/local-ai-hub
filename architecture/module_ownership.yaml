@@ -49,6 +49,10 @@ domains:
     owner: [src/services/component_installer/]
     depends_on: [model_manager, runtime_manager, platform.paths, shared]
     forbidden: [browser-path-input, arbitrary-command, startup-download, secret-logging]
+  productization:
+    owner: [src/services/productization/]
+    depends_on: [component_installer, model_manager, runtime_manager, platform.paths, shared]
+    forbidden: [inference, startup-download, arbitrary-path-input, driver-CUDA-change]
   component_api:
     owner: [src/services/api/components.py]
     depends_on: [component_installer, shared]
@@ -73,3 +77,7 @@ filesystem:
   source: APP_ROOT
   mutable: [DATA_ROOT, Config, Models, Environments, runtime, Output, Cache, Temp, Logs, Reports]
   forbidden_source_contents: [*.safetensors, *.ckpt, *.pt, *.pth, *.onnx, *.gguf]
+ui_features:
+  owner: src/ui/features/
+  facade: [src/ui/app.js, src/ui/pages.js]
+  forbidden: [filesystem, subprocess, raw_server_path, dynamic_i18n_of_snapshot]

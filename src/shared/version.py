@@ -4,4 +4,4 @@ Independent schema/contract versions live with their own modules and must not
 be coupled to this application release version.
 """
 
-PRODUCT_VERSION = "6.0.0"
+PRODUCT_VERSION = "7.0.0"

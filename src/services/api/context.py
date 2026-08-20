@@ -43,6 +43,7 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
 
     model_manager: ModelManager | None = None
     runtime_manager: RuntimeManager | None = None
+    productization_service: Any | None = None
     get = bindings.get
 
     def model_service() -> ModelManager:
@@ -56,6 +57,24 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         if runtime_manager is None:
             runtime_manager = RuntimeManager()
         return runtime_manager
+
+    def productization() -> Any:
+        nonlocal productization_service
+        if productization_service is None:
+            from src.services.productization import ComponentLifecycle
+            productization_service = ComponentLifecycle()
+        return productization_service
+
+    def product_snapshot(**kwargs: Any) -> dict[str, Any]:
+        return productization().catalog.snapshot(**kwargs)
+
+    def product_detail(component_id: str) -> dict[str, Any] | None:
+        service = productization()
+        if component_id in service.catalog.models:
+            return service.catalog.inspect_model(component_id)
+        if component_id in service.catalog.runtimes:
+            return service.catalog.inspect_runtime(component_id)
+        return None
 
     def prepare_shutdown() -> dict[str, Any]:
         status, payload = get("prepare_owned_shutdown")()
@@ -111,6 +130,11 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         "comfy_health": get("comfy_health"), "comfy_start": get("comfy_start"),
         "comfy_workflows": get("comfy_workflows"), "comfy_workflow": get("comfy_workflow"), "comfy_save_workflow": get("comfy_save_workflow"),
         "runtime_manager_snapshot": lambda: runtime_service().snapshot(), "runtime_manager_verify": lambda runtime_id: runtime_service().verify(runtime_id),
+        "productization_snapshot": product_snapshot, "productization_detail": product_detail,
+        "productization_plan": lambda component_id: productization().plan_one_click(component_id),
+        "productization_plan_lookup": lambda plan_id: productization().lookup_plan(plan_id),
+        "productization_confirm": lambda plan_id, confirmed=False: productization().confirm(plan_id, confirmed=confirmed),
+        "productization_maintenance": lambda component_id, action: productization().plan_maintenance(component_id, action),
         "settings_payload": get("settings_payload"), "settings_schema": lambda: {"status": "completed", "schema_version": SETTINGS_SCHEMA_VERSION, "defaults": SETTINGS_SECTION_DEFAULTS},
         "settings_save": lambda payload, expected_revision=None: SettingsPersistence().save(payload, expected_revision=expected_revision),
         "settings_reset": lambda section: SettingsPersistence().reset_section(section), "settings_reset_all": lambda: SettingsPersistence().save(SETTINGS_SECTION_DEFAULTS),

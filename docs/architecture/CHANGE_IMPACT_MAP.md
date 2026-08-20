@@ -23,6 +23,11 @@ machine data. Never infer permission from a filename alone.
 | Component maintenance | `src/services/api/components.py`, manager | Components / AI Setup | Phase 2 API/UI tests | repair/update/uninstall are plan-only; preserve shared/user data |
 | Installer/bootstrap | `scripts/bootstrap_core.py`, `src/services/bootstrap_core.py` | desktop launchers | clean-clone tests | model-free, offline, idempotent, preserve local files |
 | Versioning | `src/shared/version.py` | health/installer/docs | version consistency | one product source; schema versions unchanged |
+| Production catalog | `src/services/productization/catalog.py`, `Config/v7_production_catalog.example.json` | Models / Components / Dashboard | `tests/test_v7_final_productization.py` | fixed leaves, real disposition, no fabricated size or source |
+| One-click lifecycle | `src/services/productization/lifecycle.py` | `/api/productization/*`, Components/Models features | final productization acceptance | inspect/plan/confirm/apply/verify; preserve existing installs |
+| UI feature ownership | `src/ui/core/`, `src/ui/features/`, `src/ui/styles/` | navigation and feature surfaces | UI architecture + Node syntax tests | no filesystem/subprocess, static i18n only |
+| Desktop setup | `scripts/setup_local_ai_hub.py`, `scripts/setup_local_ai_hub.ps1` | desktop launcher/shortcut | clean-clone/setup acceptance | absent-only Core bootstrap, no model download |
+| Release package | `scripts/build_installer.py`, `distribution/installer.iss` | ZIP/Setup EXE | release manifest and package tests | excludes Models, Environments, runtime, Output, local Config |
 
 For API route changes, update `architecture/api_routes.yaml`, the owning
 `src/services/api/routes/<domain>.py` adapter and its contract test. Backup,

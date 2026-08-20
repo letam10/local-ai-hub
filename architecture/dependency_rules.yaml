@@ -15,6 +15,8 @@ forbidden_imports:
   - [src.ui, pathlib.Path]
   - [src.services.api, src.ui]
   - [src.services.component_installer, src.ui]
+  - [src.services.productization, src.ui]
+  - [src.ui.features, src.services]
 rules:
   - id: no-arbitrary-plugin-import
     text: Manifest discovery is data-only and uses a fixed allowlist.
@@ -28,3 +30,9 @@ rules:
     text: Component installation, import and maintenance plans are server-owned and accept fixed IDs or opaque selection IDs only.
   - id: no-global-scan
     text: Model/runtime discovery is bounded to configured roots and known catalog leaves; no drive-wide scan is allowed.
+  - id: final-catalog-disposition
+    text: A catalog source is not downloadable unless its explicit disposition and pinned source policy allow it.
+  - id: no-fake-operational
+    text: Installed file presence never promotes a module to operational without matching bounded runtime evidence.
+  - id: feature-ownership
+    text: New UI business logic belongs under src/ui/features; app.js/pages.js remain composition facades.

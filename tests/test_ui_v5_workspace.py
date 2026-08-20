@@ -42,7 +42,7 @@ class V5WorkspaceUiContractTests(unittest.TestCase):
         self.assertIn("workflowLibraryHtml", self.pages)
 
     def test_product_version_and_docs_are_v5(self) -> None:
-        self.assertIn('PRODUCT_VERSION = "6.0.0"', self.version)
+        self.assertIn('PRODUCT_VERSION = "7.0.0"', self.version)
         for marker in ("Dashboard", "Project/Workspace", "Capability", "Workflow/Nodes", "Job", "Artifact/Preview", "not_run", "V5-D"):
             self.assertIn(marker, self.docs)
 
