@@ -85,18 +85,34 @@ class RuntimeManager:
         return hashlib.sha256(payload).hexdigest()
 
     def inspect(self, runtime_id: str, *, catalog_binding: Any | None = None) -> dict[str, Any]:
-        from src.services.component_installer.verification import FastComponentInspector
+        from src.services.component_installer.verification import FastComponentInspector, revalidate_catalog_binding
 
         record = next((item for item in self._records if item["runtime_id"] == runtime_id), None)
         if record is None:
             raise RuntimeCatalogError("unknown_runtime_id")
+        current_binding, binding_error = revalidate_catalog_binding(
+            component_type="runtime",
+            record=record,
+            catalog_fingerprint=self._catalog_fingerprint(),
+            catalog_binding=catalog_binding,
+            provider=self._catalog_binding_provider,
+            unsupported_code="catalog_schema_unsupported",
+        )
+        if current_binding is None:
+            return {
+                "schema_version": "runtime-inspect.v1", "status": "conflict", "execution": "not_run", "dry_run": True,
+                "runtime_id": runtime_id, "component_type": "runtime", "state": "UNAVAILABLE", "leaves": [],
+                "verified": False, "operational": False, "code": binding_error or "stale_binding",
+                "reason": "The current server-owned catalog binding is unavailable or stale.",
+                "next_action": "Refresh the server-owned catalog context before inspection.",
+            }
         result = FastComponentInspector().inspect(
             paths=self.paths,
             component_id=runtime_id,
             component_type="runtime",
             record=record,
             catalog_fingerprint=self._catalog_fingerprint(),
-            catalog_binding=catalog_binding,
+            catalog_binding=current_binding,
         )
         result["runtime_id"] = runtime_id
         return result

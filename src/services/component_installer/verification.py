@@ -119,8 +119,15 @@ def revalidate_catalog_binding(
     catalog_fingerprint: str,
     catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None,
     provider: Any | None = None,
+    unsupported_code: str | None = None,
 ) -> tuple[CatalogBindingContext | None, str | None]:
-    """Rebuild current manager binding and compare an optional supplied context."""
+    """Rebuild current manager binding and compare an optional supplied context.
+
+    A legacy manager may explicitly reject a supplied V2 context when it has no
+    current server-owned V2 provider.  Callers that need that distinction pass
+    ``unsupported_code``; older verification callers retain their historical
+    fixed ``stale_binding`` projection.
+    """
 
     try:
         planned: CatalogBindingContext | None
@@ -143,6 +150,8 @@ def revalidate_catalog_binding(
                 return None, "stale_binding"
             current_source = candidate
         elif planned is not None and planned.catalog_schema == "v7-production-catalog.v2":
+            if unsupported_code == "catalog_schema_unsupported":
+                return None, "catalog_schema_unsupported"
             keys = ("catalog_schema", "catalog_revision", "catalog_fingerprint", "source_identity")
             if not all(key in record for key in keys):
                 return None, "stale_binding"

@@ -93,16 +93,32 @@ class ModelManager:
             raise ModelCatalogError("unknown_model_id") from exc
 
     def inspect(self, model_id: str, *, catalog_binding: Any | None = None) -> dict[str, Any]:
-        from src.services.component_installer.verification import FastComponentInspector
+        from src.services.component_installer.verification import FastComponentInspector, revalidate_catalog_binding
 
         record = self._record(model_id)
+        current_binding, binding_error = revalidate_catalog_binding(
+            component_type="model",
+            record=record,
+            catalog_fingerprint=self.catalog_fingerprint,
+            catalog_binding=catalog_binding,
+            provider=self._catalog_binding_provider,
+            unsupported_code="catalog_schema_unsupported",
+        )
+        if current_binding is None:
+            return {
+                "schema_version": "model-inspect.v1", "status": "conflict", "execution": "not_run", "dry_run": True,
+                "model_id": model_id, "component_type": "model", "state": "UNAVAILABLE", "leaves": [], "files": [],
+                "verified": False, "operational": False, "code": binding_error or "stale_binding",
+                "reason": "The current server-owned catalog binding is unavailable or stale.",
+                "next_action": "Refresh the server-owned catalog context before inspection.",
+            }
         result = FastComponentInspector().inspect(
             paths=self.paths,
             component_id=model_id,
             component_type="model",
             record=record,
             catalog_fingerprint=self.catalog_fingerprint,
-            catalog_binding=catalog_binding,
+            catalog_binding=current_binding,
         )
         result["model_id"] = model_id
         result["files"] = [

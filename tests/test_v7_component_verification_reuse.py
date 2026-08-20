@@ -453,6 +453,106 @@ class V7ComponentVerificationReuseTests(unittest.TestCase):
             missing_result = model.verify("demo-model", catalog_binding=model_context)
         self.assertEqual(missing_result["code"], "stale_binding")
 
+    def test_direct_model_and_runtime_inspect_revalidate_current_binding(self) -> None:
+        installer, current = self._v2_installer()
+        model = installer.model_manager
+        runtime = installer.runtime_manager
+        model_target = self.paths.models_root / "demo-model" / "demo.bin"
+        model_target.parent.mkdir(parents=True, exist_ok=True)
+        model_target.write_bytes(b"model")
+        runtime_target = self.paths.runtime_root / "bin" / "demo.exe"
+        runtime_target.parent.mkdir(parents=True, exist_ok=True)
+        runtime_target.write_bytes(b"runtime")
+        model_context = CatalogBindingContext.for_v2(catalog_version=current["version"], catalog_fingerprint=current["fingerprint"], source_identity=current["model_source"])
+        runtime_context = CatalogBindingContext.for_v2(catalog_version=current["version"], catalog_fingerprint=current["fingerprint"], source_identity=current["runtime_source"])
+
+        self.assertEqual(model.verify("demo-model", catalog_binding=model_context)["status"], "completed")
+        self.assertEqual(runtime.verify("demo-runtime", catalog_binding=runtime_context)["status"], "completed")
+        inspected_model = model.inspect("demo-model", catalog_binding=model_context)
+        inspected_runtime = runtime.inspect("demo-runtime", catalog_binding=runtime_context)
+        self.assertEqual(inspected_model["status"], "INSTALLED_VERIFIED")
+        self.assertEqual(inspected_runtime["status"], "INSTALLED_UNVERIFIED")
+        self.assertEqual(inspected_model["catalog_schema"], "v7-production-catalog.v2")
+        self.assertEqual(inspected_runtime["catalog_schema"], "v7-production-catalog.v2")
+        self.assertFalse(inspected_model["operational"])
+        self.assertFalse(inspected_runtime["operational"])
+        self.assertEqual(model.snapshot()["records"][0]["catalog_schema"], "v7-production-catalog.v2")
+        runtime_snapshot = runtime.snapshot()
+        self.assertEqual(runtime_snapshot["records"][0]["catalog_schema"], "v7-production-catalog.v2")
+
+        original = dict(current)
+        receipt_path = self.paths.config_root / "component_install_receipts.json"
+        for manager, component_id, supplied, field, changed in (
+            (model, "demo-model", model_context, "version", "2026.08.22"),
+            (model, "demo-model", model_context, "fingerprint", "b" * 64),
+            (model, "demo-model", model_context, "model_source", None),
+            (runtime, "demo-runtime", runtime_context, "runtime_source", "catalog:runtime-digest"),
+        ):
+            before = receipt_path.read_bytes()
+            current[field] = changed
+            with patch.object(FastComponentInspector, "inspect", side_effect=AssertionError("stale binding reached fast inspector")):
+                result = manager.inspect(component_id, catalog_binding=supplied)
+            self.assertEqual(result["status"], "conflict")
+            self.assertEqual(result["code"], "stale_binding")
+            self.assertEqual(result["execution"], "not_run")
+            self.assertTrue(result["dry_run"])
+            self.assertNotEqual(result.get("state"), "INSTALLED_VERIFIED")
+            self.assertNotIn(str(self.temp.name), json.dumps(result))
+            if changed is not None:
+                self.assertNotIn(changed, json.dumps(result))
+            self.assertEqual(receipt_path.read_bytes(), before)
+            current.update(original)
+
+        provider = model._catalog_binding_provider
+        model._catalog_binding_provider = None
+        before = receipt_path.read_bytes()
+        with patch.object(FastComponentInspector, "inspect", side_effect=AssertionError("unsupported V2 reached fast inspector")):
+            unsupported = model.inspect("demo-model", catalog_binding=model_context)
+        self.assertEqual(unsupported["status"], "conflict")
+        self.assertEqual(unsupported["code"], "catalog_schema_unsupported")
+        self.assertEqual(unsupported["state"], "UNAVAILABLE")
+        self.assertEqual(unsupported["execution"], "not_run")
+        self.assertTrue(unsupported["dry_run"])
+        self.assertEqual(receipt_path.read_bytes(), before)
+        self.assertNotIn(str(self.temp.name), json.dumps(unsupported))
+        model._catalog_binding_provider = provider
+
+        legacy_model = ModelManager(paths=self.paths, catalog_path=model.catalog_path)
+        legacy_runtime = RuntimeManager(paths=self.paths, catalog_path=runtime.catalog_path)
+        legacy_model_result = legacy_model.inspect("demo-model")
+        legacy_runtime_result = legacy_runtime.inspect("demo-runtime")
+        self.assertEqual(legacy_model_result["catalog_schema"], "model-catalog.v1")
+        self.assertEqual(legacy_runtime_result["catalog_schema"], "runtime-catalog.v1")
+        self.assertNotEqual(legacy_model_result["status"], "conflict")
+        self.assertNotEqual(legacy_runtime_result["status"], "conflict")
+        self.assertEqual(legacy_model_result["execution"], "not_run")
+        self.assertEqual(legacy_runtime_result["execution"], "not_run")
+
+        legacy_model_binding = CatalogBindingContext.for_v1(
+            component_type="model", record=legacy_model._record("demo-model"), catalog_fingerprint=legacy_model.catalog_fingerprint
+        )
+        legacy_runtime_record = next(item for item in legacy_runtime._records if item["runtime_id"] == "demo-runtime")
+        legacy_runtime_binding = CatalogBindingContext.for_v1(
+            component_type="runtime", record=legacy_runtime_record, catalog_fingerprint=legacy_runtime._catalog_fingerprint()
+        )
+        for manager, component_id, binding in (
+            (legacy_model, "demo-model", legacy_model_binding),
+            (legacy_runtime, "demo-runtime", legacy_runtime_binding),
+        ):
+            stale = CatalogBindingContext(
+                catalog_schema=binding.catalog_schema,
+                catalog_revision=binding.catalog_revision,
+                catalog_fingerprint="c" * 64,
+                source_identity=binding.source_identity,
+            )
+            with patch.object(FastComponentInspector, "inspect", side_effect=AssertionError("stale V1 reached fast inspector")):
+                result = manager.inspect(component_id, catalog_binding=stale)
+            self.assertEqual(result["status"], "conflict")
+            self.assertEqual(result["code"], "stale_binding")
+            self.assertEqual(result["state"], "UNAVAILABLE")
+            self.assertEqual(result["execution"], "not_run")
+            self.assertTrue(result["dry_run"])
+
     def test_v2_lifecycle_confirmations_reject_current_catalog_drift(self) -> None:
         from src.services.productization.lifecycle import ComponentLifecycle
 
