@@ -43,7 +43,7 @@ def validate_model_entry(value: Mapping[str, Any]) -> dict[str, Any]:
         "estimated_download_size", "estimated_disk_size", "sha256",
         "official_source", "license", "authentication_required", "modules_using_model",
         "minimum_vram", "recommended_vram", "used_by", "revision", "source_type",
-        "license_url", "notes", "install_supported", "shared_dependency_id", "runtime_id", "dependencies",
+        "license_url", "notes", "install_supported", "shared_dependency_id", "runtime_id", "dependencies", "update_candidate", "latest_supported_revision", "latest_upstream_revision", "update_parts",
     }
     if set(value) - allowed:
         raise ModelCatalogError("unknown_model_field")
@@ -105,6 +105,10 @@ def validate_model_entry(value: Mapping[str, Any]) -> dict[str, Any]:
         "shared_dependency_id": str(value.get("shared_dependency_id", "")) or None,
         "runtime_id": str(value.get("runtime_id", "")) or None,
         "dependencies": [dict(item) for item in value.get("dependencies", [])[:8] if isinstance(item, Mapping)],
+        "update_candidate": dict(value.get("update_candidate")) if isinstance(value.get("update_candidate"), Mapping) else None,
+        "latest_supported_revision": str(value.get("latest_supported_revision", value.get("revision", "unknown"))),
+        "latest_upstream_revision": str(value.get("latest_upstream_revision", value.get("revision", "unknown"))),
+        "update_parts": [str(item) for item in value.get("update_parts", []) if item in {"backend", "runtime", "dependencies", "model"}],
         "authentication_required": bool(value.get("authentication_required", False)),
         "modules_using_model": sorted(set(modules)),
         "minimum_vram": int(value.get("minimum_vram", 0)),

@@ -114,6 +114,27 @@ class V7BundleReuseTests(unittest.TestCase):
         self.assertEqual(result["code"], "existing_install_incomplete")
         self.assertFalse((self.paths.config_root / "component_install_receipts.json").exists())
 
+    def test_confirm_maintenance_update_uses_immutable_candidate_executor(self) -> None:
+        root = self.paths.models_root / "demo-model"
+        root.mkdir(parents=True)
+        (root / "demo.bin").write_bytes(b"model")
+        candidate = self.paths.temp_root / "candidates" / "demo-new.bin"
+        candidate.parent.mkdir(parents=True)
+        candidate.write_bytes(b"new!!")
+        self.models._records[0]["update_candidate"] = {
+            "staged_relative_path": "candidates/demo-new.bin", "relative_path": "demo.bin",
+            "size_bytes": 5, "sha256": hashlib.sha256(b"new!!").hexdigest(), "source_identity": "demo-model-r2",
+        }
+        self.models._records[0]["latest_supported_revision"] = "model-r2"
+        receipt = self.paths.config_root / "component_install_receipts.json"
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps({"schema_version": "component-install-receipts.v2", "records": {"demo-model": {"bundle_revision": "model-r1"}}}), encoding="utf-8")
+        plan = self.installer.plan_maintenance("demo-model", action="update")
+        result = self.installer.confirm_maintenance(plan["plan_id"], confirmed=True)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual((root / "demo.bin").read_bytes(), b"new!!")
+        self.assertTrue((self.paths.models_root / ".versions" / "demo-model" / "model-r1" / "demo.bin").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -183,7 +183,22 @@ class MaintenanceExecutor:
                 return {"status": "failed", "code": "receipt_write_failed", "execution": "not_run"}
             return {"status": "completed", "action": "repair", "component_id": component_id, "state": "INSTALLED_UNVERIFIED", "execution": "completed", "next_action": "Run the component-specific bounded verification before operational promotion."}
         if action == "update":
-            return {"status": "unavailable", "code": "update_candidate_required", "execution": "not_run", "next_action": "Run Check Update and confirm an immutable candidate plan before activation."}
+            candidate = record.get("update_candidate")
+            if not isinstance(candidate, Mapping):
+                return {"status": "unavailable", "code": "update_candidate_required", "execution": "not_run", "next_action": "Run Check Update and confirm an immutable candidate plan before activation."}
+            # The maintenance route is still plan-first/stale-state checked;
+            # the actual candidate activation stays in the dedicated update
+            # executor so rollback and source identity remain centralized.
+            from src.services.operational_closure.update_executor import ComponentUpdateExecutor
+            update_plan = {
+                "component_id": component_id,
+                "component_type": component_type,
+                "installed_revision": str(receipts["records"].get(component_id, {}).get("bundle_revision") or "previous"),
+                "latest_supported_revision": str(record.get("latest_supported_revision") or record.get("revision") or "unknown"),
+                "catalog_fingerprint": str(plan.get("catalog_fingerprint") or ""),
+                "update_candidate": dict(candidate),
+            }
+            return ComponentUpdateExecutor(paths=self.paths).apply(update_plan, confirmed=True)
         if self._shared_reference(component_id, record, receipts["records"]):
             return {"status": "conflict", "code": "shared_dependency_in_use", "execution": "not_run", "next_action": "Remove dependent components first; shared runtime/model leaves are preserved."}
         # Validate all leaves before the first delete.  Unknown files are never
