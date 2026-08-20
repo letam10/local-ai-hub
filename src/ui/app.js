@@ -1155,6 +1155,17 @@ document.addEventListener("click", async (event) => {
     finally { componentConfirm.disabled = false; }
     return;
   }
+  const maintenanceConfirm = event.target.closest("[data-component-maintenance-confirm]");
+  if (maintenanceConfirm) {
+    maintenanceConfirm.disabled = true;
+    try {
+      const result = await confirmComponentMaintenance(maintenanceConfirm.dataset.componentMaintenanceConfirm || "", true);
+      showToast(result.next_action || result.reason || "Kế hoạch bảo trì đã được xử lý.", result.status === "completed" ? "success" : "warning");
+      state.componentManager = await getComponents(); render();
+    } catch (error) { showToast(error.message || "Không thể xác nhận bảo trì.", "error"); }
+    finally { maintenanceConfirm.disabled = false; }
+    return;
+  }
   const productPlanButton = event.target.closest("[data-product-plan]");
   if (productPlanButton) {
     productPlanButton.disabled = true;

@@ -154,6 +154,10 @@ def _validate_model(item: Mapping[str, Any]) -> dict[str, Any]:
         "latest_supported_revision": str(item.get("latest_supported_revision") or item.get("revision") or "unknown")[:128],
         "update_parts": [str(value) for value in item.get("update_parts", []) if value in {"backend", "runtime", "dependencies", "model"}],
         "install_strategy": str(item.get("install_strategy") or "manual_import"),
+        "archive_format": str(item.get("archive_format") or "")[:16],
+        "archive_prefix": str(item.get("archive_prefix") or "")[:256],
+        "archive_leaves": dict(item.get("archive_leaves")) if isinstance(item.get("archive_leaves"), Mapping) else {},
+        "sha256": str(item.get("sha256"))[:64] if isinstance(item.get("sha256"), str) else None,
         "compatibility": dict(item.get("compatibility")) if isinstance(item.get("compatibility"), Mapping) else {},
         "update_candidate": dict(item.get("update_candidate")) if isinstance(item.get("update_candidate"), Mapping) else None,
         "source_type": str(item.get("source_type") or "metadata_only")[:64],
@@ -316,8 +320,11 @@ class ProductionCatalog:
             projected["size_label"] = "Size unavailable"
         elif installed_size is not None:
             projected["size_label"] = f"{installed_size} bytes"
-        elif status == "NOT_INSTALLED" and not record["estimated_download_size"]:
-            projected["size_label"] = "Size unavailable"
+        elif status == "NOT_INSTALLED":
+            if record["estimated_download_size"]:
+                projected["size_label"] = f"Download: {record['estimated_download_size']} bytes; Disk: {record['estimated_disk_size']} bytes"
+            else:
+                projected["size_label"] = "Size unavailable"
         return projected
 
     def inspect_runtime(self, runtime_id: str) -> dict[str, Any]:

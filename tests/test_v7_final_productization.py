@@ -46,7 +46,7 @@ class FinalProductizationTests(unittest.TestCase):
     def test_unknown_size_is_not_fabricated_and_refresh_is_explicit(self) -> None:
         catalog = ProductionCatalog(paths=self.paths)
         before = catalog.inspect_model("sam2.1-hiera-small")
-        self.assertEqual(before["size_label"], "Size unavailable")
+        self.assertIn("Download:", before["size_label"])
         self.assertEqual(catalog.refresh_model_size("sam2.1-hiera-small")["status"], "unavailable")
         self.assertFalse((self.paths.config_root / "model_size_cache.json").exists())
 

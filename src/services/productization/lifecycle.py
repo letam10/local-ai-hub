@@ -25,6 +25,7 @@ from src.platform.paths import HubPaths, get_paths
 
 from .catalog import ProductionCatalog, ProductionCatalogError
 from .runtime_executor import RuntimeArchiveExecutor
+from .model_executor import ModelArchiveExecutor
 from src.services.component_installer.downloader import DownloadError, TrustedDownloader
 from src.services.component_installer.policy import trusted_source
 
@@ -101,13 +102,25 @@ class ComponentLifecycle:
         record = plan.get("record") if isinstance(plan.get("record"), Mapping) else None
         if not isinstance(record, Mapping):
             return {"status": "unavailable", "code": "catalog_record_unavailable", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
-        if plan.get("component_type") != "runtime" or record.get("install_strategy") != "portable_archive":
+        dependency_block = next((item for item in plan.get("dependencies", []) if item.get("kind") == "runtime" and item.get("id") != plan.get("component_id") and item.get("status") not in {"INSTALLED", "OPERATIONAL"}), None)
+        if dependency_block is not None:
+            return {"status": "unavailable", "code": "dependency_unavailable", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "dependency": {key: dependency_block.get(key) for key in ("kind", "id", "status")}, "next_action": "Install or reuse the server-owned runtime dependency before this component."}
+        component_type = plan.get("component_type")
+        if component_type == "runtime" and record.get("install_strategy") == "portable_archive":
+            executor_kind = "runtime"
+        elif component_type == "model" and record.get("install_strategy") == "direct_file_download":
+            executor_kind = "model"
+        else:
             return {"status": "unavailable", "code": "component_executor_unavailable", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": "Use a reviewed component executor for this bundle type."}
         source = record.get("official_source")
         if not trusted_source(source, fixture_mode=False):
             return {"status": "unavailable", "code": "source_not_trusted", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
         expected_size = int(record.get("estimated_download_size", 0) or 0)
         expected_hash = record.get("sha256")
+        if executor_kind == "model":
+            files = record.get("files") if isinstance(record.get("files"), list) else []
+            leaf = files[0] if files and isinstance(files[0], Mapping) else {}
+            expected_hash = leaf.get("sha256") or expected_hash
         if expected_size <= 0 or not isinstance(expected_hash, str) or len(expected_hash) != 64:
             return {"status": "unavailable", "code": "trusted_source_metadata_required", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
         required = expected_size + int(record.get("estimated_disk_size", 0) or 0) + 256 * 1024 * 1024
@@ -120,11 +133,12 @@ class ComponentLifecycle:
         stage = self.paths.temp_root / "component-install" / plan_id
         try:
             stage.mkdir(parents=True, exist_ok=True)
+            filename = f"{plan['component_id']}.zip" if executor_kind == "runtime" else f"{plan['component_id']}.payload"
             downloaded = TrustedDownloader(staging_root=stage, max_bytes=required).download(
-                str(source), f"{plan['component_id']}.zip", expected_sha256=expected_hash, expected_size=expected_size,
+                str(source), filename, expected_sha256=expected_hash, expected_size=expected_size,
                 disk_free_bytes=free, disk_safety_bytes=256 * 1024 * 1024,
             )
-            result = RuntimeArchiveExecutor(paths=self.paths).apply(record, downloaded.staged_path, catalog_fingerprint=self.catalog.fingerprint)
+            result = RuntimeArchiveExecutor(paths=self.paths).apply(record, downloaded.staged_path, catalog_fingerprint=self.catalog.fingerprint) if executor_kind == "runtime" else ModelArchiveExecutor(paths=self.paths).apply(record, downloaded.staged_path, catalog_fingerprint=self.catalog.fingerprint)
             return {"status": result.get("status"), "plan_id": plan_id, "component_id": plan["component_id"], "execution": result.get("execution", "not_run"), "dry_run": False, "result": {key: result.get(key) for key in ("state", "receipt", "code", "next_action") if key in result}, "next_action": result.get("next_action")}
         except DownloadError as exc:
             return {"status": "failed", "code": exc.code, "plan_id": plan_id, "execution": "not_run", "dry_run": False}

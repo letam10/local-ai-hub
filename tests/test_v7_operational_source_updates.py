@@ -13,6 +13,7 @@ from unittest.mock import patch
 from src.platform.paths import HubPaths
 from src.services.operational_closure.source_availability import SourceAvailabilityService
 from src.services.operational_closure.update_service import UpdateResolver, UpdateSchedule
+from src.services.operational_closure.evidence import record_runtime_smoke
 from src.services.productization.catalog import ProductionCatalog
 from src.services.component_installer import ComponentInstaller
 from src.services.model_manager import ModelManager
@@ -219,6 +220,17 @@ class V7SourceAndUpdateTests(unittest.TestCase):
         self.assertNotIn("official_source", encoded)
         self.assertNotIn("https://", encoded)
         self.assertNotIn("update_candidate", encoded)
+
+    def test_runtime_evidence_promotes_only_matching_fresh_runtime(self) -> None:
+        runtime_root = self.paths.runtime_root
+        runtime_root.mkdir(parents=True)
+        (runtime_root / "demo.exe").write_bytes(b"runtime")
+        record = self.catalog.runtimes["demo-runtime"]
+        saved = record_runtime_smoke(self.paths, "demo-runtime", record, outcome="completed", smoke_id="demo-smoke-v1", details={"exit_code": 0})
+        self.assertEqual(saved["status"], "saved")
+        self.assertEqual(self.catalog.inspect_runtime("demo-runtime")["status"], "OPERATIONAL")
+        (runtime_root / "demo.exe").write_bytes(b"drift")
+        self.assertEqual(self.catalog.inspect_runtime("demo-runtime")["status"], "INSTALLED_UNVERIFIED")
 
     def test_check_all_never_auto_applies_and_schedule_defaults_manual(self) -> None:
         schedule = UpdateSchedule(paths=self.paths)
