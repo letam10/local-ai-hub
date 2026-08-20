@@ -65,6 +65,20 @@ class V7BundleReuseTests(unittest.TestCase):
         self.assertNotIn(str(self.temp.name), json.dumps(plan))
         self.assertNotIn("official_source", json.dumps(plan))
 
+    def test_bundle_and_reuse_are_ui_facing_opaque_routes(self) -> None:
+        from src.services.api.router_registry import build_router
+        routes = {(route.method, route.path) for route in build_router().routes()}
+        for route in (
+            ("POST", "/api/components/bundles/plan"),
+            ("POST", "/api/components/bundles/{plan_id}/confirm"),
+            ("POST", "/api/components/reuse/plan"),
+            ("POST", "/api/components/reuse/{plan_id}/confirm"),
+        ):
+            self.assertIn(route, routes)
+        source = (Path(__file__).resolve().parents[1] / "src/services/api/routes/components.py").read_text(encoding="utf-8")
+        self.assertNotIn("download_url", source)
+        self.assertNotIn("filesystem_path", source)
+
     def test_bundle_confirm_runs_runtime_then_model_through_installer(self) -> None:
         archive = self.paths.temp_root / "fixture-runtime.zip"
         archive.parent.mkdir(parents=True, exist_ok=True)

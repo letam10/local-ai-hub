@@ -1162,7 +1162,7 @@ document.addEventListener("click", async (event) => {
       const selected = await bridge.component_import.select_source(nativeImportButton.dataset.componentNativeImport || "");
       if (selected?.status !== "ready" || !selected.selection_id) throw new Error(selected?.code || "Không nhận được lựa chọn hợp lệ.");
       const plan = await createComponentImportPlan(selected.selection_id, "COPY_INTO_MANAGED_MODELS");
-      state.componentPlans[`import:${plan.component?.component_id || nativeImportButton.dataset.componentNativeImport}`] = plan;
+      state.componentPlans[`import:model:${plan.component?.component_id || nativeImportButton.dataset.componentNativeImport}`] = plan;
       render();
       showToast("Đã nhận lựa chọn native; hãy xem và xác nhận kế hoạch import.", "success");
     } catch (error) { showToast(error.message || "Không thể chọn model để import.", "error"); }
