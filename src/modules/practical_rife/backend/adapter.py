@@ -17,6 +17,7 @@ from src.shared.utils.adapter_common import local_root, unavailable
 
 WORKER = Path(__file__).with_name("worker.py")
 _MODEL_RELATIVE = Path("train_log") / "RIFEv4.26_0921"
+_SCRIPT_RELATIVE = Path("inference_video.py")
 _ARTIFACT_ID = re.compile(r"artifact_[a-f0-9]{32}")
 _UNSAFE_INPUT_FIELDS = {"path", "source", "secondary_path", "input_path", "executable", "command", "model_path", "output_root"}
 
@@ -70,6 +71,35 @@ def _runtime() -> tuple[Path | None, Path | None, Path | None]:
     return python, runtime, model_dir
 
 
+def _safe_script(runtime: Path | None) -> Path | None:
+    """Return the fixed Practical-RIFE script only when its leaf is safe."""
+
+    if runtime is None:
+        return None
+    try:
+        lexical_root = Path(os.path.abspath(str(runtime)))
+        lexical_script = Path(os.path.abspath(str(lexical_root / _SCRIPT_RELATIVE)))
+        lexical_script.relative_to(lexical_root)
+    except (OSError, ValueError):
+        return None
+    if _is_reparse(lexical_root):
+        return None
+    current = lexical_root
+    for part in _SCRIPT_RELATIVE.parts:
+        current = current / part
+        if _is_reparse(current):
+            return None
+    try:
+        resolved_root = lexical_root.resolve(strict=True)
+        resolved_script = lexical_script.resolve(strict=True)
+        resolved_script.relative_to(resolved_root)
+    except (OSError, ValueError):
+        return None
+    if not lexical_script.is_file():
+        return None
+    return lexical_script if current.resolve(strict=True) == resolved_script else None
+
+
 def _video_artifact(payload: dict[str, Any]) -> Path | None:
     if any(payload.get(name) not in (None, "", []) for name in _UNSAFE_INPUT_FIELDS):
         return None
@@ -89,11 +119,13 @@ def run_practical_rife(payload: dict[str, Any], context: ProcessOwner | None = N
     """Submit interpolation through an owned worker, never ambient FFmpeg."""
 
     python, runtime, model_dir = _runtime()
+    script = _safe_script(runtime)
     ffmpeg, ffprobe = _configured_ffmpeg()
     if (
         python is None
         or runtime is None
         or model_dir is None
+        or script is None
         or ffmpeg is None
         or ffprobe is None
         or not python.is_file()
@@ -103,7 +135,7 @@ def run_practical_rife(payload: dict[str, Any], context: ProcessOwner | None = N
         or not ffprobe.is_file()
         or not WORKER.is_file()
     ):
-        return unavailable("practical_rife", "Practical-RIFE cần environment, model và cặp FFmpeg/FFprobe canonical của Hub.")
+        return unavailable("practical_rife", "Practical-RIFE cần environment, model, fixed inference script và cặp FFmpeg/FFprobe canonical của Hub.")
     source = _video_artifact(payload)
     if source is None:
         return {"status": "error", "error": "Practical-RIFE cần VIDEO artifact do Hub quản lý."}
@@ -136,6 +168,7 @@ def run_practical_rife(payload: dict[str, Any], context: ProcessOwner | None = N
 
 def capability() -> dict[str, Any]:
     python, runtime, model_dir = _runtime()
+    script = _safe_script(runtime)
     ffmpeg, ffprobe = _configured_ffmpeg()
     return {
         "component": "practical_rife",
@@ -143,5 +176,6 @@ def capability() -> dict[str, Any]:
         "runtime_ready": bool(runtime and runtime.is_dir() and model_dir and (model_dir / "flownet.pkl").is_file()),
         "environment_ready": bool(python and python.is_file()),
         "ffmpeg_ready": bool(ffmpeg and ffmpeg.is_file() and ffprobe and ffprobe.is_file()),
+        "script_ready": script is not None,
         "worker_ready": WORKER.is_file(),
     }

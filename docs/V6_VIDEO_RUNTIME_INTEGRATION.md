@@ -23,8 +23,12 @@ overrides do not replace registry values. The Practical-RIFE worker accepts
 only the single registry FFmpeg directory containing both `ffmpeg.exe` and
 `ffprobe.exe`; a split pair is unavailable.
 
-Missing environment, runtime, model, FFmpeg/FFprobe pair, or unsafe containment
-is reported as unavailable/error. A standalone worker result is not a
+Missing environment, runtime, model, fixed inference script, FFmpeg/FFprobe
+pair, or unsafe containment is reported as unavailable/error. AnimeSR requires
+the server-owned `runtime/scripts/inference_animesr_video.py` leaf; Practical-
+RIFE requires `runtime/inference_video.py`. A missing, directory, symlink, or
+reparse script is rejected by capability and adapter preflight before any Job
+Manager submission or worker transport. A standalone worker result is not a
 capability smoke or readiness claim.
 
 ## Model and backend selection
@@ -42,11 +46,12 @@ The generic `run_media_operation` control-plane entry remains FFmpeg-backed,
 but a selected `frame_interpolate` + `practical_rife` or `image_upscale` +
 `real_esrgan` request receives a backend-specific static gate.  Missing
 runtime, environment, model/script, worker, or FFmpeg/FFprobe leaves are
-rejected before a Job Manager submission; present leaves remain `partial`
+rejected before a Job Manager submission; the selected backend's fixed script
+is part of that queue gate. Present leaves remain `partial`
 until a bounded smoke records the complete runtime → model → adapter → job →
 artifact result.  Static leaf presence never becomes `operational` by itself.
-The dedicated `upscale_anime_video` tool applies the same absent-model/runtime
-gate to the AnimeSR registry binding before queueing.
+The dedicated `upscale_anime_video` tool applies the same absent-model/runtime/
+script gate to the AnimeSR registry binding before queueing.
 
 ## Job → artifact contract
 

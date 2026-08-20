@@ -20,6 +20,7 @@ _ARTIFACT_ID = re.compile(r"artifact_[a-f0-9]{32}")
 _MODEL_ID = "animesr-v2"
 _MODEL_SPEC = {"model": "AnimeSR_v2", "expname": "animesr_v2"}
 _MODEL_RELATIVE = Path("Video") / "AnimeSR" / "AnimeSR_v2.pth"
+_SCRIPT_RELATIVE = Path("scripts") / "inference_animesr_video.py"
 _UNSAFE_INPUT_FIELDS = {
     "path", "source", "secondary_path", "input_path", "executable", "command",
     "model_path", "output_root", "model_id", "expname",
@@ -42,6 +43,35 @@ def _runtime() -> tuple[Path | None, Path | None]:
     environment = _registry_path("animesr", "environment")
     python = environment / "Scripts" / "python.exe" if environment else None
     return python, runtime
+
+
+def _safe_script(runtime: Path | None) -> Path | None:
+    """Return the fixed AnimeSR script only when its leaf is safe and real."""
+
+    if runtime is None:
+        return None
+    try:
+        lexical_root = Path(os.path.abspath(str(runtime)))
+        lexical_script = Path(os.path.abspath(str(lexical_root / _SCRIPT_RELATIVE)))
+        lexical_script.relative_to(lexical_root)
+    except (OSError, ValueError):
+        return None
+    if _is_reparse(lexical_root):
+        return None
+    current = lexical_root
+    for part in _SCRIPT_RELATIVE.parts:
+        current = current / part
+        if _is_reparse(current):
+            return None
+    try:
+        resolved_root = lexical_root.resolve(strict=True)
+        resolved_script = lexical_script.resolve(strict=True)
+        resolved_script.relative_to(resolved_root)
+    except (OSError, ValueError):
+        return None
+    if not lexical_script.is_file():
+        return None
+    return lexical_script if current.resolve(strict=True) == resolved_script else None
 
 
 def _is_reparse(path: Path) -> bool:
@@ -155,11 +185,12 @@ def split_video(payload: dict[str, Any]) -> dict[str, Any]:
 
 def run_animesr(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[str, Any]:
     python, runtime = _runtime()
+    script = _safe_script(runtime)
     model_path = _selected_model()
     if model_path is None:
         return unavailable("animesr", "AnimeSR tool model chưa được registry xác nhận dưới Models canonical.")
-    if python is None or runtime is None or not python.is_file() or not runtime.is_dir() or not WORKER.is_file():
-        return unavailable("animesr", "AnimeSR runtime hoặc environment trực tiếp chưa hoàn chỉnh.")
+    if python is None or runtime is None or script is None or not python.is_file() or not runtime.is_dir() or not WORKER.is_file():
+        return unavailable("animesr", "AnimeSR runtime, environment hoặc fixed inference script chưa hoàn chỉnh.")
     source = _video_artifact(payload)
     if source is None:
         return {"status": "error", "error": "AnimeSR cần VIDEO artifact do Hub quản lý."}
@@ -235,6 +266,7 @@ def queue_upscale(_input_path: str, _output_path: str | None = None) -> dict[str
 
 def capability() -> dict[str, Any]:
     python, runtime = _runtime()
+    script = _safe_script(runtime)
     model_path = _selected_model()
     ffmpeg = _registry_path("ffmpeg", "executable")
     if ffmpeg is None:
@@ -246,6 +278,7 @@ def capability() -> dict[str, Any]:
         "runtime_ready": bool(runtime and runtime.is_dir()),
         "environment_ready": bool(python and python.is_file()),
         "model_ready": bool(model_path),
+        "script_ready": script is not None,
         "model_id": _MODEL_ID,
         "cli_compatible": bool(model_path),
         "ffmpeg_ready": bool(ffmpeg and ffmpeg.is_file()),
