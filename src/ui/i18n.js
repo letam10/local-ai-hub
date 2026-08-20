@@ -6,6 +6,7 @@
 */
 
 const LANGUAGE_STORAGE_KEY = "local-ai-hub-language";
+export { I18N_NAMESPACES, namespaceKeys } from "./i18n/namespaces.js";
 
 export const LANGUAGE_OPTIONS = Object.freeze([
   { id: "vi", label: "Tiếng Việt" },
