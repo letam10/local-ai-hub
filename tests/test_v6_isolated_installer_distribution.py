@@ -49,6 +49,11 @@ class TestIsolatedInstallerDistribution(unittest.TestCase):
         self.assertEqual(setup_exe_info["size_bytes"], self.setup_exe.stat().st_size)
         self.assertEqual(setup_exe_info["sha256"], build_mod.sha256_file(self.setup_exe))
 
+    def test_vbs_launcher_normalizes_powershell_line_ending(self) -> None:
+        launcher = (Path(__file__).resolve().parents[1] / "LocalAIHub.vbs").read_text(encoding="utf-8")
+        self.assertIn('strPythonw = Replace(Replace(strPythonw, vbCr, ""), vbLf, "")', launcher)
+        self.assertIn('strCmd = chr(34) & strPythonw & chr(34) & " -m src.app.launcher"', launcher)
+
     def test_02_isolated_clean_install_and_lifecycle(self) -> None:
         with TemporaryDirectory() as tmpdir:
             install_root = Path(tmpdir) / "LocalAIHub"
