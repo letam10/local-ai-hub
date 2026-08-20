@@ -12,6 +12,7 @@ from src.platform.paths import HubPaths
 from src.services.api.router_registry import build_router
 from src.services.productization import ComponentLifecycle, ProductionCatalog
 from src.services.productization.catalog import ProductionCatalogError
+from src.services.component_installer import ComponentInstaller
 from scripts.setup_local_ai_hub import inspect_setup, plan_setup
 
 
@@ -105,6 +106,14 @@ class FinalProductizationTests(unittest.TestCase):
         route_keys = {(route.method, route.path) for route in build_router().routes()}
         self.assertIn(("GET", "/api/productization/catalog"), route_keys)
         self.assertIn(("POST", "/api/productization/plans"), route_keys)
+
+    def test_component_download_history_is_bounded_and_path_free(self) -> None:
+        manager = ComponentInstaller(paths=self.paths)
+        manager._jobs["component_job_fixture"] = {"job_id": "component_job_fixture", "plan_id": "plan_fixture", "component_id": "sam2.1-hiera-small", "component_type": "model", "category": "component_install", "state": "COMPLETED", "execution": "completed"}
+        manager._record_history("component_job_fixture")
+        history = manager.download_history()
+        self.assertEqual(history[-1]["state"], "COMPLETED")
+        self.assertNotIn(str(self.root), json.dumps(history))
 
     def test_catalog_rejects_unsafe_relative_leaf(self) -> None:
         path = self.app / "Config" / "bad.json"

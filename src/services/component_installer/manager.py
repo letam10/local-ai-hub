@@ -114,6 +114,36 @@ class ComponentInstaller:
             raise InstallPlanError("unknown_component")
         return record
 
+    def _history_path(self) -> Path:
+        return self.paths.config_root / "component_install_history.json"
+
+    def _record_history(self, job_id: str) -> None:
+        """Persist bounded, path-free install history for the Jobs/Components UI."""
+
+        job = self._jobs.get(job_id)
+        if not isinstance(job, Mapping):
+            return
+        try:
+            current = json.loads(self._history_path().read_text(encoding="utf-8")) if self._history_path().is_file() else {"schema_version": "component-install-history.v1", "records": []}
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            current = {"schema_version": "component-install-history.v1", "records": []}
+        records = current.get("records") if isinstance(current, Mapping) else None
+        if not isinstance(records, list):
+            records = []
+        safe = {key: job.get(key) for key in ("job_id", "plan_id", "component_id", "component_type", "category", "state", "execution", "error") if key in job}
+        records = [item for item in records if isinstance(item, Mapping) and item.get("job_id") != job_id]
+        records.append(safe)
+        records = records[-100:]
+        target = self._history_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(".tmp")
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump({"schema_version": "component-install-history.v1", "records": records}, handle, ensure_ascii=True, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+
     def inspect(self) -> dict[str, Any]:
         models = {item["model_id"]: self.model_manager.inspect(item["model_id"]) for item in self.model_manager._records}
         runtimes = {item["runtime_id"]: self.runtime_manager.inspect(item["runtime_id"]) for item in self.runtime_manager._records}
@@ -149,9 +179,18 @@ class ComponentInstaller:
             "records": sorted(records, key=lambda value: (str(value["component_type"]), str(value["component_id"]))),
             "dependency_graph": graph,
             "jobs": [self.lookup_job(job_id) for job_id in sorted(self._jobs) if self.lookup_job(job_id) is not None],
+            "download_history": self.download_history(),
             "reason": "Components are discovered from bounded catalogs; no startup installation or inference occurred.",
             "next_action": "Select one component to create an explicit server-owned install plan.",
         }
+
+    def download_history(self) -> list[dict[str, Any]]:
+        try:
+            value = json.loads(self._history_path().read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return []
+        records = value.get("records") if isinstance(value, Mapping) else None
+        return [dict(item) for item in records[-100:] if isinstance(item, Mapping)] if isinstance(records, list) else []
 
     def snapshot(self) -> dict[str, Any]:
         return self.inspect()
@@ -272,18 +311,22 @@ class ComponentInstaller:
                 finalized = self.runtime_manager.install_staged_archive(plan["component_id"], result.staged_path)
             if finalized.get("status") != "completed":
                 self._jobs[job_id].update({"state": "FAILED", "execution": "not_run", "error": str(finalized.get("code") or "finalization_failed")})
+                self._record_history(job_id)
                 self._cancel_events.pop(job_id, None)
                 return {"status": "failed", "code": "finalization_failed", "job_id": job_id, "plan_id": plan_id, "execution": "not_run"}
             self._jobs[job_id].update({"state": "COMPLETED", "execution": "completed"})
+            self._record_history(job_id)
             self._cancel_events.pop(job_id, None)
             return {"status": "completed", "job_id": job_id, "plan_id": plan_id, "component_id": plan["component_id"], "state": "INSTALLED_UNVERIFIED", "execution": "completed", "receipt": "written", "next_action": "Refresh the component snapshot; bounded runtime evidence is still required."}
         except DownloadError as exc:
             state = "CANCELLED" if exc.code == "cancelled" else "FAILED"
             self._jobs[job_id].update({"state": state, "execution": "not_run", "error": exc.code})
+            self._record_history(job_id)
             self._cancel_events.pop(job_id, None)
             return {"status": "cancelled" if state == "CANCELLED" else "failed", "code": exc.code, "job_id": job_id, "plan_id": plan_id, "execution": "not_run"}
         except (OSError, ValueError):
             self._jobs[job_id].update({"state": "FAILED", "execution": "not_run", "error": "component_install_failed"})
+            self._record_history(job_id)
             self._cancel_events.pop(job_id, None)
             return {"status": "failed", "code": "component_install_failed", "job_id": job_id, "plan_id": plan_id, "execution": "not_run"}
 
