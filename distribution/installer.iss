@@ -3,7 +3,9 @@
 ; Preserves machine-local data (Models, Environments, runtime, Output, Config, Backups, Reports)
 
 #define MyAppName "Local AI Hub"
+#ifndef MyAppVersion
 #define MyAppVersion "7.1.0"
+#endif
 #define MyAppPublisher "Local AI Hub Project"
 #define MyAppURL "https://github.com/letam10/local-ai-hub"
 #define DefaultInstallDir "{autopf}\Local AI Hub"
@@ -22,7 +24,7 @@ DirExistsWarning=no
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist
-OutputBaseFilename=LocalAIHub-Setup-Win64-v7.1.0
+OutputBaseFilename=LocalAIHub-Setup-Win64-v{#MyAppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -42,13 +44,15 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; Core application source and distribution files (NEVER includes Models, Environments, runtime, or Output)
 Source: "..\src\*"; DestDir: "{app}\src"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "..\scripts\*"; DestDir: "{app}\scripts"; Flags: recursesubdirs createallsubdirs ignoreversion
-Source: "..\distribution\*"; DestDir: "{app}\distribution"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "..\distribution\*"; Excludes: "release_manifest.json"; DestDir: "{app}\distribution"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "..\docs\*"; DestDir: "{app}\docs"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "..\workflows\*"; DestDir: "{app}\workflows"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "..\architecture\*"; DestDir: "{app}\architecture"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "..\requirements-hub.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dependencies.lock.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\AGENTS.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\Config\*.example.json"; DestDir: "{app}\Config"; Flags: ignoreversion
 Source: "..\LocalAIHub.vbs"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LocalAIHub.cmd"; DestDir: "{app}"; Flags: ignoreversion

@@ -1,10 +1,11 @@
-"""
-/*
-  FILE NOTE
-  - Mục đích: Packaging and release manifest builder cho Local AI Hub V7 — biên dịch Inno Setup installer EXE, tạo core release ZIP, kiểm tra SHA-256, và xuất release manifest
-  - Liên kết trực tiếp: distribution/installer.iss, distribution/release_manifest.json, scripts/build_core_release.py
-  - Vùng ảnh hưởng khi sửa: Quy trình đóng gói và xuất artifact release
-*/
+"""Deterministic Local AI Hub V7 release packager.
+
+This packager creates a detached ``release_manifest.v2.json`` sidecar in an
+ignored staging directory. It never writes the historical
+``distribution/release_manifest.json`` and never embeds the attestation in an
+artifact whose digest it records. The current reviewed release remains 7.1.0;
+branch/tag identity is checked explicitly and a mismatched checkout is
+blocked before any output is created.
 """
 
 from __future__ import annotations
@@ -17,19 +18,52 @@ import shutil
 import subprocess
 import sys
 import zipfile
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+DIST_DIR = ROOT / "dist"
+STAGING_DIR = DIST_DIR / ".v7-release-staging"
+HISTORICAL_MANIFEST_PATH = ROOT / "distribution" / "release_manifest.json"
+# Kept as a read-only compatibility name for existing callers.
+MANIFEST_PATH = HISTORICAL_MANIFEST_PATH
+ISS_PATH = ROOT / "distribution" / "installer.iss"
 
+from scripts.build_core_release import _write_normalized_entry, zip_content_fingerprint
+from scripts.verify_release_provenance import (
+    APPROVED_RELEASE_VERSIONS,
+    INTENDED_TAG,
+    RELEASE_BRANCH,
+    RELEASE_ROOT_FILES,
+    RELEASE_ROOTS,
+    REVIEWED_RELEASE_VERSION,
+    SOURCE_DATE_EPOCH,
+    ZIP_ENTRY_TIMESTAMP,
+    ProvenanceRefusal,
+    canonical_json,
+    compute_build_input_fingerprint,
+    installer_selection_fingerprint,
+    release_file_names,
+    selection_fingerprint,
+    selection_records,
+    validate_release_manifest,
+    manifest_self_hash,
+)
 from src.shared.version import PRODUCT_VERSION
 
-DIST_DIR = ROOT / "dist"
-MANIFEST_PATH = ROOT / "distribution" / "release_manifest.json"
-ISS_PATH = ROOT / "distribution" / "installer.iss"
+
+class ReleaseBuildRefusal(ValueError):
+    """Fixed release-build refusal without path, command or tool output echo."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def _refuse(code: str) -> None:
+    raise ReleaseBuildRefusal(code)
 
 
 def find_iscc() -> str | None:
@@ -42,188 +76,322 @@ def find_iscc() -> str | None:
         r"C:\Program Files (x86)\Inno Setup 5\ISCC.exe",
         r"C:\Program Files\Inno Setup 5\ISCC.exe",
     ]
-    for c in candidates:
-        if c and os.path.exists(c):
-            return c
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
     return None
 
 
 def sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        while chunk := f.read(1024 * 1024):
-            h.update(chunk)
-    return h.hexdigest()
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except (OSError, ValueError):
+        _refuse("ARTIFACT_READ_FAILED")
+    return digest.hexdigest()
 
 
-def get_git_info() -> tuple[str, str, str | None, str | None]:
+def _git_text(args: list[str]) -> str:
     try:
-        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).decode().strip()
-    except Exception:
-        commit = "unknown"
+        result = subprocess.run(
+            ["git", "-C", str(ROOT), *args],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _refuse("GIT_QUERY_FAILED")
+    if result.returncode != 0 or len(result.stdout) > 8 * 1024 * 1024:
+        _refuse("GIT_QUERY_FAILED")
     try:
-        branch = subprocess.check_output(["git", "branch", "--show-current"], cwd=ROOT).decode().strip()
-    except Exception:
-        branch = "unknown"
-    try:
-        tag = subprocess.check_output(
-            ["git", "describe", "--tags", "--abbrev=0", "HEAD"], cwd=ROOT
-        ).decode().strip() or None
-    except Exception:
-        tag = None
-    if tag:
+        return result.stdout.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        _refuse("GIT_QUERY_FAILED")
+
+
+def get_git_info() -> tuple[str, str, str, str]:
+    """Read explicit HEAD/branch/intended-tag identity; no tag description lookup."""
+
+    commit = _git_text(["rev-parse", "HEAD"])
+    branch = _git_text(["symbolic-ref", "--quiet", "--short", "HEAD"])
+    tag_commit = _git_text(["rev-parse", f"refs/tags/{INTENDED_TAG}^{{commit}}"])
+    return commit, branch, INTENDED_TAG, tag_commit
+
+
+def _assert_reviewed_version() -> None:
+    if PRODUCT_VERSION != REVIEWED_RELEASE_VERSION or PRODUCT_VERSION not in APPROVED_RELEASE_VERSIONS:
+        _refuse("UNREVIEWED_VERSION")
+
+
+def _assert_release_identity(commit: str, branch: str, tag_commit: str) -> None:
+    _assert_reviewed_version()
+    if branch != RELEASE_BRANCH:
+        _refuse("SOURCE_BRANCH_MISMATCH")
+    if _git_text(["status", "--porcelain=v1"]):
+        _refuse("DIRTY_SOURCE")
+    if len(commit) != 64 or any(character not in "0123456789abcdef" for character in commit):
+        _refuse("SOURCE_COMMIT_INVALID")
+    if tag_commit != commit:
+        _refuse("TAG_SOURCE_MISMATCH")
+    required = (
+        "scripts/build_installer.py",
+        "scripts/build_core_release.py",
+        "scripts/verify_release_provenance.py",
+        "distribution/release_manifest.v2.schema.json",
+    )
+    for relative in required:
         try:
-            tag_commit = subprocess.check_output(
-                ["git", "rev-parse", f"{tag}^{{commit}}"], cwd=ROOT
-            ).decode().strip() or None
-        except Exception:
-            tag_commit = None
-    else:
-        tag_commit = None
-    return commit, branch, tag, tag_commit
+            _git_text(["cat-file", "-e", f"{commit}:{relative}"])
+        except ReleaseBuildRefusal:
+            _refuse("BUILD_INPUT_NOT_COMMITTED")
 
 
-def compile_installer() -> tuple[Path | None, str | None]:
+def _required_installer_markers() -> tuple[str, ...]:
+    roots = tuple(f'Source: "..\\{name}\\*"' for name in RELEASE_ROOTS)
+    root_files = tuple(f'Source: "..\\{name}"' for name in RELEASE_ROOT_FILES)
+    return (*roots, *root_files, 'Source: "..\\Config\\*.example.json"', 'Excludes: "release_manifest.json"')
+
+
+def installer_selection_names(repo_root: Path = ROOT) -> list[str]:
+    """Return installer source names after checking the reviewed ISS contract."""
+
+    try:
+        text = ISS_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        _refuse("INSTALLER_SPEC_UNREADABLE")
+    if any(marker not in text for marker in _required_installer_markers()):
+        _refuse("INSTALLER_SELECTION_UNREVIEWED")
+    return release_file_names(repo_root)
+
+
+def _assert_selection_parity(source_names: list[str], installer_names: list[str]) -> None:
+    if source_names != installer_names:
+        _refuse("CORE_INSTALLER_SELECTION_MISMATCH")
+
+
+def _ensure_under(path: Path, parent: Path, code: str) -> None:
+    try:
+        path.resolve().relative_to(parent.resolve())
+    except ValueError:
+        _refuse(code)
+    if path.is_symlink():
+        _refuse(code)
+
+
+def _write_deterministic_zip(entries: list[tuple[Path, str]], output: Path) -> None:
+    if output.exists():
+        _refuse("ARTIFACT_OVERWRITE_FORBIDDEN")
+    temporary = output.with_name(output.name + ".part")
+    if temporary.exists():
+        _refuse("TEMPORARY_OUTPUT_OCCUPIED")
+    ordered = sorted(entries, key=lambda item: item[1])
+    destinations = [destination for _source, destination in ordered]
+    if len(destinations) != len(set(destinations)):
+        _refuse("CORE_SELECTION_DUPLICATE")
+    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+            for source, destination in ordered:
+                _write_normalized_entry(archive, source, destination)
+        os.replace(temporary, output)
+    except ReleaseBuildRefusal:
+        if temporary.exists():
+            temporary.unlink()
+        raise
+    except (OSError, zipfile.BadZipFile, ValueError):
+        if temporary.exists():
+            temporary.unlink()
+        _refuse("CORE_ARCHIVE_WRITE_FAILED")
+
+
+def _write_manifest_sidecar(path: Path, manifest: dict[str, Any]) -> None:
+    if path.exists():
+        _refuse("MANIFEST_OUTPUT_OCCUPIED")
+    payload = canonical_json(manifest) + b"\n"
+    temporary = path.with_name(path.name + ".part")
+    if temporary.exists():
+        _refuse("MANIFEST_TEMPORARY_OCCUPIED")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with temporary.open("xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except (OSError, ValueError):
+        if temporary.exists():
+            temporary.unlink()
+        _refuse("MANIFEST_WRITE_FAILED")
+
+
+def compile_installer(version: str = PRODUCT_VERSION) -> tuple[Path | None, str | None]:
+    """Compile one installer with the reviewed version supplied explicitly."""
+
+    if version != REVIEWED_RELEASE_VERSION:
+        return None, "UNREVIEWED_VERSION"
     iscc = find_iscc()
     if not iscc:
-        return None, "Inno Setup compiler (ISCC.exe) not found on system."
-
+        return None, "INSTALLER_COMPILER_UNAVAILABLE"
     DIST_DIR.mkdir(parents=True, exist_ok=True)
-    cmd = [iscc, str(ISS_PATH)]
+    exe_path = DIST_DIR / f"LocalAIHub-Setup-Win64-v{version}.exe"
+    if exe_path.exists():
+        return None, "ARTIFACT_OVERWRITE_FORBIDDEN"
+    command = [iscc, f"/DMyAppVersion={version}", str(ISS_PATH)]
     try:
-        proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=True)
-        exe_path = DIST_DIR / f"LocalAIHub-Setup-Win64-v{PRODUCT_VERSION}.exe"
+        result = subprocess.run(command, cwd=ROOT, capture_output=True, check=False, timeout=300)
+    except (OSError, subprocess.SubprocessError):
         if exe_path.exists():
-            return exe_path, None
-        return None, "Installer compilation completed but output EXE not found."
-    except subprocess.CalledProcessError as exc:
-        return None, f"ISCC compilation failed: {exc.stderr or exc.stdout}"
+            exe_path.unlink()
+        return None, "INSTALLER_COMPILE_FAILED"
+    if result.returncode != 0 or not exe_path.is_file():
+        if exe_path.exists():
+            exe_path.unlink()
+        return None, "INSTALLER_COMPILE_FAILED"
+    return exe_path, None
 
 
-def build_release_package(output_zip: Path | None = None, compile_exe: bool = True) -> dict[str, Any]:
-    """Build the clean Core release zip and Inno Setup installer, creating release manifest."""
-    DIST_DIR.mkdir(parents=True, exist_ok=True)
-    out_zip = output_zip or (DIST_DIR / f"LocalAIHub-Core-Win64-v{PRODUCT_VERSION}.zip")
-
-    commit, branch, tag, tag_commit = get_git_info()
-    timestamp = datetime.now(timezone.utc).isoformat()
-
-    included_roots = ["src", "scripts", "distribution", "docs", "workflows", "architecture"]
-    included_files = [
-        "requirements-hub.txt",
-        "dependencies.lock.json",
-        "README.md",
-        "LICENSES.md",
-        "AGENTS.md",
-        "LocalAIHub.vbs",
-        "LocalAIHub.cmd",
-    ]
-
-    total_files = 0
-    with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Add root files
-        for f_name in included_files:
-            f_path = ROOT / f_name
-            if f_path.exists():
-                zf.write(f_path, f_name)
-                total_files += 1
-
-        # Add config examples
-        config_dir = ROOT / "Config"
-        if config_dir.exists():
-            for ex in config_dir.glob("*.example.json"):
-                zf.write(ex, f"Config/{ex.name}")
-                total_files += 1
-
-        # Add roots
-        for r_name in included_roots:
-            r_path = ROOT / r_name
-            if r_path.exists():
-                for p in r_path.rglob("*"):
-                    if p.is_file() and "__pycache__" not in p.parts:
-                        rel = p.relative_to(ROOT).as_posix()
-                        zf.write(p, rel)
-                        total_files += 1
-
-    zip_hash = sha256_file(out_zip)
-    zip_size = out_zip.stat().st_size
-
-    # Compile Inno Setup installer
-    setup_exe_info: dict[str, Any] = {}
-    if compile_exe:
-        exe_path, err = compile_installer()
-        if exe_path and exe_path.exists():
-            setup_exe_info = {
-                "file_name": exe_path.name,
-                "size_bytes": exe_path.stat().st_size,
-                "sha256": sha256_file(exe_path),
-            }
-        else:
-            setup_exe_info = {"status": "compile_failed", "error": err}
-
-    manifest = {
-        "schema_version": 1,
-        "application_name": "Local AI Hub",
-        "version": PRODUCT_VERSION,
-        "git_commit": commit,
-        "git_branch": branch,
-        "tag": tag,
-        "tag_commit": tag_commit,
-        "source_reference": f"refs/heads/{branch}" if branch not in {"", "unknown"} else None,
-        "build_timestamp": timestamp,
-        "packaging_tool": "Local AI Hub Release Packager (Python/zipfile) + Inno Setup 6",
-        "platform": "windows-x64",
-        "release_artifacts": {
-            "core_zip": {
-                "file_name": out_zip.name,
-                "size_bytes": zip_size,
-                "sha256": zip_hash,
-                "total_files": total_files,
-            },
-            "setup_exe": setup_exe_info,
-        },
-        "included_application_components": [
-            "src (Application Core, UI Shell, API Server, Settings, Diagnostics, Backups)",
-            "scripts (Launchers, Verifiers, Updater, Repair, Uninstaller)",
-            "distribution (Installer specs, Release manifests)",
-            "docs (Architecture, Recovery, API documentation)",
-            "Config/*.example.json (Tracked configuration templates)",
-            "LocalAIHub.vbs (No-console Windows desktop launcher)",
-            "LocalAIHub.cmd (Command-line desktop launcher)",
-        ],
-        "excluded_machine_local_data": [
-            "Models (AI model weights preserved locally on host)",
-            "Environments (Python virtual environments preserved locally on host)",
-            "runtime (Managed native runtime binaries preserved on host)",
-            "Output (User-generated images, videos, audio preserved on host)",
-            "Config/settings.json (User settings preserved on host)",
-            "Projects & Backups (User workspace and backup archives preserved on host)",
-            "Reports (Forensic evidence and audit logs preserved on host)",
-        ],
-        "minimum_system_requirements": {
-            "os": "Windows 10 / Windows 11 (64-bit)",
-            "webview": "Microsoft Edge WebView2 Runtime",
-            "python": "Python 3.10+ (64-bit)",
-            "memory": "8 GiB RAM minimum (16 GiB+ recommended)",
-            "gpu": "NVIDIA GeForce RTX (8GB+ VRAM recommended for heavy models)",
-            "network": "Loopback-only (127.0.0.1) - No internet required for core operation",
-        },
-        "ai_runtime_validation_status": "DEFERRED BY USER",
-        "known_limitations": [
-            "AI runtime and model execution deferred until user-directed activation.",
-            "Requires Microsoft Edge WebView2 runtime installed for desktop GUI.",
-        ],
+def _artifact_record(artifact_id: str, path: Path, *, content_fingerprint: str) -> dict[str, Any]:
+    filename = path.name
+    return {
+        "id": artifact_id,
+        "filename": filename,
+        "size_bytes": path.stat().st_size,
+        "sha256": sha256_file(path),
+        "content_fingerprint": content_fingerprint,
     }
 
-    # Save manifest identically to both distribution/ and dist/
-    manifest_json = json.dumps(manifest, indent=2, ensure_ascii=False)
-    MANIFEST_PATH.write_text(manifest_json, encoding="utf-8")
-    (DIST_DIR / "release_manifest.json").write_text(manifest_json, encoding="utf-8")
 
+def build_release_package(
+    output_zip: Path | None = None,
+    compile_exe: bool = True,
+    staging_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Build deterministic artifacts and one detached v2 sidecar.
+
+    A branch/tag mismatch is rejected before ``dist`` or staging creation.
+    ``distribution/release_manifest.json`` is never opened for writing.
+    """
+
+    commit, branch, _tag, tag_commit = get_git_info()
+    _assert_release_identity(commit, branch, tag_commit)
+    output = output_zip or (DIST_DIR / f"LocalAIHub-Core-Win64-v{REVIEWED_RELEASE_VERSION}.zip")
+    staging = staging_dir or STAGING_DIR
+    if output.name != f"LocalAIHub-Core-Win64-v{REVIEWED_RELEASE_VERSION}.zip":
+        _refuse("OUTPUT_NAME_MISMATCH")
+    _ensure_under(output, DIST_DIR, "OUTPUT_PATH_OUTSIDE_STAGING")
+    _ensure_under(staging, DIST_DIR, "STAGING_PATH_OUTSIDE_DIST")
+    if output.exists():
+        _refuse("ARTIFACT_OVERWRITE_FORBIDDEN")
+    if staging.exists() and any(staging.iterdir()):
+        _refuse("STAGING_OCCUPIED")
+
+    source_names = release_file_names(ROOT)
+    installer_names = installer_selection_names(ROOT)
+    _assert_selection_parity(source_names, installer_names)
+    records_before = selection_records(ROOT, source_names)
+    selection_digest = hashlib.sha256(canonical_json(records_before)).hexdigest()
+    installer_selection_digest = installer_selection_fingerprint(installer_names)
+    input_fingerprint = compute_build_input_fingerprint(commit, selection_digest, installer_selection_digest)
+
+    entries = [(ROOT / name, name) for name in source_names]
+    _write_deterministic_zip(entries, output)
+    records_after = selection_records(ROOT, source_names)
+    if records_before != records_after:
+        if output.exists():
+            output.unlink()
+        _refuse("SOURCE_CHANGED_DURING_BUILD")
+    artifacts: list[dict[str, Any]] = [
+        _artifact_record("core_zip", output, content_fingerprint=zip_content_fingerprint(output)),
+    ]
+
+    if compile_exe:
+        exe_path, error = compile_installer(REVIEWED_RELEASE_VERSION)
+        if exe_path is None:
+            if output.exists():
+                output.unlink()
+            _refuse(error or "INSTALLER_COMPILE_FAILED")
+        artifacts.append(_artifact_record("setup_exe", exe_path, content_fingerprint=sha256_file(exe_path)))
+
+    manifest: dict[str, Any] = {
+        "schema_version": "release-provenance.v2",
+        "application_name": "Local AI Hub",
+        "version": REVIEWED_RELEASE_VERSION,
+        "source_commit": commit,
+        "build_commit": commit,
+        "source_branch": branch,
+        "intended_tag": INTENDED_TAG,
+        "tag_commit": tag_commit,
+        "build_input_fingerprint": input_fingerprint,
+        "build_parameters": {
+            "source_date_epoch": SOURCE_DATE_EPOCH,
+            "zip_compression": "deflate",
+            "zip_compression_level": 9,
+            "zip_entry_timestamp": ZIP_ENTRY_TIMESTAMP,
+            "selection_fingerprint": selection_digest,
+            "installer_selection_fingerprint": installer_selection_digest,
+            "reproducibility": "not_claimed",
+        },
+        "artifacts": artifacts,
+        "manifest_sha256": "0" * 64,
+    }
+    manifest["manifest_sha256"] = manifest_self_hash(manifest)
+    validation = validate_release_manifest(manifest)
+    if not validation.get("valid"):
+        if output.exists():
+            output.unlink()
+        _refuse("GENERATED_MANIFEST_INVALID")
+    try:
+        _write_manifest_sidecar(staging / "release_manifest.v2.json", manifest)
+    except ReleaseBuildRefusal:
+        if output.exists():
+            output.unlink()
+        raise
     return manifest
 
 
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Build a detached Local AI Hub release provenance v2 sidecar.")
+    parser.add_argument("--output-zip", type=Path, default=None)
+    parser.add_argument("--staging-dir", type=Path, default=None)
+    parser.add_argument("--no-exe", action="store_true", help="Build only the deterministic Core ZIP.")
+    args = parser.parse_args()
+    try:
+        result = build_release_package(
+            output_zip=args.output_zip,
+            compile_exe=not args.no_exe,
+            staging_dir=args.staging_dir,
+        )
+        print(json.dumps(result, ensure_ascii=True, sort_keys=True, indent=2))
+        return 0
+    except (OSError, ReleaseBuildRefusal, ProvenanceRefusal, ValueError) as exc:
+        code = str(exc) if str(exc).isidentifier() and len(str(exc)) < 80 else "RELEASE_BUILD_BLOCKED"
+        print(json.dumps({"ok": False, "code": code, "execution": "not_run", "dry_run": True}, sort_keys=True))
+        return 2
+
+
 if __name__ == "__main__":
-    res = build_release_package()
-    print("=== RELEASE MANIFEST ===")
-    print(json.dumps(res, indent=2, ensure_ascii=False))
+    raise SystemExit(main())
+
+
+__all__ = [
+    "DIST_DIR",
+    "HISTORICAL_MANIFEST_PATH",
+    "INTENDED_TAG",
+    "ISS_PATH",
+    "MANIFEST_PATH",
+    "PRODUCT_VERSION",
+    "RELEASE_BRANCH",
+    "RELEASE_ROOT_FILES",
+    "RELEASE_ROOTS",
+    "REVIEWED_RELEASE_VERSION",
+    "STAGING_DIR",
+    "ReleaseBuildRefusal",
+    "build_release_package",
+    "compile_installer",
+    "find_iscc",
+    "get_git_info",
+    "installer_selection_names",
+    "sha256_file",
+]

@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "release-provenance.v2",
+  "title": "Local AI Hub detached release provenance v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "application_name",
+    "version",
+    "source_commit",
+    "build_commit",
+    "source_branch",
+    "intended_tag",
+    "tag_commit",
+    "build_input_fingerprint",
+    "build_parameters",
+    "artifacts",
+    "manifest_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "release-provenance.v2"},
+    "application_name": {"const": "Local AI Hub"},
+    "version": {"const": "7.1.0"},
+    "source_commit": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "build_commit": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "source_branch": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$"},
+    "intended_tag": {"const": "v7.1.0"},
+    "tag_commit": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "build_input_fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "build_parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_date_epoch",
+        "zip_compression",
+        "zip_compression_level",
+        "zip_entry_timestamp",
+        "selection_fingerprint",
+        "installer_selection_fingerprint",
+        "reproducibility"
+      ],
+      "properties": {
+        "source_date_epoch": {"const": 315532800},
+        "zip_compression": {"const": "deflate"},
+        "zip_compression_level": {"const": 9},
+        "zip_entry_timestamp": {"const": "1980-01-01T00:00:00Z"},
+        "selection_fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "installer_selection_fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "reproducibility": {"enum": ["not_claimed", "blocked", "reproducibility_failed"]}
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "filename", "size_bytes", "sha256", "content_fingerprint"],
+        "properties": {
+          "id": {"enum": ["core_zip", "setup_exe"]},
+          "filename": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$"},
+          "size_bytes": {"type": "integer", "minimum": 0, "maximum": 4294967296},
+          "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "content_fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+        }
+      }
+    },
+    "manifest_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}
