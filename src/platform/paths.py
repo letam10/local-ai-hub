@@ -8,9 +8,79 @@ single-root mode, while a clean clone can point data at another directory via
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
+import stat
+
+
+ROOT_CLASSES = frozenset({"models_root", "runtime_root", "environments_root", "external_managed"})
+COMPONENT_TYPES = frozenset({"model", "runtime"})
+_SAFE_COMPONENT_ID = re.compile(r"^[a-z][a-z0-9._-]{1,95}$")
+
+
+class ComponentPathError(ValueError):
+    """Fixed-code failure for a server-owned component root/leaf lookup."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def is_reparse_point(path: Path) -> bool:
+    """Return whether a path is a symlink/junction/reparse point.
+
+    The helper is deliberately conservative: an unreadable attribute is
+    treated as unsafe instead of falling through to a caller-controlled path.
+    """
+
+    try:
+        if stat.S_ISLNK(path.lstat().st_mode):
+            return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            attributes = int(ctypes.windll.kernel32.GetFileAttributesW(str(path))) & 0xFFFFFFFF
+            if attributes == 0xFFFFFFFF:
+                return False
+            return bool(attributes & 0x400)
+        except (AttributeError, OSError):
+            return True
+    return False
+
+
+def _safe_ancestor_chain(path: Path, *, stop: Path | None = None) -> bool:
+    """Check every existing original ancestor without following a link."""
+
+    current = path.absolute()
+    boundary = stop.absolute() if stop is not None else None
+    while True:
+        if is_reparse_point(current):
+            return False
+        if boundary is not None and current == boundary:
+            return True
+        if current.parent == current:
+            return boundary is None
+        current = current.parent
+
+
+def _safe_relative(value: object) -> str:
+    if not isinstance(value, str) or not value or len(value) > 512:
+        raise ComponentPathError("invalid_component_leaf")
+    if "\x00" in value or value.startswith(("/", "\\")) or ":" in value:
+        raise ComponentPathError("unsafe_component_leaf")
+    normalized = value.replace("\\", "/")
+    parts = normalized.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ComponentPathError("unsafe_component_leaf")
+    return "/".join(parts)
 
 
 def _resolved(value: str | os.PathLike[str] | None) -> Path | None:
@@ -122,4 +192,100 @@ def get_paths(*, app_root: str | os.PathLike[str] | None = None, data_root: str 
     return HubPaths(app_root=app, data_root=resolve_data_root(app, data_root))
 
 
-__all__ = ["HubPaths", "get_paths", "resolve_app_root", "resolve_data_root"]
+def _root_for(paths: HubPaths, component_id: str, component_type: str, root_class: str | None) -> Path:
+    if not isinstance(component_type, str) or component_type not in COMPONENT_TYPES:
+        raise ComponentPathError("unknown_component_type")
+    if not isinstance(component_id, str) or not _SAFE_COMPONENT_ID.fullmatch(component_id):
+        raise ComponentPathError("invalid_component_id")
+    if root_class is not None and (not isinstance(root_class, str) or root_class not in ROOT_CLASSES):
+        raise ComponentPathError("unknown_root_class")
+    if component_type == "model":
+        if root_class not in {None, "models_root"}:
+            raise ComponentPathError("component_root_mismatch")
+        return paths.models_root / component_id
+    if root_class == "models_root":
+        raise ComponentPathError("component_root_mismatch")
+    if root_class == "environments_root":
+        return paths.environments_root
+    if root_class == "external_managed":
+        return paths.runtime_root / "external"
+    return paths.runtime_root
+
+
+def resolve_component_root(
+    paths: HubPaths,
+    component_id: str,
+    component_type: str,
+    root_class: str | None = None,
+    *,
+    caller_root: str | os.PathLike[str] | None = None,
+    relative_leaves: Iterable[object] | None = None,
+    require_exists: bool = True,
+) -> Path:
+    """Resolve one fixed Hub-owned component root.
+
+    ``caller_root`` is intentionally rejected even when it happens to point at
+    a managed directory.  Roots and leaves are derived from the server-owned
+    ``HubPaths`` plus catalog identity; a request must never smuggle in a
+    filesystem path.  ``require_exists=False`` is used only by fast startup
+    inspection so a missing installation can be reported as NOT_INSTALLED.
+    """
+
+    if caller_root is not None:
+        raise ComponentPathError("caller_root_not_allowed")
+    root = _root_for(paths, component_id, component_type, root_class)
+    managed_boundary = paths.data_root
+    try:
+        root.absolute().relative_to(managed_boundary.absolute())
+    except (OSError, ValueError):
+        raise ComponentPathError("component_root_escape") from None
+    if not _safe_ancestor_chain(managed_boundary):
+        raise ComponentPathError("unsafe_managed_boundary")
+    if not _safe_ancestor_chain(root, stop=managed_boundary):
+        raise ComponentPathError("unsafe_component_root")
+    if root.exists() and (not root.is_dir() or is_reparse_point(root)):
+        raise ComponentPathError("component_root_unavailable")
+    if require_exists and not root.is_dir():
+        raise ComponentPathError("component_root_unavailable")
+    if relative_leaves is not None:
+        for relative in relative_leaves:
+            resolve_component_leaf(root, relative, require_exists=require_exists)
+    return root
+
+
+def resolve_managed_root(*args: object, **kwargs: object) -> Path:
+    """Compatibility alias for the canonical component-root resolver."""
+
+    return resolve_component_root(*args, **kwargs)  # type: ignore[arg-type]
+
+
+def resolve_component_leaf(root: Path, relative_path: object, *, require_exists: bool = True) -> Path:
+    """Resolve a fixed relative catalog leaf below an already-owned root."""
+
+    normalized = _safe_relative(relative_path)
+    root = Path(root).absolute()
+    if not _safe_ancestor_chain(root):
+        raise ComponentPathError("unsafe_component_root")
+    candidate = (root / Path(normalized)).absolute()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        raise ComponentPathError("component_leaf_escape") from None
+    if not _safe_ancestor_chain(candidate, stop=root):
+        raise ComponentPathError("unsafe_component_leaf")
+    try:
+        resolved_root = root.resolve(strict=False)
+        resolved_candidate = candidate.resolve(strict=False)
+        resolved_candidate.relative_to(resolved_root)
+    except (OSError, ValueError):
+        raise ComponentPathError("component_leaf_escape") from None
+    if require_exists and (not candidate.is_file() or is_reparse_point(candidate)):
+        raise ComponentPathError("component_leaf_unavailable")
+    return candidate
+
+
+__all__ = [
+    "COMPONENT_TYPES", "ComponentPathError", "HubPaths", "ROOT_CLASSES",
+    "get_paths", "is_reparse_point", "resolve_app_root", "resolve_component_leaf",
+    "resolve_component_root", "resolve_data_root", "resolve_managed_root",
+]

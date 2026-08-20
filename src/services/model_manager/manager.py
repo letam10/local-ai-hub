@@ -92,27 +92,27 @@ class ModelManager:
             raise ModelCatalogError("unknown_model_id") from exc
 
     def inspect(self, model_id: str) -> dict[str, Any]:
+        from src.services.component_installer.verification import FastComponentInspector
+
         record = self._record(model_id)
-        model_root = self.paths.models_root / model_id
-        files: list[dict[str, Any]] = []
-        for expected in record["files"]:
-            target = _safe_child(model_root, expected["relative_path"])
-            present = bool(target and target.is_file())
-            size_ok = bool(present and target.stat().st_size == expected["size_bytes"])
-            files.append({"relative_path": expected["relative_path"], "present": present, "size_match": size_ok, "size_bytes": target.stat().st_size if present else 0})
-        if all(item["present"] and item["size_match"] for item in files):
-            status = "INSTALLED_UNVERIFIED"
-            reason = "All catalog leaves are present and sized; bounded smoke evidence is still required."
-            action = "Run an authorized bounded module verification before claiming operational status."
-        elif any(item["present"] for item in files):
-            status = "PARTIAL"
-            reason = "Some catalog leaves are present but the installation is incomplete or differs from the catalog."
-            action = "Review the installation plan; do not overwrite existing files automatically."
-        else:
-            status = "NOT_INSTALLED"
-            reason = "No catalog leaf is present under the managed Models root."
-            action = "Review the model install plan and explicitly authorize a trusted source or manual import."
-        return {"model_id": model_id, "status": status, "execution": "not_run", "files": files, "reason": reason, "next_action": action}
+        result = FastComponentInspector().inspect(
+            paths=self.paths,
+            component_id=model_id,
+            component_type="model",
+            record=record,
+            catalog_fingerprint=self.catalog_fingerprint,
+        )
+        result["model_id"] = model_id
+        result["files"] = [
+            {
+                "relative_path": item.get("relative_path"),
+                "present": bool(item.get("present")),
+                "size_match": bool(item.get("present")) and (next((leaf.get("size_bytes") for leaf in record.get("files", []) if isinstance(leaf, Mapping) and leaf.get("relative_path") == item.get("relative_path")), None) in {None, 0, item.get("observed_size_bytes")}),
+                "size_bytes": item.get("observed_size_bytes", 0),
+            }
+            for item in result.get("leaves", []) if isinstance(item, Mapping)
+        ]
+        return result
 
     def snapshot(self) -> dict[str, Any]:
         records = [self.inspect(model_id) for model_id in sorted(self._by_id)]
@@ -128,13 +128,37 @@ class ModelManager:
         }
 
     def verify(self, model_id: str) -> dict[str, Any]:
-        state = self.inspect(model_id)
+        from src.services.component_installer.receipts import ReceiptError, write_component_receipt
+        from src.services.component_installer.verification import DeepComponentVerifier
+
+        record = self._record(model_id)
+        result = DeepComponentVerifier().verify(
+            paths=self.paths,
+            component_id=model_id,
+            component_type="model",
+            record=record,
+            catalog_fingerprint=self.catalog_fingerprint,
+            source="catalog_primary",
+        )
+        if result.get("status") != "completed":
+            return {
+                "schema_version": "model-verify.v1", "status": result.get("status", "unavailable"),
+                "execution": "not_run", "dry_run": True, "model_id": model_id,
+                "state": result.get("state", "UNAVAILABLE"), "files": result.get("leaves", []),
+                "verified": False, "code": result.get("code", "verification_unavailable"),
+                "reason": result.get("reason", "Bounded verification was unavailable."),
+                "next_action": result.get("next_action", "Review the managed installation."),
+            }
+        try:
+            write_component_receipt(self.paths.config_root, model_id, result["receipt"])
+        except (OSError, ReceiptError, KeyError, TypeError):
+            return {"schema_version": "model-verify.v1", "status": "unavailable", "execution": "not_run", "dry_run": True, "model_id": model_id, "state": "UNAVAILABLE", "verified": False, "code": "receipt_write_failed", "reason": "Verification completed but its receipt could not be stored safely.", "next_action": "Retry explicit verification after reviewing receipt storage."}
         return {
             "schema_version": "model-verify.v1", "status": "completed", "execution": "not_run", "dry_run": True,
-            "model_id": model_id, "state": state["status"], "files": state["files"],
-            "verified": state["status"] == "INSTALLED_UNVERIFIED",
-            "reason": "Bounded file existence/size verification only; no model load or inference ran.",
-            "next_action": "Run the module-specific bounded verification under explicit authorization.",
+            "model_id": model_id, "state": result["state"], "files": result["leaves"],
+            "verified": result["state"] == "INSTALLED_VERIFIED", "operational": False,
+            "reason": "Bounded streaming file verification only; no model load or inference ran.",
+            "next_action": result["next_action"],
         }
 
     def plan_install(self, model_id: str, *, free_bytes: int | None = None) -> dict[str, Any]:

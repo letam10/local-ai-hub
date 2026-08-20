@@ -21,7 +21,7 @@ import shutil
 import time
 from typing import Any
 
-from src.platform.paths import HubPaths, get_paths
+from src.platform.paths import ComponentPathError, HubPaths, get_paths, resolve_component_root
 
 from .catalog import ProductionCatalog, ProductionCatalogError
 from .runtime_executor import RuntimeArchiveExecutor
@@ -52,6 +52,19 @@ class ComponentLifecycle:
             return "runtime", self.catalog.runtimes[component_id]
         raise LifecycleError("unknown_component_id")
 
+    def _inspect_component(self, component_id: str, component_type: str, record: Mapping[str, Any]) -> dict[str, Any]:
+        """Use the shared fixed-leaf fast inspector for lifecycle planning."""
+
+        from src.services.component_installer.verification import FastComponentInspector
+
+        return FastComponentInspector().inspect(
+            paths=self.paths,
+            component_id=component_id,
+            component_type=component_type,
+            record=record,
+            catalog_fingerprint=self.catalog.fingerprint,
+        )
+
     def snapshot(self) -> dict[str, Any]:
         value = self.catalog.snapshot()
         value["lifecycle_schema"] = "component-lifecycle.v1"
@@ -61,11 +74,11 @@ class ComponentLifecycle:
     def plan_one_click(self, component_id: str) -> dict[str, Any]:
         kind, record = self._record(component_id)
         if kind == "model":
-            current = self.catalog.inspect_model(component_id)
+            current = self._inspect_component(component_id, "model", record)
             runtime_id = record.get("runtime_id")
-            runtime = self.catalog.inspect_runtime(runtime_id) if runtime_id and runtime_id in self.catalog.runtimes else None
+            runtime = self._inspect_component(runtime_id, "runtime", self.catalog.runtimes[runtime_id]) if runtime_id and runtime_id in self.catalog.runtimes else None
         else:
-            current = self.catalog.inspect_runtime(component_id)
+            current = self._inspect_component(component_id, "runtime", record)
             runtime = current
             runtime_id = component_id
         dependencies = []
@@ -149,7 +162,7 @@ class ComponentLifecycle:
         if action not in {"repair", "update", "uninstall"}:
             raise LifecycleError("invalid_maintenance_action")
         kind, record = self._record(component_id)
-        current = self.catalog.inspect_model(component_id) if kind == "model" else self.catalog.inspect_runtime(component_id)
+        current = self._inspect_component(component_id, kind, record)
         body = {"schema_version": "v7-component-maintenance-plan.v1", "component_id": component_id, "component_type": kind, "action": action, "catalog_fingerprint": self.catalog.fingerprint, "expected_state": current["status"], "preserve_existing": True, "execution": "not_run", "dry_run": True}
         plan_id = "v7_maintenance_" + secrets.token_hex(16)
         plan = {**body, "plan_id": plan_id, "plan_fingerprint": _fingerprint(body)}
@@ -221,7 +234,10 @@ class ComponentLifecycle:
             # path or an unknown directory.  This branch is test-only and
             # requires the explicit fixture-owned receipt above.
             record = self.catalog.models.get(component_id) if kind == "model" else self.catalog.runtimes.get(component_id)
-            root = self.paths.models_root / component_id if kind == "model" else (self.paths.environments_root if record and record.get("root_class") == "environments_root" else self.paths.runtime_root)
+            try:
+                root = resolve_component_root(self.paths, component_id, kind, "models_root" if kind == "model" else record.get("root_class") if record else None, require_exists=False)
+            except ComponentPathError:
+                return {"status": "failed", "code": "unsafe_fixture_target", "execution": "not_run"}
             leaves = record.get("files", []) if kind == "model" and record else [{"relative_path": item} for item in (record.get("required_leaves", []) if record else [])]
             removed = 0
             for leaf in leaves:

@@ -142,7 +142,7 @@ class V7BundleReuseTests(unittest.TestCase):
         repair = self.installer.plan_maintenance("demo-model", action="repair")
         repaired = self.installer.confirm_maintenance(repair["plan_id"], confirmed=True)
         self.assertEqual(repaired["status"], "completed")
-        self.assertEqual(repaired["state"], "INSTALLED_UNVERIFIED")
+        self.assertEqual(repaired["state"], "INSTALLED_VERIFIED")
         remove = self.installer.plan_maintenance("demo-model", action="uninstall")
         removed = self.installer.confirm_maintenance(remove["plan_id"], confirmed=True)
         self.assertEqual(removed["status"], "completed")

@@ -12,7 +12,7 @@ import time
 import stat
 from typing import Any
 
-from src.platform.paths import HubPaths, get_paths
+from src.platform.paths import HubPaths, get_paths, resolve_component_root
 
 from .catalog import RuntimeCatalogError, load_catalog
 
@@ -75,34 +75,29 @@ class RuntimeManager:
         self._records = load_catalog(self.catalog_path)
 
     def _root(self, record: Mapping[str, Any]) -> Path:
-        if record["root_class"] == "environments_root":
-            return self.paths.environments_root
-        if record["root_class"] == "external_managed":
-            return self.paths.runtime_root / "external"
-        return self.paths.runtime_root
+        return resolve_component_root(self.paths, str(record.get("runtime_id", "runtime")), "runtime", record.get("root_class"), require_exists=False)
+
+    def _catalog_fingerprint(self) -> str:
+        import hashlib
+
+        payload = json.dumps(self._records, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
 
     def inspect(self, runtime_id: str) -> dict[str, Any]:
+        from src.services.component_installer.verification import FastComponentInspector
+
         record = next((item for item in self._records if item["runtime_id"] == runtime_id), None)
         if record is None:
             raise RuntimeCatalogError("unknown_runtime_id")
-        root = self._root(record)
-        leaves = []
-        for relative in record["required_leaves"]:
-            target = _safe_target(root, relative)
-            leaves.append({"relative_path": relative, "present": bool(target and target.exists() and target.is_file())})
-        if leaves and all(item["present"] for item in leaves):
-            status = "INSTALLED_UNVERIFIED"
-            reason = "Required runtime leaves are present; import/pip and bounded smoke evidence are still required."
-            action = "Run the component-specific verification under an explicit authorization."
-        elif any(item["present"] for item in leaves):
-            status = "PARTIAL"
-            reason = "Some required runtime leaves are present, but the runtime is incomplete."
-            action = "Review the runtime install plan; do not replace an existing environment automatically."
-        else:
-            status = "NOT_INSTALLED"
-            reason = "No required runtime leaves were observed at the managed root."
-            action = "Create a separate pinned runtime installation plan."
-        return {"runtime_id": runtime_id, "status": status, "execution": "not_run", "leaves": leaves, "reason": reason, "next_action": action}
+        result = FastComponentInspector().inspect(
+            paths=self.paths,
+            component_id=runtime_id,
+            component_type="runtime",
+            record=record,
+            catalog_fingerprint=self._catalog_fingerprint(),
+        )
+        result["runtime_id"] = runtime_id
+        return result
 
     def snapshot(self) -> dict[str, Any]:
         records = [self.inspect(item["runtime_id"]) for item in self._records]
@@ -130,13 +125,39 @@ class RuntimeManager:
         }
 
     def verify(self, runtime_id: str) -> dict[str, Any]:
-        state = self.inspect(runtime_id)
+        from src.services.component_installer.receipts import ReceiptError, write_component_receipt
+        from src.services.component_installer.verification import DeepComponentVerifier
+
+        record = next((item for item in self._records if item["runtime_id"] == runtime_id), None)
+        if record is None:
+            raise RuntimeCatalogError("unknown_runtime_id")
+        result = DeepComponentVerifier().verify(
+            paths=self.paths,
+            component_id=runtime_id,
+            component_type="runtime",
+            record=record,
+            catalog_fingerprint=self._catalog_fingerprint(),
+            source="catalog_primary",
+        )
+        if result.get("status") != "completed":
+            return {
+                "schema_version": "runtime-verify.v1", "status": result.get("status", "unavailable"),
+                "execution": "not_run", "dry_run": True, "runtime_id": runtime_id,
+                "state": result.get("state", "UNAVAILABLE"), "leaves": result.get("leaves", []),
+                "verified": False, "code": result.get("code", "verification_unavailable"),
+                "reason": result.get("reason", "Bounded verification was unavailable."),
+                "next_action": result.get("next_action", "Review the managed runtime."),
+            }
+        try:
+            write_component_receipt(self.paths.config_root, runtime_id, result["receipt"])
+        except (OSError, ReceiptError, KeyError, TypeError):
+            return {"schema_version": "runtime-verify.v1", "status": "unavailable", "execution": "not_run", "dry_run": True, "runtime_id": runtime_id, "state": "UNAVAILABLE", "verified": False, "code": "receipt_write_failed", "reason": "Verification completed but its receipt could not be stored safely.", "next_action": "Retry explicit verification after reviewing receipt storage."}
         return {
             "schema_version": "runtime-verify.v1", "status": "completed", "execution": "not_run", "dry_run": True,
-            "runtime_id": runtime_id, "state": state["status"], "leaves": state["leaves"],
-            "verified": state["status"] == "INSTALLED_UNVERIFIED",
-            "reason": "Leaf and size discovery only; Python/import and bounded runtime smoke remain separate.",
-            "next_action": "Run the runtime-specific bounded verification when explicitly authorized.",
+            "runtime_id": runtime_id, "state": result["state"], "leaves": result["leaves"],
+            "verified": result["state"] == "INSTALLED_VERIFIED", "operational": False,
+            "reason": "Bounded streaming runtime-leaf verification only; no process or environment import ran.",
+            "next_action": result["next_action"],
         }
 
     def install_fixture(self, runtime_id: str, source_root: Path) -> dict[str, Any]:

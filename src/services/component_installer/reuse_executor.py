@@ -16,8 +16,9 @@ import stat
 import time
 from typing import Any
 
-from src.platform.paths import HubPaths
-from .receipts import source_identity, write_component_receipt
+from src.platform.paths import HubPaths, resolve_component_root
+from .receipts import ReceiptError, write_component_receipt
+from .verification import DeepComponentVerifier, stream_sha256
 
 
 def _is_reparse(path: Path) -> bool:
@@ -62,11 +63,9 @@ def _safe_leaf(root: Path, relative: str) -> Path | None:
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    """Compatibility wrapper; deep verification always streams every size."""
+
+    return stream_sha256(path)
 
 
 class ExistingInstallReuseExecutor:
@@ -83,11 +82,8 @@ class ExistingInstallReuseExecutor:
             return None
 
     def _root(self, component_id: str, component_type: str, record: Mapping[str, Any]) -> Path:
-        if component_type == "model":
-            return self.paths.models_root / component_id
-        if record.get("root_class") == "environments_root":
-            return self.paths.environments_root
-        return self.paths.runtime_root
+        root_class = "models_root" if component_type == "model" else record.get("root_class")
+        return resolve_component_root(self.paths, component_id, component_type, root_class, require_exists=False)
 
     def apply(self, plan: Mapping[str, Any], *, confirmed: bool) -> dict[str, Any]:
         if not confirmed:
@@ -99,53 +95,31 @@ class ExistingInstallReuseExecutor:
         record = self._record(component_id, str(component_type))
         if not isinstance(record, Mapping):
             return {"status": "error", "code": "unknown_component", "execution": "not_run"}
-        root = self._root(component_id, str(component_type), record)
-        leaves = record.get("files") if component_type == "model" else record.get("required_leaves")
-        if not isinstance(leaves, list) or not leaves:
-            return {"status": "unavailable", "code": "catalog_leaves_missing", "execution": "not_run"}
-        verified: list[dict[str, Any]] = []
-        for item in leaves:
-            if component_type == "model":
-                if not isinstance(item, Mapping):
-                    return {"status": "failed", "code": "catalog_leaf_invalid", "execution": "not_run"}
-                relative = item.get("relative_path")
-                expected_size = item.get("size_bytes")
-                expected_hash = item.get("sha256")
-            else:
-                relative = item
-                expected_size = None
-                expected_hash = None
-            if not isinstance(relative, str):
-                return {"status": "failed", "code": "catalog_leaf_invalid", "execution": "not_run"}
-            target = _safe_leaf(root, relative)
-            if target is None or not target.is_file() or _is_reparse(target):
-                return {"status": "unavailable", "code": "existing_install_incomplete", "execution": "not_run"}
-            actual_size = int(target.stat().st_size)
-            if isinstance(expected_size, int) and expected_size > 0 and actual_size != expected_size:
-                return {"status": "conflict", "code": "existing_install_size_mismatch", "execution": "not_run"}
-            digest = _sha256(target) if actual_size <= 64 * 1024 * 1024 else None
-            if isinstance(expected_hash, str) and digest != expected_hash.lower():
-                return {"status": "conflict", "code": "existing_install_checksum_mismatch", "execution": "not_run"}
-            verified.append({"relative_leaf": relative.replace("\\", "/"), "size_bytes": actual_size, "sha256": digest, "size_verified": bool(isinstance(expected_size, int) and expected_size > 0 and actual_size == expected_size) or digest is not None})
-        receipt = {
-            "component_id": component_id,
-            "component_type": component_type,
-            "bundle_revision": str(record.get("revision") or "unknown"),
-            "source": "existing_install_reuse",
-            "source_identity": source_identity(record),
-            "files": verified,
-            "installed_size_bytes": sum(item["size_bytes"] for item in verified),
-            "installed_at": int(time.time()),
-            "verified_at": int(time.time()),
-            "state": "INSTALLED_UNVERIFIED",
-            "operational": False,
-            "catalog_fingerprint": str(plan.get("catalog_fingerprint") or "")[:128],
-        }
+        result = DeepComponentVerifier().verify(
+            paths=self.paths,
+            component_id=component_id,
+            component_type=str(component_type),
+            record=record,
+            catalog_fingerprint=plan.get("catalog_fingerprint") if isinstance(plan.get("catalog_fingerprint"), str) else None,
+            source="existing_install_reuse",
+        )
+        if result.get("status") != "completed":
+            failure = {key: result[key] for key in ("status", "code", "execution", "dry_run", "reason", "next_action") if key in result}
+            if failure.get("code") == "component_leaf_unavailable":
+                failure["code"] = "existing_install_incomplete"
+            return failure
         try:
-            write_component_receipt(self.paths.config_root, component_id, receipt)
-        except OSError:
+            write_component_receipt(self.paths.config_root, component_id, result["receipt"])
+        except (OSError, ReceiptError, KeyError, TypeError):
             return {"status": "failed", "code": "receipt_write_failed", "execution": "not_run"}
-        return {"status": "completed", "execution": "completed", "dry_run": False, "component_id": component_id, "state": "INSTALLED_UNVERIFIED", "source": "existing_install_reuse", "installed_size_bytes": receipt["installed_size_bytes"], "next_action": "Run the component-specific bounded verification before operational promotion."}
+        return {
+            "status": "completed", "execution": "not_run", "dry_run": True,
+            "component_id": component_id, "state": result.get("state", "INSTALLED_UNVERIFIED"),
+            "source": "existing_install_reuse",
+            "leaves": result.get("leaves", []),
+            "next_action": result.get("next_action", "Run the component-specific bounded verification before operational promotion."),
+            "operational": False,
+        }
 
 
 __all__ = ["ExistingInstallReuseExecutor"]

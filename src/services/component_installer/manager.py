@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from src.platform.paths import HubPaths, get_paths
+from src.platform.paths import ComponentPathError, HubPaths, get_paths, resolve_component_leaf, resolve_component_root
 from src.services.model_manager import ModelManager
 from src.services.runtime_manager import RuntimeManager
 
@@ -237,7 +237,7 @@ class ComponentInstaller:
             "component_id": component_id,
             "component_type": component_type,
             "variant": variant or "default",
-            "catalog_fingerprint": self.model_manager.catalog_fingerprint if component_type == "model" else _state_fingerprint({"runtimes": self.runtime_manager._records}),
+            "catalog_fingerprint": self.model_manager.catalog_fingerprint if component_type == "model" else self.runtime_manager._catalog_fingerprint(),
             "expected_state_fingerprint": _state_fingerprint(state),
             "existing_status": state["status"],
             "auto_install_supported": self._auto_install_ready(record),
@@ -344,12 +344,28 @@ class ComponentInstaller:
                 self._cancel_events.pop(job_id, None)
                 return {"status": "failed", "code": "finalization_failed", "job_id": job_id, "plan_id": plan_id, "execution": "not_run"}
             try:
+                root_class = "models_root" if plan["component_type"] == "model" else record.get("root_class", "runtime_root")
+                managed_root = resolve_component_root(self.paths, plan["component_id"], plan["component_type"], root_class, require_exists=True)
+                if plan["component_type"] == "model":
+                    receipt_leaves = [
+                        {"relative_leaf": item.get("relative_path"), "observed_size_bytes": resolve_component_leaf(managed_root, item.get("relative_path"), require_exists=True).stat().st_size, "observed_mtime_ns": resolve_component_leaf(managed_root, item.get("relative_path"), require_exists=True).stat().st_mtime_ns, "verification_level": "unverified"}
+                        for item in record.get("files", []) if isinstance(item, Mapping)
+                    ]
+                else:
+                    receipt_leaves = [
+                        {"relative_leaf": item, "observed_size_bytes": resolve_component_leaf(managed_root, item, require_exists=True).stat().st_size, "observed_mtime_ns": resolve_component_leaf(managed_root, item, require_exists=True).stat().st_mtime_ns, "verification_level": "unverified"}
+                        for item in record.get("required_leaves", []) if isinstance(item, str)
+                    ]
                 write_component_receipt(self.paths.config_root, plan["component_id"], {
                     "component_id": plan["component_id"],
                     "component_type": plan["component_type"],
+                    "catalog_schema": "model-catalog.v1" if plan["component_type"] == "model" else "runtime-catalog.v1",
                     "bundle_revision": str(record.get("revision") or "unknown"),
                     "source": "catalog_primary",
                     "source_identity": source_identity(record),
+                    "root_class": "models_root" if plan["component_type"] == "model" else record.get("root_class", "runtime_root"),
+                    "location_class": "models_root" if plan["component_type"] == "model" else record.get("root_class", "runtime_root"),
+                    "files": receipt_leaves,
                     "installed_at": int(time.time()),
                     "verified_at": None,
                     "state": "INSTALLED_UNVERIFIED",
@@ -358,7 +374,7 @@ class ComponentInstaller:
                     "rollback_candidate": None,
                     "catalog_fingerprint": plan.get("catalog_fingerprint"),
                 })
-            except OSError:
+            except (OSError, ComponentPathError, ValueError, TypeError):
                 self._jobs[job_id].update({"state": "FAILED", "execution": "not_run", "error": "receipt_write_failed"})
                 self._record_history(job_id)
                 self._cancel_events.pop(job_id, None)
@@ -450,6 +466,30 @@ class ComponentInstaller:
             "next_action": "Confirm a separately authorized bounded verification operation.",
         }
 
+    def confirm_verify(self, plan_id: str, *, confirmed: bool = False) -> dict[str, Any]:
+        """Run the explicit receipt-only deep verifier after confirmation."""
+
+        plan = self._plans.get(plan_id)
+        if not isinstance(plan, Mapping) or plan.get("schema_version") != "component-verify-plan.v1":
+            return {"status": "error", "code": "unknown_verify_plan", "execution": "not_run", "dry_run": True}
+        if not confirmed:
+            return {"status": "waiting_confirmation", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
+        component_id = plan.get("component_id")
+        component_type = plan.get("component_type")
+        if not isinstance(component_id, str) or not isinstance(component_type, str) or component_type not in {"model", "runtime"}:
+            return {"status": "error", "code": "verify_plan_invalid", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
+        current = self._inspect(component_id, str(component_type))
+        if _state_fingerprint(current) != plan.get("expected_state_fingerprint"):
+            return {"status": "conflict", "code": "stale_verify_plan", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": "Create a fresh verification plan."}
+        if component_type == "model":
+            result = self.model_manager.verify(component_id)
+        else:
+            result = self.runtime_manager.verify(component_id)
+        result["plan_id"] = plan_id
+        result.setdefault("execution", "not_run")
+        result.setdefault("dry_run", True)
+        return result
+
     def issue_selection(self, component_id: str, selected: Path, *, component_type: str = "model") -> dict[str, Any]:
         component_id = validate_component_id(component_id)
         if component_type != "model" or self._model_record(component_id) is None:
@@ -509,7 +549,7 @@ class ComponentInstaller:
             "schema_version": "component-reuse-plan.v1",
             "component_id": component_id,
             "component_type": component_type,
-            "catalog_fingerprint": self.model_manager.catalog_fingerprint if component_type == "model" else _state_fingerprint({"runtimes": self.runtime_manager._records}),
+            "catalog_fingerprint": self.model_manager.catalog_fingerprint if component_type == "model" else self.runtime_manager._catalog_fingerprint(),
             "expected_state_fingerprint": _state_fingerprint(state),
             "current_status": state.get("status"),
             "source": "existing_install_reuse",
@@ -542,7 +582,7 @@ class ComponentInstaller:
         if kind is None:
             raise InstallPlanError("unknown_component")
         state = self._inspect(component_id, kind)
-        body = {"schema_version": "component-maintenance-plan.v1", "component_id": component_id, "component_type": kind, "action": action, "expected_state_fingerprint": _state_fingerprint(state), "shared_dependency_policy": "preserve_referenced_assets"}
+        body = {"schema_version": "component-maintenance-plan.v1", "component_id": component_id, "component_type": kind, "action": action, "expected_state_fingerprint": _state_fingerprint(state), "catalog_fingerprint": self.model_manager.catalog_fingerprint if kind == "model" else self.runtime_manager._catalog_fingerprint(), "shared_dependency_policy": "preserve_referenced_assets"}
         plan_id = f"maintenance_plan_{secrets.token_hex(16)}"
         fingerprint = plan_fingerprint(body)
         self._plans[plan_id] = {**body, "plan_id": plan_id, "plan_fingerprint": fingerprint}
@@ -557,6 +597,27 @@ class ComponentInstaller:
         current = self._inspect(plan["component_id"], plan["component_type"])
         if _state_fingerprint(current) != plan["expected_state_fingerprint"]:
             return {"status": "conflict", "code": "stale_maintenance_plan", "plan_id": plan_id}
+        if plan.get("action") == "repair":
+            from .receipts import ReceiptError, write_component_receipt
+            from .verification import DeepComponentVerifier
+
+            record = self._catalog_record(plan["component_id"], plan["component_type"])
+            catalog_fingerprint = self.model_manager.catalog_fingerprint if plan["component_type"] == "model" else self.runtime_manager._catalog_fingerprint()
+            verified = DeepComponentVerifier().verify(
+                paths=self.paths,
+                component_id=plan["component_id"],
+                component_type=plan["component_type"],
+                record=record,
+                catalog_fingerprint=catalog_fingerprint,
+                source="existing_install_reuse",
+            )
+            if verified.get("status") != "completed":
+                return {"status": verified.get("status", "unavailable"), "code": verified.get("code", "repair_unavailable"), "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": verified.get("next_action", "Review the managed installation.")}
+            try:
+                write_component_receipt(self.paths.config_root, plan["component_id"], verified["receipt"])
+            except (OSError, ReceiptError, KeyError, TypeError):
+                return {"status": "unavailable", "code": "receipt_write_failed", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": "Retry the explicit receipt-only repair after reviewing receipt storage."}
+            return {"status": "completed", "action": "repair", "component_id": plan["component_id"], "state": verified["state"], "execution": "not_run", "dry_run": True, "verified": verified["state"] == "INSTALLED_VERIFIED", "operational": False, "next_action": verified["next_action"]}
         result = MaintenanceExecutor(paths=self.paths, catalog=self._catalog_adapter()).apply(plan, confirmed=True)
         result["plan_id"] = plan_id
         return result
