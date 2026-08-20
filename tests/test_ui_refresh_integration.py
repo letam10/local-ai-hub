@@ -12,6 +12,7 @@ HTML_PATH = ROOT / "src" / "ui" / "index.html"
 CSS_PATH = ROOT / "src" / "ui" / "styles.css"
 APP_PATH = ROOT / "src" / "ui" / "app.js"
 PAGES_PATH = ROOT / "src" / "ui" / "pages.js"
+DASHBOARD_PATH = ROOT / "src" / "ui" / "features" / "dashboard" / "render.js"
 
 
 class UiRefreshIntegrationTests(unittest.TestCase):
@@ -21,9 +22,7 @@ class UiRefreshIntegrationTests(unittest.TestCase):
         cls.css = CSS_PATH.read_text(encoding="utf-8")
         cls.app = APP_PATH.read_text(encoding="utf-8")
         cls.pages = PAGES_PATH.read_text(encoding="utf-8")
-        start = cls.pages.index("function renderDashboard(state) {")
-        end = cls.pages.index("\nfunction renderAiri", start)
-        cls.dashboard = cls.pages[start:end]
+        cls.dashboard = DASHBOARD_PATH.read_text(encoding="utf-8")
 
     def test_sidebar_toggle_targets_the_owned_aside(self) -> None:
         self.assertRegex(self.html, r'<button[^>]*aria-controls="sidebar"[^>]*>')
