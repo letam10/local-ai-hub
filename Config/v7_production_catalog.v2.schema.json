@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "local-ai-hub/v7-production-catalog.v2",
+  "title": "Local AI Hub V7 production catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "models", "runtimes"],
+  "properties": {
+    "schema_version": {"const": "v7-production-catalog.v2"},
+    "models": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/model"}},
+    "runtimes": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/runtime"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{0,95}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+    "leaf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relative_path", "size_bytes"],
+      "properties": {
+        "relative_path": {"type": "string", "pattern": "^(?![\\/])(?!.*(?:^|[\\/])\\.\\.(?:[\\/]|$))(?!.*:)[^\\u0000-\\u001f]+$"},
+        "size_bytes": {"type": "integer", "minimum": 0},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "kind", "canonical_identity", "revision"],
+      "properties": {
+        "provider": {"type": "string", "minLength": 1, "maxLength": 96},
+        "kind": {"type": "string", "minLength": 1, "maxLength": 64},
+        "url": {"type": "string", "pattern": "^https://"},
+        "canonical_identity": {"type": "string", "minLength": 1, "maxLength": 256},
+        "revision": {"type": "string", "minLength": 1, "maxLength": 128},
+        "authentication_required": {"type": "boolean"},
+        "license_required": {"type": "boolean"}
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["model_id", "display_name", "provider", "version", "revision", "files", "disposition", "install_strategy", "source_identity", "latest_supported_revision"],
+      "properties": {
+        "model_id": {"$ref": "#/$defs/id"},
+        "display_name": {"type": "string", "minLength": 1},
+        "category": {"type": "string"},
+        "provider": {"type": "string"},
+        "version": {"type": "string"},
+        "revision": {"type": "string"},
+        "files": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/leaf"}},
+        "runtime_id": {"$ref": "#/$defs/id"},
+        "source_identity": {"type": "string", "minLength": 1},
+        "primary_source": {"$ref": "#/$defs/source"},
+        "trusted_fallback_sources": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/source"}},
+        "latest_upstream_revision": {"type": "string"},
+        "latest_supported_revision": {"type": "string"},
+        "disposition": {"enum": ["AUTO_INSTALL_READY", "AUTH_REQUIRED", "LICENSE_REQUIRED", "MANUAL_IMPORT_ONLY", "UNSUPPORTED_SOURCE"]},
+        "install_strategy": {"enum": ["direct_file_download", "multi_file_download", "portable_archive", "python_environment_locked", "reference_existing", "manual_import"]},
+        "update_parts": {"type": "array", "items": {"enum": ["backend", "runtime", "dependencies", "model"]}},
+        "estimated_download_size": {"type": "integer", "minimum": 0},
+        "estimated_disk_size": {"type": "integer", "minimum": 0},
+        "minimum_vram_mb": {"type": "integer", "minimum": 0},
+        "recommended_vram_mb": {"type": "integer", "minimum": 0},
+        "license": {"type": "string"},
+        "license_url": {"type": "string", "pattern": "^https://"}
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["runtime_id", "display_name", "version", "revision", "required_leaves", "disposition", "install_strategy", "source_identity", "latest_supported_revision"],
+      "properties": {
+        "runtime_id": {"$ref": "#/$defs/id"},
+        "display_name": {"type": "string", "minLength": 1},
+        "kind": {"type": "string"},
+        "version": {"type": "string"},
+        "revision": {"type": "string"},
+        "root_class": {"enum": ["runtime_root", "environments_root", "external_managed"]},
+        "required_leaves": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "source_identity": {"type": "string", "minLength": 1},
+        "primary_source": {"$ref": "#/$defs/source"},
+        "trusted_fallback_sources": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/source"}},
+        "latest_upstream_revision": {"type": "string"},
+        "latest_supported_revision": {"type": "string"},
+        "disposition": {"enum": ["AUTO_INSTALL_READY", "REFERENCE_EXISTING", "MANUAL_INSTALL", "UNSUPPORTED"]},
+        "install_strategy": {"enum": ["direct_file_download", "multi_file_download", "portable_archive", "python_environment_locked", "reference_existing", "manual_import"]},
+        "update_parts": {"type": "array", "items": {"enum": ["backend", "runtime", "dependencies", "model"]}},
+        "estimated_download_size": {"type": "integer", "minimum": 0},
+        "estimated_disk_size": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}
