@@ -106,7 +106,7 @@ const state = {
   creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
   workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trong V5-D trước khi đồng bộ." },
-  productionCatalog: { status: "partial", models: [], runtimes: [] },
+  productionCatalog: { status: "partial", models: [], runtimes: [] }, modelFilters: { query: "", category: "", installed: "all" },
   featureRegistry: FEATURE_REGISTRY,
 };
 const view = document.querySelector("#module-view");
@@ -1046,6 +1046,12 @@ const handleImageMaskForm = async (form) => {
 };
 
 document.addEventListener("change", (event) => {
+  const modelSearch = event.target.closest("[data-model-search]");
+  if (modelSearch) { state.modelFilters.query = String(modelSearch.value || "").slice(0, 80); render(); return; }
+  const modelCategory = event.target.closest("[data-model-category]");
+  if (modelCategory) { state.modelFilters.category = String(modelCategory.value || "").slice(0, 48); render(); return; }
+  const modelInstalled = event.target.closest("[data-model-installed]");
+  if (modelInstalled) { state.modelFilters.installed = ["all", "installed", "uninstalled"].includes(modelInstalled.value) ? modelInstalled.value : "all"; render(); return; }
   const language = event.target.closest("#language-select");
   if (language) {
     setLanguage(language.value);

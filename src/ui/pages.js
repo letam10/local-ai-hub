@@ -60,7 +60,7 @@ const { renderImageMaskStudio, renderComfyAdvancedV5 } = createImageMaskRenderer
 
 
 function renderModels(state) {
-  return renderProductionModels({ productionCatalog: state.productionCatalog, legacyModels: state.models, storage: state.storage, escapeHtml, formatGb, statusPill, card, heading });
+  return renderProductionModels({ productionCatalog: state.productionCatalog, legacyModels: state.models, storage: state.storage, filters: state.modelFilters, escapeHtml, formatGb, statusPill, card, heading });
 }
 
 // Components implementation lives in src/ui/features/components/render.js.

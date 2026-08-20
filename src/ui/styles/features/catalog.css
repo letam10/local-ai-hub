@@ -2,3 +2,6 @@
 .catalog-card { min-width: 0; }
 .catalog-card__meta { display: flex; flex-wrap: wrap; gap: var(--hub-space-2); color: var(--hub-color-muted); }
 .catalog-card__action { margin-top: var(--hub-space-3); }
+.model-catalog-controls { display: grid; grid-template-columns: minmax(180px, 2fr) repeat(2, minmax(150px, 1fr)); gap: var(--hub-space-4); align-items: end; margin-bottom: var(--hub-space-4); }
+.model-catalog-controls .row-meta { align-self: center; }
+@media (max-width: 760px) { .model-catalog-controls { grid-template-columns: 1fr; } .model-catalog-controls .row-meta { align-self: start; } }

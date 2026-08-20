@@ -121,6 +121,11 @@ class FinalProductizationTests(unittest.TestCase):
         with self.assertRaises(ProductionCatalogError):
             ProductionCatalog(paths=self.paths, catalog_path=path)
 
+    def test_models_surface_has_bounded_search_and_install_state_filters(self) -> None:
+        source = (ROOT / "src" / "ui" / "features" / "models" / "models.js").read_text(encoding="utf-8")
+        for marker in ("data-model-search", "data-model-category", "data-model-installed", "data-model-count", "Download & Install", "Import Model"):
+            self.assertIn(marker, source)
+
 
 if __name__ == "__main__":
     unittest.main()
