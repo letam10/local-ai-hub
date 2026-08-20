@@ -24,6 +24,11 @@ machine data. Never infer permission from a filename alone.
 | Installer/bootstrap | `scripts/bootstrap_core.py`, `src/services/bootstrap_core.py` | desktop launchers | clean-clone tests | model-free, offline, idempotent, preserve local files |
 | Versioning | `src/shared/version.py` | health/installer/docs | version consistency | one product source; schema versions unchanged |
 
+For API route changes, update `architecture/api_routes.yaml`, the owning
+`src/services/api/routes/<domain>.py` adapter and its contract test. Backup,
+Components, Model/Runtime, Project/Creative and streaming changes remain in
+their existing application services; route files are transport adapters.
+
 For every change, update the relevant example config, contract test and
 architecture metadata. Do not edit `Models`, `Environments`, runtime, Output,
 or user media as part of a source package.

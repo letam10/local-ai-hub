@@ -20,6 +20,23 @@ The allowed dependency direction is UI → API → services → modules → plat
 shared. Shared never imports a service, module or UI package. New modules are
 registered through validated data manifests, not arbitrary Python imports.
 
+## API route ownership (V7 Phase 3)
+
+HTTP transport enters `HubHandler`, then the explicit server-owned
+`src/services/api/router.py`, a domain route adapter under
+`src/services/api/routes/`, the shared `ApiContext`, and finally the existing
+application/domain service. Route adapters parse bounded request data and map
+status codes; they do not own model installation, job scheduling, project
+databases, archive internals or inference.
+
+The canonical route/owner inventory is generated in
+`architecture/api_routes.yaml` by `scripts/generate_api_route_inventory.py`.
+Routes still in the compatibility dispatcher are marked `transport: legacy`
+until their streaming or domain-specific regression suite is ready. This is a
+deliberate strangler migration: only one registered router route can match a
+method/path, and legacy streaming/static paths remain explicit rather than
+being silently duplicated.
+
 ## Source and data roots
 
 `src/platform/paths.py` defines `APP_ROOT` and `DATA_ROOT`. `DATA_ROOT` may be
