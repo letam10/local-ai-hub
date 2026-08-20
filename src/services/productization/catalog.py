@@ -23,6 +23,8 @@ from src.services.operational_closure.evidence import runtime_evidence_passed, r
 
 
 SCHEMA = "v7-production-catalog.v1"
+SCHEMA_V2 = "v7-production-catalog.v2"
+SUPPORTED_SCHEMAS = frozenset({SCHEMA, SCHEMA_V2})
 MODEL_DISPOSITIONS = frozenset({"AUTO_INSTALL_READY", "AUTH_REQUIRED", "LICENSE_REQUIRED", "MANUAL_IMPORT_ONLY", "UNSUPPORTED_SOURCE"})
 RUNTIME_DISPOSITIONS = frozenset({"AUTO_INSTALL_READY", "REFERENCE_EXISTING", "MANUAL_INSTALL", "UNSUPPORTED"})
 MODEL_STATES = frozenset({"INSTALLED", "NOT_INSTALLED", "PARTIAL", "UNAVAILABLE", "OPERATIONAL"})
@@ -235,7 +237,7 @@ def load_production_catalog(path: Path) -> dict[str, list[dict[str, Any]]]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ProductionCatalogError("catalog_unreadable") from exc
-    if not isinstance(raw, Mapping) or raw.get("schema_version") != SCHEMA:
+    if not isinstance(raw, Mapping) or raw.get("schema_version") not in SUPPORTED_SCHEMAS:
         raise ProductionCatalogError("unsupported_catalog_schema")
     models_raw = raw.get("models")
     runtimes_raw = raw.get("runtimes")
@@ -245,7 +247,7 @@ def load_production_catalog(path: Path) -> dict[str, list[dict[str, Any]]]:
     runtimes = [_validate_runtime(item) for item in runtimes_raw if isinstance(item, Mapping)]
     if len({item["model_id"] for item in models}) != len(models) or len({item["runtime_id"] for item in runtimes}) != len(runtimes):
         raise ProductionCatalogError("duplicate_catalog_id")
-    return {"models": models, "runtimes": runtimes}
+    return {"schema_version": str(raw.get("schema_version")), "models": models, "runtimes": runtimes}
 
 
 class ProductionCatalog:
@@ -255,6 +257,7 @@ class ProductionCatalog:
         self.paths = paths or get_paths()
         self.catalog_path = catalog_path or self.paths.app_root / "Config" / "v7_production_catalog.example.json"
         loaded = load_production_catalog(self.catalog_path)
+        self.catalog_schema_version = str(loaded.get("schema_version") or SCHEMA)
         self.models = {item["model_id"]: item for item in loaded["models"]}
         self.runtimes = {item["runtime_id"]: item for item in loaded["runtimes"]}
         self.fingerprint = _fingerprint(loaded)
@@ -360,7 +363,7 @@ class ProductionCatalog:
             models = [item for item in models if str(item.get("category", "")).casefold() == category.casefold()]
         if installed is not None:
             models = [item for item in models if (item["status"] == "INSTALLED") is installed]
-        return {"schema_version": "v7-production-catalog-snapshot.v1", "status": "completed", "execution": "not_run", "dry_run": True, "catalog_fingerprint": self.fingerprint, "models": models, "runtimes": runtimes, "counts": {"models": len(models), "runtimes": len(runtimes), "installed_models": sum(item["status"] == "INSTALLED" for item in models), "install_ready": sum(item["disposition"] == "AUTO_INSTALL_READY" for item in models)}, "reason": "Catalog and fixed-leaf discovery only; no model/runtime process or network action ran.", "next_action": "Select a server-owned component plan before any installation."}
+        return {"schema_version": "v7-production-catalog-snapshot.v1", "catalog_schema_version": self.catalog_schema_version, "status": "completed", "execution": "not_run", "dry_run": True, "catalog_fingerprint": self.fingerprint, "models": models, "runtimes": runtimes, "counts": {"models": len(models), "runtimes": len(runtimes), "installed_models": sum(item["status"] == "INSTALLED" for item in models), "install_ready": sum(item["disposition"] == "AUTO_INSTALL_READY" for item in models)}, "reason": "Catalog and fixed-leaf discovery only; no model/runtime process or network action ran.", "next_action": "Select a server-owned component plan before any installation."}
 
     def refresh_model_size(self, model_id: str, *, max_files: int = 10000) -> dict[str, Any]:
         """Explicit user-requested bounded size refresh; never runs on every UI refresh."""
@@ -402,4 +405,4 @@ def catalog_snapshot(*, paths: HubPaths | None = None, query: str = "", category
     return ProductionCatalog(paths=paths).snapshot(query=query, category=category, installed=installed)
 
 
-__all__ = ["MODEL_DISPOSITIONS", "ProductionCatalog", "ProductionCatalogError", "RUNTIME_DISPOSITIONS", "SCHEMA", "catalog_snapshot", "load_production_catalog"]
+__all__ = ["MODEL_DISPOSITIONS", "ProductionCatalog", "ProductionCatalogError", "RUNTIME_DISPOSITIONS", "SCHEMA", "SCHEMA_V2", "SUPPORTED_SCHEMAS", "catalog_snapshot", "load_production_catalog"]

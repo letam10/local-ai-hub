@@ -1,5 +1,11 @@
 # Source resilience and component updates
 
+The tracked production catalog now uses `v7-production-catalog.v2` (the
+loader remains backward-compatible with v1 fixtures).  Its companion schema
+`Config/v7_production_catalog.v2.schema.json` defines reviewed source identity,
+fallback identity, installation strategy, dependency/runtime binding, exact
+leaves, size/hash evidence and separate upstream-versus-supported revisions.
+
 V7 keeps two independent facts for every component:
 
 1. **Local installation state** — the managed leaves, receipts, runtime

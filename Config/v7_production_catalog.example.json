@@ -1,5 +1,5 @@
 {
-  "schema_version": "v7-production-catalog.v1",
+  "schema_version": "v7-production-catalog.v2",
   "catalog_version": "2026.08.20",
   "models": [
     {"model_id":"animesr-v2","display_name":"AnimeSR v2","category":"Video","provider":"TencentARC","version":"v2","revision":"v2","official_source":"https://github.com/TencentARC/AnimeSR","source_type":"official_metadata_only","disposition":"MANUAL_IMPORT_ONLY","license":"Review upstream license","modules":["animesr"],"runtime_id":"animesr","files":[{"relative_path":"weights/animesr_v2.pth","size_bytes":0}],"estimated_download_size":0,"estimated_disk_size":0,"minimum_vram_mb":4096,"recommended_vram_mb":8192,"notes":"Pinned asset and digest are not published in the tracked catalog; use manual import."},

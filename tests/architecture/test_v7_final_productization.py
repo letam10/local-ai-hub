@@ -24,7 +24,7 @@ class V7FinalArchitectureTests(unittest.TestCase):
     def test_catalog_is_tracked_and_all_entries_have_explicit_disposition(self) -> None:
         config = ROOT / "Config/v7_production_catalog.example.json"
         raw = json.loads(config.read_text(encoding="utf-8"))
-        self.assertEqual(raw["schema_version"], "v7-production-catalog.v1")
+        self.assertEqual(raw["schema_version"], "v7-production-catalog.v2")
         self.assertGreaterEqual(len(raw["models"]), 13)
         self.assertGreaterEqual(len(raw["runtimes"]), 14)
         for item in [*raw["models"], *raw["runtimes"]]:
