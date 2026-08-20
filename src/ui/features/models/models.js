@@ -37,7 +37,13 @@ export function renderProductionModels({ productionCatalog, legacyModels, storag
     <span class="row-meta" data-model-count>Hiển thị ${visibleProduction.length}/${production.length} model</span>
   </div>`;
   const updateRows = Array.isArray(updateCenter.records) ? updateCenter.records : [];
-  const updateCard = card("Update Center", `<div class="form-actions"><button class="button button--compact" type="button" data-check-all-updates>Check All Updates</button><span class="small">Lịch hiện tại: ${escapeHtml(updateCenter.settings?.policy || "manual")}; không tự cài.</span></div>${updateRows.length ? `<div class="row-list">${updateRows.slice(0, 8).map((item) => `<div class="row-item"><span>${escapeHtml(item.component_id || "component")}</span><span>${escapeHtml(item.status || "CHECK_FAILED")} <button class="button button--compact" type="button" data-check-update="${escapeHtml(item.component_id || "")}">Check</button></span></div>`).join("")}</div>` : `<p class="small">Chưa có báo cáo update. Kiểm tra theo yêu cầu, không polling 24/7.</p>}`, "", "card--wide");
+  const updateRowHtml = updateRows.slice(0, 8).map((item) => {
+    const id = escapeHtml(item.component_id || "component");
+    const actions = `<button class="button button--compact" type="button" data-check-update="${id}">Check</button>${item.status === "UPDATE_AVAILABLE" ? `<button class="button button--compact button--accent" type="button" data-plan-update="${id}">Plan Update</button>` : ""}${item.rollback_available ? `<button class="button button--compact" type="button" data-rollback-update="${id}">Roll Back</button>` : ""}`;
+    return `<div class="row-item"><span>${id} · ${escapeHtml((item.changed_parts || []).join(", ") || "no changed parts")}</span><span>${escapeHtml(item.status || "CHECK_FAILED")} ${actions}</span></div>`;
+  }).join("");
+  const updateCardBody = `<div class="form-actions"><button class="button button--compact" type="button" data-check-all-updates>Check All Updates</button><span class="small">Lịch hiện tại: ${escapeHtml(updateCenter.settings?.policy || "manual")}; không tự cài.</span></div>${updateRows.length ? `<div class="row-list">${updateRowHtml}</div>` : "<p class=\"small\">Chưa có báo cáo update. Kiểm tra theo yêu cầu, không polling 24/7.</p>"}`;
+  const updateCard = card("Update Center", updateCardBody, "", "card--wide");
   return heading("STORAGE", "Models & Storage", "Model store canonical không nhân bản. Legacy cleanup chỉ xử lý mục đã phân loại và xác minh, không tự xoá UNKNOWN hoặc user media.", `<button class="button" type="button" data-refresh-storage>Quét lại</button>`) + `
     <div class="workspace-grid workspace-grid--two">
       ${card("Dung lượng", `<div class="row-list">${areas.map(([name, value]) => `<div class="row-item"><span>${escapeHtml(name)}</span><strong>${formatGb(value.bytes)}</strong></div>`).join("") || `<div class="empty-state compact">Chưa có số liệu storage.</div>`}</div>`)}
