@@ -15,14 +15,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 import hashlib
 import json
+import os
 from pathlib import Path
 import secrets
 import shutil
+import stat
 import time
 from typing import Any
 
 from src.platform.paths import ComponentPathError, HubPaths, get_paths, resolve_component_root
-from src.services.component_installer.receipts import CatalogBindingContext
+from src.services.component_installer.receipts import CatalogBindingContext, V2_CATALOG_SCHEMA
 
 from .catalog import ProductionCatalog, ProductionCatalogError
 from .runtime_executor import RuntimeArchiveExecutor
@@ -33,6 +35,23 @@ from src.services.component_installer.policy import trusted_source
 
 class LifecycleError(ValueError):
     pass
+
+
+def _is_reparse(path: Path) -> bool:
+    try:
+        if stat.S_ISLNK(path.lstat().st_mode):
+            return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    if os.name == "nt":
+        try:
+            attrs = int(__import__("ctypes").windll.kernel32.GetFileAttributesW(str(path))) & 0xFFFFFFFF
+            return attrs != 0xFFFFFFFF and bool(attrs & 0x400)
+        except (AttributeError, OSError):
+            return True
+    return False
 
 
 def _fingerprint(value: object) -> str:
@@ -177,11 +196,18 @@ class ComponentLifecycle:
             executor_kind = "model"
         else:
             return {"status": "unavailable", "code": "component_executor_unavailable", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": "Use a reviewed component executor for this bundle type."}
-        source = record.get("official_source")
+        current_binding, record, binding_error = self._fresh_plan_binding(plan)
+        if current_binding is None or record is None:
+            return self._binding_refusal(plan_id, binding_error or "stale_binding")
+        source_value = record.get("official_source") or record.get("primary_source")
+        source = source_value.get("url") if isinstance(source_value, Mapping) else source_value
         if not trusted_source(source, fixture_mode=False):
             return {"status": "unavailable", "code": "source_not_trusted", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
         expected_size = int(record.get("estimated_download_size", 0) or 0)
         expected_hash = record.get("sha256")
+        if executor_kind == "runtime" and isinstance(record.get("integrity"), Mapping):
+            expected_size = int(record["integrity"].get("size_bytes") or expected_size)
+            expected_hash = record["integrity"].get("sha256") or expected_hash
         if executor_kind == "model":
             files = record.get("files") if isinstance(record.get("files"), list) else []
             leaf = files[0] if files and isinstance(files[0], Mapping) else {}
@@ -197,18 +223,47 @@ class ComponentLifecycle:
             return {"status": "unavailable", "code": "insufficient_disk", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
         stage = self.paths.temp_root / "component-install" / plan_id
         try:
+            current_binding, record, binding_error = self._fresh_plan_binding(plan)
+            if current_binding is None or record is None:
+                return self._binding_refusal(plan_id, binding_error or "stale_binding")
+            source_value = record.get("official_source") or record.get("primary_source")
+            source = source_value.get("url") if isinstance(source_value, Mapping) else source_value
+            if not trusted_source(source, fixture_mode=False):
+                return {"status": "unavailable", "code": "source_not_trusted", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
+            expected_size = int(record.get("estimated_download_size", 0) or 0)
+            expected_hash = record.get("sha256")
+            if executor_kind == "runtime" and isinstance(record.get("integrity"), Mapping):
+                expected_size = int(record["integrity"].get("size_bytes") or expected_size)
+                expected_hash = record["integrity"].get("sha256") or expected_hash
+            if executor_kind == "model":
+                files = record.get("files") if isinstance(record.get("files"), list) else []
+                leaf = files[0] if files and isinstance(files[0], Mapping) else {}
+                expected_hash = leaf.get("sha256") or expected_hash
+            if expected_size <= 0 or not isinstance(expected_hash, str) or len(expected_hash) != 64:
+                return {"status": "unavailable", "code": "trusted_source_metadata_required", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
+            required = expected_size + int(record.get("estimated_disk_size", 0) or 0) + 256 * 1024 * 1024
             stage.mkdir(parents=True, exist_ok=True)
             filename = f"{plan['component_id']}.zip" if executor_kind == "runtime" else f"{plan['component_id']}.payload"
             downloaded = TrustedDownloader(staging_root=stage, max_bytes=required).download(
                 str(source), filename, expected_sha256=expected_hash, expected_size=expected_size,
                 disk_free_bytes=free, disk_safety_bytes=256 * 1024 * 1024,
             )
-            result = RuntimeArchiveExecutor(paths=self.paths).apply(record, downloaded.staged_path, catalog_fingerprint=self.catalog.fingerprint) if executor_kind == "runtime" else ModelArchiveExecutor(paths=self.paths).apply(record, downloaded.staged_path, catalog_fingerprint=self.catalog.fingerprint)
-            return {"status": result.get("status"), "plan_id": plan_id, "component_id": plan["component_id"], "execution": result.get("execution", "not_run"), "dry_run": False, "result": {key: result.get(key) for key in ("state", "receipt", "code", "next_action") if key in result}, "next_action": result.get("next_action")}
+            current_binding, record, binding_error = self._fresh_plan_binding(plan)
+            if current_binding is None or record is None:
+                return self._binding_refusal(plan_id, binding_error or "stale_binding")
+            result = RuntimeArchiveExecutor(paths=self.paths).apply(record, downloaded.staged_path, catalog_binding=current_binding, catalog_fingerprint=current_binding.catalog_fingerprint, catalog_revision=current_binding.catalog_revision) if executor_kind == "runtime" else ModelArchiveExecutor(paths=self.paths).apply(record, downloaded.staged_path, catalog_binding=current_binding, catalog_fingerprint=current_binding.catalog_fingerprint, catalog_revision=current_binding.catalog_revision)
+            execution = result.get("execution", "not_run")
+            response = {"status": result.get("status"), "plan_id": plan_id, "component_id": plan["component_id"], "execution": execution, "dry_run": result.get("dry_run", execution != "completed"), "result": {key: result.get(key) for key in ("state", "receipt", "code", "next_action") if key in result}, "next_action": result.get("next_action")}
+            if isinstance(result.get("code"), str):
+                response["code"] = result["code"]
+            return response
         except DownloadError as exc:
             return {"status": "failed", "code": exc.code, "plan_id": plan_id, "execution": "not_run", "dry_run": False}
         except (OSError, ValueError):
             return {"status": "failed", "code": "component_install_failed", "plan_id": plan_id, "execution": "not_run", "dry_run": False}
+        finally:
+            if stage.exists() and not _is_reparse(stage):
+                shutil.rmtree(stage, ignore_errors=True)
 
     def plan_maintenance(self, component_id: str, action: str) -> dict[str, Any]:
         if action not in {"repair", "update", "uninstall"}:
@@ -235,6 +290,8 @@ class ComponentLifecycle:
         current_binding, record, binding_error = self._fresh_plan_binding(plan)
         if current_binding is None or record is None:
             return self._binding_refusal(plan_id, binding_error or "stale_binding")
+        if current_binding.catalog_schema == V2_CATALOG_SCHEMA:
+            return self._binding_refusal(plan_id, "catalog_schema_unsupported")
         if plan.get("disposition") != "AUTO_INSTALL_READY":
             return {"status": "unavailable", "code": "manual_review_required", "execution": "not_run"}
         from src.services.model_manager import ModelManager
@@ -273,6 +330,8 @@ class ComponentLifecycle:
         current_binding, record, binding_error = self._fresh_plan_binding(plan)
         if current_binding is None or record is None:
             return self._binding_refusal(plan_id, binding_error or "stale_binding")
+        if current_binding.catalog_schema == V2_CATALOG_SCHEMA:
+            return self._binding_refusal(plan_id, "catalog_schema_unsupported")
         marker = self.paths.config_root / "v7_fixture_receipts.json"
         try:
             records = json.loads(marker.read_text(encoding="utf-8"))
