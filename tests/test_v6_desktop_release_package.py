@@ -217,7 +217,7 @@ class TestReleaseManifestAndPackaging(unittest.TestCase):
         manifest = build_mod.build_release_package()
         self.assertEqual(manifest["schema_version"], 1)
         self.assertEqual(manifest["application_name"], "Local AI Hub")
-        self.assertEqual(manifest["version"], "7.0.0")
+        self.assertEqual(manifest["version"], "7.1.0")
         self.assertEqual(manifest["platform"], "windows-x64")
         self.assertIn("tag", manifest)
         self.assertIn("source_reference", manifest)

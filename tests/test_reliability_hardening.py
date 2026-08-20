@@ -584,7 +584,7 @@ class ProductVersionTests(unittest.TestCase):
         from src.services.api.core import health
         from src.shared.version import PRODUCT_VERSION
 
-        self.assertEqual(PRODUCT_VERSION, "7.0.0")
+        self.assertEqual(PRODUCT_VERSION, "7.1.0")
         with patch("src.services.api.core.query_gpu", return_value={"available": False}):
             self.assertEqual(health(probe_gpu=False)["version"], PRODUCT_VERSION)
         self.assertEqual(HubHandler.server_version, f"LocalAIHub/{PRODUCT_VERSION}")

@@ -3,7 +3,7 @@
 ; Preserves machine-local data (Models, Environments, runtime, Output, Config, Backups, Reports)
 
 #define MyAppName "Local AI Hub"
-#define MyAppVersion "7.0.0"
+#define MyAppVersion "7.1.0"
 #define MyAppPublisher "Local AI Hub Project"
 #define MyAppURL "https://github.com/letam10/local-ai-hub"
 #define DefaultInstallDir "{autopf}\Local AI Hub"
@@ -22,7 +22,7 @@ DirExistsWarning=no
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist
-OutputBaseFilename=LocalAIHub-Setup-Win64-v7.0.0
+OutputBaseFilename=LocalAIHub-Setup-Win64-v7.1.0
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
