@@ -91,7 +91,7 @@ class ModelManager:
         except KeyError as exc:
             raise ModelCatalogError("unknown_model_id") from exc
 
-    def inspect(self, model_id: str) -> dict[str, Any]:
+    def inspect(self, model_id: str, *, catalog_binding: Any | None = None) -> dict[str, Any]:
         from src.services.component_installer.verification import FastComponentInspector
 
         record = self._record(model_id)
@@ -101,6 +101,7 @@ class ModelManager:
             component_type="model",
             record=record,
             catalog_fingerprint=self.catalog_fingerprint,
+            catalog_binding=catalog_binding,
         )
         result["model_id"] = model_id
         result["files"] = [
@@ -127,7 +128,7 @@ class ModelManager:
             "next_action": "Choose an explicit model plan from the Module/Model Manager.",
         }
 
-    def verify(self, model_id: str) -> dict[str, Any]:
+    def verify(self, model_id: str, *, catalog_binding: Any | None = None) -> dict[str, Any]:
         from src.services.component_installer.receipts import ReceiptError, write_component_receipt
         from src.services.component_installer.verification import DeepComponentVerifier
 
@@ -138,6 +139,7 @@ class ModelManager:
             component_type="model",
             record=record,
             catalog_fingerprint=self.catalog_fingerprint,
+            catalog_binding=catalog_binding,
             source="catalog_primary",
         )
         if result.get("status") != "completed":
@@ -150,7 +152,7 @@ class ModelManager:
                 "next_action": result.get("next_action", "Review the managed installation."),
             }
         try:
-            write_component_receipt(self.paths.config_root, model_id, result["receipt"])
+            write_component_receipt(self.paths.config_root, model_id, result["receipt"], catalog_binding=catalog_binding)
         except (OSError, ReceiptError, KeyError, TypeError):
             return {"schema_version": "model-verify.v1", "status": "unavailable", "execution": "not_run", "dry_run": True, "model_id": model_id, "state": "UNAVAILABLE", "verified": False, "code": "receipt_write_failed", "reason": "Verification completed but its receipt could not be stored safely.", "next_action": "Retry explicit verification after reviewing receipt storage."}
         return {

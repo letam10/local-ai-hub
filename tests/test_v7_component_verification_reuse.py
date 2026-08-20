@@ -7,11 +7,12 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from src.platform.paths import ComponentPathError, HubPaths, resolve_component_leaf, resolve_component_root
-from src.services.component_installer.receipts import ReceiptConflict, ReceiptError, read_receipts, write_component_receipt
+from src.services.component_installer.receipts import CatalogBindingContext, ReceiptConflict, ReceiptError, read_receipts, write_component_receipt
 from src.services.component_installer.verification import DeepComponentVerifier, FastComponentInspector, stream_sha256
 
 
@@ -209,6 +210,92 @@ class V7ComponentVerificationReuseTests(unittest.TestCase):
         bad["state"] = "OPERATIONAL"
         with self.assertRaises(ReceiptError):
             write_component_receipt(self.paths.config_root, "demo-model", bad)
+
+    def test_v2_model_binding_uses_catalog_version_fingerprint_and_source_identity(self) -> None:
+        target, _record, digest = self._model_file(b"v2-model")
+        record: dict[str, object] = {
+            "model_id": "demo-model", "display_name": "V2 demo model", "kind": "model", "category": "fixture",
+            "provider": "fixture", "version": "component-v9", "revision": "component-r9", "runtime_id": "demo-runtime",
+            "modules": ["demo"], "disposition": "MANUAL_IMPORT_ONLY", "install_strategy": "manual_import",
+            "primary_source": {"provider": "fixture", "kind": "metadata", "canonical_identity": "catalog:demo-model-v2", "revision": "component-r9", "verification_state": "manual", "url": None, "authentication_required": False, "license_required": False},
+            "trusted_fallback_sources": [], "source_verification": "manual", "latest_upstream_revision": None,
+            "latest_supported_revision": None, "license": {"state": "review_required", "spdx_id": None, "url": None},
+            "authentication": {"required": False, "state": "not_required"}, "update_parts": ["model"],
+            "estimated_download_size": target.stat().st_size, "estimated_disk_size": target.stat().st_size,
+            "minimum_vram_mb": 0, "recommended_vram_mb": 0, "notes": "fixture",
+            "source_identity": "catalog:demo-model-v2",
+            "files": [{"relative_path": "weights/demo.bin", "verification": "verified", "size_bytes": target.stat().st_size, "sha256": digest}],
+        }
+        context = CatalogBindingContext.for_v2(catalog_version="2026.08.21", catalog_fingerprint="3" * 64, source_identity="catalog:demo-model-v2")
+        result = DeepComponentVerifier().verify(paths=self.paths, component_id="demo-model", component_type="model", record=record, catalog_binding=context)
+        self.assertEqual(result["state"], "INSTALLED_VERIFIED")
+        self.assertEqual(result["receipt"]["catalog_schema"], "v7-production-catalog.v2")
+        self.assertEqual(result["receipt"]["catalog_revision"], "2026.08.21")
+        self.assertEqual(result["receipt"]["catalog_fingerprint"], "3" * 64)
+        self.assertEqual(result["receipt"]["source_identity"], "catalog:demo-model-v2")
+        with self.assertRaises(ReceiptError):
+            write_component_receipt(self.paths.config_root, "demo-model", result["receipt"])
+        write_component_receipt(self.paths.config_root, "demo-model", result["receipt"], catalog_binding=context)
+        inspected = FastComponentInspector().inspect(paths=self.paths, component_id="demo-model", component_type="model", record=record, catalog_binding=context)
+        self.assertEqual(inspected["status"], "INSTALLED_VERIFIED")
+        self.assertEqual(inspected["catalog_schema"], "v7-production-catalog.v2")
+        stale = CatalogBindingContext.for_v2(catalog_version="2026.08.22", catalog_fingerprint="3" * 64, source_identity="catalog:demo-model-v2")
+        self.assertNotEqual(FastComponentInspector().inspect(paths=self.paths, component_id="demo-model", component_type="model", record=record, catalog_binding=stale)["status"], "INSTALLED_VERIFIED")
+        wrong_source = CatalogBindingContext.for_v2(catalog_version="2026.08.21", catalog_fingerprint="3" * 64, source_identity="catalog:other")
+        rejected = DeepComponentVerifier().verify(paths=self.paths, component_id="demo-model", component_type="model", record=record, catalog_binding=wrong_source)
+        self.assertEqual(rejected["code"], "catalog_source_identity_mismatch")
+        self.assertNotIn("catalog:demo-model-v2", json.dumps(rejected.get("reason", "")))
+
+    def test_v2_runtime_binding_and_explicit_null_source_identity_are_path_free(self) -> None:
+        target = self.paths.runtime_root / "tools" / "demo.bin"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"v2-runtime")
+        record: dict[str, object] = {
+            "runtime_id": "demo-runtime", "display_name": "V2 demo runtime", "kind": "tool", "provider": "fixture",
+            "version": "runtime-component-r4", "revision": "runtime-component-r4", "root_class": "runtime_root",
+            "required_leaves": ["tools/demo.bin"], "modules": ["demo"], "disposition": "REFERENCE_EXISTING", "install_strategy": "reference_existing",
+            "primary_source": None, "trusted_fallback_sources": [], "source_identity": None, "source_verification": "manual",
+            "latest_upstream_revision": None, "latest_supported_revision": None,
+            "license": {"state": "review_required", "spdx_id": None, "url": None},
+            "authentication": {"required": False, "state": "not_required"}, "update_parts": ["runtime"],
+            "integrity": {"verification": "unverified"}, "estimated_download_size": 0, "estimated_disk_size": 0,
+            "notes": "fixture",
+        }
+        context = CatalogBindingContext.for_v2(catalog_version="2026.08.21", catalog_fingerprint="4" * 64, source_identity=None)
+        result = DeepComponentVerifier().verify(paths=self.paths, component_id="demo-runtime", component_type="runtime", record=record, catalog_binding=context)
+        self.assertEqual(result["state"], "INSTALLED_UNVERIFIED")
+        self.assertEqual(result["receipt"]["catalog_schema"], "v7-production-catalog.v2")
+        self.assertIsNone(result["receipt"]["source_identity"])
+        self.assertNotIn(str(self.temp.name), json.dumps(result))
+        self.assertNotIn("https://", json.dumps(result))
+
+    def test_v2_lifecycle_uses_component_specific_source_bindings(self) -> None:
+        from src.services.productization.lifecycle import ComponentLifecycle
+
+        model = {
+            "model_id": "demo-model", "display_name": "V2 demo model", "kind": "model", "category": "fixture",
+            "provider": "fixture", "version": "1", "revision": "model-r1", "runtime_id": "demo-runtime",
+            "modules": ["demo"], "files": [{"relative_path": "weights/demo.bin", "verification": "unverified"}],
+            "source_identity": "catalog:demo-model", "root_class": "models_root",
+            "disposition": "MANUAL_IMPORT_ONLY", "install_strategy": "manual_import",
+        }
+        runtime = {
+            "runtime_id": "demo-runtime", "display_name": "V2 demo runtime", "kind": "tool", "provider": "fixture",
+            "version": "1", "revision": "runtime-r1", "root_class": "runtime_root", "required_leaves": ["bin/demo.exe"],
+            "modules": ["demo"], "source_identity": None, "disposition": "REFERENCE_EXISTING", "install_strategy": "reference_existing",
+        }
+        catalog = SimpleNamespace(
+            catalog_schema_version="v7-production-catalog.v2", catalog_version="2026.08.21", fingerprint="5" * 64,
+            models={"demo-model": model}, runtimes={"demo-runtime": runtime},
+        )
+        lifecycle = ComponentLifecycle(paths=self.paths, catalog=catalog)
+        plan = lifecycle.plan_one_click("demo-model")
+        self.assertEqual(plan["dependencies"][0], {"kind": "runtime", "id": "demo-runtime", "status": "NOT_INSTALLED"})
+        self.assertNotIn(str(self.temp.name), json.dumps(plan))
+        binding = lifecycle._plans[plan["plan_id"]]["_catalog_binding"]
+        self.assertEqual(binding.catalog_schema, "v7-production-catalog.v2")
+        self.assertEqual(binding.catalog_revision, "2026.08.21")
+        self.assertEqual(binding.source_identity, "catalog:demo-model")
 
 
 if __name__ == "__main__":

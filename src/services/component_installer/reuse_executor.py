@@ -17,7 +17,7 @@ import time
 from typing import Any
 
 from src.platform.paths import HubPaths, resolve_component_root
-from .receipts import ReceiptError, write_component_receipt
+from .receipts import CatalogBindingContext, ReceiptError, write_component_receipt
 from .verification import DeepComponentVerifier, stream_sha256
 
 
@@ -101,6 +101,7 @@ class ExistingInstallReuseExecutor:
             component_type=str(component_type),
             record=record,
             catalog_fingerprint=plan.get("catalog_fingerprint") if isinstance(plan.get("catalog_fingerprint"), str) else None,
+            catalog_binding=plan.get("_catalog_binding") if isinstance(plan.get("_catalog_binding"), (CatalogBindingContext, Mapping)) else None,
             source="existing_install_reuse",
         )
         if result.get("status") != "completed":
@@ -109,7 +110,12 @@ class ExistingInstallReuseExecutor:
                 failure["code"] = "existing_install_incomplete"
             return failure
         try:
-            write_component_receipt(self.paths.config_root, component_id, result["receipt"])
+            write_component_receipt(
+                self.paths.config_root,
+                component_id,
+                result["receipt"],
+                catalog_binding=plan.get("_catalog_binding") if isinstance(plan.get("_catalog_binding"), (CatalogBindingContext, Mapping)) else None,
+            )
         except (OSError, ReceiptError, KeyError, TypeError):
             return {"status": "failed", "code": "receipt_write_failed", "execution": "not_run"}
         return {

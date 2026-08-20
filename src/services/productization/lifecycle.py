@@ -22,6 +22,7 @@ import time
 from typing import Any
 
 from src.platform.paths import ComponentPathError, HubPaths, get_paths, resolve_component_root
+from src.services.component_installer.receipts import CatalogBindingContext
 
 from .catalog import ProductionCatalog, ProductionCatalogError
 from .runtime_executor import RuntimeArchiveExecutor
@@ -52,7 +53,16 @@ class ComponentLifecycle:
             return "runtime", self.catalog.runtimes[component_id]
         raise LifecycleError("unknown_component_id")
 
-    def _inspect_component(self, component_id: str, component_type: str, record: Mapping[str, Any]) -> dict[str, Any]:
+    def _catalog_binding(self, component_type: str, record: Mapping[str, Any]) -> CatalogBindingContext:
+        if self.catalog.catalog_schema_version == "v7-production-catalog.v2":
+            return CatalogBindingContext.for_v2(
+                catalog_version=str(self.catalog.catalog_version),
+                catalog_fingerprint=self.catalog.fingerprint,
+                source_identity=record.get("source_identity") if "source_identity" in record else None,
+            )
+        return CatalogBindingContext.for_v1(component_type=component_type, record=record, catalog_fingerprint=self.catalog.fingerprint)
+
+    def _inspect_component(self, component_id: str, component_type: str, record: Mapping[str, Any], *, catalog_binding: CatalogBindingContext | None = None) -> dict[str, Any]:
         """Use the shared fixed-leaf fast inspector for lifecycle planning."""
 
         from src.services.component_installer.verification import FastComponentInspector
@@ -63,6 +73,7 @@ class ComponentLifecycle:
             component_type=component_type,
             record=record,
             catalog_fingerprint=self.catalog.fingerprint,
+            catalog_binding=catalog_binding or self._catalog_binding(component_type, record),
         )
 
     def snapshot(self) -> dict[str, Any]:
@@ -73,12 +84,15 @@ class ComponentLifecycle:
 
     def plan_one_click(self, component_id: str) -> dict[str, Any]:
         kind, record = self._record(component_id)
+        binding = self._catalog_binding(kind, record)
         if kind == "model":
-            current = self._inspect_component(component_id, "model", record)
+            current = self._inspect_component(component_id, "model", record, catalog_binding=binding)
             runtime_id = record.get("runtime_id")
-            runtime = self._inspect_component(runtime_id, "runtime", self.catalog.runtimes[runtime_id]) if runtime_id and runtime_id in self.catalog.runtimes else None
+            runtime_record = self.catalog.runtimes.get(runtime_id) if isinstance(runtime_id, str) else None
+            runtime_binding = self._catalog_binding("runtime", runtime_record) if isinstance(runtime_record, Mapping) else None
+            runtime = self._inspect_component(runtime_id, "runtime", runtime_record, catalog_binding=runtime_binding) if isinstance(runtime_id, str) and runtime_record is not None else None
         else:
-            current = self._inspect_component(component_id, "runtime", record)
+            current = self._inspect_component(component_id, "runtime", record, catalog_binding=binding)
             runtime = current
             runtime_id = component_id
         dependencies = []
@@ -91,7 +105,7 @@ class ComponentLifecycle:
         plan_id = "v7_plan_" + secrets.token_hex(16)
         # Keep the normalized catalog record server-side only; the public plan
         # projection contains IDs/fingerprints and bounded estimates.
-        plan = {**body, "record": record, "plan_id": plan_id, "plan_fingerprint": _fingerprint(body), "created_at": int(time.time())}
+        plan = {**body, "record": record, "plan_id": plan_id, "plan_fingerprint": _fingerprint(body), "_catalog_binding": binding, "created_at": int(time.time())}
         self._plans[plan_id] = plan
         status = "planned" if can_install and current["status"] != "INSTALLED" else "manual_review" if current["status"] != "INSTALLED" else "already_installed"
         return {**body, "plan_id": plan_id, "plan_fingerprint": plan["plan_fingerprint"], "status": status, "reason": "Server-owned dependency plan; no download or write occurred." if status == "planned" else "The catalog or existing owner state requires explicit review.", "next_action": action}
@@ -162,10 +176,11 @@ class ComponentLifecycle:
         if action not in {"repair", "update", "uninstall"}:
             raise LifecycleError("invalid_maintenance_action")
         kind, record = self._record(component_id)
-        current = self._inspect_component(component_id, kind, record)
+        binding = self._catalog_binding(kind, record)
+        current = self._inspect_component(component_id, kind, record, catalog_binding=binding)
         body = {"schema_version": "v7-component-maintenance-plan.v1", "component_id": component_id, "component_type": kind, "action": action, "catalog_fingerprint": self.catalog.fingerprint, "expected_state": current["status"], "preserve_existing": True, "execution": "not_run", "dry_run": True}
         plan_id = "v7_maintenance_" + secrets.token_hex(16)
-        plan = {**body, "plan_id": plan_id, "plan_fingerprint": _fingerprint(body)}
+        plan = {**body, "plan_id": plan_id, "plan_fingerprint": _fingerprint(body), "_catalog_binding": binding}
         self._plans[plan_id] = plan
         return {**body, "plan_id": plan_id, "plan_fingerprint": plan["plan_fingerprint"], "status": "planned", "reason": "Maintenance is plan-only until a separately confirmed manager executor is available.", "next_action": "Review the exact existing receipt and dependency impact."}
 

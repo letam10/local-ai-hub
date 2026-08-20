@@ -9,6 +9,7 @@ produce a verified state.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -43,6 +44,106 @@ _V3_REQUIRED_KEYS = frozenset({
     "state", "source", "operational",
 })
 _V3_OPTIONAL_KEYS = frozenset({"previous_version", "rollback_candidate"})
+V1_CATALOG_SCHEMAS = frozenset({"model-catalog.v1", "runtime-catalog.v1"})
+V2_CATALOG_SCHEMA = "v7-production-catalog.v2"
+_CATALOG_SCHEMAS = V1_CATALOG_SCHEMAS | {V2_CATALOG_SCHEMA}
+_CATALOG_BINDING_KEYS = frozenset({"catalog_schema", "catalog_revision", "catalog_fingerprint", "source_identity"})
+
+
+def _normalize_source_identity(value: object, *, required: bool = False) -> str | None:
+    if value is None:
+        if required:
+            raise ReceiptError("catalog_source_identity_missing")
+        return None
+    if not isinstance(value, str) or not value or len(value) > 256 or "\x00" in value:
+        raise ReceiptError("catalog_source_identity_invalid")
+    if _SHA256.fullmatch(value.casefold()):
+        return value.casefold()
+    lowered = value.casefold()
+    if "http://" in lowered or "https://" in lowered or "\\" in value or "/" in value or value.startswith("."):
+        raise ReceiptError("catalog_source_identity_invalid")
+    if not all(char.isalnum() or char in "._:+@ -" for char in value):
+        raise ReceiptError("catalog_source_identity_invalid")
+    return value
+
+
+@dataclass(frozen=True)
+class CatalogBindingContext:
+    """Explicit server-owned catalog identity carried into verification."""
+
+    catalog_schema: str
+    catalog_revision: str
+    catalog_fingerprint: str
+    source_identity: str | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.catalog_schema, str) or self.catalog_schema not in _CATALOG_SCHEMAS:
+            raise ReceiptError("catalog_schema_invalid")
+        if not isinstance(self.catalog_revision, str) or not self.catalog_revision or len(self.catalog_revision) > 256:
+            raise ReceiptError("catalog_revision_invalid")
+        if "http://" in self.catalog_revision.casefold() or "https://" in self.catalog_revision.casefold() or "\\" in self.catalog_revision or "/" in self.catalog_revision or ":" in self.catalog_revision:
+            raise ReceiptError("catalog_revision_invalid")
+        if not isinstance(self.catalog_fingerprint, str) or not _SHA256.fullmatch(self.catalog_fingerprint.casefold()):
+            raise ReceiptError("catalog_fingerprint_invalid")
+        normalized_source = _normalize_source_identity(self.source_identity, required=False)
+        object.__setattr__(self, "catalog_fingerprint", self.catalog_fingerprint.casefold())
+        object.__setattr__(self, "source_identity", normalized_source)
+
+    @classmethod
+    def for_v1(cls, *, component_type: str, record: Mapping[str, Any], catalog_fingerprint: str) -> "CatalogBindingContext":
+        schema = "model-catalog.v1" if component_type == "model" else "runtime-catalog.v1" if component_type == "runtime" else ""
+        return cls(
+            catalog_schema=schema,
+            catalog_revision=str(record.get("revision") or record.get("version") or "unknown"),
+            catalog_fingerprint=catalog_fingerprint,
+            source_identity=source_identity(record),
+        )
+
+    @classmethod
+    def for_v2(cls, *, catalog_version: str, catalog_fingerprint: str, source_identity: str | None) -> "CatalogBindingContext":
+        return cls(
+            catalog_schema=V2_CATALOG_SCHEMA,
+            catalog_revision=catalog_version,
+            catalog_fingerprint=catalog_fingerprint,
+            source_identity=source_identity,
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "CatalogBindingContext":
+        if not isinstance(value, Mapping):
+            raise ReceiptError("catalog_binding_invalid")
+        if set(value) != _CATALOG_BINDING_KEYS:
+            raise ReceiptError("catalog_binding_fields_invalid")
+        schema = value.get("catalog_schema")
+        revision = value.get("catalog_revision")
+        fingerprint = value.get("catalog_fingerprint")
+        if schema == V2_CATALOG_SCHEMA and "source_identity" not in value:
+            raise ReceiptError("catalog_source_identity_missing")
+        return cls(catalog_schema=schema, catalog_revision=revision, catalog_fingerprint=fingerprint, source_identity=value.get("source_identity"))
+
+    def validate_record(self, *, component_type: str, record: Mapping[str, Any]) -> None:
+        expected_v1 = "model-catalog.v1" if component_type == "model" else "runtime-catalog.v1" if component_type == "runtime" else None
+        if self.catalog_schema in V1_CATALOG_SCHEMAS and self.catalog_schema != expected_v1:
+            raise ReceiptError("catalog_schema_component_mismatch")
+        if self.catalog_schema in V1_CATALOG_SCHEMAS:
+            expected_revision = str(record.get("revision") or record.get("version") or "unknown")
+            if self.catalog_revision != expected_revision:
+                raise ReceiptError("catalog_revision_component_mismatch")
+            if self.source_identity != source_identity(record):
+                raise ReceiptError("catalog_source_identity_mismatch")
+        if self.catalog_schema == V2_CATALOG_SCHEMA:
+            if "source_identity" not in record:
+                raise ReceiptError("catalog_source_identity_missing")
+            if _normalize_source_identity(record.get("source_identity"), required=False) != self.source_identity:
+                raise ReceiptError("catalog_source_identity_mismatch")
+
+    def as_record_fields(self) -> dict[str, Any]:
+        return {
+            "catalog_schema": self.catalog_schema,
+            "catalog_revision": self.catalog_revision,
+            "catalog_fingerprint": self.catalog_fingerprint.casefold(),
+            "source_identity": self.source_identity,
+        }
 
 
 class ReceiptError(ValueError):
@@ -143,7 +244,12 @@ def _catalog_fingerprint(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _catalog_schema(component_type: object) -> str:
+def _catalog_schema(component_type: object, binding: CatalogBindingContext | None = None) -> str:
+    if binding is not None:
+        expected = "model-catalog.v1" if component_type == "model" else "runtime-catalog.v1" if component_type == "runtime" else None
+        if binding.catalog_schema == V2_CATALOG_SCHEMA or binding.catalog_schema == expected:
+            return binding.catalog_schema
+        raise ReceiptError("catalog_schema_component_mismatch")
     if component_type == "model":
         return "model-catalog.v1"
     if component_type == "runtime":
@@ -187,11 +293,12 @@ def _validate_v3_record(component_id: str, value: object) -> dict[str, Any]:
     if not isinstance(component_type, str) or component_type not in _COMPONENT_TYPES:
         raise ReceiptError("receipt_invalid_component_type")
     schema = value.get("catalog_schema")
-    if schema != _catalog_schema(component_type):
+    expected_schema = _catalog_schema(component_type)
+    if not isinstance(schema, str) or (schema != expected_schema and schema != V2_CATALOG_SCHEMA):
         raise ReceiptError("receipt_catalog_schema_mismatch")
     revision = _safe_text(value.get("catalog_revision"))
     fingerprint = _sha256(value.get("catalog_fingerprint"))
-    source = _sha256(value.get("source_identity"), nullable=True)
+    source = _normalize_source_identity(value.get("source_identity"), required=False)
     root_class = value.get("root_class")
     location_class = value.get("location_class")
     if not isinstance(root_class, str) or not isinstance(location_class, str) or root_class not in _ROOT_CLASSES or location_class not in _ROOT_CLASSES:
@@ -394,11 +501,34 @@ def _legacy_to_v3_record(component_id: str, receipt: Mapping[str, Any]) -> dict[
     return _validate_v3_record(component_id, value)
 
 
-def _normalize_new_record(component_id: str, receipt: Mapping[str, Any]) -> dict[str, Any]:
+def _coerce_binding(value: CatalogBindingContext | Mapping[str, Any] | None) -> CatalogBindingContext | None:
+    if value is None:
+        return None
+    if isinstance(value, CatalogBindingContext):
+        return value
+    if isinstance(value, Mapping):
+        return CatalogBindingContext.from_mapping(value)
+    raise ReceiptError("catalog_binding_invalid")
+
+
+def _normalize_new_record(component_id: str, receipt: Mapping[str, Any], *, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> dict[str, Any]:
     if not isinstance(component_id, str) or not _ID.fullmatch(component_id):
         raise ReceiptError("receipt_invalid_component_id")
     if not isinstance(receipt, Mapping):
         raise ReceiptError("receipt_record_not_object")
+    binding = _coerce_binding(catalog_binding)
+    if binding is not None:
+        component_type_value = receipt.get("component_type")
+        if not isinstance(component_type_value, str):
+            raise ReceiptError("receipt_invalid_component_type")
+        expected_schema = "model-catalog.v1" if component_type_value == "model" else "runtime-catalog.v1" if component_type_value == "runtime" else None
+        if binding.catalog_schema == V2_CATALOG_SCHEMA:
+            binding.validate_record(component_type=component_type_value, record=receipt)
+        elif binding.catalog_schema != expected_schema:
+            raise ReceiptError("catalog_schema_component_mismatch")
+        receipt = {**receipt, **binding.as_record_fields()}
+    elif receipt.get("catalog_schema") == V2_CATALOG_SCHEMA:
+        raise ReceiptError("catalog_binding_required")
     if _V3_REQUIRED_KEYS.issubset(set(receipt)) and not (set(receipt) - (_V3_REQUIRED_KEYS | _V3_OPTIONAL_KEYS)):
         return _validate_v3_record(component_id, receipt)
     if set(receipt) - _LEGACY_INPUT_KEYS:
@@ -481,14 +611,14 @@ def _atomic_write(path: Path, value: Mapping[str, Any]) -> None:
                 pass
 
 
-def write_component_receipt(config_root: Path, component_id: str, receipt: Mapping[str, Any]) -> dict[str, Any]:
+def write_component_receipt(config_root: Path, component_id: str, receipt: Mapping[str, Any], *, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Atomically write one server-owned V3 record, never a caller path."""
 
     current = _read_document(Path(config_root))
     records = current.get("records") if isinstance(current.get("records"), Mapping) else {}
     if current.get("schema_version") == LEGACY_RECEIPT_SCHEMA:
         records = {key: _legacy_to_v3_record(key, value) for key, value in records.items() if isinstance(key, str) and isinstance(value, Mapping)}
-    candidate = _normalize_new_record(component_id, receipt)
+    candidate = _normalize_new_record(component_id, receipt, catalog_binding=catalog_binding)
     existing = records.get(component_id)
     if isinstance(existing, Mapping):
         try:
@@ -502,18 +632,18 @@ def write_component_receipt(config_root: Path, component_id: str, receipt: Mappi
     return dict(candidate)
 
 
-def write_verified_receipt(config_root: Path, component_id: str, receipt: Mapping[str, Any], *, expected_catalog_fingerprint: str | None = None) -> dict[str, Any]:
+def write_verified_receipt(config_root: Path, component_id: str, receipt: Mapping[str, Any], *, expected_catalog_fingerprint: str | None = None, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Receipt-only explicit verification update with a binding check."""
 
     if expected_catalog_fingerprint is not None and receipt.get("catalog_fingerprint") != expected_catalog_fingerprint:
         raise ReceiptConflict("receipt_catalog_fingerprint_mismatch")
     candidate = dict(receipt)
     candidate["state"] = "INSTALLED_VERIFIED" if all(isinstance(item, Mapping) and item.get("verification_level") == "verified" for item in candidate.get("leaves", [])) else "INSTALLED_UNVERIFIED"
-    return write_component_receipt(config_root, component_id, candidate)
+    return write_component_receipt(config_root, component_id, candidate, catalog_binding=catalog_binding)
 
 
 __all__ = [
     "LEGACY_RECEIPT_SCHEMA", "MAX_RECEIPT_BYTES", "RECEIPT_FILENAME", "RECEIPT_SCHEMA",
-    "ReceiptConflict", "ReceiptError", "read_receipts", "source_identity",
+    "CatalogBindingContext", "ReceiptConflict", "ReceiptError", "read_receipts", "source_identity",
     "write_component_receipt", "write_verified_receipt",
 ]

@@ -83,7 +83,7 @@ class RuntimeManager:
         payload = json.dumps(self._records, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
 
-    def inspect(self, runtime_id: str) -> dict[str, Any]:
+    def inspect(self, runtime_id: str, *, catalog_binding: Any | None = None) -> dict[str, Any]:
         from src.services.component_installer.verification import FastComponentInspector
 
         record = next((item for item in self._records if item["runtime_id"] == runtime_id), None)
@@ -95,6 +95,7 @@ class RuntimeManager:
             component_type="runtime",
             record=record,
             catalog_fingerprint=self._catalog_fingerprint(),
+            catalog_binding=catalog_binding,
         )
         result["runtime_id"] = runtime_id
         return result
@@ -124,7 +125,7 @@ class RuntimeManager:
             "next_action": "Review pinned requirements, wheels/checksums and disk/process gates before explicit installation." if enough else "Increase free space or choose a smaller runtime.",
         }
 
-    def verify(self, runtime_id: str) -> dict[str, Any]:
+    def verify(self, runtime_id: str, *, catalog_binding: Any | None = None) -> dict[str, Any]:
         from src.services.component_installer.receipts import ReceiptError, write_component_receipt
         from src.services.component_installer.verification import DeepComponentVerifier
 
@@ -137,6 +138,7 @@ class RuntimeManager:
             component_type="runtime",
             record=record,
             catalog_fingerprint=self._catalog_fingerprint(),
+            catalog_binding=catalog_binding,
             source="catalog_primary",
         )
         if result.get("status") != "completed":
@@ -149,7 +151,7 @@ class RuntimeManager:
                 "next_action": result.get("next_action", "Review the managed runtime."),
             }
         try:
-            write_component_receipt(self.paths.config_root, runtime_id, result["receipt"])
+            write_component_receipt(self.paths.config_root, runtime_id, result["receipt"], catalog_binding=catalog_binding)
         except (OSError, ReceiptError, KeyError, TypeError):
             return {"schema_version": "runtime-verify.v1", "status": "unavailable", "execution": "not_run", "dry_run": True, "runtime_id": runtime_id, "state": "UNAVAILABLE", "verified": False, "code": "receipt_write_failed", "reason": "Verification completed but its receipt could not be stored safely.", "next_action": "Retry explicit verification after reviewing receipt storage."}
         return {

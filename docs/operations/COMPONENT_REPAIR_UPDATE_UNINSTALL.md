@@ -1,9 +1,15 @@
 # Component repair, verification and reuse contract
 
-Component state is derived from the server-owned V1 catalog, the fixed Hub
-roots and a bounded receipt.  The browser supplies only an opaque component or
-plan ID.  It cannot supply a root, path, file list, source, command, executable
-or credential.
+Component state is derived from a server-owned versioned catalog context, the
+fixed Hub roots and a bounded receipt.  V1 model/runtime callers retain their
+legacy schema/revision binding.  Normalized V2 callers explicitly carry
+`v7-production-catalog.v2`, the catalog version, catalog fingerprint and the
+normalized source identity (or an explicit null); component revision/version is
+never substituted for catalog version and source identity is never fabricated.
+The catalog version and fingerprint may be shared by a normalized catalog, but
+the source identity is bound independently for each model or runtime record.
+The browser supplies only an opaque component or plan ID.  It cannot supply a
+root, path, file list, source, command, executable or credential.
 
 ## Roots and leaves
 
@@ -24,7 +30,8 @@ then compares an existing receipt's component, catalog schema/revision/
 fingerprint and opaque source binding.  It never hashes a file, reads a whole
 file, downloads, starts a process, imports a model/runtime or claims
 operational capability.  A complete fixed selection without a bound receipt is
-`DISCOVERED`; a V2 receipt is readable as `INSTALLED_UNVERIFIED`.
+`DISCOVERED`; a legacy component-install V2 receipt is readable as
+`INSTALLED_UNVERIFIED`.
 
 Verify Installation, Reuse Existing and receipt-only Repair are explicit
 confirmation actions.  The deep verifier streams SHA-256 in bounded chunks for
@@ -44,6 +51,9 @@ Runtime/model capability evidence remains a separate contract.
 `component-install-receipts.v3` schema.  It binds component ID/type,
 catalog schema/revision/fingerprint, an opaque source identity, root/location
 class, relative leaves, bounded timestamps, state and `operational: false`.
+For V2 the schema/revision/fingerprint/source fields are copied only from the
+explicit server-owned catalog context; a component's own revision is not used
+as the catalog revision.
 Verified leaves additionally carry observed/verified size, SHA-256 and the
 `sha256` algorithm.  Duplicate keys, unknown fields, absolute paths, URLs,
 commands, executables, secrets and oversized documents fail closed.  Writes

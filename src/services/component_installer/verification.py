@@ -20,7 +20,7 @@ from typing import Any
 
 from src.platform.paths import ComponentPathError, HubPaths, is_reparse_point, resolve_component_leaf, resolve_component_root
 
-from .receipts import RECEIPT_SCHEMA, ReceiptError, read_receipts, source_identity
+from .receipts import CatalogBindingContext, RECEIPT_SCHEMA, ReceiptError, read_receipts
 
 
 HASH_CHUNK_SIZE = 1024 * 1024
@@ -92,15 +92,24 @@ def _catalog_leaves(record: Mapping[str, Any], component_type: str) -> tuple[lis
     return leaves, None
 
 
-def _catalog_binding(record: Mapping[str, Any], component_type: str, catalog_fingerprint: str | None) -> dict[str, str | None]:
-    fingerprint = catalog_fingerprint if isinstance(catalog_fingerprint, str) else ""
-    revision = record.get("revision") or record.get("version") or "unknown"
-    return {
-        "catalog_schema": "model-catalog.v1" if component_type == "model" else "runtime-catalog.v1",
-        "catalog_revision": str(revision)[:256],
-        "catalog_fingerprint": fingerprint.casefold() if len(fingerprint) == 64 else None,
-        "source_identity": source_identity(record),
-    }
+def _catalog_binding(
+    record: Mapping[str, Any],
+    component_type: str,
+    catalog_fingerprint: str | None,
+    catalog_binding: CatalogBindingContext | Mapping[str, Any] | None,
+) -> CatalogBindingContext:
+    if catalog_binding is None:
+        if not isinstance(catalog_fingerprint, str) or len(catalog_fingerprint) != 64:
+            raise ReceiptError("catalog_binding_missing")
+        binding = CatalogBindingContext.for_v1(component_type=component_type, record=record, catalog_fingerprint=catalog_fingerprint)
+    elif isinstance(catalog_binding, CatalogBindingContext):
+        binding = catalog_binding
+    elif isinstance(catalog_binding, Mapping):
+        binding = CatalogBindingContext.from_mapping(catalog_binding)
+    else:
+        raise ReceiptError("catalog_binding_invalid")
+    binding.validate_record(component_type=component_type, record=record)
+    return binding
 
 
 def _root_class(record: Mapping[str, Any], component_type: str) -> str | None:
@@ -142,18 +151,18 @@ def _safe_root(paths: HubPaths, component_id: str, component_type: str, root_cla
         return None, "component_root_unavailable"
 
 
-def _receipt_binding_matches(receipt: Mapping[str, Any], component_id: str, component_type: str, record: Mapping[str, Any], catalog_fingerprint: str | None, root_class: str, observed: Sequence[Mapping[str, Any]]) -> bool:
+def _receipt_binding_matches(receipt: Mapping[str, Any], component_id: str, component_type: str, record: Mapping[str, Any], binding: CatalogBindingContext, root_class: str, observed: Sequence[Mapping[str, Any]]) -> bool:
     if receipt.get("schema_version") != RECEIPT_SCHEMA or not isinstance(receipt.get("records"), Mapping):
         return False
     value = receipt["records"].get(component_id)
     if not isinstance(value, Mapping):
         return False
-    binding = _catalog_binding(record, component_type, catalog_fingerprint)
+    binding_fields = binding.as_record_fields()
     if value.get("component_id") != component_id or value.get("component_type") != component_type:
         return False
-    if value.get("catalog_schema") != binding["catalog_schema"] or value.get("catalog_revision") != binding["catalog_revision"]:
+    if value.get("catalog_schema") != binding_fields["catalog_schema"] or value.get("catalog_revision") != binding_fields["catalog_revision"]:
         return False
-    if value.get("catalog_fingerprint") != binding["catalog_fingerprint"] or value.get("source_identity") != binding["source_identity"]:
+    if value.get("catalog_fingerprint") != binding_fields["catalog_fingerprint"] or value.get("source_identity") != binding_fields["source_identity"]:
         return False
     if value.get("root_class") != root_class or value.get("location_class") != root_class:
         return False
@@ -186,10 +195,14 @@ def _receipt_binding_matches(receipt: Mapping[str, Any], component_id: str, comp
 class FastComponentInspector:
     """Startup-safe fixed-leaf inspection; never invokes the deep hasher."""
 
-    def inspect(self, *, paths: HubPaths, component_id: str, component_type: str, record: Mapping[str, Any], catalog_fingerprint: str | None = None, receipts: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def inspect(self, *, paths: HubPaths, component_id: str, component_type: str, record: Mapping[str, Any], catalog_fingerprint: str | None = None, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None, receipts: Mapping[str, Any] | None = None) -> dict[str, Any]:
         leaves, error = _catalog_leaves(record, component_type)
         if leaves is None:
             return _fixed_result(component_id, component_type, status="UNAVAILABLE", code=error, reason="The server-owned component catalog is invalid or incomplete.", next_action="Review the fixed catalog metadata before verification.")
+        try:
+            binding = _catalog_binding(record, component_type, catalog_fingerprint, catalog_binding)
+        except ReceiptError as exc:
+            return _fixed_result(component_id, component_type, status="UNAVAILABLE", code=exc.code, reason="The server-owned catalog binding is unavailable or mismatched.", next_action="Refresh the server-owned catalog context before verification.")
         root_class = _root_class(record, component_type)
         if root_class is None:
             return _fixed_result(component_id, component_type, status="UNAVAILABLE", code="catalog_root_class_invalid", reason="The server-owned component root class is unavailable.", next_action="Review the fixed managed-root contract.")
@@ -217,7 +230,7 @@ class FastComponentInspector:
         receipt_doc = receipts if isinstance(receipts, Mapping) else read_receipts(paths.config_root)
         if receipt_doc.get("schema_version") == "component-install-receipts.v2":
             legacy_record = isinstance(receipt_doc.get("records"), Mapping) and component_id in receipt_doc["records"]
-        bound = _receipt_binding_matches(receipt_doc, component_id, component_type, record, catalog_fingerprint, root_class, observed)
+        bound = _receipt_binding_matches(receipt_doc, component_id, component_type, record, binding, root_class, observed)
         receipt_state = None
         if bound and isinstance(receipt_doc.get("records"), Mapping) and isinstance(receipt_doc["records"].get(component_id), Mapping):
             candidate_state = receipt_doc["records"][component_id].get("state")
@@ -253,8 +266,10 @@ class FastComponentInspector:
             "execution": "not_run",
             "dry_run": True,
             "leaves": observed,
-            "catalog_fingerprint": catalog_fingerprint if isinstance(catalog_fingerprint, str) and len(catalog_fingerprint) == 64 else None,
-            "catalog_revision": str(record.get("revision") or record.get("version") or "unknown")[:256],
+            "catalog_schema": binding.catalog_schema,
+            "catalog_fingerprint": binding.catalog_fingerprint,
+            "catalog_revision": binding.catalog_revision,
+            "source_identity": binding.source_identity,
             "verification_source": "receipt_v3" if bound else "legacy_receipt" if legacy_record else "fixed_leaf_inspection",
             "operational": False,
             "reason": reason,
@@ -265,10 +280,14 @@ class FastComponentInspector:
 class DeepComponentVerifier:
     """Explicit streaming verifier for user-confirmed reuse/repair."""
 
-    def verify(self, *, paths: HubPaths, component_id: str, component_type: str, record: Mapping[str, Any], catalog_fingerprint: str | None = None, source: str = "existing_install_reuse") -> dict[str, Any]:
+    def verify(self, *, paths: HubPaths, component_id: str, component_type: str, record: Mapping[str, Any], catalog_fingerprint: str | None = None, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None, source: str = "existing_install_reuse") -> dict[str, Any]:
         leaves, error = _catalog_leaves(record, component_type)
         if leaves is None:
             return _fixed_result(component_id, component_type, status="UNAVAILABLE", code=error, reason="The server-owned component catalog is invalid or incomplete.", next_action="Review fixed catalog metadata before retrying verification.")
+        try:
+            binding = _catalog_binding(record, component_type, catalog_fingerprint, catalog_binding)
+        except ReceiptError as exc:
+            return _fixed_result(component_id, component_type, status="UNAVAILABLE", code=exc.code, reason="The server-owned catalog binding is unavailable or mismatched.", next_action="Refresh the server-owned catalog context before verification.")
         root_class = _root_class(record, component_type)
         root, root_error = _safe_root(paths, component_id, component_type, root_class, require_exists=True) if root_class else (None, "catalog_root_class_invalid")
         if root is None:
@@ -308,15 +327,14 @@ class DeepComponentVerifier:
                 leaf.update({"verified_size_bytes": before[0], "verified_sha256": measured_hash, "hash_algorithm": "sha256", "verified_at": int(time.time())})
             output_leaves.append(leaf)
         state = "INSTALLED_VERIFIED" if all_verified else "INSTALLED_UNVERIFIED"
-        binding = _catalog_binding(record, component_type, catalog_fingerprint)
         safe_source = source if isinstance(source, str) and source in {"catalog_primary", "existing_install_reuse", "manual_import", "legacy", "unknown"} else "unknown"
         receipt = {
             "component_id": component_id,
             "component_type": component_type,
-            "catalog_schema": binding["catalog_schema"],
-            "catalog_revision": binding["catalog_revision"],
-            "catalog_fingerprint": binding["catalog_fingerprint"],
-            "source_identity": binding["source_identity"],
+            "catalog_schema": binding.catalog_schema,
+            "catalog_revision": binding.catalog_revision,
+            "catalog_fingerprint": binding.catalog_fingerprint,
+            "source_identity": binding.source_identity,
             "root_class": root_class,
             "location_class": root_class,
             "leaves": output_leaves,
@@ -330,6 +348,10 @@ class DeepComponentVerifier:
             "status": "completed",
             "component_id": component_id,
             "component_type": component_type,
+            "catalog_schema": binding.catalog_schema,
+            "catalog_revision": binding.catalog_revision,
+            "catalog_fingerprint": binding.catalog_fingerprint,
+            "source_identity": binding.source_identity,
             "state": state,
             "location_class": root_class,
             "execution": "not_run",

@@ -37,7 +37,7 @@ from .downloader import DownloadError, TrustedDownloader
 from .import_executor import ManualImportExecutor
 from .maintenance_executor import MaintenanceExecutor
 from .reuse_executor import ExistingInstallReuseExecutor
-from .receipts import source_identity, write_component_receipt
+from .receipts import CatalogBindingContext, ReceiptError, write_component_receipt
 
 
 class SelectionError(ValueError):
@@ -69,6 +69,18 @@ def _state_fingerprint(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _binding_context(component_type: str, record: Mapping[str, Any], catalog_fingerprint: str, supplied: CatalogBindingContext | Mapping[str, Any] | None = None) -> CatalogBindingContext:
+    try:
+        if supplied is None:
+            return CatalogBindingContext.for_v1(component_type=component_type, record=record, catalog_fingerprint=catalog_fingerprint)
+        binding = supplied if isinstance(supplied, CatalogBindingContext) else CatalogBindingContext.from_mapping(supplied)
+        binding.validate_record(component_type=component_type, record=record)
+        return binding
+    except (ReceiptError, TypeError, ValueError) as exc:
+        code = getattr(exc, "code", "catalog_binding_invalid")
+        raise InstallPlanError(str(code)) from None
+
+
 class ComponentInstaller:
     """Compose, validate and execute only server-owned component plans."""
 
@@ -90,11 +102,11 @@ class ComponentInstaller:
     def _runtime_record(self, component_id: str) -> dict[str, Any] | None:
         return next((item for item in self.runtime_manager._records if item["runtime_id"] == component_id), None)
 
-    def _inspect(self, component_id: str, component_type: str) -> dict[str, Any]:
+    def _inspect(self, component_id: str, component_type: str, *, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> dict[str, Any]:
         if component_type == "model":
-            return self.model_manager.inspect(component_id)
+            return self.model_manager.inspect(component_id, catalog_binding=catalog_binding)
         if component_type == "runtime":
-            return self.runtime_manager.inspect(component_id)
+            return self.runtime_manager.inspect(component_id, catalog_binding=catalog_binding)
         raise InstallPlanError("invalid_component_type")
 
     @staticmethod
@@ -118,7 +130,7 @@ class ComponentInstaller:
             raise InstallPlanError("unknown_component")
         return record
 
-    def _dependency_steps(self, component_id: str, component_type: str, record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def _dependency_steps(self, component_id: str, component_type: str, record: Mapping[str, Any], *, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
         """Build a fixed server-owned dependency graph for one plan."""
 
         if component_type != "model":
@@ -129,7 +141,25 @@ class ComponentInstaller:
         runtime = self._runtime_record(runtime_id)
         if runtime is None:
             return [{"kind": "runtime", "component_id": runtime_id, "status": "UNAVAILABLE", "disposition": "UNSUPPORTED"}]
-        state = self.runtime_manager.inspect(runtime_id)
+        dependency_binding = catalog_binding
+        if catalog_binding is not None:
+            try:
+                context = catalog_binding if isinstance(catalog_binding, CatalogBindingContext) else CatalogBindingContext.from_mapping(catalog_binding)
+                if context.catalog_schema == "v7-production-catalog.v2":
+                    dependency_binding = CatalogBindingContext.for_v2(
+                        catalog_version=context.catalog_revision,
+                        catalog_fingerprint=context.catalog_fingerprint,
+                        source_identity=runtime.get("source_identity") if "source_identity" in runtime else None,
+                    )
+                elif context.catalog_schema in {"model-catalog.v1", "runtime-catalog.v1"}:
+                    dependency_binding = CatalogBindingContext.for_v1(
+                        component_type="runtime",
+                        record=runtime,
+                        catalog_fingerprint=self.runtime_manager._catalog_fingerprint(),
+                    )
+            except (ReceiptError, TypeError, ValueError):
+                dependency_binding = None
+        state = self.runtime_manager.inspect(runtime_id, catalog_binding=dependency_binding)
         return [{"kind": "runtime", "component_id": runtime_id, "status": state.get("status", "UNAVAILABLE"), "disposition": runtime.get("disposition", "MANUAL_INSTALL"), "install_strategy": runtime.get("install_strategy", "reference_existing"), "shared_dependency_id": runtime.get("shared_dependency_id")}]
 
     def _history_path(self) -> Path:
@@ -222,13 +252,15 @@ class ComponentInstaller:
                 return {"schema_version": "component-detail.v1", "status": "completed", "execution": "not_run", "dry_run": True, "component": item}
         raise InstallPlanError("unknown_component")
 
-    def plan_install(self, component_id: str, *, component_type: str = "model", variant: str | None = None) -> dict[str, Any]:
+    def plan_install(self, component_id: str, *, component_type: str = "model", variant: str | None = None, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> dict[str, Any]:
         component_id = validate_component_id(component_id)
         if component_type not in {"model", "runtime"}:
             raise InstallPlanError("invalid_component_type")
         record = self._catalog_record(component_id, component_type)
-        state = self._inspect(component_id, component_type)
-        dependencies = self._dependency_steps(component_id, component_type, record)
+        default_fingerprint = self.model_manager.catalog_fingerprint if component_type == "model" else self.runtime_manager._catalog_fingerprint()
+        binding = _binding_context(component_type, record, default_fingerprint, catalog_binding)
+        state = self._inspect(component_id, component_type, catalog_binding=binding)
+        dependencies = self._dependency_steps(component_id, component_type, record, catalog_binding=binding)
         projection = safe_component_projection({**record, "component_id": component_id, "component_type": component_type, "location_class": "models_root" if component_type == "model" else record.get("root_class")})
         if variant is not None and variant not in {"default", "low_vram", "portable"}:
             raise InstallPlanError("invalid_component_variant")
@@ -237,7 +269,7 @@ class ComponentInstaller:
             "component_id": component_id,
             "component_type": component_type,
             "variant": variant or "default",
-            "catalog_fingerprint": self.model_manager.catalog_fingerprint if component_type == "model" else self.runtime_manager._catalog_fingerprint(),
+            "catalog_fingerprint": binding.catalog_fingerprint,
             "expected_state_fingerprint": _state_fingerprint(state),
             "existing_status": state["status"],
             "auto_install_supported": self._auto_install_ready(record),
@@ -249,7 +281,7 @@ class ComponentInstaller:
         }
         plan_id = f"install_plan_{secrets.token_hex(16)}"
         fingerprint = plan_fingerprint(plan_body)
-        internal = {**plan_body, "plan_id": plan_id, "plan_fingerprint": fingerprint, "record": record, "created_at": time.time()}
+        internal = {**plan_body, "plan_id": plan_id, "plan_fingerprint": fingerprint, "record": record, "_catalog_binding": binding, "created_at": time.time()}
         self._plans[plan_id] = internal
         return {
             "schema_version": "component-install-plan.v1", "plan_id": plan_id, "plan_fingerprint": fingerprint,
@@ -270,7 +302,7 @@ class ComponentInstaller:
             return {"status": "error", "code": "unknown_install_plan"}
         if not confirmed:
             return {"status": "waiting_confirmation", "plan_id": plan_id, "execution": "not_run"}
-        current = self._inspect(internal["component_id"], internal["component_type"])
+        current = self._inspect(internal["component_id"], internal["component_type"], catalog_binding=internal.get("_catalog_binding"))
         if _state_fingerprint(current) != internal["expected_state_fingerprint"]:
             return {"status": "conflict", "code": "stale_install_plan", "plan_id": plan_id, "next_action": "Create a fresh plan."}
         if not internal["auto_install_supported"]:
@@ -294,7 +326,7 @@ class ComponentInstaller:
             return {"status": "error", "code": "unknown_install_plan", "execution": "not_run"}
         if not confirmed:
             return {"status": "waiting_confirmation", "plan_id": plan_id, "execution": "not_run"}
-        current = self._inspect(plan["component_id"], plan["component_type"])
+        current = self._inspect(plan["component_id"], plan["component_type"], catalog_binding=plan.get("_catalog_binding"))
         if _state_fingerprint(current) != plan["expected_state_fingerprint"]:
             return {"status": "conflict", "code": "stale_install_plan", "plan_id": plan_id, "next_action": "Create a fresh plan."}
         if not plan.get("auto_install_supported"):
@@ -344,6 +376,9 @@ class ComponentInstaller:
                 self._cancel_events.pop(job_id, None)
                 return {"status": "failed", "code": "finalization_failed", "job_id": job_id, "plan_id": plan_id, "execution": "not_run"}
             try:
+                binding = plan.get("_catalog_binding")
+                if not isinstance(binding, CatalogBindingContext):
+                    binding = _binding_context(plan["component_type"], record, str(plan.get("catalog_fingerprint") or ""), binding if isinstance(binding, Mapping) else None)
                 root_class = "models_root" if plan["component_type"] == "model" else record.get("root_class", "runtime_root")
                 managed_root = resolve_component_root(self.paths, plan["component_id"], plan["component_type"], root_class, require_exists=True)
                 if plan["component_type"] == "model":
@@ -359,10 +394,9 @@ class ComponentInstaller:
                 write_component_receipt(self.paths.config_root, plan["component_id"], {
                     "component_id": plan["component_id"],
                     "component_type": plan["component_type"],
-                    "catalog_schema": "model-catalog.v1" if plan["component_type"] == "model" else "runtime-catalog.v1",
                     "bundle_revision": str(record.get("revision") or "unknown"),
                     "source": "catalog_primary",
-                    "source_identity": source_identity(record),
+                    "source_identity": binding.source_identity,
                     "root_class": "models_root" if plan["component_type"] == "model" else record.get("root_class", "runtime_root"),
                     "location_class": "models_root" if plan["component_type"] == "model" else record.get("root_class", "runtime_root"),
                     "files": receipt_leaves,
@@ -372,8 +406,8 @@ class ComponentInstaller:
                     "operational": False,
                     "previous_version": None,
                     "rollback_candidate": None,
-                    "catalog_fingerprint": plan.get("catalog_fingerprint"),
-                })
+                    **binding.as_record_fields(),
+                }, catalog_binding=binding)
             except (OSError, ComponentPathError, ValueError, TypeError):
                 self._jobs[job_id].update({"state": "FAILED", "execution": "not_run", "error": "receipt_write_failed"})
                 self._record_history(job_id)
@@ -440,11 +474,14 @@ class ComponentInstaller:
             return None
         return {key: job.get(key) for key in ("job_id", "plan_id", "component_id", "component_type", "category", "state", "execution", "error") if key in job}
 
-    def plan_verify(self, component_id: str, *, component_type: str) -> dict[str, Any]:
+    def plan_verify(self, component_id: str, *, component_type: str, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> dict[str, Any]:
         component_id = validate_component_id(component_id)
         if component_type not in {"model", "runtime"}:
             raise InstallPlanError("invalid_component_type")
-        state = self._inspect(component_id, component_type)
+        record = self._catalog_record(component_id, component_type)
+        default_fingerprint = self.model_manager.catalog_fingerprint if component_type == "model" else self.runtime_manager._catalog_fingerprint()
+        binding = _binding_context(component_type, record, default_fingerprint, catalog_binding)
+        state = self._inspect(component_id, component_type, catalog_binding=binding)
         body = {
             "schema_version": "component-verify-plan.v1",
             "component_id": component_id,
@@ -453,7 +490,7 @@ class ComponentInstaller:
         }
         plan_id = f"verify_plan_{secrets.token_hex(16)}"
         fingerprint = plan_fingerprint(body)
-        self._plans[plan_id] = {**body, "plan_id": plan_id, "plan_fingerprint": fingerprint, "created_at": time.time()}
+        self._plans[plan_id] = {**body, "plan_id": plan_id, "plan_fingerprint": fingerprint, "_catalog_binding": binding, "created_at": time.time()}
         return {
             **body,
             "plan_id": plan_id,
@@ -478,13 +515,13 @@ class ComponentInstaller:
         component_type = plan.get("component_type")
         if not isinstance(component_id, str) or not isinstance(component_type, str) or component_type not in {"model", "runtime"}:
             return {"status": "error", "code": "verify_plan_invalid", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
-        current = self._inspect(component_id, str(component_type))
+        current = self._inspect(component_id, str(component_type), catalog_binding=plan.get("_catalog_binding"))
         if _state_fingerprint(current) != plan.get("expected_state_fingerprint"):
             return {"status": "conflict", "code": "stale_verify_plan", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": "Create a fresh verification plan."}
         if component_type == "model":
-            result = self.model_manager.verify(component_id)
+            result = self.model_manager.verify(component_id, catalog_binding=plan.get("_catalog_binding"))
         else:
-            result = self.runtime_manager.verify(component_id)
+            result = self.runtime_manager.verify(component_id, catalog_binding=plan.get("_catalog_binding"))
         result["plan_id"] = plan_id
         result.setdefault("execution", "not_run")
         result.setdefault("dry_run", True)
@@ -537,19 +574,21 @@ class ComponentInstaller:
             self._selections.pop(str(selection.get("selection_id")), None)
         return result
 
-    def plan_reuse(self, component_id: str, *, component_type: str = "model") -> dict[str, Any]:
+    def plan_reuse(self, component_id: str, *, component_type: str = "model", catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Plan a receipt-only reuse of a complete managed installation."""
 
         component_id = validate_component_id(component_id)
         if component_type not in {"model", "runtime"}:
             raise InstallPlanError("invalid_component_type")
         record = self._catalog_record(component_id, component_type)
-        state = self._inspect(component_id, component_type)
+        default_fingerprint = self.model_manager.catalog_fingerprint if component_type == "model" else self.runtime_manager._catalog_fingerprint()
+        binding = _binding_context(component_type, record, default_fingerprint, catalog_binding)
+        state = self._inspect(component_id, component_type, catalog_binding=binding)
         body = {
             "schema_version": "component-reuse-plan.v1",
             "component_id": component_id,
             "component_type": component_type,
-            "catalog_fingerprint": self.model_manager.catalog_fingerprint if component_type == "model" else self.runtime_manager._catalog_fingerprint(),
+            "catalog_fingerprint": binding.catalog_fingerprint,
             "expected_state_fingerprint": _state_fingerprint(state),
             "current_status": state.get("status"),
             "source": "existing_install_reuse",
@@ -558,7 +597,7 @@ class ComponentInstaller:
         }
         plan_id = f"reuse_plan_{secrets.token_hex(16)}"
         fingerprint = plan_fingerprint(body)
-        self._plans[plan_id] = {**body, "plan_id": plan_id, "plan_fingerprint": fingerprint, "record": record}
+        self._plans[plan_id] = {**body, "plan_id": plan_id, "plan_fingerprint": fingerprint, "record": record, "_catalog_binding": binding}
         return {**body, "plan_id": plan_id, "plan_fingerprint": fingerprint, "status": "planned", "next_action": "Confirm only if every catalog leaf is already present under the managed root."}
 
     def confirm_reuse(self, plan_id: str, *, confirmed: bool = False) -> dict[str, Any]:
@@ -567,25 +606,28 @@ class ComponentInstaller:
             return {"status": "error", "code": "unknown_reuse_plan", "execution": "not_run"}
         if not confirmed:
             return {"status": "waiting_confirmation", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
-        current = self._inspect(str(plan["component_id"]), str(plan["component_type"]))
+        current = self._inspect(str(plan["component_id"]), str(plan["component_type"]), catalog_binding=plan.get("_catalog_binding"))
         if _state_fingerprint(current) != plan.get("expected_state_fingerprint"):
             return {"status": "conflict", "code": "stale_reuse_plan", "plan_id": plan_id, "execution": "not_run", "next_action": "Create a fresh existing-install reuse plan."}
         result = ExistingInstallReuseExecutor(paths=self.paths, manager=self).apply(plan, confirmed=True)
         result["plan_id"] = plan_id
         return result
 
-    def plan_maintenance(self, component_id: str, *, action: str) -> dict[str, Any]:
+    def plan_maintenance(self, component_id: str, *, action: str, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> dict[str, Any]:
         component_id = validate_component_id(component_id)
         if action not in {"repair", "update", "uninstall"}:
             raise InstallPlanError("invalid_maintenance_action")
         kind = "model" if self._model_record(component_id) else "runtime" if self._runtime_record(component_id) else None
         if kind is None:
             raise InstallPlanError("unknown_component")
-        state = self._inspect(component_id, kind)
-        body = {"schema_version": "component-maintenance-plan.v1", "component_id": component_id, "component_type": kind, "action": action, "expected_state_fingerprint": _state_fingerprint(state), "catalog_fingerprint": self.model_manager.catalog_fingerprint if kind == "model" else self.runtime_manager._catalog_fingerprint(), "shared_dependency_policy": "preserve_referenced_assets"}
+        record = self._catalog_record(component_id, kind)
+        default_fingerprint = self.model_manager.catalog_fingerprint if kind == "model" else self.runtime_manager._catalog_fingerprint()
+        binding = _binding_context(kind, record, default_fingerprint, catalog_binding)
+        state = self._inspect(component_id, kind, catalog_binding=binding)
+        body = {"schema_version": "component-maintenance-plan.v1", "component_id": component_id, "component_type": kind, "action": action, "expected_state_fingerprint": _state_fingerprint(state), "catalog_fingerprint": binding.catalog_fingerprint, "shared_dependency_policy": "preserve_referenced_assets"}
         plan_id = f"maintenance_plan_{secrets.token_hex(16)}"
         fingerprint = plan_fingerprint(body)
-        self._plans[plan_id] = {**body, "plan_id": plan_id, "plan_fingerprint": fingerprint}
+        self._plans[plan_id] = {**body, "plan_id": plan_id, "plan_fingerprint": fingerprint, "_catalog_binding": binding}
         return {**body, "plan_id": plan_id, "plan_fingerprint": fingerprint, "status": "planned", "execution": "not_run", "dry_run": True, "current_status": state["status"], "next_action": "Review the plan and explicit destructive confirmation policy."}
 
     def confirm_maintenance(self, plan_id: str, *, confirmed: bool = False) -> dict[str, Any]:
@@ -594,7 +636,7 @@ class ComponentInstaller:
             return {"status": "error", "code": "unknown_maintenance_plan"}
         if not confirmed:
             return {"status": "waiting_confirmation", "plan_id": plan_id, "execution": "not_run"}
-        current = self._inspect(plan["component_id"], plan["component_type"])
+        current = self._inspect(plan["component_id"], plan["component_type"], catalog_binding=plan.get("_catalog_binding"))
         if _state_fingerprint(current) != plan["expected_state_fingerprint"]:
             return {"status": "conflict", "code": "stale_maintenance_plan", "plan_id": plan_id}
         if plan.get("action") == "repair":
@@ -609,12 +651,13 @@ class ComponentInstaller:
                 component_type=plan["component_type"],
                 record=record,
                 catalog_fingerprint=catalog_fingerprint,
+                catalog_binding=plan.get("_catalog_binding"),
                 source="existing_install_reuse",
             )
             if verified.get("status") != "completed":
                 return {"status": verified.get("status", "unavailable"), "code": verified.get("code", "repair_unavailable"), "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": verified.get("next_action", "Review the managed installation.")}
             try:
-                write_component_receipt(self.paths.config_root, plan["component_id"], verified["receipt"])
+                write_component_receipt(self.paths.config_root, plan["component_id"], verified["receipt"], catalog_binding=plan.get("_catalog_binding"))
             except (OSError, ReceiptError, KeyError, TypeError):
                 return {"status": "unavailable", "code": "receipt_write_failed", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": "Retry the explicit receipt-only repair after reviewing receipt storage."}
             return {"status": "completed", "action": "repair", "component_id": plan["component_id"], "state": verified["state"], "execution": "not_run", "dry_run": True, "verified": verified["state"] == "INSTALLED_VERIFIED", "operational": False, "next_action": verified["next_action"]}
