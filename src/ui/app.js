@@ -102,6 +102,9 @@ import {
   setUpdateSchedule,
   checkComponentUpdate,
   checkAllUpdates,
+  planComponentUpdate,
+  confirmComponentUpdate,
+  rollbackComponentUpdate,
 } from "./api.js";
 import { disposeNodeStudios, mountNodeStudios } from "./features/node_studio/studio.js";
 import { mountImageMaskCanvases } from "./image_mask_studio.js";
@@ -1761,6 +1764,40 @@ document.addEventListener("click", async (event) => {
       showToast(`Đã kiểm tra update cho ${result.component_id || "component"}.`, "success");
     } catch (error) { showToast(error.message || "Không thể kiểm tra update.", "error"); }
     finally { checkUpdateButton.disabled = false; }
+    return;
+  }
+  const planUpdateButton = event.target.closest("[data-plan-update]");
+  if (planUpdateButton) {
+    planUpdateButton.disabled = true;
+    try {
+      const plan = await planComponentUpdate(planUpdateButton.dataset.planUpdate || "");
+      state.updateCenter = { ...state.updateCenter, pendingPlan: plan };
+      render();
+      showToast(plan.status === "planned" ? "Đã lập kế hoạch update; chưa tải/cài." : (plan.code || "Update chưa khả dụng."), plan.status === "planned" ? "success" : "warning");
+    } catch (error) { showToast(error.message || "Không thể lập kế hoạch update.", "error"); }
+    finally { planUpdateButton.disabled = false; }
+    return;
+  }
+  const confirmUpdateButton = event.target.closest("[data-confirm-update]");
+  if (confirmUpdateButton) {
+    confirmUpdateButton.disabled = true;
+    try {
+      const result = await confirmComponentUpdate(confirmUpdateButton.dataset.confirmUpdate || "", true);
+      showToast(result.next_action || result.reason || "Update đã được xử lý.", result.status === "completed" ? "success" : "warning");
+      state.updateCenter = { ...state.updateCenter, pendingPlan: null };
+      render();
+    } catch (error) { showToast(error.message || "Không thể xác nhận update.", "error"); }
+    finally { confirmUpdateButton.disabled = false; }
+    return;
+  }
+  const rollbackButton = event.target.closest("[data-rollback-update]");
+  if (rollbackButton) {
+    rollbackButton.disabled = true;
+    try {
+      const result = await rollbackComponentUpdate(rollbackButton.dataset.rollbackUpdate || "");
+      showToast(result.next_action || result.reason || "Rollback đã được xử lý.", result.status === "completed" ? "success" : "warning");
+    } catch (error) { showToast(error.message || "Không thể rollback.", "error"); }
+    finally { rollbackButton.disabled = false; }
     return;
   }
   const saveUpdateScheduleButton = event.target.closest("[data-save-update-schedule]");

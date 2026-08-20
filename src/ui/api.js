@@ -58,6 +58,7 @@ export const checkComponentUpdate = (componentId, refreshSource = false) => requ
 export const checkAllUpdates = (refreshSource = false) => request("/api/updates/check-all", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refresh_source: Boolean(refreshSource) }) });
 export const planComponentUpdate = (componentId) => request("/api/updates/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ component_id: String(componentId) }) });
 export const confirmComponentUpdate = (planId, confirmed = false) => request(`/api/updates/plans/${encodeURIComponent(planId)}/confirm`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: Boolean(confirmed) }) });
+export const rollbackComponentUpdate = (componentId) => request("/api/updates/rollback", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ component_id: String(componentId) }) });
 export const getApplications = () => request("/api/applications");
 export const getSettings = () => request("/api/settings");
 export const getSettingsSchema = () => request("/api/settings/schema");
