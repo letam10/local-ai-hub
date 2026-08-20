@@ -1,4 +1,4 @@
-; Inno Setup Script for Local AI Hub V6 Win64 Desktop Release
+; Inno Setup Script for Local AI Hub V7 Win64 Desktop Release
 ; Generated for deterministic, safe Windows desktop installation
 ; Preserves machine-local data (Models, Environments, runtime, Output, Config, Backups, Reports)
 
@@ -6,7 +6,7 @@
 #define MyAppVersion "7.0.0"
 #define MyAppPublisher "Local AI Hub Project"
 #define MyAppURL "https://github.com/letam10/local-ai-hub"
-#define DefaultInstallDir "D:\LocalAIHub"
+#define DefaultInstallDir "{autopf}\Local AI Hub"
 
 [Setup]
 AppId={{D37E84B1-2F16-4E89-9B21-085781E738C4}

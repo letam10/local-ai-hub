@@ -68,6 +68,9 @@ class V7FinalArchitectureTests(unittest.TestCase):
         for name in ("Models", "Environments", "runtime", "Output", "Reports"):
             self.assertIn(name, script)
         self.assertNotIn("rglob('*')", script)
+        installer = (ROOT / "distribution/installer.iss").read_text(encoding="utf-8")
+        self.assertIn('{autopf}\\Local AI Hub', installer)
+        self.assertNotIn('DefaultInstallDir "D:\\LocalAIHub"', installer)
 
 
 if __name__ == "__main__":
