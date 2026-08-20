@@ -120,6 +120,34 @@ class V7BundleReuseTests(unittest.TestCase):
         receipts = json.loads((self.paths.config_root / "component_install_receipts.json").read_text(encoding="utf-8"))
         self.assertEqual(receipts["records"]["demo-model"]["source"], "existing_install_reuse")
 
+    def test_native_manual_import_runs_through_ui_service_path(self) -> None:
+        source = self.paths.temp_root / "native-selection"
+        source.mkdir(parents=True)
+        (source / "demo.bin").write_bytes(b"model")
+        selection = self.installer.issue_selection("demo-model", source)
+        self.assertEqual(selection["status"], "ready")
+        plan = self.installer.plan_import(selection["selection_id"], mode="COPY_INTO_MANAGED_MODELS")
+        result = self.installer.confirm_import(plan["plan_id"], confirmed=True)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["source"], "manual_import")
+        self.assertEqual((self.paths.models_root / "demo-model" / "demo.bin").read_bytes(), b"model")
+        receipt = json.loads((self.paths.config_root / "component_install_receipts.json").read_text(encoding="utf-8"))
+        self.assertEqual(receipt["records"]["demo-model"]["source"], "manual_import")
+        self.assertNotIn(str(self.temp.name), json.dumps(result))
+
+    def test_managed_repair_and_uninstall_are_real_plan_confirm_flows(self) -> None:
+        root = self.paths.models_root / "demo-model"
+        root.mkdir(parents=True)
+        (root / "demo.bin").write_bytes(b"model")
+        repair = self.installer.plan_maintenance("demo-model", action="repair")
+        repaired = self.installer.confirm_maintenance(repair["plan_id"], confirmed=True)
+        self.assertEqual(repaired["status"], "completed")
+        self.assertEqual(repaired["state"], "INSTALLED_UNVERIFIED")
+        remove = self.installer.plan_maintenance("demo-model", action="uninstall")
+        removed = self.installer.confirm_maintenance(remove["plan_id"], confirmed=True)
+        self.assertEqual(removed["status"], "completed")
+        self.assertFalse((root / "demo.bin").exists())
+
     def test_reuse_refuses_partial_or_reparse_without_receipt(self) -> None:
         root = self.paths.models_root / "demo-model"
         root.mkdir(parents=True)
