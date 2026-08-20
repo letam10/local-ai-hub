@@ -111,6 +111,15 @@ class RuntimeEvidenceCatalogBindingTests(unittest.TestCase):
 
     def test_record_and_leaf_drift_and_stale_timestamp_never_promote(self) -> None:
         self._write_v2(self._valid_record())
+        forged_binding = self._binding(record_revision="runtime-r2")
+        forged_evidence = {
+            **self._valid_record(),
+            **forged_binding,
+            "runtime_fingerprint": evidence.runtime_fingerprint(self.paths, {**self.record, "revision": "runtime-r2"}, binding=forged_binding),
+        }
+        self._write_v2(forged_evidence)
+        self.assertFalse(evidence.runtime_evidence_passed(self.paths, "demo-runtime", self.record, binding=forged_binding, now=100))
+        self._write_v2(self._valid_record())
         self.assertFalse(
             evidence.runtime_evidence_passed(
                 self.paths,
@@ -124,6 +133,8 @@ class RuntimeEvidenceCatalogBindingTests(unittest.TestCase):
         target.write_bytes(b"runtime-drift")
         self.assertFalse(evidence.runtime_evidence_passed(self.paths, "demo-runtime", self.record, binding=self.binding, now=100))
         target.write_bytes(b"runtime")
+        with patch.object(evidence, "_is_reparse", return_value=True):
+            self.assertFalse(evidence.runtime_evidence_passed(self.paths, "demo-runtime", self.record, binding=self.binding, now=100))
         self._write_v2(self._valid_record(timestamp=100))
         self.assertFalse(evidence.runtime_evidence_passed(self.paths, "demo-runtime", self.record, binding=self.binding, now=100 + 24 * 60 * 60 + 1))
 

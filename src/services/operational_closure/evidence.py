@@ -24,6 +24,7 @@ _V2_FILE = "component_runtime_evidence.v2.json"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN = re.compile(r"^[a-z][a-z0-9_.-]{0,95}$")
 _IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$")
+_CATALOG_VERSION = re.compile(r"^\d{4}\.\d{2}\.\d{2}$")
 _CATALOG_SCHEMAS = frozenset({"v7-production-catalog.v1", "v7-production-catalog.v2"})
 _BINDING_KEYS = frozenset({
     "catalog_schema",
@@ -141,9 +142,9 @@ def _normalize_binding(value: object) -> dict[str, Any] | None:
         return None
     raw_catalog_version = value.get("catalog_version")
     raw_catalog_revision = value.get("catalog_revision")
-    if raw_catalog_version is not None and _safe_text(raw_catalog_version) is None:
+    if raw_catalog_version is not None and (_safe_text(raw_catalog_version) is None or _CATALOG_VERSION.fullmatch(str(raw_catalog_version)) is None):
         return None
-    if raw_catalog_revision is not None and _safe_text(raw_catalog_revision) is None:
+    if raw_catalog_revision is not None and (_safe_text(raw_catalog_revision) is None or _CATALOG_VERSION.fullmatch(str(raw_catalog_revision)) is None):
         return None
     catalog_version = _safe_text(raw_catalog_version, nullable=True)
     catalog_revision = _safe_text(raw_catalog_revision, nullable=True)
@@ -205,19 +206,45 @@ def _safe_leaf(value: object) -> str | None:
     return path.as_posix()
 
 
+def _runtime_root(paths: HubPaths, record: Mapping[str, Any]) -> Path:
+    if record.get("root_class") == "environments_root":
+        return paths.environments_root
+    if record.get("root_class") == "external_managed":
+        return paths.runtime_root / "external"
+    return paths.runtime_root
+
+
+def _safe_runtime_target(root: Path, target: Path) -> bool:
+    try:
+        lexical_root = root.absolute()
+        current = target.absolute()
+        current.relative_to(lexical_root)
+    except (OSError, ValueError):
+        return False
+    while True:
+        if _is_reparse(current):
+            return False
+        if current == lexical_root:
+            return True
+        if current.parent == current:
+            return False
+        current = current.parent
+
+
 def _leaf_observations(paths: HubPaths, record: Mapping[str, Any]) -> tuple[list[dict[str, Any]], bool]:
     required = record.get("required_leaves")
     if not isinstance(required, list) or not required or len({item for item in required if isinstance(item, str)}) != len(required):
         return [], False
     leaves: list[dict[str, Any]] = []
     all_present = True
+    root = _runtime_root(paths, record)
     for relative in required:
         safe_relative = _safe_leaf(relative)
         if safe_relative is None:
             return [], False
-        target = paths.runtime_root / Path(safe_relative)
+        target = root / Path(safe_relative)
         try:
-            if _is_reparse(target) or not target.is_file():
+            if not _safe_runtime_target(root, target) or not target.is_file():
                 leaves.append({"relative_leaf": safe_relative, "present": False})
                 all_present = False
             else:
@@ -236,6 +263,7 @@ def runtime_fingerprint(paths: HubPaths, record: Mapping[str, Any], *, binding: 
     payload: dict[str, Any] = {
         "runtime_id": record.get("runtime_id"),
         "revision": record.get("revision"),
+        "root_class": record.get("root_class"),
         "leaves": leaves,
     }
     normalized = _normalize_binding(binding) if binding is not None else None
@@ -388,7 +416,7 @@ def record_runtime_smoke(
     timestamp: int | None = None,
     catalog_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if outcome not in {"completed", "failed", "unavailable", "not_run"} or not isinstance(smoke_id, str) or not smoke_id or len(smoke_id) > 96 or _UNSAFE_TEXT.search(smoke_id):
+    if _safe_token(component_id) is None or outcome not in {"completed", "failed", "unavailable", "not_run"} or not isinstance(smoke_id, str) or not smoke_id or len(smoke_id) > 96 or _UNSAFE_TEXT.search(smoke_id):
         return {"status": "invalid", "code": "evidence_invalid", "execution": "not_run"}
     smoked_at = int(time.time()) if timestamp is None else int(timestamp)
     if smoked_at < 0:
@@ -482,6 +510,14 @@ def runtime_evidence_passed(
 
     current_binding = _normalize_binding(binding)
     if current_binding is None or current_binding["runtime_id"] != component_id:
+        return False
+    expected_source_identity = record.get("source_identity") if isinstance(record.get("source_identity"), str) else None
+    if (
+        current_binding["runtime_id"] != record.get("runtime_id")
+        or current_binding["record_revision"] != record.get("revision")
+        or current_binding["install_strategy"] != record.get("install_strategy")
+        or current_binding["source_identity"] != expected_source_identity
+    ):
         return False
     document = _read_document(_path(paths, EVIDENCE_SCHEMA_V2), EVIDENCE_SCHEMA_V2)
     evidence = document["records"].get(component_id) if document is not None else None
