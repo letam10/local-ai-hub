@@ -193,7 +193,7 @@ def validate_python(files: list[Path], failures: list[str]) -> None:
         if path.suffix.casefold() != ".py":
             continue
         try:
-            compile(path.read_text(encoding="utf-8"), str(path), "exec")
+            compile(path.read_text(encoding="utf-8-sig"), str(path), "exec")
         except (OSError, UnicodeDecodeError, SyntaxError) as exc:
             failures.append(f"Python syntax error in {relative_path(path)}: {exc}")
 

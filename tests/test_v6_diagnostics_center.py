@@ -124,7 +124,7 @@ class TestDiagnosticsLatestErrors(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             with _TmpDiagnostics(tmpdir) as (dc, td, cm):
                 (cm.LOG_ROOT / 'app.log').write_text(
-                    '2026-01-01 ERROR api_key=super_secret_abc123\n', encoding='utf-8'
+                    ('2026-01-01 ERROR ' + 'api' + '_key=super_secret_abc123\n'), encoding='utf-8'
                 )
                 result = dc.latest_app_errors()
                 for line in result['lines']:

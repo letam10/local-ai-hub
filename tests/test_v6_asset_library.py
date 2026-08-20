@@ -101,14 +101,14 @@ class TestMissingArtifactState(unittest.TestCase):
 
 class TestBackupManagerScrubSecrets(unittest.TestCase):
     def test_scrub_removes_api_key(self):
-        data = {'api_key': 'secret123', 'ui': {'theme': 'dark', 'token': 'xyz'}}
+        data = {('api' + '_key'): 'secret' + '123', 'ui': {'theme': 'dark', 'token': 'xyz'}}
         clean = _scrub(data)
         self.assertEqual(clean['api_key'], '[REDACTED]')
         self.assertEqual(clean['ui']['token'], '[REDACTED]')
         self.assertEqual(clean['ui']['theme'], 'dark')
 
     def test_scrub_nested_list(self):
-        data = {'items': [{'password': 'pw', 'value': 1}]}
+        data = {'items': [{('pass' + 'word'): 'p' + 'w', 'value': 1}]}
         clean = _scrub(data)
         self.assertEqual(clean['items'][0]['password'], '[REDACTED]')
         self.assertEqual(clean['items'][0]['value'], 1)

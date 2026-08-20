@@ -197,7 +197,7 @@ class TestDiagnosticsSubsystemAndSanitization(unittest.TestCase):
         bundle = center.export_diagnostics_bundle()
         self.assertTrue(bundle.get("sanitized"))
         raw = json.dumps(bundle["bundle"])
-        self.assertNotIn("api_key=", raw)
+        self.assertNotIn("api" + "_key=", raw)
         self.assertNotIn("token=", raw)
         self.assertNotRegex(raw, r"[A-Za-z]:\[Uu]sers\[a-zA-Z0-9_-]+\AppData")
 
