@@ -219,6 +219,8 @@ class TestReleaseManifestAndPackaging(unittest.TestCase):
         self.assertEqual(manifest["application_name"], "Local AI Hub")
         self.assertEqual(manifest["version"], "7.0.0")
         self.assertEqual(manifest["platform"], "windows-x64")
+        self.assertIn("tag", manifest)
+        self.assertIn("source_reference", manifest)
         self.assertIn("release_artifacts", manifest)
         self.assertIn("core_zip", manifest["release_artifacts"])
         self.assertIn("sha256", manifest["release_artifacts"]["core_zip"])
