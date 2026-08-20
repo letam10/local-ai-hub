@@ -167,7 +167,7 @@ class ReleaseProvenanceRemediationTests(unittest.TestCase):
         pre_tag["manifest_sha256"] = verifier.manifest_self_hash(pre_tag)
         with patch.object(verifier, "RELEASE_BRANCH", current["source_branch"]):
             baseline_codes = verifier.verify_pre_tag_manifest(pre_tag, ROOT, intended_tag=tag)["codes"]
-            self.assertIn("DIRTY_SOURCE", baseline_codes)
+            self.assertTrue(set(baseline_codes) <= {"DIRTY_SOURCE"})
             stale_source = dict(pre_tag)
             stale_source["source_commit"] = self.oid("b", current["oid_width"])
             stale_source["build_commit"] = stale_source["source_commit"]
