@@ -9,7 +9,7 @@ from src.shared.paths.registry import ROOT, RUNTIME_PATHS
 
 class LayoutV2Tests(unittest.TestCase):
     def test_registry_stays_under_workspace(self) -> None:
-        self.assertEqual(ROOT.name, "LocalAIHub")
+        self.assertTrue((ROOT / "src").is_dir())
         for path in RUNTIME_PATHS.values():
             self.assertTrue(path.is_relative_to(ROOT), path)
 
