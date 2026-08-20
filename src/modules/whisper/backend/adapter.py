@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from src.services.artifact_store import describe, resolve
 from src.services.api.config import models
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
 from src.shared.utils.adapter_common import configured_path, local_root, unavailable
@@ -15,7 +16,33 @@ from src.shared.utils.adapter_common import configured_path, local_root, unavail
 
 _MODEL_ID = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
 _TOKEN = re.compile(r"[a-f0-9]{32}\Z")
+_ARTIFACT_ID = re.compile(r"artifact_[a-f0-9]{32}\Z")
 _MAX_TIMEOUT_SECONDS = 1_200
+_PATH_LIKE_FIELDS = frozenset({
+    "path",
+    "source",
+    "secondary_path",
+    "reference_audio",
+    "target",
+    "input_image",
+    "input_paths",
+    "output",
+    "outputs",
+    "files",
+    "command",
+    "executable",
+    "runtime",
+    "model",
+    "model_id",
+    "local_path",
+    "asset_id",
+    "input_asset_id",
+    "source_asset_id",
+    "target_asset_id",
+    "manifest",
+    "callable",
+    "secret",
+})
 
 
 def _runtime() -> tuple[Path | None, Path, Path]:
@@ -80,12 +107,51 @@ def _outputs(root: Path, token: str) -> tuple[Path, Path] | None:
     return transcript, srt
 
 
+def _source_artifact(payload: object) -> Path | None:
+    """Resolve one server-owned audio/video artifact without accepting paths."""
+
+    if not isinstance(payload, dict):
+        return None
+    if any(
+        key in payload and payload[key] not in (None, "", [])
+        for key in _PATH_LIKE_FIELDS
+    ):
+        return None
+    artifact_id = payload.get("source_artifact_id")
+    if not isinstance(artifact_id, str) or _ARTIFACT_ID.fullmatch(artifact_id) is None:
+        return None
+    try:
+        source = resolve(artifact_id)
+        metadata = describe(artifact_id)
+    except Exception:
+        return None
+    media_type = str(metadata.get("media_type") or "").casefold() if isinstance(metadata, dict) else ""
+    if (
+        not isinstance(source, Path)
+        or not source.is_file()
+        or _is_reparse(source)
+        or not (media_type.startswith("audio/") or media_type.startswith("video/"))
+    ):
+        return None
+    return source
+
+
+def _invalid_source_artifact() -> dict[str, Any]:
+    return {
+        "status": "error",
+        "code": "input_artifact_invalid",
+        "error": "Whisper yêu cầu source_artifact_id của Hub và media audio/video hợp lệ.",
+    }
+
+
 def transcribe(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return _invalid_source_artifact()
+    source = _source_artifact(payload)
+    if source is None:
+        return _invalid_source_artifact()
     python, wrapper, root = _runtime()
-    source = Path(os.path.expandvars(str(payload.get("path", "")))).expanduser()
     model_id = _model_id()
-    if not source.is_file() or _is_reparse(source):
-        return {"status": "error", "code": "input_unavailable", "error": "Không tìm thấy media đầu vào Whisper."}
     if python is None or not python.is_file() or _is_reparse(python) or not wrapper.is_file() or _is_reparse(wrapper) or model_id is None:
         return unavailable("whisper", "Faster-Whisper runtime hoặc local model registry chưa sẵn sàng.")
     token = uuid.uuid4().hex
@@ -131,8 +197,7 @@ def transcribe(payload: dict[str, Any], context: ProcessOwner | None = None) -> 
     return {
         "status": "completed",
         "operation": "transcribe_media",
-        "output": str(transcript),
-        "srt": str(srt),
+        "files": [str(transcript), str(srt)],
         "segment_count": int(segment_count) if isinstance(segment_count, int) and segment_count >= 0 else 0,
         "device": result.get("device") if result.get("device") in {"cpu", "cuda"} else "cpu",
     }

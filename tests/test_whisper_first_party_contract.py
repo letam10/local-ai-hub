@@ -156,7 +156,7 @@ class WhisperFirstPartyContractTests(unittest.TestCase):
             self.assertEqual((root / "Output" / "Speech" / f"whisper_{token}.srt").read_text(encoding="utf-8"), "1\n00:00:00,000 --> 00:00:01,500\nxin chào\n")
             self.assertNotIn(str(root), json.dumps(response, ensure_ascii=False))
 
-    def test_adapter_selects_one_server_registry_model_and_returns_internal_artifact_paths(self) -> None:
+    def test_adapter_requires_opaque_media_artifact_and_publishes_files_batch(self) -> None:
         from src.modules.whisper.backend import adapter
         from src.services.api import jobs
 
@@ -176,18 +176,139 @@ class WhisperFirstPartyContractTests(unittest.TestCase):
             python.write_bytes(b"")
             wrapper.write_text("# tracked wrapper fixture\n", encoding="utf-8")
             registry = [{"id": "approved-asr", "engine": "Faster-Whisper", "local_path": "server-owned"}]
-            with patch.object(adapter, "models", return_value=registry), patch.object(adapter, "_runtime", return_value=(python, wrapper, root)), patch.object(adapter, "run_json_worker", return_value={
+            artifact_id = "artifact_" + "a" * 32
+            with patch.object(adapter, "models", return_value=registry), patch.object(adapter, "_runtime", return_value=(python, wrapper, root)), patch.object(adapter, "resolve", return_value=source), patch.object(adapter, "describe", return_value={"id": artifact_id, "media_type": "audio/wav"}), patch.object(adapter, "run_json_worker", return_value={
                 "status": "completed", "operation": "transcribe_media", "transcript_token": token, "segment_count": 1, "device": "cpu",
             }) as worker:
-                result = adapter.transcribe({"path": str(source), "timeout_seconds": 9})
+                result = adapter.transcribe({"source_artifact_id": artifact_id, "timeout_seconds": 9})
             self.assertEqual(result["status"], "completed")
-            self.assertEqual(result["output"], str(transcript))
-            self.assertEqual(result["srt"], str(srt))
+            self.assertEqual(result["files"], [str(transcript), str(srt)])
+            self.assertNotIn("output", result)
+            self.assertNotIn("srt", result)
             self.assertEqual(worker.call_args.kwargs["env"]["WHISPER_MODEL_ID"], "approved-asr")
-            with patch.object(jobs, "publicize", return_value={"id": "artifact_safe"}):
-                public = jobs.public_job({"id": "job_example", "tool": "transcribe_media", "status": "completed", "result": result})
-            self.assertEqual(public["result"], {"id": "artifact_safe"})
+            published_paths: list[Path] = []
+
+            def register_worker_outputs(paths, *, provenance):
+                published_paths.extend(paths)
+                return [
+                    {"id": "artifact_" + suffix * 32, "url": f"/api/artifacts/artifact_{suffix * 32}", "provenance": provenance}
+                    for suffix in ("b", "c")
+                ]
+
+            with patch.object(jobs.artifact_store, "register_worker_outputs", side_effect=register_worker_outputs):
+                public, publish_error = jobs._publish_result(result, {"id": "job_example", "tool": "transcribe_media"})
+            self.assertIsNone(publish_error)
+            self.assertEqual(published_paths, [transcript, srt])
+            self.assertEqual(len(public["artifacts"]), 2)
             self.assertNotIn(str(root), json.dumps(public, ensure_ascii=False))
+
+    def test_adapter_rejects_raw_path_path_like_wrong_media_and_reparse_before_worker(self) -> None:
+        from src.modules.whisper.backend import adapter
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "input.wav"
+            source.write_bytes(b"audio")
+            python = root / "python.exe"
+            wrapper = root / "whisper_cli.py"
+            python.write_bytes(b"")
+            wrapper.write_text("# tracked wrapper fixture\n", encoding="utf-8")
+            artifact_id = "artifact_" + "d" * 32
+            with patch.object(adapter, "_runtime", return_value=(python, wrapper, root)), patch.object(adapter, "_model_id", return_value="approved-asr"), patch.object(adapter, "run_json_worker", side_effect=AssertionError("invalid input must not reach worker")) as worker:
+                missing = adapter.transcribe({})
+                self.assertEqual(missing["code"], "input_artifact_invalid")
+
+                raw = adapter.transcribe({"path": str(source)})
+                self.assertEqual(raw["code"], "input_artifact_invalid")
+                self.assertNotIn(str(source), json.dumps(raw, ensure_ascii=False))
+
+                path_like = adapter.transcribe({"source_artifact_id": artifact_id, "command": str(source)})
+                self.assertEqual(path_like["code"], "input_artifact_invalid")
+
+                with patch.object(adapter, "resolve", return_value=None), patch.object(adapter, "describe", return_value=None):
+                    unknown = adapter.transcribe({"source_artifact_id": artifact_id})
+                self.assertEqual(unknown["code"], "input_artifact_invalid")
+
+                with patch.object(adapter, "resolve", return_value=source), patch.object(adapter, "describe", return_value={"id": artifact_id, "media_type": "image/png"}):
+                    wrong_media = adapter.transcribe({"source_artifact_id": artifact_id})
+                self.assertEqual(wrong_media["code"], "input_artifact_invalid")
+
+                with patch.object(adapter, "resolve", return_value=source), patch.object(adapter, "describe", return_value={"id": artifact_id, "media_type": "audio/wav"}), patch.object(adapter, "_is_reparse", return_value=True):
+                    reparse = adapter.transcribe({"source_artifact_id": artifact_id})
+                self.assertEqual(reparse["code"], "input_artifact_invalid")
+                self.assertFalse(worker.called)
+
+    def test_jobs_rejects_incomplete_or_scalar_srt_whisper_results_without_public_artifact(self) -> None:
+        from src.services.api import jobs
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            transcript = root / "whisper.json"
+            srt = root / "whisper.srt"
+            transcript.write_text("{}", encoding="utf-8")
+            srt.write_text("1\n", encoding="utf-8")
+            record = {"id": "job_example", "tool": "transcribe_media"}
+
+            missing, missing_error = jobs._publish_result({"status": "completed", "files": [str(transcript)]}, record)
+            self.assertEqual(missing["status"], "failed")
+            self.assertEqual(missing_error, "whisper_output_contract")
+            self.assertNotIn("artifacts", missing)
+
+            scalar, scalar_error = jobs._publish_result({"status": "completed", "output": str(transcript), "srt": str(srt)}, record)
+            self.assertEqual(scalar["status"], "failed")
+            self.assertEqual(scalar_error, "whisper_output_contract")
+            self.assertNotIn(str(root), json.dumps(scalar, ensure_ascii=False))
+
+            with patch.object(jobs.artifact_store, "register_worker_outputs", return_value=None) as register:
+                failed, failed_error = jobs._publish_result({"status": "completed", "files": [str(transcript), str(srt)]}, record)
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed_error, "output_publish")
+            self.assertNotIn("artifacts", failed)
+            register.assert_called_once()
+            self.assertNotIn(str(root), json.dumps(failed, ensure_ascii=False))
+
+    def test_core_keeps_whisper_opaque_and_rejects_raw_path_before_submit(self) -> None:
+        from src.services.api import core
+
+        marker = "C:\\private\\whisper-input.wav"
+        with patch.object(core, "component_statuses", return_value=[{"id": "whisper", "name": "Whisper", "component_status": "partial"}]), patch.object(core.job_manager, "submit", side_effect=AssertionError("raw public input must not be submitted")) as submit:
+            status, response = core.submit_tool("transcribe_media", {"path": marker})
+        self.assertEqual(status, 400)
+        self.assertNotIn(marker, json.dumps(response, ensure_ascii=False))
+        self.assertFalse(submit.called)
+
+        artifact_id = "artifact_" + "e" * 32
+        resolved, resolve_error = core._resolve_assets({"asset_id": artifact_id}, tool="transcribe_media")
+        self.assertIsNone(resolve_error)
+        self.assertEqual(resolved, {"source_artifact_id": artifact_id})
+
+        with patch("src.modules.whisper.backend.adapter.transcribe", return_value={"status": "unavailable"}) as transcribe:
+            result = core._run_operation("transcribe_media", {"source_artifact_id": artifact_id})
+        self.assertEqual(result["status"], "unavailable")
+        transcribe.assert_called_once_with({"source_artifact_id": artifact_id}, None)
+
+    def test_core_subtitle_flow_uses_private_srt_for_composition_only(self) -> None:
+        from src.services.api import core
+        from src.modules.media_editor.backend import adapter as media_adapter
+        from src.modules.whisper.backend import adapter as whisper_adapter
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.mp4"
+            transcript = root / "whisper.json"
+            srt = root / "whisper.srt"
+            source.write_bytes(b"video")
+            transcript.write_text("{}", encoding="utf-8")
+            srt.write_text("1\n", encoding="utf-8")
+            artifact_id = "artifact_" + "f" * 32
+            with patch.object(core, "resolve", return_value=source), patch.object(core, "describe", return_value={"id": artifact_id, "media_type": "video/mp4"}), patch.object(whisper_adapter, "transcribe", return_value={"status": "completed", "files": [str(transcript), str(srt)]}), patch.object(media_adapter, "run_operation", return_value={"status": "completed", "output": str(root / "final.mp4")}) as burn:
+                result = core._run_operation("create_subtitled_video", {"source_artifact_id": artifact_id})
+            self.assertEqual(result["status"], "completed")
+            request = burn.call_args.args[0]
+            self.assertEqual(request["operation"], "burn_subtitle")
+            self.assertEqual(request["path"], str(source))
+            self.assertEqual(request["secondary_path"], str(srt))
+            self.assertNotIn("source_artifact_id", request)
 
     def test_adapter_rejects_an_output_parent_reparse(self) -> None:
         from src.modules.whisper.backend import adapter

@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from src.services.artifact_store import resolve
+from src.services.artifact_store import describe, resolve
 from src.shared.version import PRODUCT_VERSION
 from src.services.job_manager.manager import JobContext, job_manager
 from src.services.tool_smoke import (
@@ -640,6 +640,8 @@ def _opaque_media_request(tool: str, payload: dict[str, Any]) -> bool:
         "ground_objects",
         "segment_from_text",
         "ocr_document",
+        "transcribe_media",
+        "create_subtitled_video",
         "text_to_speech",
         "design_voice",
         "clone_voice",
@@ -798,13 +800,35 @@ def _run_operation(tool: str, payload: dict[str, Any], context: JobContext | Non
         from src.modules.whisper.backend.adapter import transcribe
         from src.modules.media_editor.backend.adapter import run_operation
 
+        source_id = payload.get("source_artifact_id")
+        try:
+            source = resolve(source_id) if isinstance(source_id, str) else None
+            metadata = describe(source_id) if isinstance(source_id, str) else None
+        except Exception:
+            source = None
+            metadata = None
+        media_type = str(metadata.get("media_type") or "").casefold() if isinstance(metadata, dict) else ""
+        if not isinstance(source, Path) or not source.is_file() or not media_type.startswith("video/"):
+            return {
+                "status": "error",
+                "code": "input_artifact_invalid",
+                "error": "Whisper yêu cầu video artifact Hub hợp lệ trước khi burn subtitle.",
+            }
         transcript = transcribe(payload, context)
         if transcript.get("status") != "completed":
             return transcript
-        srt = transcript.get("srt")
+        files = transcript.get("files")
+        srt = next(
+            (
+                item
+                for item in files
+                if isinstance(item, str) and item.casefold().endswith(".srt")
+            ),
+            None,
+        ) if isinstance(files, list) else None
         if not isinstance(srt, str) or not Path(srt).is_file():
             return {"status": "error", "error": "Whisper không tạo SRT để burn subtitle."}
-        return run_operation({"operation": "burn_subtitle", "path": payload.get("path"), "secondary_path": srt}, context)
+        return run_operation({"operation": "burn_subtitle", "path": str(source), "secondary_path": srt}, context)
     if tool in {"text_to_speech", "design_voice", "clone_voice"}:
         from src.modules.voice.backend.qwen3_tts_adapter import synthesize
 
