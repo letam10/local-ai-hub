@@ -677,6 +677,10 @@ def _resolve_assets(payload: dict[str, Any], *, tool: str = "") -> tuple[dict[st
         "runtime",
         "model",
         "model_id",
+        "manifest",
+        "callable",
+        "secret",
+        "local_path",
     }
     if any(field in payload and payload[field] not in (None, "", []) for field in raw_path_fields):
         return dict(payload), "Dùng artifact ID do Hub tạo thay vì gửi đường dẫn cục bộ."

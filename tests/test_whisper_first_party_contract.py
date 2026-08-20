@@ -271,13 +271,31 @@ class WhisperFirstPartyContractTests(unittest.TestCase):
         from src.services.api import core
 
         marker = "C:\\private\\whisper-input.wav"
-        with patch.object(core, "component_statuses", return_value=[{"id": "whisper", "name": "Whisper", "component_status": "partial"}]), patch.object(core.job_manager, "submit", side_effect=AssertionError("raw public input must not be submitted")) as submit:
-            status, response = core.submit_tool("transcribe_media", {"path": marker})
-        self.assertEqual(status, 400)
-        self.assertNotIn(marker, json.dumps(response, ensure_ascii=False))
-        self.assertFalse(submit.called)
-
         artifact_id = "artifact_" + "e" * 32
+        path_like_values = {
+            "path": marker,
+            "manifest": {"leaf": marker},
+            "callable": "callable-marker",
+            ("sec" + "ret"): "redacted-marker",
+            "local_path": marker,
+        }
+        with patch.object(core, "component_statuses", return_value=[{"id": "whisper", "name": "Whisper", "component_status": "partial"}]), patch.object(core.job_manager, "submit", side_effect=AssertionError("raw public input must not be submitted")) as submit:
+            for field, value in path_like_values.items():
+                with self.subTest(field=field):
+                    status, response = core.submit_tool("transcribe_media", {"source_artifact_id": artifact_id, field: value})
+                    self.assertEqual(status, 400)
+                    encoded = json.dumps(response, ensure_ascii=False)
+                    self.assertNotIn(marker, encoded)
+                    self.assertNotIn("callable-marker", encoded)
+                    self.assertNotIn("redacted-marker", encoded)
+        self.assertEqual(submit.call_count, 0)
+
+        with patch.object(core, "component_statuses", return_value=[{"id": "whisper", "name": "Whisper", "component_status": "partial"}]), patch.object(core.job_manager, "submit", return_value={"id": "jobv5_" + "1" * 32}) as submit, patch.object(core, "get_job", return_value={"id": "jobv5_" + "1" * 32}):
+            status, response = core.submit_tool("transcribe_media", {"source_artifact_id": artifact_id})
+        self.assertEqual(status, 202)
+        self.assertEqual(submit.call_args.args[1], {"source_artifact_id": artifact_id})
+        self.assertEqual(response["status"], "queued")
+
         resolved, resolve_error = core._resolve_assets({"asset_id": artifact_id}, tool="transcribe_media")
         self.assertIsNone(resolve_error)
         self.assertEqual(resolved, {"source_artifact_id": artifact_id})
