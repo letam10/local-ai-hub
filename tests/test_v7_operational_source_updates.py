@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 import zipfile
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ from unittest.mock import patch
 from src.platform.paths import HubPaths
 from src.services.operational_closure.source_availability import SourceAvailabilityService
 from src.services.operational_closure.update_service import UpdateResolver, UpdateSchedule
-from src.services.operational_closure.evidence import record_runtime_smoke
+from src.services.operational_closure.evidence import EVIDENCE_SCHEMA_V1, read_runtime_evidence, record_runtime_smoke
 from src.services.productization.catalog import ProductionCatalog
 from src.services.component_installer import ComponentInstaller
 from src.services.model_manager import ModelManager
@@ -250,15 +251,57 @@ class V7SourceAndUpdateTests(unittest.TestCase):
         self.assertNotIn("update_candidate", encoded)
 
     def test_runtime_evidence_promotes_only_matching_fresh_runtime(self) -> None:
-        runtime_root = self.paths.runtime_root
-        runtime_root.mkdir(parents=True)
-        (runtime_root / "demo.exe").write_bytes(b"runtime")
-        record = self.catalog.runtimes["demo-runtime"]
-        saved = record_runtime_smoke(self.paths, "demo-runtime", record, outcome="completed", smoke_id="demo-smoke-v1", details={"exit_code": 0})
+        v2_catalog = ProductionCatalog(
+            paths=self.paths,
+            catalog_path=Path(__file__).resolve().parents[1] / "Config" / "v7_production_catalog.example.json",
+        )
+        runtime_id = "ffmpeg"
+        record = v2_catalog.runtimes[runtime_id]
+        runtime_root = v2_catalog._root_for_runtime(record)
+        for relative in record["required_leaves"]:
+            target = runtime_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"runtime")
+        binding = v2_catalog._runtime_evidence_binding(runtime_id, record)
+        self.assertIsNotNone(binding)
+        assert binding is not None
+        self.assertEqual(binding["catalog_schema"], "v7-production-catalog.v2")
+        self.assertEqual(binding["catalog_version"], v2_catalog.catalog_version)
+        self.assertEqual(binding["catalog_revision"], v2_catalog.catalog_version)
+        self.assertEqual(binding["catalog_fingerprint"], v2_catalog.fingerprint)
+        self.assertEqual(binding["runtime_id"], runtime_id)
+        self.assertEqual(binding["record_revision"], record["revision"])
+        self.assertEqual(binding["install_strategy"], record["install_strategy"])
+        saved = record_runtime_smoke(
+            self.paths,
+            runtime_id,
+            record,
+            outcome="completed",
+            smoke_id="demo-smoke-v2",
+            details={"exit_code": 0},
+            timestamp=int(time.time()),
+            catalog_binding=binding,
+        )
         self.assertEqual(saved["status"], "saved")
-        self.assertEqual(self.catalog.inspect_runtime("demo-runtime")["status"], "OPERATIONAL")
-        (runtime_root / "demo.exe").write_bytes(b"drift")
-        self.assertEqual(self.catalog.inspect_runtime("demo-runtime")["status"], "INSTALLED_UNVERIFIED")
+        self.assertEqual(v2_catalog.inspect_runtime(runtime_id)["status"], "OPERATIONAL")
+        (self.paths.config_root / "component_runtime_evidence.v2.json").unlink()
+
+        legacy = record_runtime_smoke(
+            self.paths,
+            runtime_id,
+            record,
+            outcome="completed",
+            smoke_id="demo-smoke-v1",
+            details={"exit_code": 0},
+            timestamp=int(time.time()),
+        )
+        self.assertEqual(legacy["status"], "saved")
+        self.assertEqual(read_runtime_evidence(self.paths, schema=EVIDENCE_SCHEMA_V1)["schema_version"], EVIDENCE_SCHEMA_V1)
+        legacy_projection = v2_catalog.inspect_runtime(runtime_id)
+        self.assertEqual(legacy_projection["status"], "INSTALLED_UNVERIFIED")
+        self.assertFalse(legacy_projection["operational"])
+        self.assertEqual(legacy_projection["execution"], "not_run")
+        self.assertTrue(legacy_projection["dry_run"])
 
     def test_check_all_never_auto_applies_and_schedule_defaults_manual(self) -> None:
         schedule = UpdateSchedule(paths=self.paths)
