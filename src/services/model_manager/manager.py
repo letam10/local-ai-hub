@@ -156,6 +156,7 @@ class ModelManager:
             catalog_fingerprint=self.catalog_fingerprint,
             catalog_binding=catalog_binding,
             provider=self._catalog_binding_provider,
+            unsupported_code="catalog_schema_unsupported",
         )
         if current_binding is None:
             return {

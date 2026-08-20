@@ -451,7 +451,58 @@ class V7ComponentVerificationReuseTests(unittest.TestCase):
         model._catalog_binding_provider = None
         with patch.object(DeepComponentVerifier, "verify", side_effect=AssertionError("missing context reached deep verifier")):
             missing_result = model.verify("demo-model", catalog_binding=model_context)
-        self.assertEqual(missing_result["code"], "stale_binding")
+        self.assertEqual(missing_result["code"], "catalog_schema_unsupported")
+
+    def test_direct_verify_rejects_record_derived_v2_without_provider(self) -> None:
+        model_catalog = self.paths.app_root / "Config" / "legacy_model_catalog.json"
+        model_catalog.write_text(json.dumps({
+            "schema_version": "model-catalog.v1",
+            "models": [{
+                "model_id": "demo-model", "display_name": "Legacy model", "version": "1", "revision": "model-r1",
+                "official_source": "local", "files": [{"relative_path": "demo.bin", "size_bytes": 5, "sha256": hashlib.sha256(b"model").hexdigest()}],
+                "estimated_download_size": 5, "estimated_disk_size": 5,
+            }],
+        }), encoding="utf-8")
+        runtime_catalog = self.paths.app_root / "Config" / "legacy_runtime_catalog.json"
+        runtime_catalog.write_text(json.dumps({
+            "schema_version": "runtime-catalog.v1",
+            "runtimes": [{
+                "runtime_id": "demo-runtime", "display_name": "Legacy runtime", "version": "1", "revision": "runtime-r1",
+                "root_class": "runtime_root", "required_leaves": ["bin/demo.exe"], "estimated_download_size": 0, "estimated_disk_size": 0,
+            }],
+        }), encoding="utf-8")
+        model = ModelManager(paths=self.paths, catalog_path=model_catalog)
+        runtime = RuntimeManager(paths=self.paths, catalog_path=runtime_catalog)
+        model_record = model._record("demo-model")
+        runtime_record = next(item for item in runtime._records if item["runtime_id"] == "demo-runtime")
+        model_record.update({
+            "catalog_schema": "v7-production-catalog.v2", "catalog_revision": "2026.08.21",
+            "catalog_fingerprint": "a" * 64, "source_identity": "catalog:legacy-model",
+        })
+        runtime_record.update({
+            "catalog_schema": "v7-production-catalog.v2", "catalog_revision": "2026.08.21",
+            "catalog_fingerprint": "b" * 64, "source_identity": None,
+        })
+        model_context = CatalogBindingContext.for_v2(catalog_version="2026.08.21", catalog_fingerprint="a" * 64, source_identity="catalog:legacy-model")
+        runtime_context = CatalogBindingContext.for_v2(catalog_version="2026.08.21", catalog_fingerprint="b" * 64, source_identity=None)
+        receipt_path = self.paths.config_root / "component_install_receipts.json"
+        receipt_path.write_bytes(b"legacy-direct-verify-prior\n")
+        before = receipt_path.read_bytes()
+        with patch.object(DeepComponentVerifier, "verify", side_effect=AssertionError("record-derived V2 reached deep verifier")) as deep_verify, patch("src.services.component_installer.receipts.write_component_receipt", side_effect=AssertionError("record-derived V2 reached receipt writer")) as write_receipt:
+            model_result = model.verify("demo-model", catalog_binding=model_context)
+            runtime_result = runtime.verify("demo-runtime", catalog_binding=runtime_context)
+        for result, marker in ((model_result, "catalog:legacy-model"), (runtime_result, "2026.08.21")):
+            self.assertEqual(result["status"], "conflict")
+            self.assertEqual(result["code"], "catalog_schema_unsupported")
+            self.assertEqual(result["state"], "UNAVAILABLE")
+            self.assertEqual(result["execution"], "not_run")
+            self.assertTrue(result["dry_run"])
+            self.assertFalse(result["verified"])
+            self.assertNotIn(marker, json.dumps(result))
+            self.assertNotIn(str(self.temp.name), json.dumps(result))
+        deep_verify.assert_not_called()
+        write_receipt.assert_not_called()
+        self.assertEqual(receipt_path.read_bytes(), before)
 
     def test_direct_model_and_runtime_inspect_revalidate_current_binding(self) -> None:
         installer, current = self._v2_installer()
