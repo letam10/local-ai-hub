@@ -6,6 +6,7 @@ import copy
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -116,8 +117,18 @@ class V7SourceAvailabilityProvenanceTests(unittest.TestCase):
         service = self._service()
         self._seed_available(service)
         self.assertEqual(SourceAvailabilityService(paths=self.paths).cached("demo-model")["status"], "UNKNOWN")
-        self.assertEqual(service.cached("demo-model")["status"], "AVAILABLE")
-        self.assertEqual(service.cached("demo-model", self.record, binding=self.binding)["status"], "AVAILABLE")
+        self.assertEqual(service.cached("demo-model")["status"], "UNKNOWN")
+        self.assertEqual(service.check("demo-model", self.record, force=False, now=101)["status"], "UNKNOWN")
+        self.assertEqual(service.check_all({"demo-model": self.record}, force=False, now=101)["records"]["demo-model"]["status"], "UNKNOWN")
+        self.assertEqual(service.cached("demo-model", self.record, binding=self.binding, now=101)["status"], "AVAILABLE")
+
+    def test_cached_rejects_expired_exact_binding_without_probe(self) -> None:
+        service = self._service()
+        self._seed_available(service)
+        expired = service.cached("demo-model", self.record, binding=self.binding, now=701)
+        self.assertEqual(expired["status"], "UNKNOWN")
+        self.assertIsNone(expired["source_identity"])
+        self.assertEqual(expired["reason_code"], "not_checked")
 
     def test_each_source_and_catalog_binding_mutation_invalidates_old_record(self) -> None:
         service = self._service()
@@ -177,8 +188,8 @@ class V7SourceAvailabilityProvenanceTests(unittest.TestCase):
         other = service.check("other-model", refreshed, force=True, now=102, binding=refreshed_binding, probe=lambda entry: (calls.append(str(entry["identity_digest"])) or ("AVAILABLE", "fixture", None)))
         self.assertEqual(other["status"], "AVAILABLE")
         self.assertEqual(len(calls), 1)
-        self.assertEqual(service.cached("demo-model", self.record, binding=self.binding)["status"], "AVAILABLE")
-        self.assertEqual(service.cached("other-model", refreshed, binding=refreshed_binding)["status"], "AVAILABLE")
+        self.assertEqual(service.cached("demo-model", self.record, binding=self.binding, now=103)["status"], "AVAILABLE")
+        self.assertEqual(service.cached("other-model", refreshed, binding=refreshed_binding, now=103)["status"], "AVAILABLE")
 
     def test_check_all_requires_a_current_binding_for_each_component(self) -> None:
         service = self._service()
@@ -258,11 +269,53 @@ class V7SourceAvailabilityProvenanceTests(unittest.TestCase):
         service = self._service()
         record = catalog.models["demo-model"]
         binding = catalog._source_availability_binding("demo-model", record, component_type="model")
-        self.assertEqual(service.check("demo-model", record, force=True, binding=binding, probe=lambda _entry: ("AVAILABLE", "fixture", None))["status"], "AVAILABLE")
+        self.assertEqual(service.check("demo-model", record, force=True, now=int(time.time()), binding=binding, probe=lambda _entry: ("AVAILABLE", "fixture", None))["status"], "AVAILABLE")
         catalog.source_availability = service
         self.assertEqual(catalog.inspect_model("demo-model")["source_availability"]["status"], "AVAILABLE")
         catalog.fingerprint = "d" * 64
         self.assertEqual(catalog.inspect_model("demo-model")["source_availability"]["status"], "UNKNOWN")
+
+    def test_catalog_model_and_runtime_snapshots_reject_expired_bound_cache(self) -> None:
+        catalog_path = self.app / "Config" / "catalog-with-runtime.json"
+        catalog_path.write_text(json.dumps({
+            "schema_version": "v7-production-catalog.v1",
+            "models": [{
+                "model_id": "demo-model",
+                "display_name": "Demo",
+                "provider": "fixture",
+                "revision": "r1",
+                "official_source": {"provider": "fixture", "url": "https://example.invalid/demo", "canonical_identity": "demo-artifact-r1"},
+                "disposition": "AUTO_INSTALL_READY",
+                "files": [{"relative_path": "demo.bin", "size_bytes": 1}],
+                "install_strategy": "portable_archive",
+            }],
+            "runtimes": [{
+                "runtime_id": "demo-runtime",
+                "display_name": "Demo runtime",
+                "kind": "tool",
+                "revision": "r1",
+                "root_class": "runtime_root",
+                "required_leaves": ["demo.exe"],
+                "official_source": {"provider": "fixture", "url": "https://example.invalid/runtime", "canonical_identity": "demo-runtime-r1"},
+                "disposition": "REFERENCE_EXISTING",
+                "install_strategy": "reference_existing",
+            }],
+        }), encoding="utf-8")
+        catalog = ProductionCatalog(paths=self.paths, catalog_path=catalog_path)
+        service = self._service()
+        for component_id, record, component_type in (
+            ("demo-model", catalog.models["demo-model"], "model"),
+            ("demo-runtime", catalog.runtimes["demo-runtime"], "runtime"),
+        ):
+            binding = catalog._source_availability_binding(component_id, record, component_type=component_type)
+            self.assertEqual(service.check(component_id, record, force=True, now=100, binding=binding, probe=lambda _entry: ("AVAILABLE", "fixture", None))["status"], "AVAILABLE")
+        catalog.source_availability = service
+        model_projection = catalog.inspect_model("demo-model")["source_availability"]
+        runtime_projection = catalog.inspect_runtime("demo-runtime")["source_availability"]
+        for projection in (model_projection, runtime_projection):
+            self.assertEqual(projection["status"], "UNKNOWN")
+            self.assertIsNone(projection["source_identity"])
+            self.assertEqual(projection["reason_code"], "not_checked")
 
     def test_update_resolver_check_and_check_all_pass_current_binding(self) -> None:
         from types import SimpleNamespace

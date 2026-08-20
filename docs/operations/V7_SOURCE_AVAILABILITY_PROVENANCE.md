@@ -24,6 +24,11 @@ unbound cache records fail closed to `UNKNOWN` / `not_checked`. A force check
 is the only path allowed to perform the existing bounded HTTPS probe; it does
 not install, apply, or promote a component to operational.
 
+Context-free `cached(component_id)` reads do not consult service-instance
+memory and cannot reuse a prior result. Every cached projection also checks
+the persisted expiry against the current time, so an expired `AVAILABLE`,
+`AUTH_REQUIRED`, or other result is projected as `UNKNOWN` / `not_checked`.
+
 The cache writer remains same-directory atomic and fsynced. The cache is local
 machine state and is not a release/catalog source of truth. Existing source
 availability classifications, fallback same-identity handling, TTLs, and

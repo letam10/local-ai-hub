@@ -516,7 +516,6 @@ class SourceAvailabilityService:
         self.ttl_seconds = max(60, min(int(ttl_seconds), _MAX_TTL_SECONDS))
         self.cache_path = self.paths.config_root / "source_availability_cache.json"
         self._cache_lock = threading.RLock()
-        self._known_bindings: dict[str, str] = {}
 
     def _read_cache(self) -> dict[str, Any]:
         try:
@@ -620,19 +619,26 @@ class SourceAvailabilityService:
 
     def _current_binding(self, component_id: str, record: Mapping[str, Any] | None, binding: Mapping[str, Any] | None) -> str | None:
         if record is None:
-            return self._known_bindings.get(component_id)
+            return None
         if binding is not None and not self._record_component_matches(component_id, record):
             return None
         return source_binding_fingerprint(record, binding=binding)
 
-    def cached(self, component_id: str, record: Mapping[str, Any] | None = None, *, binding: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def cached(self, component_id: str, record: Mapping[str, Any] | None = None, *, binding: Mapping[str, Any] | None = None, now: int | None = None) -> dict[str, Any]:
         component_id = _safe_id(component_id)
         expected = self._current_binding(component_id, record, binding)
         if expected is None:
             return _unknown_projection()
         with self._cache_lock:
             cache = self._read_cache()
-        return source_status_projection(cache["records"].get(component_id), binding_fingerprint=expected)
+        record_value = cache["records"].get(component_id)
+        if not isinstance(record_value, Mapping) or record_value.get("binding_fingerprint") != expected:
+            return _unknown_projection()
+        current = int(time.time()) if now is None else int(now)
+        expires_at = record_value.get("expires_at")
+        if not isinstance(expires_at, int) or expires_at <= current:
+            return _unknown_projection()
+        return source_status_projection(record_value, binding_fingerprint=expected)
 
     def check(
         self,
@@ -652,7 +658,6 @@ class SourceAvailabilityService:
         expected = self._current_binding(component_id, record, binding)
         if expected is None:
             return _unknown_projection()
-        self._known_bindings[component_id] = expected
         current = int(time.time()) if now is None else int(now)
         with self._cache_lock:
             cache = self._read_cache()
