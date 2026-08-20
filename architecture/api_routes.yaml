@@ -345,6 +345,25 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "components.bundle_lookup",
+      "method": "GET",
+      "path": "/api/components/bundles/{plan_id}",
+      "domain": "components",
+      "owner": "src/services/api/routes/components.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "components.job",
       "method": "GET",
       "path": "/api/components/jobs/{job_id}",
@@ -1200,6 +1219,44 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "updates.plan_lookup",
+      "method": "GET",
+      "path": "/api/updates/plans/{plan_id}",
+      "domain": "updates",
+      "owner": "src/services/api/routes/updates.py",
+      "service": "updates",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "updates.settings",
+      "method": "GET",
+      "path": "/api/updates/settings",
+      "domain": "updates",
+      "owner": "src/services/api/routes/updates.py",
+      "service": "updates",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "creative.gallery",
       "method": "GET",
       "path": "/api/workflow-gallery",
@@ -1599,6 +1656,44 @@
       "transport_class": "SPECIAL_PROTOCOL"
     },
     {
+      "route_id": "components.bundle_plan",
+      "method": "POST",
+      "path": "/api/components/bundles/plan",
+      "domain": "components",
+      "owner": "src/services/api/routes/components.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "components.bundle_confirm",
+      "method": "POST",
+      "path": "/api/components/bundles/{plan_id}/confirm",
+      "domain": "components",
+      "owner": "src/services/api/routes/components.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "components.import_confirm",
       "method": "POST",
       "path": "/api/components/import/confirm",
@@ -1773,6 +1868,44 @@
       "route_id": "components.repair_plan",
       "method": "POST",
       "path": "/api/components/repair/plan",
+      "domain": "components",
+      "owner": "src/services/api/routes/components.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "components.reuse_plan",
+      "method": "POST",
+      "path": "/api/components/reuse/plan",
+      "domain": "components",
+      "owner": "src/services/api/routes/components.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "components.reuse_confirm",
+      "method": "POST",
+      "path": "/api/components/reuse/{plan_id}/confirm",
       "domain": "components",
       "owner": "src/services/api/routes/components.py",
       "service": "components",
@@ -2536,6 +2669,120 @@
       "domain": "storage",
       "owner": "src/services/api/routes/compatibility.py",
       "service": "storage",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "updates.check",
+      "method": "POST",
+      "path": "/api/updates/check",
+      "domain": "updates",
+      "owner": "src/services/api/routes/updates.py",
+      "service": "updates",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "updates.check_all",
+      "method": "POST",
+      "path": "/api/updates/check-all",
+      "domain": "updates",
+      "owner": "src/services/api/routes/updates.py",
+      "service": "updates",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "updates.plan",
+      "method": "POST",
+      "path": "/api/updates/plan",
+      "domain": "updates",
+      "owner": "src/services/api/routes/updates.py",
+      "service": "updates",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "updates.confirm",
+      "method": "POST",
+      "path": "/api/updates/plans/{plan_id}/confirm",
+      "domain": "updates",
+      "owner": "src/services/api/routes/updates.py",
+      "service": "updates",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "updates.rollback",
+      "method": "POST",
+      "path": "/api/updates/rollback",
+      "domain": "updates",
+      "owner": "src/services/api/routes/updates.py",
+      "service": "updates",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "updates.settings_save",
+      "method": "POST",
+      "path": "/api/updates/settings",
+      "domain": "updates",
+      "owner": "src/services/api/routes/updates.py",
+      "service": "updates",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
