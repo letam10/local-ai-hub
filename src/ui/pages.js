@@ -8,6 +8,9 @@
 import { escapeHtml, formatGb, formatStatus } from "./api.js";
 import { translateText } from "./i18n.js";
 import { renderProductionModels } from "./features/models/models.js";
+import { createDashboardRenderer } from "./features/dashboard/render.js";
+import { createJobsRenderer } from "./features/jobs/render.js";
+import { createComponentsRenderer } from "./features/components/render.js";
 
 // Page templates contain a mixture of fixed UI copy and server-owned snapshot
 // values.  Translate only values supplied by the template itself; all values
@@ -662,7 +665,15 @@ const provenanceList = (job) => {
 
 const formResult = (id) => `<div class="form-result" id="${escapeHtml(id)}" role="status" aria-live="polite"></div>`;
 
-function renderDashboard(state) {
+const renderDashboardFeature = createDashboardRenderer({
+  uiTextHtml, escapeHtml, formatGb, readinessSnapshot, jobRecoverySnapshot, readinessStatus,
+  safeReadinessModules, statusPill, readinessStatusLabel, textKey, mediaEvidencePanel,
+  workflowLibraryState, formatStatus,
+});
+const renderJobsFeature = createJobsRenderer({ jobRecoverySnapshot, escapeHtml, uiTextHtml, statusPill, readinessStatusLabel, artifactList, provenanceList, heading });
+const renderComponentsFeature = createComponentsRenderer({ heading, escapeHtml, statusPill, uiTextHtml, uiText });
+
+function renderDashboardLegacy(state) {
   const source = state && typeof state === "object" ? state : {};
   const health = source.health && typeof source.health === "object" ? source.health : {};
   const disk = health.disk && typeof health.disk === "object" ? health.disk : {};
@@ -1095,7 +1106,7 @@ function renderCreativeWorkspace(state) {
   return heading("CREATIVE WORKSPACE", "Projects, Assets & Recipes", "Tổ chức creative work theo project → artifact → recipe → workflow → compare. Local metadata được version hóa, an toàn và không đóng gói output/model/secrets.", `<button class="button" type="button" data-refresh-creative>Làm mới workspace</button>`) + creativeTabs(state) + creativeRecovery(creative.recovery) + content;
 }
 
-function renderJobs(state) {
+function renderJobsLegacy(state) {
   const recovery = jobRecoverySnapshot(state);
   const filter = state.jobFilter || "all";
   const filtered = recovery.records.filter((job) => filter === "all" || (filter === "active" && ["queued", "starting", "running", "cancelling"].includes(job.status)) || (filter === "attention" && ["failed", "unavailable", "cancelled", "interrupted"].includes(job.status)) || (filter === "completed" && job.status === "completed"));
@@ -1132,7 +1143,7 @@ function renderModels(state) {
   return renderProductionModels({ productionCatalog: state.productionCatalog, legacyModels: state.models, storage: state.storage, escapeHtml, formatGb, statusPill, card, heading });
 }
 
-function renderComponents(state) {
+function renderComponentsLegacy(state) {
   const manager = state.componentManager || {};
   const records = Array.isArray(manager.records) ? manager.records : [];
   const plans = state.componentPlans || {};
@@ -1329,7 +1340,7 @@ function renderSettings(state) {
 
 export function renderPage(route, state) {
   const pages = {
-    dashboard: renderDashboard,
+    dashboard: renderDashboardFeature,
     airi: renderAiri,
     vision: renderVision,
     sam2: renderSam2,
@@ -1340,8 +1351,8 @@ export function renderPage(route, state) {
     media: renderMedia,
     animesr: renderAnime,
     projects: renderCreativeWorkspace,
-    jobs: renderJobs,
-    components: renderComponents,
+    jobs: renderJobsFeature,
+    components: renderComponentsFeature,
     models: renderModels,
     diagnostics: renderDiagnostics,
     settings: renderSettings,

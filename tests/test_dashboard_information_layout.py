@@ -7,13 +7,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PAGES = ROOT / "src" / "ui" / "pages.js"
+DASHBOARD_FEATURE = ROOT / "src" / "ui" / "features" / "dashboard" / "render.js"
 
 
 def dashboard_source():
-    source = PAGES.read_text(encoding="utf-8")
-    start = source.index("function renderDashboard(state) {")
-    end = source.index("\nfunction renderAiri", start)
-    return source[start:end]
+    return DASHBOARD_FEATURE.read_text(encoding="utf-8")
 
 
 def render_dashboard(state):
@@ -137,7 +135,7 @@ class DashboardInformationLayoutTests(unittest.TestCase):
     def test_dashboard_routes_are_existing_and_no_new_api(self):
         source = dashboard_source()
         full_source = PAGES.read_text(encoding="utf-8")
-        navigation_source = full_source.split("function renderDashboard", 1)[0]
+        navigation_source = full_source.split("function renderDashboardLegacy", 1)[0]
         existing_routes = set(re.findall(r'\["([a-z0-9-]+)",\s*"[^"]+"', navigation_source))
         rendered_routes = set(re.findall(r'data-route="([^"]+)"', render_dashboard({})))
         self.assertEqual(rendered_routes, {"image", "media", "jobs", "models"})
