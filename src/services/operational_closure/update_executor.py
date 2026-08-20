@@ -73,6 +73,38 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _clone_tree_preserving_files(source_root: Path, destination_root: Path) -> bool:
+    """Clone an active component slot without redownloading unchanged bytes.
+
+    Ordinary files are hard-linked where the filesystem permits it; a copy is
+    the bounded fallback.  Any reparse entry fails closed instead of following
+    an external target.  The helper is only used after an explicit update plan
+    and never scans the drive or a user-selected path.
+    """
+
+    if not source_root.is_dir() or _is_reparse(source_root):
+        return False
+    try:
+        for item in source_root.rglob("*"):
+            relative = item.relative_to(source_root)
+            target = destination_root / relative
+            if _is_reparse(item):
+                return False
+            if item.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if not item.is_file():
+                return False
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(item, target)
+            except OSError:
+                shutil.copy2(item, target)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 class ComponentUpdateExecutor:
     """Apply one immutable model candidate and preserve a rollback version."""
 
@@ -120,8 +152,14 @@ class ComponentUpdateExecutor:
         candidate_root.mkdir(parents=True, exist_ok=True)
         previous_root: Path | None = None
         try:
+            if root.exists() and not _clone_tree_preserving_files(root, candidate_root):
+                return {"status": "failed", "code": "update_preserve_existing_failed", "execution": "not_run"}
             staged_target = candidate_root / Path(relative)
             staged_target.parent.mkdir(parents=True, exist_ok=True)
+            if staged_target.exists() or staged_target.is_symlink():
+                if _is_reparse(staged_target):
+                    return {"status": "failed", "code": "update_target_reparse", "execution": "not_run"}
+                staged_target.unlink()
             shutil.copy2(source, staged_target)
             if _sha256(staged_target) != actual_hash:
                 return {"status": "failed", "code": "update_stage_checksum_mismatch", "execution": "not_run"}

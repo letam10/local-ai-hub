@@ -20,6 +20,7 @@ from pathlib import Path
 import re
 import stat
 import tempfile
+import threading
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -177,6 +178,7 @@ class SourceAvailabilityService:
         self.paths = paths or get_paths()
         self.ttl_seconds = max(60, min(int(ttl_seconds), _MAX_TTL_SECONDS))
         self.cache_path = self.paths.config_root / "source_availability_cache.json"
+        self._cache_lock = threading.RLock()
 
     def _read_cache(self) -> dict[str, Any]:
         try:
@@ -258,7 +260,8 @@ class SourceAvailabilityService:
 
         component_id = _safe_id(component_id)
         current = int(time.time()) if now is None else int(now)
-        cache = self._read_cache()
+        with self._cache_lock:
+            cache = self._read_cache()
         cached = cache["records"].get(component_id)
         if not force and isinstance(cached, Mapping) and int(cached.get("expires_at", 0) or 0) > current:
             return source_status_projection(cached)
@@ -285,19 +288,35 @@ class SourceAvailabilityService:
 
         ttl = int(result.get("retry_after_seconds") or self.ttl_seconds)
         result.update({"checked_at": current, "expires_at": current + max(60, min(ttl, _MAX_TTL_SECONDS))})
-        cache["records"][component_id] = {key: value for key, value in result.items() if key != "retry_after_seconds" or value is not None}
-        self._write_cache(cache)
+        with self._cache_lock:
+            # Re-read before publishing so bounded concurrent Check All
+            # workers do not discard another component's record.
+            latest = self._read_cache()
+            latest["records"][component_id] = {key: value for key, value in result.items() if key != "retry_after_seconds" or value is not None}
+            self._write_cache(latest)
         return source_status_projection(result)
 
     def check_all(self, records: Mapping[str, Mapping[str, Any]], *, force: bool = False, now: int | None = None) -> dict[str, Any]:
         """Check a bounded catalog mapping sequentially; never starts a daemon."""
 
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         output: dict[str, Any] = {}
-        for component_id in sorted(list(records)[:32]):
-            try:
-                output[_safe_id(component_id)] = self.check(component_id, records[component_id], force=force, now=now)
-            except SourceAvailabilityError:
-                continue
+        selected = sorted(list(records)[:32])
+
+        def run(component_id: str) -> tuple[str, dict[str, Any]]:
+            safe = _safe_id(component_id)
+            return safe, self.check(safe, records[component_id], force=force, now=now)
+
+        with ThreadPoolExecutor(max_workers=min(4, max(1, len(selected)))) as pool:
+            futures = [pool.submit(run, component_id) for component_id in selected]
+            for future in as_completed(futures):
+                try:
+                    component_id, value = future.result()
+                except SourceAvailabilityError:
+                    continue
+                output[component_id] = value
+        output = {key: output[key] for key in sorted(output)}
         return {"schema_version": "source-availability-check.v1", "status": "completed", "execution": "completed" if force else "not_run", "dry_run": not force, "records": output, "checked_count": len(output), "network_action": bool(force)}
 
 

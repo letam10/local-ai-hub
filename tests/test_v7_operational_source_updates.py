@@ -141,6 +141,7 @@ class V7SourceAndUpdateTests(unittest.TestCase):
         current_root = self.paths.models_root / "demo-model"
         current_root.mkdir(parents=True)
         (current_root / "demo.bin").write_bytes(b"old")
+        (current_root / "unchanged.bin").write_bytes(b"preserve me")
         candidate = self.paths.temp_root / "candidates" / "demo.bin"
         candidate.parent.mkdir(parents=True)
         candidate.write_bytes(b"new")
@@ -162,6 +163,7 @@ class V7SourceAndUpdateTests(unittest.TestCase):
         applied = resolver.apply_update(plan["plan_id"], confirmed=True)
         self.assertEqual(applied["status"], "completed")
         self.assertEqual((current_root / "demo.bin").read_bytes(), b"new")
+        self.assertEqual((current_root / "unchanged.bin").read_bytes(), b"preserve me")
         rolled_back = resolver.rollback("demo-model")
         self.assertEqual(rolled_back["status"], "completed")
         self.assertEqual((current_root / "demo.bin").read_bytes(), b"old")
