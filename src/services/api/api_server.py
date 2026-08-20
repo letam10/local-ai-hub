@@ -28,7 +28,7 @@ from src.services.job_manager.manager import job_manager
 from src.services.project_manager import project_manager
 from src.services.runtime_registry import applications, launch
 from src.services.storage_manager.overview import dashboard_volume_snapshot
-from src.shared.paths.registry import ROOT
+from src.shared.paths.registry import APP_ROOT, ROOT
 from src.shared.version import PRODUCT_VERSION
 
 from .config import hub_config
@@ -43,8 +43,11 @@ from .router import request_from_handler
 
 
 LOG = logging.getLogger("local-ai-hub")
-UI_ROOT = (ROOT / "src" / "ui").resolve()
-WORKFLOW_ROOT = (ROOT / "workflows").resolve()
+# Source assets belong to APP_ROOT even when a fresh install uses a split
+# machine DATA_ROOT.  Mutable Config/Models/Output state remains rooted at
+# ROOT; conflating the two made an isolated relocatable clone serve 404 UI.
+UI_ROOT = (APP_ROOT / "src" / "ui").resolve()
+WORKFLOW_ROOT = (APP_ROOT / "workflows").resolve()
 _BOOTSTRAP_CACHE_SECONDS = 5.0
 _bootstrap_cache: tuple[float, dict] | None = None
 _bootstrap_lock = threading.RLock()
