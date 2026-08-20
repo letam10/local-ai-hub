@@ -473,6 +473,89 @@ def compute_build_input_fingerprint(source_commit: str, phase: str, intended_tag
     return hashlib.sha256(canonical_json(payload)).hexdigest()
 
 
+def recompute_current_binding(repo_root: Path, *, intended_tag: str) -> tuple[dict[str, Any], list[str]]:
+    """Recompute all source/selection/build fields from the exact repository."""
+
+    codes: list[str] = []
+    try:
+        width = repository_oid_width(repo_root)
+        head = _git_text(repo_root, ["rev-parse", "HEAD"])
+        branch = _git_text(repo_root, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+        tag_exists, tag_commit = _git_ref_exists(repo_root, f"refs/tags/{intended_tag}")
+        source_names = release_file_names(repo_root)
+        installer_names = audit_installer_selection(repo_root, repo_root / "distribution" / "installer.iss")
+        if source_names != installer_names:
+            codes.append("CORE_INSTALLER_SELECTION_MISMATCH")
+        selection_digest = selection_fingerprint(repo_root, source_names)
+        installer_digest = installer_selection_fingerprint(installer_names)
+        phase = "tagged" if tag_exists else "pre_tag"
+        expected = {
+            "phase": phase,
+            "source_commit": head,
+            "build_commit": head,
+            "source_branch": branch,
+            "intended_tag": intended_tag,
+            "tag_commit": tag_commit if tag_exists else None,
+            "build_input_fingerprint": compute_build_input_fingerprint(head, phase, intended_tag, selection_digest, installer_digest),
+            "build_parameters": {
+                "source_date_epoch": SOURCE_DATE_EPOCH,
+                "zip_compression": "deflate",
+                "zip_compression_level": 9,
+                "zip_entry_timestamp": ZIP_ENTRY_TIMESTAMP,
+                "json_framing": RAW_JSON_FRAMING,
+                "selection_fingerprint": selection_digest,
+                "installer_selection_fingerprint": installer_digest,
+                "reproducibility": "not_claimed",
+            },
+            "oid_width": width,
+        }
+        identity = source_identity_gate(repo_root, intended_tag=intended_tag, phase=phase)
+        codes.extend(identity.get("codes", []))
+        return expected, sorted(set(codes))
+    except ProvenanceRefusal as exc:
+        return {}, [exc.code]
+
+
+def compare_manifest_to_current(manifest: Mapping[str, Any], current: Mapping[str, Any], current_codes: Iterable[str]) -> list[str]:
+    """Return fixed mismatch codes for a self-hashed stale/moved record."""
+
+    codes = list(current_codes)
+
+    def add(code: str) -> None:
+        if code not in codes:
+            codes.append(code)
+
+    for field, code in (
+        ("source_commit", "SOURCE_COMMIT_MISMATCH"),
+        ("build_commit", "BUILD_COMMIT_MISMATCH"),
+        ("source_branch", "BRANCH_HEAD_MISMATCH"),
+        ("phase", "PHASE_MISMATCH"),
+        ("intended_tag", "INTENDED_TAG_MISMATCH"),
+        ("tag_commit", "TAG_COMMIT_MISMATCH"),
+        ("build_input_fingerprint", "BUILD_INPUT_FINGERPRINT_MISMATCH"),
+    ):
+        if field in current and manifest.get(field) != current.get(field):
+            add(code)
+    expected_build = current.get("build_parameters")
+    actual_build = manifest.get("build_parameters")
+    if isinstance(expected_build, Mapping) and isinstance(actual_build, Mapping):
+        if actual_build.get("selection_fingerprint") != expected_build.get("selection_fingerprint"):
+            add("SELECTION_FINGERPRINT_MISMATCH")
+        if actual_build.get("installer_selection_fingerprint") != expected_build.get("installer_selection_fingerprint"):
+            add("INSTALLER_SELECTION_MISMATCH")
+        for field, code in (
+            ("source_date_epoch", "SOURCE_DATE_EPOCH_MISMATCH"),
+            ("zip_compression", "ZIP_PARAMETERS_MISMATCH"),
+            ("zip_compression_level", "ZIP_PARAMETERS_MISMATCH"),
+            ("zip_entry_timestamp", "ZIP_TIMESTAMP_MISMATCH"),
+            ("json_framing", "JSON_FRAMING_MISMATCH"),
+            ("reproducibility", "REPRODUCIBILITY_STATUS_INVALID"),
+        ):
+            if actual_build.get(field) != expected_build.get(field):
+                add(code)
+    return sorted(set(codes))
+
+
 def source_identity_gate(repo_root: Path, *, intended_tag: str, phase: str) -> dict[str, Any]:
     codes: list[str] = []
     try:
@@ -533,12 +616,18 @@ def require_source_identity(repo_root: Path, *, intended_tag: str, phase: str) -
 
 
 def verify_pre_tag_manifest(value: Any, repo_root: Path, *, intended_tag: str) -> dict[str, Any]:
-    structural = validate_release_manifest(value, require_phase="pre_tag", oid_width=repository_oid_width(repo_root))
+    try:
+        width = repository_oid_width(repo_root)
+        structural = validate_release_manifest(value, require_phase="pre_tag", oid_width=width)
+    except ProvenanceRefusal as exc:
+        return _projection("pre_tag", False, [exc.code])
     if not structural["valid"]:
         return _projection("pre_tag", False, structural["codes"])
     if value.get("intended_tag") != intended_tag:
         return _projection("pre_tag", False, ["INTENDED_TAG_MISMATCH"])
-    return source_identity_gate(repo_root, intended_tag=intended_tag, phase="pre_tag")
+    current, current_codes = recompute_current_binding(repo_root, intended_tag=intended_tag)
+    codes = compare_manifest_to_current(value, current, current_codes)
+    return _projection("pre_tag", not codes, codes)
 
 
 def _zip_content_fingerprint(path: Path) -> str:
@@ -614,8 +703,8 @@ def verify_manifest_file(manifest_path: Path, *, repo_root: Path = ROOT, artifac
         return _projection("verify", False, [exc.code])
     codes = list(structural["codes"])
     if structural["valid"]:
-        identity = source_identity_gate(repo_root, intended_tag=manifest["intended_tag"], phase=manifest["phase"])
-        codes.extend(identity["codes"])
+        current, current_codes = recompute_current_binding(repo_root, intended_tag=manifest["intended_tag"])
+        codes.extend(compare_manifest_to_current(manifest, current, current_codes))
         if artifact_root is not None:
             codes.extend(verify_artifacts(manifest, artifact_root))
     return _projection("verify", not codes, sorted(set(codes)))
@@ -709,11 +798,13 @@ __all__ = [
     "audit_installer_selection",
     "canonical_json",
     "classify_historical_manifest",
+    "compare_manifest_to_current",
     "compute_build_input_fingerprint",
     "installer_selection_fingerprint",
     "load_manifest",
     "manifest_self_hash",
     "release_file_names",
+    "recompute_current_binding",
     "repository_oid_width",
     "require_source_identity",
     "selection_fingerprint",

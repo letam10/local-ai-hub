@@ -53,7 +53,7 @@ Source: "..\dependencies.lock.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\AGENTS.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\Config\*.example.json"; Excludes: "__pycache__;*.pyc"; DestDir: "{app}\Config"; Flags: ignoreversion
+Source: "..\Config\*.example.json"; DestDir: "{app}\Config"; Flags: ignoreversion
 Source: "..\LocalAIHub.vbs"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LocalAIHub.cmd"; DestDir: "{app}"; Flags: ignoreversion
 

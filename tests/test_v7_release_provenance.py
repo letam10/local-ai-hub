@@ -69,6 +69,9 @@ class ReleaseProvenanceRemediationTests(unittest.TestCase):
         return value
 
     def test_repository_oid_width_is_real_sha1_and_64_is_not_fixture_only(self) -> None:
+        schema = json.loads((ROOT / "distribution" / "release_manifest.v2.schema.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(schema["properties"]["source_commit"]["oneOf"]), 2)
+        self.assertEqual({item["pattern"] for item in schema["properties"]["source_commit"]["oneOf"]}, {"^[a-f0-9]{40}$", "^[a-f0-9]{64}$"})
         self.assertEqual(verifier.repository_oid_width(ROOT), 40)
         valid = self.manifest()
         self.assertEqual(verifier.validate_release_manifest(valid, oid_width=40), {"valid": True, "codes": []})
@@ -147,6 +150,50 @@ class ReleaseProvenanceRemediationTests(unittest.TestCase):
         self.assertIn("TAG_SOURCE_MISMATCH", mismatch["codes"])
         self.assertIsNone(value["tag_commit"])
         self.assertEqual(tagged["tag_commit"], self.oid("a"))
+
+    def test_manifest_verifiers_reject_self_hashed_stale_source_and_selection_fields(self) -> None:
+        tag = "v7.99.0"
+        current, current_codes = verifier.recompute_current_binding(ROOT, intended_tag=tag)
+        self.assertIn("SOURCE_BRANCH_MISMATCH", current_codes)
+        pre_tag = self.manifest(phase="pre_tag", tag=tag, width=current["oid_width"])
+        pre_tag.update({
+            "source_commit": current["source_commit"],
+            "build_commit": current["build_commit"],
+            "source_branch": current["source_branch"],
+            "build_input_fingerprint": current["build_input_fingerprint"],
+            "build_parameters": current["build_parameters"],
+            "tag_commit": None,
+        })
+        pre_tag["manifest_sha256"] = verifier.manifest_self_hash(pre_tag)
+        with patch.object(verifier, "RELEASE_BRANCH", current["source_branch"]):
+            baseline_codes = verifier.verify_pre_tag_manifest(pre_tag, ROOT, intended_tag=tag)["codes"]
+            self.assertIn("DIRTY_SOURCE", baseline_codes)
+            stale_source = dict(pre_tag)
+            stale_source["source_commit"] = self.oid("b", current["oid_width"])
+            stale_source["build_commit"] = stale_source["source_commit"]
+            stale_source["manifest_sha256"] = verifier.manifest_self_hash(stale_source)
+            self.assertIn("SOURCE_COMMIT_MISMATCH", verifier.verify_pre_tag_manifest(stale_source, ROOT, intended_tag=tag)["codes"])
+            stale_input = dict(pre_tag)
+            stale_input["build_input_fingerprint"] = self.digest("9")
+            stale_input["manifest_sha256"] = verifier.manifest_self_hash(stale_input)
+            self.assertIn("BUILD_INPUT_FINGERPRINT_MISMATCH", verifier.verify_pre_tag_manifest(stale_input, ROOT, intended_tag=tag)["codes"])
+            stale_selection = dict(pre_tag)
+            stale_selection["build_parameters"] = dict(pre_tag["build_parameters"])
+            stale_selection["build_parameters"]["selection_fingerprint"] = self.digest("8")  # type: ignore[index]
+            stale_selection["manifest_sha256"] = verifier.manifest_self_hash(stale_selection)
+            self.assertIn("SELECTION_FINGERPRINT_MISMATCH", verifier.verify_pre_tag_manifest(stale_selection, ROOT, intended_tag=tag)["codes"])
+
+            stale_installer = dict(pre_tag)
+            stale_installer["build_parameters"] = dict(pre_tag["build_parameters"])
+            stale_installer["build_parameters"]["installer_selection_fingerprint"] = self.digest("7")  # type: ignore[index]
+            stale_installer["manifest_sha256"] = verifier.manifest_self_hash(stale_installer)
+            stale_path = self.root / "stale-installer.json"
+            stale_path.write_bytes(verifier.canonical_json(stale_installer) + b"\n")
+            self.assertIn("INSTALLER_SELECTION_MISMATCH", verifier.verify_manifest_file(stale_path, repo_root=ROOT)["codes"])
+
+    def test_checked_in_installer_spec_passes_real_audit(self) -> None:
+        names = verifier.audit_installer_selection(ROOT, ROOT / "distribution" / "installer.iss")
+        self.assertEqual(names, verifier.release_file_names(ROOT))
 
     def test_core_build_gate_refuses_before_output_or_staging(self) -> None:
         output = self.root / "dist" / "core.zip"
@@ -238,7 +285,7 @@ class ReleaseProvenanceRemediationTests(unittest.TestCase):
         sidecar = fake / "dist" / "staging" / "release_manifest.v2.json"
         self.assertEqual(verifier.load_manifest(sidecar, require_canonical=True), manifest)
         self.assertEqual(legacy.read_bytes(), b"legacy")
-        self.assertEqual(hashlib.sha256(verifier.canonical_json(manifest)).hexdigest()[:0], "")
+        self.assertEqual(manifest["manifest_sha256"], verifier.manifest_self_hash(manifest))
 
     def test_direct_verifier_cli_is_finite_and_redacted(self) -> None:
         result = subprocess.run([sys.executable, "-B", "scripts/verify_release_provenance.py", "--historical"], cwd=ROOT, capture_output=True, text=True, check=False)
