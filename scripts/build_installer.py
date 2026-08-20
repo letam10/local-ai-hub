@@ -56,7 +56,7 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def get_git_info() -> tuple[str, str, str | None]:
+def get_git_info() -> tuple[str, str, str | None, str | None]:
     try:
         commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).decode().strip()
     except Exception:
@@ -66,11 +66,21 @@ def get_git_info() -> tuple[str, str, str | None]:
     except Exception:
         branch = "unknown"
     try:
-        tags = subprocess.check_output(["git", "tag", "--points-at", "HEAD"], cwd=ROOT).decode().splitlines()
-        tag = next((item.strip() for item in tags if item.strip()), None)
+        tag = subprocess.check_output(
+            ["git", "describe", "--tags", "--abbrev=0", "HEAD"], cwd=ROOT
+        ).decode().strip() or None
     except Exception:
         tag = None
-    return commit, branch, tag
+    if tag:
+        try:
+            tag_commit = subprocess.check_output(
+                ["git", "rev-parse", f"{tag}^{{commit}}"], cwd=ROOT
+            ).decode().strip() or None
+        except Exception:
+            tag_commit = None
+    else:
+        tag_commit = None
+    return commit, branch, tag, tag_commit
 
 
 def compile_installer() -> tuple[Path | None, str | None]:
@@ -95,7 +105,7 @@ def build_release_package(output_zip: Path | None = None, compile_exe: bool = Tr
     DIST_DIR.mkdir(parents=True, exist_ok=True)
     out_zip = output_zip or (DIST_DIR / f"LocalAIHub-Core-Win64-v{PRODUCT_VERSION}.zip")
 
-    commit, branch, tag = get_git_info()
+    commit, branch, tag, tag_commit = get_git_info()
     timestamp = datetime.now(timezone.utc).isoformat()
 
     included_roots = ["src", "scripts", "distribution", "docs", "workflows", "architecture"]
@@ -158,6 +168,7 @@ def build_release_package(output_zip: Path | None = None, compile_exe: bool = Tr
         "git_commit": commit,
         "git_branch": branch,
         "tag": tag,
+        "tag_commit": tag_commit,
         "source_reference": f"refs/heads/{branch}" if branch not in {"", "unknown"} else None,
         "build_timestamp": timestamp,
         "packaging_tool": "Local AI Hub Release Packager (Python/zipfile) + Inno Setup 6",
