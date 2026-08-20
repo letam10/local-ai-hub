@@ -115,6 +115,18 @@ class V7SourceAndUpdateTests(unittest.TestCase):
             self.assertEqual(result["status"], expected)
             self.assertEqual(service.cached(f"demo-{code}")["status"], expected)
 
+    def test_animesr_local_operational_state_survives_upstream_loss(self) -> None:
+        record = dict(self.catalog.models["demo-model"])
+        record.update({"model_id": "animesr-v2", "source_identity": "animesr-v2", "revision": "v2"})
+        service = SourceAvailabilityService(paths=self.paths)
+        service.check("animesr-v2", record, force=True, now=int(__import__("time").time()), probe=lambda _entry: ("UNAVAILABLE", "source_not_found", None))
+        resolver = UpdateResolver(paths=self.paths, catalog=self.catalog, source_service=service)
+        with patch.object(resolver, "_record", return_value=("model", record)), patch.object(resolver, "_local", return_value={"status": "OPERATIONAL"}):
+            report = resolver.check_component("animesr-v2")
+        self.assertEqual(report["local_status"], "OPERATIONAL")
+        self.assertEqual(report["status"], "SOURCE_UNAVAILABLE")
+        self.assertEqual(report["source"]["status"], "UNAVAILABLE")
+
     def test_source_unavailable_does_not_turn_installed_local_component_into_not_installed(self) -> None:
         model_root = self.paths.models_root / "demo-model"
         model_root.mkdir(parents=True)
