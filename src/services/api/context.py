@@ -93,7 +93,7 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         "admit_durable_job": get("admit_durable_job"), "resume_durable_job": get("resume_durable_job"),
         "submit_graph": get("submit_graph"), "open_artifact": get("open_artifact"),
         "artifact_status": project.get_artifact_status, "node_registry_payload": lambda scope=None: __import__("src.services.node_studio.registry", fromlist=["registry_payload"]).registry_payload(scope),
-        "node_preset_summaries": get("node_preset_summaries"), "node_preset": get("node_preset"),
+        "node_preset_summaries": get("node_preset_summaries") or get("preset_summaries"), "node_preset": get("node_preset") or get("preset"),
         "node_validate": lambda graph, require_runnable=False: __import__("src.services.node_studio.schema", fromlist=["validate_graph"]).validate_graph(graph, require_runnable=require_runnable),
         "node_downstream": lambda graph, changed: __import__("src.services.node_studio.schema", fromlist=["downstream_nodes"]).downstream_nodes(graph, changed),
         "node_draft_load": lambda scope: __import__("src.services.node_studio.state", fromlist=["draft_load"]).draft_load(scope),
