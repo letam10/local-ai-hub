@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import os
 import subprocess
@@ -65,6 +66,19 @@ def _ui_url() -> str:
     return f"{_api_base_url()}/ui/"
 
 
+def _scoped_mutex(base: str) -> str:
+    """Keep single-instance semantics per installation, not per Windows user."""
+
+    try:
+        paths = get_paths(app_root=ROOT)
+        if paths.legacy_single_root_mode:
+            return base
+        digest = hashlib.sha256(str(paths.data_root).casefold().encode("utf-8")).hexdigest()[:16]
+        return f"{base}.{digest}"
+    except OSError:
+        return base
+
+
 def _api_ready() -> bool:
     try:
         with urllib.request.urlopen(f"{_api_base_url()}/health", timeout=0.35) as response:
@@ -87,7 +101,7 @@ def ensure_api(timeout_seconds: float = 20.0) -> subprocess.Popen[object] | None
     if _api_ready():
         return None
     deadline = time.monotonic() + timeout_seconds
-    with startup_mutex(API_STARTUP_MUTEX, max(0.0, deadline - time.monotonic())) as acquired:
+    with startup_mutex(_scoped_mutex(API_STARTUP_MUTEX), max(0.0, deadline - time.monotonic())) as acquired:
         if _api_ready():
             return None
         if not acquired:
@@ -479,7 +493,7 @@ def main() -> int:
 
     min_w, min_h, start_maximized = _load_window_settings()
 
-    with startup_mutex(APP_INSTANCE_MUTEX, 0.5) as instance_acquired:
+    with startup_mutex(_scoped_mutex(APP_INSTANCE_MUTEX), 0.5) as instance_acquired:
         if not instance_acquired:
             print("Local AI Hub is already running in another instance.", file=sys.stderr)
             return 0
