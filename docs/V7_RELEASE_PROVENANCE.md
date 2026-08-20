@@ -16,13 +16,14 @@ The historical verifier reads the byte-preserved v1
 `distribution/release_manifest.json` and returns only finite redacted mismatch
 codes. It does not reinterpret that record as a v2 release and never writes it.
 
-The pre-tag verifier accepts an explicitly reviewed future `intended_tag` only
-when it is safe, unoccupied, and paired with `tag_commit: null`. It proves the
-current clean source/build identity but does not select, create, or publish a
-tag. The tagged verifier requires the existing intended tag to resolve exactly
-to the current source/build commit. These paths are intentionally distinct so
-preparation does not require a current source to already equal a future tag,
-while an actual tagged release still has a detached exact chain.
+The pre-tag verifier accepts only the currently reviewed `intended_tag`
+`v7.1.0`, when it is unoccupied and paired with `tag_commit: null`. It proves
+the current clean source/build identity but does not select, create, or publish
+a tag. `v7.1.1` and `v7.2.0` return the fixed
+`INTENDED_TAG_VERSION_MISMATCH` refusal until a separate roadmap-approved
+package changes the version/tag allowlist. The tagged verifier requires the
+existing reviewed intended tag to resolve exactly to the current source/build
+commit. No safe tag syntax is treated as roadmap approval.
 
 ## Detached v2 framing and chain
 

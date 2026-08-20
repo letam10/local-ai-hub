@@ -40,6 +40,7 @@ APPROVED_RELEASE_VERSIONS = frozenset({"7.1.0"})
 REVIEWED_RELEASE_VERSION = PRODUCT_VERSION
 RELEASE_BRANCH = "feature/v7-operational-closure"
 REVIEWED_INTENDED_TAG = "v7.1.0"
+APPROVED_INTENDED_TAGS = frozenset({REVIEWED_INTENDED_TAG})
 SOURCE_DATE_EPOCH = 315532800
 ZIP_ENTRY_TIMESTAMP = "1980-01-01T00:00:00Z"
 RAW_JSON_FRAMING = "canonical-json-sorted-keys-compact-utf8-with-exactly-one-terminal-lf"
@@ -260,8 +261,8 @@ def validate_release_manifest(
         add("SOURCE_BRANCH_MISMATCH")
     if not isinstance(value.get("intended_tag"), str) or SAFE_TAG.fullmatch(value["intended_tag"]) is None:
         add("INTENDED_TAG_INVALID")
-    elif phase == "tagged" and value.get("intended_tag") != REVIEWED_INTENDED_TAG:
-        add("INTENDED_TAG_MISMATCH")
+    elif value.get("intended_tag") not in APPROVED_INTENDED_TAGS:
+        add("INTENDED_TAG_VERSION_MISMATCH")
 
     build = value.get("build_parameters")
     if not _strict_keys(build, _BUILD_KEYS):
@@ -587,6 +588,8 @@ def source_identity_gate(repo_root: Path, *, intended_tag: str, phase: str) -> d
     elif phase == "pre_tag":
         if SAFE_TAG.fullmatch(intended_tag) is None:
             codes.append("INTENDED_TAG_INVALID")
+        elif intended_tag not in APPROVED_INTENDED_TAGS:
+            codes.append("INTENDED_TAG_VERSION_MISMATCH")
         else:
             try:
                 occupied, _tag_commit = _git_ref_exists(repo_root, f"refs/tags/{intended_tag}")
@@ -625,6 +628,8 @@ def verify_pre_tag_manifest(value: Any, repo_root: Path, *, intended_tag: str) -
         return _projection("pre_tag", False, structural["codes"])
     if value.get("intended_tag") != intended_tag:
         return _projection("pre_tag", False, ["INTENDED_TAG_MISMATCH"])
+    if intended_tag not in APPROVED_INTENDED_TAGS:
+        return _projection("pre_tag", False, ["INTENDED_TAG_VERSION_MISMATCH"])
     current, current_codes = recompute_current_binding(repo_root, intended_tag=intended_tag)
     codes = compare_manifest_to_current(value, current, current_codes)
     return _projection("pre_tag", not codes, codes)
@@ -780,6 +785,7 @@ if __name__ == "__main__":
 
 __all__ = [
     "APPROVED_RELEASE_VERSIONS",
+    "APPROVED_INTENDED_TAGS",
     "HISTORICAL_MANIFEST_PATH",
     "INSTALLER_SOURCE_RULES",
     "RAW_JSON_FRAMING",

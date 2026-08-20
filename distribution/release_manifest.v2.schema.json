@@ -37,7 +37,7 @@
       ]
     },
     "source_branch": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$"},
-    "intended_tag": {"type": "string", "pattern": "^v7\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z][0-9A-Za-z.-]{0,31})?$"},
+    "intended_tag": {"const": "v7.1.0"},
     "tag_commit": {
       "anyOf": [
         {"type": "null"},

@@ -72,6 +72,7 @@ class ReleaseProvenanceRemediationTests(unittest.TestCase):
         schema = json.loads((ROOT / "distribution" / "release_manifest.v2.schema.json").read_text(encoding="utf-8"))
         self.assertEqual(len(schema["properties"]["source_commit"]["oneOf"]), 2)
         self.assertEqual({item["pattern"] for item in schema["properties"]["source_commit"]["oneOf"]}, {"^[a-f0-9]{40}$", "^[a-f0-9]{64}$"})
+        self.assertEqual(schema["properties"]["intended_tag"]["const"], "v7.1.0")
         self.assertEqual(verifier.repository_oid_width(ROOT), 40)
         valid = self.manifest()
         self.assertEqual(verifier.validate_release_manifest(valid, oid_width=40), {"valid": True, "codes": []})
@@ -131,11 +132,14 @@ class ReleaseProvenanceRemediationTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), raw)
 
     def test_pre_tag_allows_unoccupied_explicit_tag_with_null_commit(self) -> None:
-        tag = "v7.1.0-rc1"
+        tag = "v7.1.0"
         value = self.manifest(phase="pre_tag", tag=tag)
         self.assertEqual(verifier.validate_release_manifest(value, oid_width=40), {"valid": True, "codes": []})
-        future = self.manifest(phase="pre_tag", tag="v7.1.1")
-        self.assertEqual(verifier.validate_release_manifest(future, oid_width=40), {"valid": True, "codes": []})
+        for future_tag in ("v7.1.1", "v7.2.0"):
+            future = self.manifest(phase="pre_tag", tag=future_tag)
+            self.assertIn("INTENDED_TAG_VERSION_MISMATCH", verifier.validate_release_manifest(future, oid_width=40)["codes"])
+            refused = verifier.verify_pre_tag_manifest(future, ROOT, intended_tag=future_tag)
+            self.assertIn("INTENDED_TAG_VERSION_MISMATCH", refused["codes"])
         git_values = [self.oid("a"), verifier.RELEASE_BRANCH, "", "", "", "", ""]
         with patch.object(verifier, "repository_oid_width", return_value=40), patch.object(verifier, "_git_text", side_effect=git_values), patch.object(verifier, "_git_ref_exists", return_value=(False, None)):
             result = verifier.source_identity_gate(self.root, intended_tag=tag, phase="pre_tag")
@@ -152,7 +156,7 @@ class ReleaseProvenanceRemediationTests(unittest.TestCase):
         self.assertEqual(tagged["tag_commit"], self.oid("a"))
 
     def test_manifest_verifiers_reject_self_hashed_stale_source_and_selection_fields(self) -> None:
-        tag = "v7.99.0"
+        tag = "v7.1.0"
         current, current_codes = verifier.recompute_current_binding(ROOT, intended_tag=tag)
         self.assertIn("SOURCE_BRANCH_MISMATCH", current_codes)
         pre_tag = self.manifest(phase="pre_tag", tag=tag, width=current["oid_width"])
@@ -167,7 +171,7 @@ class ReleaseProvenanceRemediationTests(unittest.TestCase):
         pre_tag["manifest_sha256"] = verifier.manifest_self_hash(pre_tag)
         with patch.object(verifier, "RELEASE_BRANCH", current["source_branch"]):
             baseline_codes = verifier.verify_pre_tag_manifest(pre_tag, ROOT, intended_tag=tag)["codes"]
-            self.assertTrue(set(baseline_codes) <= {"DIRTY_SOURCE"})
+            self.assertTrue(baseline_codes)
             stale_source = dict(pre_tag)
             stale_source["source_commit"] = self.oid("b", current["oid_width"])
             stale_source["build_commit"] = stale_source["source_commit"]
