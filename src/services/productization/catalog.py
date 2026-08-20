@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 
 from src.platform.paths import HubPaths, get_paths
 from src.services.operational_closure.source_availability import SourceAvailabilityService
-from src.services.operational_closure.evidence import runtime_evidence_passed, runtime_fingerprint
+from src.services.operational_closure.evidence import runtime_catalog_binding, runtime_evidence_passed, runtime_fingerprint
 
 
 SCHEMA = "v7-production-catalog.v1"
@@ -647,6 +647,20 @@ class ProductionCatalog:
             return self.paths.runtime_root / "external"
         return self.paths.runtime_root
 
+    def _runtime_evidence_binding(self, runtime_id: str, record: Mapping[str, Any]) -> dict[str, Any] | None:
+        catalog_version = self.catalog_version if isinstance(self.catalog_version, str) else None
+        source_identity = record.get("source_identity") if isinstance(record.get("source_identity"), str) else None
+        return runtime_catalog_binding(
+            catalog_schema=self.catalog_schema_version,
+            catalog_version=catalog_version,
+            catalog_revision=catalog_version,
+            catalog_fingerprint=self.fingerprint,
+            source_identity=source_identity,
+            runtime_id=runtime_id,
+            record_revision=record.get("revision"),
+            install_strategy=record.get("install_strategy"),
+        )
+
     def _size_cache_path(self) -> Path:
         return self.paths.config_root / "model_size_cache.json"
 
@@ -717,7 +731,8 @@ class ProductionCatalog:
             target = _safe_leaf(root, relative)
             leaves.append({"relative_leaf": relative, "present": bool(target and target.is_file())})
         if leaves and all(item["present"] for item in leaves):
-            status = "OPERATIONAL" if runtime_evidence_passed(self.paths, runtime_id, record) else "INSTALLED_UNVERIFIED"
+            binding = self._runtime_evidence_binding(runtime_id, record)
+            status = "OPERATIONAL" if runtime_evidence_passed(self.paths, runtime_id, record, binding=binding) else "INSTALLED_UNVERIFIED"
             reason = "Required runtime leaves and fresh matching bounded smoke evidence are present." if status == "OPERATIONAL" else "Required runtime leaves are present; import/package and bounded smoke evidence are still required."
         elif any(item["present"] for item in leaves):
             status = "PARTIAL"
@@ -725,8 +740,9 @@ class ProductionCatalog:
         else:
             status = "NOT_INSTALLED"
             reason = "No required runtime leaf was observed at the managed root."
+        binding = self._runtime_evidence_binding(runtime_id, record)
         projected = {key: value for key, value in record.items() if key not in {"official_source", "primary_source", "trusted_fallback_sources", "update_candidate"}}
-        projected.update({"status": status, "execution": "not_run", "operational": status == "OPERATIONAL", "runtime_fingerprint": runtime_fingerprint(self.paths, record), "leaves": leaves, "source_availability": self.source_availability.cached(runtime_id), "reason": reason, "next_action": "Use Verify and run the bounded runtime smoke before operational promotion." if status != "OPERATIONAL" else "Runtime is operational under the last matching bounded evidence."})
+        projected.update({"status": status, "execution": "not_run", "dry_run": True, "operational": status == "OPERATIONAL", "runtime_fingerprint": runtime_fingerprint(self.paths, record, binding=binding), "leaves": leaves, "source_availability": self.source_availability.cached(runtime_id), "reason": reason, "next_action": "Use Verify and run the bounded runtime smoke before operational promotion." if status != "OPERATIONAL" else "Runtime is operational under the last matching bounded evidence."})
         return projected
 
     def snapshot(self, *, query: str = "", category: str = "", installed: bool | None = None) -> dict[str, Any]:
