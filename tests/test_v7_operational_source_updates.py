@@ -101,6 +101,20 @@ class V7SourceAndUpdateTests(unittest.TestCase):
         self.assertEqual(result["status"], "UNAVAILABLE")
         self.assertIsNone(result["selected_source"])
 
+    def test_source_error_classes_are_finite_and_cached(self) -> None:
+        service = SourceAvailabilityService(paths=self.paths)
+        record = self.catalog.models["demo-model"]
+        for expected, code in (("AUTH_REQUIRED", "auth"), ("LICENSE_REQUIRED", "license"), ("RATE_LIMITED", "rate"), ("UNKNOWN", "timeout")):
+            value = dict(record)
+            if code == "auth":
+                value["primary_source"] = {"url": "https://example.invalid/demo", "canonical_identity": "demo-artifact-r1", "authentication_required": True}
+            elif code == "license":
+                value["primary_source"] = {"url": "https://example.invalid/demo", "canonical_identity": "demo-artifact-r1", "license_required": True}
+            probe_value = (expected, code, 3600 if code == "rate" else None)
+            result = service.check(f"demo-{code}", value, force=True, now=100, probe=lambda _entry, output=probe_value: output)
+            self.assertEqual(result["status"], expected)
+            self.assertEqual(service.cached(f"demo-{code}")["status"], expected)
+
     def test_source_unavailable_does_not_turn_installed_local_component_into_not_installed(self) -> None:
         model_root = self.paths.models_root / "demo-model"
         model_root.mkdir(parents=True)
