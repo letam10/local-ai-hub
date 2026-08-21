@@ -17,7 +17,7 @@ from src.services.process_manager.managed import ProcessOwner, run_command
 from src.services.process_manager.windows import run_hidden
 from src.services.artifact_store import describe, resolve
 from src.shared.paths.registry import OUTPUT_ROOT, TEMP_ROOT
-from src.shared.utils.adapter_common import configured_path, unavailable
+from src.shared.utils.adapter_common import configured_path, reserve_output_leaf, reserve_output_namespace, reserved_worker_result, seal_output_reservations, unavailable
 
 
 VIDEO_OPS = {
@@ -652,12 +652,19 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
             return {"status": "error", "error": "Concat hoặc image sequence cần ít nhất hai artifact input trong Hub."}
         if operation == "image_sequence_video" and any(item.suffix.casefold() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"} for item in unique_sources):
             return {"status": "error", "error": "Image sequence chỉ nhận ảnh PNG/JPG/WEBP/BMP đã tải lên Hub."}
-        target = _output(source, operation, ".mp4" if operation == "image_sequence_video" else source.suffix or ".mp4")
+        suffix = ".mp4" if operation == "image_sequence_video" else source.suffix or ".mp4"
+        reservation_context = callable(getattr(context, "reserve_output", None))
+        reservation = reserve_output_leaf(context, "media_editor", suffix=suffix)
+        if reservation_context and reservation is None:
+            return unavailable("ffmpeg", "Media output reservation server-owned không khả dụng.", code="output_reservation_unavailable")
+        target = Path(reservation["path"]) if reservation else _output(source, operation, suffix)
         manifest = _concat_manifest(unique_sources, fps=max(1, min(120, float(payload.get("fps", 24)))) if operation == "image_sequence_video" else None)
         try:
             command = _multi_input_command(operation, manifest, target, payload)
             if command is None:
                 return unavailable("ffmpeg", "Không tìm thấy FFmpeg canonical của Hub.")
+            if reservation and not seal_output_reservations(context):
+                return unavailable("ffmpeg", "Media output reservation không thể chốt trước khi chạy.", code="output_reservation_unavailable")
             code, output = run_command(command, label=f"ffmpeg_{operation}", owner=context, timeout_seconds=float(payload.get("timeout_seconds", 1800)))
         finally:
             try:
@@ -670,15 +677,22 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
             return {"status": "error", "error": output or f"FFmpeg kết thúc với mã {code}."}
         if not target.is_file():
             return {"status": "error", "error": "FFmpeg không tạo output mong đợi."}
-        return {"status": "completed", "operation": operation, "output": str(target), "input_count": len(unique_sources)}
+        result = {"status": "completed", "operation": operation, "output": str(target), "input_count": len(unique_sources)}
+        return (reserved_worker_result(result, context, {"output": reservation}, ("output",)) or unavailable("ffmpeg", "Media output reservation could not be attested.", code="output_scope_unavailable")) if reservation else result
     if operation == "encode":
         container = str(payload.get("container") or "mp4").strip().lower().lstrip(".")
         if container not in {"mp4", "mkv", "webm"}:
             return {"status": "error", "error": "Encode container chỉ hỗ trợ MP4, MKV hoặc WebM."}
-        target = _output(source, operation, f".{container}")
+        reservation_context = callable(getattr(context, "reserve_output", None))
+        reservation = reserve_output_leaf(context, "media_editor", suffix=f".{container}")
+        if reservation_context and reservation is None:
+            return unavailable("ffmpeg", "Media output reservation server-owned không khả dụng.", code="output_reservation_unavailable")
+        target = Path(reservation["path"]) if reservation else _output(source, operation, f".{container}")
         cleanup_prefixes: list[Path] = []
         try:
             commands, cleanup_prefixes = _encode_commands(payload, source, target)
+            if reservation and not seal_output_reservations(context):
+                return unavailable("ffmpeg", "Media output reservation không thể chốt trước khi chạy.", code="output_reservation_unavailable")
             for index, command in enumerate(commands, start=1):
                 code, output = run_command(command, label=f"ffmpeg_encode_pass{index}", owner=context, timeout_seconds=float(payload.get("timeout_seconds", 1800)))
                 if code == -2:
@@ -696,16 +710,26 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
                     continue
         if not target.is_file():
             return {"status": "error", "error": "FFmpeg không tạo output encode mong đợi."}
-        return {"status": "completed", "operation": operation, "output": str(target), "container": container, "rate_control": str(payload.get("rate_control") or "quality")}
+        result = {"status": "completed", "operation": operation, "output": str(target), "container": container, "rate_control": str(payload.get("rate_control") or "quality")}
+        return (reserved_worker_result(result, context, {"output": reservation}, ("output",)) or unavailable("ffmpeg", "Media output reservation could not be attested.", code="output_scope_unavailable")) if reservation else result
     requested_format = str(payload.get("format") or "png").strip().lower().lstrip(".")
     image_extension = "." + ({"jpeg": "jpg", "jpg": "jpg", "png": "png", "webp": "webp", "bmp": "bmp"}.get(requested_format, "png"))
     extension = ".m4a" if operation == "extract_audio" else (image_extension if operation.startswith("image_") else source.suffix or ".mp4")
     if operation == "extract_frames":
-        output_dir = OUTPUT_ROOT / "Media" / f"frames_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
-        output_dir.mkdir(parents=True, exist_ok=False)
+        reservation_context = callable(getattr(context, "reserve_output_namespace", None))
+        reservation = reserve_output_namespace(context, "media_frames", expected_patterns=["frame_*.png"], max_children=100)
+        if reservation_context and reservation is None:
+            return unavailable("ffmpeg", "Media frame reservation server-owned không khả dụng.", code="output_reservation_unavailable")
+        output_dir = Path(reservation["path"]) if reservation else OUTPUT_ROOT / "Media" / f"frames_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+        if not output_dir.exists():
+            output_dir.mkdir(parents=True, exist_ok=False)
         target = output_dir / "frame_%06d.png"
     else:
-        target = _output(source, operation, extension)
+        reservation_context = callable(getattr(context, "reserve_output", None))
+        reservation = reserve_output_leaf(context, "media_editor", suffix=extension)
+        if reservation_context and reservation is None:
+            return unavailable("ffmpeg", "Media output reservation server-owned không khả dụng.", code="output_reservation_unavailable")
+        target = Path(reservation["path"]) if reservation else _output(source, operation, extension)
     try:
         command = _command(payload, source, target, resolved_overlay=resolved_overlay)
     except (TypeError, ValueError) as exc:
@@ -714,6 +738,8 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
         return unavailable("ffmpeg", "Không tìm thấy FFmpeg canonical của Hub.")
     if not command:
         return {"status": "error", "error": "Operation này cần tệp audio/subtitle thứ hai đã tải lên Hub."}
+    if reservation and not seal_output_reservations(context):
+        return unavailable("ffmpeg", "Media output reservation không thể chốt trước khi chạy.", code="output_reservation_unavailable")
     code, output = run_command(command, label=f"ffmpeg_{operation}", owner=context, timeout_seconds=float(payload.get("timeout_seconds", 1800)))
     if code == -2:
         return {"status": "cancelled", "reason": output}
@@ -721,7 +747,9 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
         return {"status": "error", "error": output or f"FFmpeg kết thúc với mã {code}."}
     if operation == "extract_frames":
         files = sorted(target.parent.glob("*.png"))
-        return {"status": "completed", "operation": operation, "frame_count": len(files), "files": [str(item) for item in files[:100]]}
+        result = {"status": "completed", "operation": operation, "frame_count": len(files), "files": [str(item) for item in files[:100]]}
+        return (reserved_worker_result(result, context, {"files": reservation}, ("files",)) or unavailable("ffmpeg", "Media frame reservation could not be attested.", code="output_scope_unavailable")) if reservation else result
     if not target.is_file():
         return {"status": "error", "error": "FFmpeg không tạo output mong đợi."}
-    return {"status": "completed", "operation": operation, "output": str(target)}
+    result = {"status": "completed", "operation": operation, "output": str(target)}
+    return (reserved_worker_result(result, context, {"output": reservation}, ("output",)) or unavailable("ffmpeg", "Media output reservation could not be attested.", code="output_scope_unavailable")) if reservation else result

@@ -18,7 +18,9 @@ from src.shared.utils.adapter_common import (
     configured_path,
     local_root,
     normalize_worker_result,
+    reserve_output_namespace,
     resolve_artifact_input,
+    seal_output_reservations,
     unavailable,
 )
 
@@ -134,6 +136,20 @@ def _run(operation: str, payload: dict[str, Any], context: ProcessOwner | None =
         # Public callers can never supply ``path`` because the artifact input
         # resolver rejects every raw path-shaped field above.
         request["path"] = str(source)
+    reservation_context = callable(getattr(context, "reserve_output_namespace", None))
+    reservation = reserve_output_namespace(
+        context,
+        "sam2",
+        expected_patterns=["*.png", "*.mp4", "frames/*.jpg", "masks/*.png"],
+        max_children=128,
+    )
+    if reservation_context and reservation is None:
+        return unavailable("sam2", "SAM2 không nhận được output reservation server-owned.", code="output_reservation_unavailable")
+    if reservation:
+        request["output_root"] = reservation["path"]
+        request["output_reservation_token"] = reservation["token"]
+    if reservation and not seal_output_reservations(context):
+        return unavailable("sam2", "SAM2 không thể chốt output reservation trước khi chạy.", code="output_reservation_unavailable")
     result = run_json_worker(
         [str(python), str(WORKER)],
         request,
@@ -143,7 +159,7 @@ def _run(operation: str, payload: dict[str, Any], context: ProcessOwner | None =
         owner=context,
         timeout_seconds=bounded_timeout(payload.get("timeout_seconds"), 1200, maximum=1200),
     )
-    return normalize_worker_result(result, component_id="sam2", context=context, output_fields=("output", "files", "outputs"))
+    return normalize_worker_result(result, component_id="sam2", context=context, output_fields=("output", "files", "outputs"), reservations={"*": reservation} if reservation else None)
 
 
 def load_model(payload: dict[str, Any] | None = None, context: ProcessOwner | None = None) -> dict[str, Any]:

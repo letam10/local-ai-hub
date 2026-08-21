@@ -11,7 +11,9 @@ from src.shared.utils.adapter_common import (
     normalize_worker_result,
     registered_model,
     registered_runtime,
+    reserve_output_namespace,
     resolve_artifact_input,
+    seal_output_reservations,
     unavailable,
 )
 
@@ -33,20 +35,26 @@ def parse(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[
     if not runtime[0].is_file() or not runtime[1].is_file() or not model[1].exists():
         return unavailable("omniparser", "OmniParser runtime/model leaf không còn tồn tại sau khi registry được đọc.", code="runtime_leaf_missing")
     python, helper, service = runtime
+    reservation_context = callable(getattr(context, "reserve_output_namespace", None))
+    reservation = reserve_output_namespace(context, "omniparser", expected_patterns=["*.json", "*.png", "*.jpg", "*.txt"], max_children=32)
+    if reservation_context and reservation is None:
+        return unavailable("omniparser", "OmniParser không nhận được output reservation server-owned.", code="output_reservation_unavailable")
     try:
         threshold = max(0.0, min(1.0, float(payload.get("box_threshold", 0.05))))
     except (TypeError, ValueError):
         threshold = 0.05
+    if reservation and not seal_output_reservations(context):
+        return unavailable("omniparser", "OmniParser không thể chốt output reservation trước khi chạy.", code="output_reservation_unavailable")
     result = run_json_worker(
         [str(python), str(helper)],
-        {"path": str(source), "box_threshold": threshold, "model_id": model[0]},
+        {"path": str(source), "box_threshold": threshold, "model_id": model[0], "output_root": reservation["path"] if reservation else str(local_root() / "Output" / "Vision"), "output_reservation_token": reservation.get("token") if reservation else None},
         label="omniparser",
         cwd=service,
         env={**os.environ, "LOCALAIHUB_ROOT": str(local_root()), "OMNIPARSER_HOME": str(service), "HF_HOME": str(local_cache_root() / "HuggingFace"), "HF_HUB_CACHE": str(local_cache_root() / "HuggingFace" / "hub"), "EASYOCR_MODULE_PATH": str(local_cache_root() / "EasyOCR"), "PYTHONIOENCODING": "utf-8"},
         owner=context,
         timeout_seconds=bounded_timeout(payload.get("timeout_seconds"), 300, maximum=300),
     )
-    return normalize_worker_result(result, component_id="omniparser", context=context, output_fields=("output", "files", "outputs"))
+    return normalize_worker_result(result, component_id="omniparser", context=context, output_fields=("output", "files", "outputs"), reservations={"*": reservation} if reservation else None)
 
 
 def capability() -> dict[str, Any]:

@@ -11,8 +11,10 @@ from src.shared.utils.adapter_common import (
     normalize_worker_result,
     registered_model,
     registered_runtime,
+    reserve_output_namespace,
     reject_raw_worker_fields,
     resolve_artifact_input,
+    seal_output_reservations,
     unavailable,
 )
 
@@ -38,8 +40,14 @@ def convert(payload: dict[str, Any], context: ProcessOwner | None = None) -> dic
     if source_error or target_error:
         return {"status": "error", "component": "seed_vc", "code": source_error or target_error, "error": "Seed-VC cần source và target artifact Hub hợp lệ."}
     python, helper, service = runtime
+    reservation_context = callable(getattr(context, "reserve_output_namespace", None))
+    reservation = reserve_output_namespace(context, "seed_vc", expected_patterns=["*.wav", "*.mp3", "*.flac", "*.json"], max_children=8)
+    if reservation_context and reservation is None:
+        return unavailable("seed_vc", "Seed-VC không nhận được output reservation server-owned.", code="output_reservation_unavailable")
     request = {key: value for key, value in payload.items() if key in {"diffusion_steps", "f0_condition", "auto_f0_adjust"}}
-    request.update({"source": str(source), "target": str(target), "model_id": model[0]})
+    request.update({"source": str(source), "target": str(target), "model_id": model[0], "output_root": reservation["path"] if reservation else str(local_root() / "Output" / "Voice"), "output_reservation_token": reservation.get("token") if reservation else None})
+    if reservation and not seal_output_reservations(context):
+        return unavailable("seed_vc", "Seed-VC không thể chốt output reservation trước khi chạy.", code="output_reservation_unavailable")
     result = run_json_worker(
         [str(python), str(helper)],
         request,
@@ -49,7 +57,7 @@ def convert(payload: dict[str, Any], context: ProcessOwner | None = None) -> dic
         owner=context,
         timeout_seconds=bounded_timeout(payload.get("timeout_seconds"), 1200, maximum=1200),
     )
-    return normalize_worker_result(result, component_id="seed_vc", context=context, output_fields=("output", "audio", "files", "outputs"))
+    return normalize_worker_result(result, component_id="seed_vc", context=context, output_fields=("output", "audio", "files", "outputs"), reservations={"*": reservation} if reservation else None)
 
 
 def capability() -> dict[str, Any]:

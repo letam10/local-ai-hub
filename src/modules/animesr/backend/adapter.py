@@ -12,7 +12,7 @@ from src.services.api.config import component, models
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
 from src.services.artifact_store import describe, resolve
 from src.shared.paths.registry import MODEL_ROOT, OUTPUT_ROOT
-from src.shared.utils.adapter_common import local_root, unavailable
+from src.shared.utils.adapter_common import local_root, reserve_output_namespace, reserved_worker_result, seal_output_reservations, unavailable
 
 
 WORKER = Path(__file__).with_name("worker.py")
@@ -200,6 +200,11 @@ def run_animesr(payload: dict[str, Any], context: ProcessOwner | None = None) ->
         ffmpeg = home / "ffmpeg.exe" if home else None
     if ffmpeg is None or not ffmpeg.is_file():
         return unavailable("ffmpeg", "Không tìm thấy FFmpeg canonical của Hub cho AnimeSR.")
+    reservation_context = callable(getattr(context, "reserve_output_namespace", None))
+    reservation = reserve_output_namespace(context, "animesr", expected_patterns=["*.mp4"], max_children=1)
+    if reservation_context and reservation is None:
+        return unavailable("animesr", "AnimeSR không nhận được output reservation server-owned.", code="output_reservation_unavailable")
+    output_root = reservation["path"] if reservation else str(OUTPUT_ROOT / "AnimeSR")
     try:
         scale = max(1, min(4, int(payload.get("scale", 2))))
     except (TypeError, ValueError):
@@ -207,7 +212,9 @@ def run_animesr(payload: dict[str, Any], context: ProcessOwner | None = None) ->
     request = {
         "path": str(source),
         "runtime": str(runtime),
-        "output_root": str(OUTPUT_ROOT / "AnimeSR"),
+        "output_root": output_root,
+        "output_reserved": bool(reservation),
+        "output_reservation_token": reservation.get("token") if reservation else None,
         "scale": scale,
         "model_id": _MODEL_ID,
         "model": _MODEL_SPEC["model"],
@@ -219,7 +226,9 @@ def run_animesr(payload: dict[str, Any], context: ProcessOwner | None = None) ->
         # lookup without modifying the installed runtime.
         "ffmpeg": str(ffmpeg),
     }
-    return run_json_worker(
+    if reservation and not seal_output_reservations(context):
+        return unavailable("animesr", "AnimeSR không thể chốt output reservation trước khi chạy.", code="output_reservation_unavailable")
+    result = run_json_worker(
         [str(python), str(WORKER)],
         request,
         label="animesr_upscale",
@@ -228,6 +237,9 @@ def run_animesr(payload: dict[str, Any], context: ProcessOwner | None = None) ->
         owner=context,
         timeout_seconds=3600,
     )
+    if reservation_context:
+        return reserved_worker_result(result, context, {"output": reservation}, ("output",)) or unavailable("animesr", "AnimeSR output reservation could not be attested.", code="output_scope_unavailable")
+    return result
 
 
 def run_optional_rife(payload: dict[str, Any], _context: ProcessOwner | None = None) -> dict[str, Any]:

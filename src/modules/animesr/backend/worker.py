@@ -128,6 +128,7 @@ def main() -> int:
         model_name = str(request.get("model") or "")
         expname = str(request.get("expname") or "")
         output_root = Path(str(request["output_root"])).expanduser()
+        output_reserved = request.get("output_reserved") is True
         hub_root = Path(os.environ.get("LOCALAIHUB_ROOT", ""))
         expected_runtime = _safe_tree(hub_root, Path("runtime"))
         expected_models = _safe_tree(hub_root, Path("Models"))
@@ -150,7 +151,11 @@ def main() -> int:
             or not _safe_existing_under(hub_root, runtime)
             or not _safe_existing_under(hub_root, ffmpeg)
             or not _safe_model_leaf(expected_models, model_path)
-            or output_root.resolve(strict=False) != expected_output.resolve(strict=False)
+            or (
+                not _safe_existing_under(_safe_tree(hub_root, Path("Output")), output_root)
+                if output_reserved
+                else output_root.resolve(strict=False) != expected_output.resolve(strict=False)
+            )
         ):
             return _emit({"status": "error", "error": "AnimeSR runtime hoặc input video không tồn tại."})
         script = runtime / "scripts" / "inference_animesr_video.py"
@@ -160,7 +165,11 @@ def main() -> int:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         output_root.mkdir(parents=True, exist_ok=True)
         expected_output = _safe_tree(hub_root, Path("Output") / "AnimeSR")
-        if expected_output is None or output_root.is_symlink() or output_root.resolve(strict=False) != expected_output.resolve(strict=False):
+        if expected_output is None or output_root.is_symlink() or (
+            not _safe_existing_under(_safe_tree(hub_root, Path("Output")), output_root)
+            if output_reserved
+            else output_root.resolve(strict=False) != expected_output.resolve(strict=False)
+        ):
             return _emit({"status": "error", "error": "Output AnimeSR không khả dụng."})
         expected_jobs = _safe_tree(hub_root, Path("Temp") / "jobs")
         if expected_jobs is None:

@@ -11,7 +11,7 @@ from typing import Any
 from src.services.artifact_store import describe, resolve
 from src.services.api.config import models
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
-from src.shared.utils.adapter_common import configured_path, local_root, unavailable
+from src.shared.utils.adapter_common import configured_path, local_root, reserve_output_leaf, reserved_worker_result, seal_output_reservations, unavailable
 
 
 _MODEL_ID = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
@@ -155,6 +155,11 @@ def transcribe(payload: dict[str, Any], context: ProcessOwner | None = None) -> 
     if python is None or not python.is_file() or _is_reparse(python) or not wrapper.is_file() or _is_reparse(wrapper) or model_id is None:
         return unavailable("whisper", "Faster-Whisper runtime hoặc local model registry chưa sẵn sàng.")
     token = uuid.uuid4().hex
+    reservation_context = callable(getattr(context, "reserve_output", None))
+    json_reservation = reserve_output_leaf(context, "whisper_json", suffix=".json")
+    srt_reservation = reserve_output_leaf(context, "whisper_srt", suffix=".srt")
+    if reservation_context and (json_reservation is None or srt_reservation is None):
+        return unavailable("whisper", "Whisper không nhận được output reservation server-owned.", code="output_reservation_unavailable")
     request = {
         "path": str(source),
         "start": payload.get("start", 0),
@@ -163,6 +168,12 @@ def transcribe(payload: dict[str, Any], context: ProcessOwner | None = None) -> 
         "language": payload.get("language", "auto"),
         "timeout_seconds": _timeout(payload.get("timeout_seconds", _MAX_TIMEOUT_SECONDS)),
     }
+    if json_reservation and srt_reservation:
+        request["output_json_path"] = json_reservation["path"]
+        request["output_srt_path"] = srt_reservation["path"]
+        request["output_reservation_tokens"] = [json_reservation["token"], srt_reservation["token"]]
+    if json_reservation and srt_reservation and not seal_output_reservations(context):
+        return unavailable("whisper", "Whisper không thể chốt output reservation trước khi chạy.", code="output_reservation_unavailable")
     result = run_json_worker(
         [str(python), str(wrapper)],
         request,
@@ -185,7 +196,11 @@ def transcribe(payload: dict[str, Any], context: ProcessOwner | None = None) -> 
             "error": "Faster-Whisper không hoàn tất transcript Hub.",
             "next_action": "Kiểm tra local model registry, environment Faster-Whisper và thử lại bằng một job mới.",
         }
-    outputs = _outputs(root, str(result.get("transcript_token") or ""))
+    transcript_token = str(result.get("transcript_token") or "")
+    if json_reservation and srt_reservation:
+        outputs = (Path(str(json_reservation["path"])), Path(str(srt_reservation["path"])))
+    else:
+        outputs = _outputs(root, transcript_token)
     if outputs is None:
         return {
             "status": "error",
@@ -194,13 +209,16 @@ def transcribe(payload: dict[str, Any], context: ProcessOwner | None = None) -> 
         }
     transcript, srt = outputs
     segment_count = result.get("segment_count")
-    return {
+    output_result = {
         "status": "completed",
         "operation": "transcribe_media",
         "files": [str(transcript), str(srt)],
         "segment_count": int(segment_count) if isinstance(segment_count, int) and segment_count >= 0 else 0,
         "device": result.get("device") if result.get("device") in {"cpu", "cuda"} else "cpu",
     }
+    if json_reservation and srt_reservation:
+        return reserved_worker_result(output_result, context, {"files": [json_reservation, srt_reservation]}, ("files",)) or unavailable("whisper", "Whisper output reservation could not be attested.", code="output_scope_unavailable")
+    return output_result
 
 
 def capability() -> dict[str, Any]:

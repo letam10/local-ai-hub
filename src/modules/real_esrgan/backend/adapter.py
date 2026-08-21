@@ -12,7 +12,7 @@ from src.services.api.config import component, models
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
 from src.services.artifact_store import describe, resolve
 from src.shared.paths.registry import MODEL_ROOT, OUTPUT_ROOT, TEMP_ROOT
-from src.shared.utils.adapter_common import local_root, unavailable
+from src.shared.utils.adapter_common import local_root, reserve_output_namespace, reserved_worker_result, seal_output_reservations, unavailable
 
 
 WORKER = Path(__file__).with_name("worker.py")
@@ -126,17 +126,26 @@ def run_realesrgan(payload: dict[str, Any], context: ProcessOwner | None = None)
     except (TypeError, ValueError):
         scale, tile = 2, 0
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    reservation_context = callable(getattr(context, "reserve_output_namespace", None))
+    reservation = reserve_output_namespace(context, "real_esrgan", expected_patterns=["*.png"], max_children=1)
+    if reservation_context and reservation is None:
+        return unavailable("real_esrgan", "Real-ESRGAN không nhận được output reservation server-owned.", code="output_reservation_unavailable")
+    output_root = reservation["path"] if reservation else str(OUTPUT_ROOT / "Real-ESRGAN")
     request = {
         "path": str(source),
         "runtime": str(runtime),
         "model_path": str(model),
         "model_id": _MODEL_ID,
-        "output_root": str(OUTPUT_ROOT / "Real-ESRGAN"),
+        "output_root": output_root,
+        "output_reserved": bool(reservation),
+        "output_reservation_token": reservation.get("token") if reservation else None,
         "temp_root": str(TEMP_ROOT / "jobs" / f"realesrgan_{stamp}"),
         "scale": scale,
         "tile": tile,
     }
-    return run_json_worker(
+    if reservation and not seal_output_reservations(context):
+        return unavailable("real_esrgan", "Real-ESRGAN không thể chốt output reservation trước khi chạy.", code="output_reservation_unavailable")
+    result = run_json_worker(
         [str(python), str(WORKER)],
         request,
         label="real_esrgan_upscale",
@@ -145,6 +154,9 @@ def run_realesrgan(payload: dict[str, Any], context: ProcessOwner | None = None)
         owner=context,
         timeout_seconds=float(payload.get("timeout_seconds", 1200)),
     )
+    if reservation_context:
+        return reserved_worker_result(result, context, {"output": reservation}, ("output",)) or unavailable("real_esrgan", "Real-ESRGAN output reservation could not be attested.", code="output_scope_unavailable")
+    return result
 
 
 def capability() -> dict[str, Any]:

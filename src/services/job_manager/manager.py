@@ -68,6 +68,37 @@ class JobContext:
     def progress(self, value: int, message: str | None = None) -> None:
         update_job(self.job_id, progress=max(0, min(100, int(value))), message=message)
 
+    def reserve_output(self, producer: str, *, suffix: str = ".bin") -> dict[str, Any] | None:
+        """Issue a server-owned opaque exact-leaf reservation."""
+
+        return artifact_store.reserve_job_output(self.job_id, producer, suffix=suffix)
+
+    def reserve_output_namespace(
+        self,
+        producer: str,
+        *,
+        expected_patterns: list[str],
+        max_children: int,
+    ) -> dict[str, Any] | None:
+        """Issue a bounded opaque reservation for dynamic producer children."""
+
+        return artifact_store.reserve_job_output_namespace(
+            self.job_id,
+            producer,
+            expected_patterns=expected_patterns,
+            max_children=max_children,
+        )
+
+    def attest_output(self, token: object, path: object, producer: object = None) -> dict[str, Any]:
+        """Attest a returned child using the opaque reservation token."""
+
+        return artifact_store.attest_job_output_reservation(self.job_id, token, path, producer)
+
+    def seal_output_reservations(self) -> bool:
+        """Close the reservation window immediately before producer launch."""
+
+        return artifact_store.seal_job_output_reservations(self.job_id)
+
 
 @dataclass(frozen=True)
 class RunnerSpec:
@@ -187,6 +218,14 @@ class HubJobManager:
             # a cancel that arrives during it waits until the terminal state
             # is durable, so it cannot leave an orphaned artifact behind.
             with context._lock:
+                resolved_result = artifact_store.resolve_job_output_reservations(job_id, raw_result)
+                reservation_error = (
+                    isinstance(raw_result, dict)
+                    and raw_result.get("status") == "completed"
+                    and resolved_result is None
+                )
+                if resolved_result is not None:
+                    raw_result = resolved_result
                 record = get_job_internal(job_id) or {"id": job_id, "tool": tool}
                 scope_state = artifact_store.inspect_job_output_scope(job_id)
                 if context.cancelled:
@@ -197,7 +236,16 @@ class HubJobManager:
                     publish_error = None
                 else:
                     scope_result = artifact_store.prepare_job_output_scope(job_id, raw_result) if scope_state is not None else {"status": "no_scope"}
-                    if scope_result.get("status") in {"manual_review", "invalid", "unavailable"}:
+                    if reservation_error:
+                        result, publish_error = {
+                            "status": "unavailable",
+                            "code": "OUTPUT_RESERVATION_REQUIRED",
+                            "execution": "not_run",
+                            "dry_run": True,
+                            "reason": "Producer output reservation could not be verified.",
+                            "next_action": "Create a new job through the server-owned producer contract.",
+                        }, "OUTPUT_RESERVATION_REQUIRED"
+                    elif scope_result.get("status") in {"manual_review", "invalid", "unavailable"}:
                         result, publish_error = {
                             "status": "failed",
                             "error": "Output ownership could not be proven; no artifact was published.",

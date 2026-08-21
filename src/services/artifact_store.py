@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import fnmatch
 import io
 import mimetypes
 import os
@@ -36,11 +37,12 @@ OWNED_OUTPUT_PREFIX = "hub-job-"
 OWNED_STAGE_PREFIX = "hub-job-stage-"
 DEFAULT_ORPHAN_EXPIRY_SECONDS = 24 * 60 * 60
 MAX_JOB_OUTPUT_BYTES = 8 * 1024 * 1024 * 1024
-JOB_OUTPUT_SCOPE_SCHEMA = "job-output-scope.v1"
+JOB_OUTPUT_SCOPE_SCHEMA = "job-output-scope.v2"
 JOB_OUTPUT_SCOPE_MAX_BYTES = 128 * 1024
 JOB_OUTPUT_SCOPE_MAX_JOBS = 128
 JOB_OUTPUT_SCOPE_MAX_ENTRIES = 256
 JOB_OUTPUT_SCOPE_MAX_CANDIDATES = 64
+JOB_OUTPUT_SCOPE_MAX_RESERVATIONS = 128
 ARTIFACT_VISIBILITY_STAGED = "staged"
 ARTIFACT_VISIBILITY_PUBLISHED = "published"
 MANAGED_OUTPUT_NAME = "video_grade.mp4"
@@ -48,6 +50,7 @@ MANAGED_OUTPUT_MEDIA_TYPE = "video/mp4"
 _ARTIFACT_ID = re.compile(r"artifact_[a-f0-9]{32}")
 _JOB_ID = re.compile(r"jobv5_[a-f0-9]{32}")
 _TRANSACTION_ID = re.compile(r"artifact_tx_[a-f0-9]{32}")
+_RESERVATION_TOKEN = re.compile(r"resv_[a-f0-9]{32}")
 _FINGERPRINT = re.compile(r"[a-f0-9]{64}")
 _MANAGED_VISIBILITIES = frozenset({ARTIFACT_VISIBILITY_STAGED, ARTIFACT_VISIBILITY_PUBLISHED})
 _MANAGED_RECORD_KEYS = frozenset({
@@ -79,9 +82,11 @@ _PATH_FIELDS = {
 _JOB_OUTPUT_SCOPE_STATES = frozenset({"open", "completed", "failed", "cancelled", "unavailable", "interrupted", "manual_review"})
 _JOB_OUTPUT_SCOPE_OWNERSHIP = frozenset({"owned", "ambiguous"})
 _JOB_OUTPUT_SCOPE_ROOT_KEYS = frozenset({"schema_version", "records"})
-_JOB_OUTPUT_SCOPE_RECORD_KEYS = frozenset({"job_id", "job_fingerprint", "state", "snapshot_complete", "baseline", "candidates"})
-_JOB_OUTPUT_SCOPE_ENTRY_KEYS = frozenset({"relative_path", "ownership", "before", "current"})
+_JOB_OUTPUT_SCOPE_RECORD_KEYS = frozenset({"job_id", "job_fingerprint", "state", "snapshot_complete", "reservations_open", "baseline", "reservations", "candidates"})
+_JOB_OUTPUT_SCOPE_RESERVATION_KEYS = frozenset({"token", "job_id", "producer", "namespace", "expected_relative", "expected_patterns", "max_children", "max_size_bytes", "state", "before", "attested"})
+_JOB_OUTPUT_SCOPE_ENTRY_KEYS = frozenset({"relative_path", "ownership", "reservation_token", "before", "current"})
 _JOB_OUTPUT_SCOPE_IDENTITY_KEYS = frozenset({"size_bytes", "mtime_ns", "file_id"})
+_JOB_OUTPUT_SCOPE_RESERVATION_STATES = frozenset({"reserved", "attested", "published", "ambiguous"})
 
 
 class UploadError(ValueError):
@@ -369,18 +374,105 @@ def _scope_relative(value: object) -> str | None:
     return path.as_posix()
 
 
+def _scope_pattern(value: object) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > 120 or "\\" in value or ":" in value or "\x00" in value:
+        return None
+    path = Path(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return None
+    return path.as_posix()
+
+
+def _scope_producer(value: object) -> str | None:
+    return value if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_.-]{0,63}", value) else None
+
+
+def _scope_reservation(value: object, job_id: str | None = None) -> dict[str, Any] | None:
+    if type(value) is not dict or set(value) != _JOB_OUTPUT_SCOPE_RESERVATION_KEYS:
+        return None
+    token = value.get("token")
+    record_job_id = value.get("job_id")
+    producer = _scope_producer(value.get("producer"))
+    namespace = _scope_relative(value.get("namespace"))
+    expected_relative = value.get("expected_relative")
+    expected_patterns = value.get("expected_patterns")
+    max_children = value.get("max_children")
+    max_size_bytes = value.get("max_size_bytes")
+    state = value.get("state")
+    before = value.get("before")
+    attested = value.get("attested")
+    if (
+        not isinstance(token, str)
+        or _RESERVATION_TOKEN.fullmatch(token) is None
+        or not isinstance(record_job_id, str)
+        or _JOB_ID.fullmatch(record_job_id) is None
+        or (job_id is not None and record_job_id != job_id)
+        or producer is None
+        or namespace is None
+        or not isinstance(expected_patterns, list)
+        or len(expected_patterns) > 8
+        or any(_scope_pattern(item) is None for item in expected_patterns)
+        or isinstance(max_children, bool)
+        or not isinstance(max_children, int)
+        or not 1 <= max_children <= JOB_OUTPUT_SCOPE_MAX_CANDIDATES
+        or isinstance(max_size_bytes, bool)
+        or not isinstance(max_size_bytes, int)
+        or not 0 <= max_size_bytes <= MAX_JOB_OUTPUT_BYTES
+        or not isinstance(state, str)
+        or state not in _JOB_OUTPUT_SCOPE_RESERVATION_STATES
+        or (before is not None and _scope_identity(before) is None)
+        or type(attested) is not dict
+        or len(attested) > max_children
+    ):
+        return None
+    if expected_relative is not None:
+        expected_relative = _scope_relative(expected_relative)
+        if expected_relative is None or not expected_relative.startswith(namespace + "/") or expected_patterns:
+            return None
+    elif not expected_patterns:
+        return None
+    normalized_attested: dict[str, dict[str, int]] = {}
+    for relative, identity in attested.items():
+        safe_relative = _scope_relative(relative)
+        safe_identity = _scope_identity(identity)
+        if safe_relative is None or safe_identity is None or not safe_relative.startswith(namespace + "/"):
+            return None
+        normalized_attested[safe_relative] = safe_identity
+    return {
+        "token": token,
+        "job_id": record_job_id,
+        "producer": producer,
+        "namespace": namespace,
+        "expected_relative": expected_relative,
+        "expected_patterns": [_scope_pattern(item) for item in expected_patterns],
+        "max_children": max_children,
+        "max_size_bytes": max_size_bytes,
+        "state": state,
+        "before": before,
+        "attested": normalized_attested,
+    }
+
+
 def _scope_entry(value: object) -> dict[str, Any] | None:
     if type(value) is not dict or set(value) != _JOB_OUTPUT_SCOPE_ENTRY_KEYS:
         return None
     relative = _scope_relative(value.get("relative_path"))
     ownership = value.get("ownership")
+    reservation_token = value.get("reservation_token")
     before = value.get("before")
     current = _scope_identity(value.get("current"))
-    if relative is None or not isinstance(ownership, str) or ownership not in _JOB_OUTPUT_SCOPE_OWNERSHIP or current is None:
+    if (
+        relative is None
+        or not isinstance(ownership, str)
+        or ownership not in _JOB_OUTPUT_SCOPE_OWNERSHIP
+        or (reservation_token is not None and (not isinstance(reservation_token, str) or _RESERVATION_TOKEN.fullmatch(reservation_token) is None))
+        or (ownership == "owned" and reservation_token is None)
+        or current is None
+    ):
         return None
     if before is not None and _scope_identity(before) is None:
         return None
-    return {"relative_path": relative, "ownership": ownership, "before": before, "current": current}
+    return {"relative_path": relative, "ownership": ownership, "reservation_token": reservation_token, "before": before, "current": current}
 
 
 def _scope_record(value: object, job_id: str | None = None) -> dict[str, Any] | None:
@@ -390,7 +482,9 @@ def _scope_record(value: object, job_id: str | None = None) -> dict[str, Any] | 
     fingerprint = value.get("job_fingerprint")
     state = value.get("state")
     snapshot_complete = value.get("snapshot_complete")
+    reservations_open = value.get("reservations_open")
     baseline = value.get("baseline")
+    reservations = value.get("reservations")
     candidates = value.get("candidates")
     if (
         not isinstance(record_job_id, str)
@@ -401,9 +495,12 @@ def _scope_record(value: object, job_id: str | None = None) -> dict[str, Any] | 
         or not isinstance(state, str)
         or state not in _JOB_OUTPUT_SCOPE_STATES
         or type(snapshot_complete) is not bool
+        or type(reservations_open) is not bool
         or type(baseline) is not dict
+        or type(reservations) is not dict
         or type(candidates) is not dict
         or len(baseline) > JOB_OUTPUT_SCOPE_MAX_ENTRIES
+        or len(reservations) > JOB_OUTPUT_SCOPE_MAX_RESERVATIONS
         or len(candidates) > JOB_OUTPUT_SCOPE_MAX_CANDIDATES
     ):
         return None
@@ -420,12 +517,26 @@ def _scope_record(value: object, job_id: str | None = None) -> dict[str, Any] | 
         if safe_entry is None or safe_entry["relative_path"] != relative:
             return None
         normalized_candidates[relative] = safe_entry
+    normalized_reservations: dict[str, Any] = {}
+    for token, reservation in reservations.items():
+        if not isinstance(token, str) or _RESERVATION_TOKEN.fullmatch(token) is None:
+            return None
+        safe_reservation = _scope_reservation(reservation, record_job_id)
+        if safe_reservation is None or safe_reservation["token"] != token:
+            return None
+        normalized_reservations[token] = safe_reservation
+    for entry in normalized_candidates.values():
+        token = entry.get("reservation_token")
+        if token is not None and token not in normalized_reservations:
+            return None
     return {
         "job_id": record_job_id,
         "job_fingerprint": fingerprint,
         "state": state,
         "snapshot_complete": snapshot_complete,
+        "reservations_open": reservations_open,
         "baseline": normalized_baseline,
+        "reservations": normalized_reservations,
         "candidates": normalized_candidates,
     }
 
@@ -554,6 +665,242 @@ def _scope_output_candidates(value: object) -> list[object]:
     return result[:JOB_OUTPUT_SCOPE_MAX_CANDIDATES]
 
 
+def _scope_safe_producer(value: object) -> str | None:
+    return _scope_producer(value)
+
+
+def _scope_safe_suffix(value: object) -> str | None:
+    if not isinstance(value, str) or not re.fullmatch(r"\.[a-z0-9]{1,12}", value.casefold()):
+        return None
+    return value.casefold()
+
+
+def _scope_namespace_path(relative: str) -> Path | None:
+    try:
+        root = OUTPUT_ROOT.resolve()
+        candidate = root / relative
+        candidate.relative_to(root)
+        cursor = root
+        for part in Path(relative).parts:
+            cursor = cursor / part
+            if cursor.exists() and _scope_reparse(cursor):
+                return None
+        return candidate
+    except (OSError, ValueError):
+        return None
+
+
+def _reserve_job_output_locked(
+    scopes: dict[str, Any],
+    job_id: str,
+    producer: str,
+    *,
+    suffix: str | None = None,
+    expected_patterns: list[str] | None = None,
+    max_children: int = 1,
+) -> dict[str, Any] | None:
+    record = scopes["records"].get(job_id)
+    if not isinstance(record, dict) or record.get("state") != "open" or record.get("snapshot_complete") is not True or record.get("reservations_open") is not True:
+        return None
+    if len(record["reservations"]) >= JOB_OUTPUT_SCOPE_MAX_RESERVATIONS:
+        return None
+    if not isinstance(max_children, int) or not 1 <= max_children <= JOB_OUTPUT_SCOPE_MAX_CANDIDATES:
+        return None
+    token = f"resv_{uuid.uuid4().hex}"
+    namespace_relative = f".job-output-scopes/{job_id[-8:]}-{producer}-{uuid.uuid4().hex[:12]}"
+    namespace_path = _scope_namespace_path(namespace_relative)
+    if namespace_path is None or namespace_path.exists():
+        return None
+    try:
+        namespace_path.mkdir(parents=True, exist_ok=False)
+    except OSError:
+        return None
+    expected_relative: str | None = None
+    patterns = expected_patterns or []
+    if suffix is not None:
+        safe_suffix = _scope_safe_suffix(suffix)
+        if safe_suffix is None:
+            namespace_path.rmdir()
+            return None
+        expected_relative = f"{namespace_relative}/output_{token[5:]}{safe_suffix}"
+        patterns = []
+        max_children = 1
+    normalized_patterns = [_scope_pattern(item) for item in patterns]
+    if expected_relative is None and (not normalized_patterns or any(item is None for item in normalized_patterns)):
+        namespace_path.rmdir()
+        return None
+    if expected_relative is None and len(normalized_patterns) > 8:
+        namespace_path.rmdir()
+        return None
+    reservation = {
+        "token": token,
+        "job_id": job_id,
+        "producer": producer,
+        "namespace": namespace_relative,
+        "expected_relative": expected_relative,
+        "expected_patterns": [item for item in normalized_patterns if item is not None],
+        "max_children": max_children,
+        "max_size_bytes": MAX_JOB_OUTPUT_BYTES,
+        "state": "reserved",
+        "before": None,
+        "attested": {},
+    }
+    record["reservations"][token] = reservation
+    if not _save_job_output_scopes(scopes):
+        record["reservations"].pop(token, None)
+        try:
+            namespace_path.rmdir()
+        except OSError:
+            pass
+        return None
+    return {"status": "reserved", "token": token, "producer": producer, "path": namespace_path if expected_relative is None else namespace_path / Path(expected_relative).name}
+
+
+def reserve_job_output(job_id: str, producer: str, *, suffix: str = ".bin") -> dict[str, Any] | None:
+    """Issue one opaque exact-leaf reservation before a producer writes."""
+
+    if not isinstance(job_id, str) or _JOB_ID.fullmatch(job_id) is None:
+        return None
+    safe_producer = _scope_safe_producer(producer)
+    if safe_producer is None:
+        return None
+    with _LOCK:
+        scopes = _load_job_output_scopes()
+        if scopes is None:
+            return None
+        return _reserve_job_output_locked(scopes, job_id, safe_producer, suffix=suffix)
+
+
+def reserve_job_output_namespace(
+    job_id: str,
+    producer: str,
+    *,
+    expected_patterns: list[str],
+    max_children: int,
+) -> dict[str, Any] | None:
+    """Issue one opaque bounded namespace reservation for dynamic children."""
+
+    if not isinstance(job_id, str) or _JOB_ID.fullmatch(job_id) is None:
+        return None
+    safe_producer = _scope_safe_producer(producer)
+    if safe_producer is None or type(expected_patterns) is not list:
+        return None
+    with _LOCK:
+        scopes = _load_job_output_scopes()
+        if scopes is None:
+            return None
+        return _reserve_job_output_locked(scopes, job_id, safe_producer, expected_patterns=expected_patterns, max_children=max_children)
+
+
+def seal_job_output_reservations(job_id: str) -> bool:
+    """Close the reservation window before a producer/helper starts writing."""
+
+    if not isinstance(job_id, str) or _JOB_ID.fullmatch(job_id) is None:
+        return False
+    with _LOCK:
+        scopes = _load_job_output_scopes()
+        record = scopes.get("records", {}).get(job_id) if isinstance(scopes, dict) else None
+        if not isinstance(record, dict) or record.get("state") != "open" or record.get("reservations_open") is not True:
+            return False
+        record["reservations_open"] = False
+        return _save_job_output_scopes(scopes)
+
+
+def attest_job_output_reservation(job_id: str, token: object, path: object, producer: object = None) -> dict[str, Any]:
+    """Attest a producer child only through its opaque server-issued token."""
+
+    empty = {"status": "unavailable"}
+    if not isinstance(job_id, str) or _JOB_ID.fullmatch(job_id) is None or not isinstance(token, str) or _RESERVATION_TOKEN.fullmatch(token) is None:
+        return empty
+    with _LOCK:
+        scopes = _load_job_output_scopes()
+        record = scopes.get("records", {}).get(job_id) if isinstance(scopes, dict) else None
+        reservation = record.get("reservations", {}).get(token) if isinstance(record, dict) else None
+        if not isinstance(record, dict) or not isinstance(reservation, dict) or reservation.get("state") not in {"reserved", "attested"}:
+            return empty
+        if producer is not None and producer != reservation.get("producer"):
+            return {"status": "manual_review"}
+        item = _scope_output_file(path)
+        if item is None:
+            return {"status": "invalid"}
+        _resolved, relative, identity = item
+        if record.get("snapshot_complete") is not True or record.get("baseline", {}).get(relative) is not None:
+            reservation["state"] = "ambiguous"
+            _save_job_output_scopes(scopes)
+            return {"status": "manual_review"}
+        namespace = reservation.get("namespace")
+        expected_relative = reservation.get("expected_relative")
+        patterns = reservation.get("expected_patterns")
+        if not isinstance(namespace, str) or not relative.startswith(namespace + "/"):
+            return {"status": "manual_review"}
+        if expected_relative is not None:
+            matches = relative == expected_relative
+        else:
+            matches = isinstance(patterns, list) and any(fnmatch.fnmatchcase(relative[len(namespace) + 1 :], pattern) for pattern in patterns)
+        if not matches:
+            return {"status": "manual_review"}
+        attested = reservation.get("attested")
+        if not isinstance(attested, dict):
+            return empty
+        previous = attested.get(relative)
+        if previous is not None and previous != identity:
+            reservation["state"] = "ambiguous"
+            _save_job_output_scopes(scopes)
+            return {"status": "manual_review"}
+        if previous is None and len(attested) >= int(reservation.get("max_children", 0)):
+            return {"status": "unavailable"}
+        attested[relative] = identity
+        reservation["state"] = "attested"
+        if not _save_job_output_scopes(scopes):
+            attested.pop(relative, None)
+            reservation["state"] = "reserved" if not attested else "attested"
+            return empty
+        return {"status": "attested"}
+
+
+def resolve_job_output_reservations(job_id: str, result: object) -> dict[str, Any] | None:
+    """Resolve internal token references into paths immediately before publish."""
+
+    if not isinstance(result, dict) or result.get("status") != "completed":
+        return dict(result) if isinstance(result, dict) else None
+    references = result.get("output_reservations")
+    output_fields = {"output", "files", "outputs"}
+    has_raw_outputs = any(key in result for key in output_fields)
+    if references is None:
+        return None if has_raw_outputs else dict(result)
+    if has_raw_outputs:
+        return None
+    if type(references) is not list or not references or len(references) > JOB_OUTPUT_SCOPE_MAX_CANDIDATES:
+        return None
+    with _LOCK:
+        scopes = _load_job_output_scopes()
+        record = scopes.get("records", {}).get(job_id) if isinstance(scopes, dict) else None
+        if not isinstance(record, dict) or record.get("state") != "open":
+            return None
+        materialized = dict(result)
+        materialized.pop("output_reservations", None)
+        grouped: dict[str, list[str]] = {}
+        seen: set[tuple[str, str]] = set()
+        for reference in references:
+            if type(reference) is not dict or set(reference) != {"token", "field"}:
+                return None
+            token = reference.get("token")
+            field = reference.get("field")
+            if not isinstance(token, str) or _RESERVATION_TOKEN.fullmatch(token) is None or field not in output_fields or (token, field) in seen:
+                return None
+            seen.add((token, field))
+            reservation = record.get("reservations", {}).get(token)
+            if not isinstance(reservation, dict) or reservation.get("state") != "attested":
+                return None
+            attested = reservation.get("attested")
+            if not isinstance(attested, dict) or not attested:
+                return None
+            grouped.setdefault(field, []).extend(str(OUTPUT_ROOT / relative) for relative in attested)
+        for field, values in grouped.items():
+            materialized[field] = values[0] if field == "output" and len(values) == 1 else values
+        return materialized
+
+
 def _scope_snapshot() -> tuple[dict[str, dict[str, int]], bool]:
     try:
         root = OUTPUT_ROOT.resolve()
@@ -602,7 +949,9 @@ def begin_job_output_scope(job_id: str) -> dict[str, Any] | None:
             "job_fingerprint": hashlib.sha256(job_id.encode("utf-8")).hexdigest(),
             "state": "open",
             "snapshot_complete": complete,
+            "reservations_open": True,
             "baseline": baseline,
+            "reservations": {},
             "candidates": {},
         }
         terminal_ids = [key for key, value in scopes["records"].items() if value.get("state") != "open"]
@@ -630,10 +979,20 @@ def _claim_job_output_scope_locked(scopes: dict[str, Any], job_id: str, result: 
             invalid_count += 1
             continue
         before = record["baseline"].get(relative)
-        ownership = "ambiguous" if before is not None or not record["snapshot_complete"] else "owned"
+        reservation_token: str | None = None
+        if before is None and record["snapshot_complete"]:
+            for token, reservation in record.get("reservations", {}).items():
+                if not isinstance(reservation, dict) or reservation.get("state") not in {"attested", "published"}:
+                    continue
+                attested = reservation.get("attested")
+                if isinstance(attested, dict) and attested.get(relative) == current:
+                    reservation_token = token
+                    break
+        ownership = "owned" if reservation_token is not None else "ambiguous"
         entries[relative] = {
             "relative_path": relative,
             "ownership": ownership,
+            "reservation_token": reservation_token,
             "before": before,
             "current": current,
         }
@@ -649,6 +1008,10 @@ def prepare_job_output_scope(job_id: str, result: object) -> dict[str, Any]:
 
     if not isinstance(job_id, str) or _JOB_ID.fullmatch(job_id) is None:
         return {"status": "unavailable", "owned_count": 0, "ambiguous_count": 0, "invalid_count": 0}
+    if isinstance(result, dict) and result.get("status") == "completed" and "output_reservations" in result:
+        result = resolve_job_output_reservations(job_id, result)
+        if result is None:
+            return {"status": "unavailable", "owned_count": 0, "ambiguous_count": 0, "invalid_count": 0}
     with _LOCK:
         scopes = _load_job_output_scopes()
         if scopes is None:
@@ -656,6 +1019,7 @@ def prepare_job_output_scope(job_id: str, result: object) -> dict[str, Any]:
         record = scopes["records"].get(job_id)
         if not isinstance(record, dict) or record.get("state") != "open":
             return {"status": "unavailable", "owned_count": 0, "ambiguous_count": 0, "invalid_count": 0}
+        record["reservations_open"] = False
         result_value = _claim_job_output_scope_locked(scopes, job_id, result)
         if not _save_job_output_scopes(scopes):
             return {"status": "unavailable", "owned_count": 0, "ambiguous_count": 0, "invalid_count": 0}
@@ -692,6 +1056,50 @@ def _cleanup_scope_candidates_locked(record: dict[str, Any]) -> tuple[int, int]:
     return removed, ambiguous
 
 
+def _add_attested_candidates_locked(record: dict[str, Any]) -> None:
+    """Make every explicitly attested child eligible for one terminal decision."""
+
+    for token, reservation in record.get("reservations", {}).items():
+        if not isinstance(reservation, dict) or reservation.get("state") not in {"attested", "published"}:
+            continue
+        attested = reservation.get("attested")
+        if not isinstance(attested, dict):
+            continue
+        for relative, identity in attested.items():
+            if relative in record["candidates"]:
+                continue
+            record["candidates"][relative] = {
+                "relative_path": relative,
+                "ownership": "owned",
+                "reservation_token": token,
+                "before": record["baseline"].get(relative),
+                "current": identity,
+            }
+
+
+def _cleanup_empty_reservation_namespaces_locked(record: dict[str, Any]) -> int:
+    """Remove only empty manager-created namespace directories."""
+
+    manual_review = 0
+    for reservation in record.get("reservations", {}).values():
+        if not isinstance(reservation, dict):
+            continue
+        namespace = reservation.get("namespace")
+        if not isinstance(namespace, str):
+            continue
+        path = _scope_namespace_path(namespace)
+        if path is None or not path.is_dir():
+            continue
+        try:
+            if any(path.iterdir()):
+                manual_review += 1
+                continue
+            path.rmdir()
+        except OSError:
+            manual_review += 1
+    return manual_review
+
+
 def finalize_job_output_scope(
     job_id: str,
     result: object = None,
@@ -704,6 +1112,10 @@ def finalize_job_output_scope(
     safe_states = {"completed", "failed", "cancelled", "unavailable", "interrupted"}
     if not isinstance(job_id, str) or _JOB_ID.fullmatch(job_id) is None or not isinstance(terminal_state, str) or terminal_state not in safe_states:
         return {"status": "unavailable", "removed_count": 0, "ambiguous_count": 0}
+    if isinstance(result, dict) and result.get("status") == "completed" and "output_reservations" in result:
+        result = resolve_job_output_reservations(job_id, result)
+        if result is None:
+            result = None
     with _LOCK:
         scopes = _load_job_output_scopes()
         if scopes is None:
@@ -711,14 +1123,27 @@ def finalize_job_output_scope(
         record = scopes["records"].get(job_id)
         if not isinstance(record, dict):
             return {"status": "unavailable", "removed_count": 0, "ambiguous_count": 0}
+        record["reservations_open"] = False
         if result is not None:
             _claim_job_output_scope_locked(scopes, job_id, result)
+        _add_attested_candidates_locked(record)
         if terminal_state == "completed" and published:
+            if any(entry.get("ownership") != "owned" for entry in record["candidates"].values()):
+                record["state"] = "manual_review"
+                _save_job_output_scopes(scopes)
+                return {"status": "manual_review", "removed_count": 0, "ambiguous_count": 1}
+            for reservation in record.get("reservations", {}).values():
+                if isinstance(reservation, dict) and reservation.get("state") == "attested":
+                    reservation["state"] = "published"
             record["state"] = "completed"
             if not _save_job_output_scopes(scopes):
                 return {"status": "unavailable", "removed_count": 0, "ambiguous_count": 0}
             return {"status": "published", "removed_count": 0, "ambiguous_count": 0}
         removed, ambiguous = _cleanup_scope_candidates_locked(record)
+        ambiguous += _cleanup_empty_reservation_namespaces_locked(record)
+        for reservation in record.get("reservations", {}).values():
+            if isinstance(reservation, dict) and reservation.get("state") == "attested":
+                reservation["state"] = "ambiguous" if ambiguous or removed else "ambiguous"
         record["state"] = "manual_review" if ambiguous else terminal_state
         if not _save_job_output_scopes(scopes):
             return {"status": "unavailable", "removed_count": removed, "ambiguous_count": ambiguous}
@@ -740,7 +1165,13 @@ def reconcile_job_output_scopes(*, active_job_ids: set[str] | None = None) -> di
                 continue
             if record.get("state") == "completed":
                 continue
+            record["reservations_open"] = False
+            _add_attested_candidates_locked(record)
             removed, ambiguous = _cleanup_scope_candidates_locked(record)
+            ambiguous += _cleanup_empty_reservation_namespaces_locked(record)
+            for reservation in record.get("reservations", {}).values():
+                if isinstance(reservation, dict) and reservation.get("state") == "attested":
+                    reservation["state"] = "ambiguous"
             if ambiguous:
                 record["state"] = "manual_review"
                 manual_review += 1
@@ -765,6 +1196,8 @@ def inspect_job_output_scope(job_id: str) -> dict[str, Any] | None:
             "job_id": job_id,
             "state": record["state"],
             "snapshot_complete": record["snapshot_complete"],
+            "reservations_open": record["reservations_open"],
+            "reservation_count": len(record["reservations"]),
             "candidate_count": len(record["candidates"]),
             "owned_count": sum(entry["ownership"] == "owned" for entry in record["candidates"].values()),
             "ambiguous_count": sum(entry["ownership"] == "ambiguous" for entry in record["candidates"].values()),

@@ -73,6 +73,23 @@ def _output_target(root: Path, token: str) -> tuple[Path, Path] | None:
     return output_root, output
 
 
+def _requested_output_target(root: Path, token: str, requested: object) -> tuple[Path, Path] | None:
+    if not _TOKEN.fullmatch(token) or not isinstance(requested, str) or not requested:
+        return None
+    try:
+        output_base = (root / "Output").resolve(strict=True)
+        output = Path(requested).expanduser().resolve(strict=False)
+        output_root = output.parent.resolve(strict=True)
+        output_root.relative_to(output_base)
+        if not output_root.is_dir() or _is_reparse(output_root):
+            return None
+        if output.name != f"whisper_{token}.json" or output.exists() or output.is_symlink() or _is_reparse(output):
+            return None
+        return output_root, output
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
 def _local_root() -> Path | None:
     value = os.environ.get("LOCALAIHUB_ROOT", "")
     if not value:
@@ -155,7 +172,7 @@ def _segments(source: Any, *, start: float, end: float) -> list[dict[str, object
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 8:
+    if len(argv) not in {8, 9}:
         return _result("error", code="invalid_request")
     root = _local_root()
     source = Path(argv[1])
@@ -175,7 +192,7 @@ def main(argv: list[str]) -> int:
     model_path = _model_snapshot(root, model_id)
     if model_path is None:
         return _result("error", code="tool_model_unavailable")
-    targets = _output_target(root, token)
+    targets = _requested_output_target(root, token, argv[8]) if len(argv) == 9 else _output_target(root, token)
     if targets is None:
         return _result("error", code="output_unavailable")
     output_root, output = targets

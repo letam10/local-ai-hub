@@ -37,16 +37,21 @@ class V7JobOutputTransactionTests(unittest.TestCase):
         ready = threading.Event()
         release = threading.Event()
         target = self.output_root / "owned" / "created.mp4"
+        target_ref = {"path": target}
         manager = HubJobManager()
         patches = self._patch_store()
         try:
             with patches[0], patches[1], patches[2]:
-                def runner(_payload: dict[str, object], _context: object) -> dict[str, object]:
-                    target.parent.mkdir(parents=True)
-                    target.write_bytes(b"owned output")
+                def runner(_payload: dict[str, object], context: object) -> dict[str, object]:
+                    reservation = context.reserve_output("transaction", suffix=".mp4")
+                    self.assertIsNotNone(reservation)
+                    assert reservation is not None
+                    target_ref["path"] = Path(str(reservation["path"]))
+                    target_ref["path"].write_bytes(b"owned output")
+                    self.assertEqual(context.attest_output(reservation["token"], target_ref["path"])["status"], "attested")
                     ready.set()
                     self.assertTrue(release.wait(3))
-                    return {"status": "completed", "output": str(target)}
+                    return {"status": "completed", "output_reservations": [{"token": reservation["token"], "field": "output"}]}
 
                 record = manager.submit("upscale_anime_video", {}, runner, heavy=False)
                 self.assertTrue(ready.wait(3))
@@ -59,9 +64,9 @@ class V7JobOutputTransactionTests(unittest.TestCase):
                 self.assertIsNotNone(public)
                 assert public is not None
                 self.assertEqual(public["status"], "cancelled")
-                self.assertFalse(target.exists())
+                self.assertFalse(target_ref["path"].exists())
                 self.assertFalse(self.index_path.exists())
-                self.assertNotIn(str(target), json.dumps(public, ensure_ascii=False))
+                self.assertNotIn(str(target_ref["path"]), json.dumps(public, ensure_ascii=False))
                 scope = artifact_store.inspect_job_output_scope(record["id"])
                 self.assertIsNotNone(scope)
                 assert scope is not None
@@ -110,9 +115,14 @@ class V7JobOutputTransactionTests(unittest.TestCase):
         patches = self._patch_store()
         try:
             with patches[0], patches[1], patches[2], patch.object(artifact_store, "register_worker_outputs", return_value=None):
-                def runner(_payload: dict[str, object], _context: object) -> dict[str, object]:
+                def runner(_payload: dict[str, object], context: object) -> dict[str, object]:
+                    reservation = context.reserve_output("transaction", suffix=".mp4")
+                    self.assertIsNotNone(reservation)
+                    assert reservation is not None
+                    target = Path(str(reservation["path"]))
                     target.write_bytes(b"publication failure")
-                    return {"status": "completed", "output": str(target)}
+                    self.assertEqual(context.attest_output(reservation["token"], target)["status"], "attested")
+                    return {"status": "completed", "output_reservations": [{"token": reservation["token"], "field": "output"}]}
 
                 record = manager.submit(
                     "upscale_anime_video",
@@ -159,8 +169,16 @@ class V7JobOutputTransactionTests(unittest.TestCase):
         legacy.write_bytes(b"legacy")
         with patch.object(artifact_store, "OUTPUT_ROOT", self.output_root), patch.object(artifact_store, "INDEX_PATH", self.index_path):
             self.assertIsNotNone(artifact_store.begin_job_output_scope(job_id))
+            reservation = artifact_store.reserve_job_output(job_id, "transaction", suffix=".bin")
+            self.assertIsNotNone(reservation)
+            assert reservation is not None
+            owned = Path(str(reservation["path"]))
             owned.write_bytes(b"owned")
-            self.assertEqual(artifact_store.prepare_job_output_scope(job_id, {"status": "completed", "output": str(owned)})["status"], "owned")
+            self.assertEqual(artifact_store.attest_job_output_reservation(job_id, reservation["token"], owned)["status"], "attested")
+            resolved = artifact_store.resolve_job_output_reservations(job_id, {"status": "completed", "output_reservations": [{"token": reservation["token"], "field": "output"}]})
+            self.assertIsNotNone(resolved)
+            assert resolved is not None
+            self.assertEqual(artifact_store.prepare_job_output_scope(job_id, resolved)["status"], "owned")
             result = artifact_store.reconcile_job_output_scopes(active_job_ids=set())
             self.assertEqual(result["manual_review"], 0)
             self.assertFalse(owned.exists())
@@ -172,10 +190,20 @@ class V7JobOutputTransactionTests(unittest.TestCase):
         second = self.output_root / "nested" / "second.bin"
         with patch.object(artifact_store, "OUTPUT_ROOT", self.output_root), patch.object(artifact_store, "INDEX_PATH", self.index_path):
             self.assertIsNotNone(artifact_store.begin_job_output_scope(job_id))
-            second.parent.mkdir(parents=True)
+            reservation = artifact_store.reserve_job_output_namespace(job_id, "transaction", expected_patterns=["*.bin"], max_children=2)
+            self.assertIsNotNone(reservation)
+            assert reservation is not None
+            namespace = Path(str(reservation["path"]))
+            first = namespace / "first.bin"
+            second = namespace / "second.bin"
             first.write_bytes(b"first")
             second.write_bytes(b"second")
-            prepared = artifact_store.prepare_job_output_scope(job_id, {"status": "completed", "files": [str(first), str(second)]})
+            self.assertEqual(artifact_store.attest_job_output_reservation(job_id, reservation["token"], first)["status"], "attested")
+            self.assertEqual(artifact_store.attest_job_output_reservation(job_id, reservation["token"], second)["status"], "attested")
+            resolved = artifact_store.resolve_job_output_reservations(job_id, {"status": "completed", "output_reservations": [{"token": reservation["token"], "field": "files"}]})
+            self.assertIsNotNone(resolved)
+            assert resolved is not None
+            prepared = artifact_store.prepare_job_output_scope(job_id, resolved)
             self.assertEqual(prepared["status"], "owned")
             self.assertEqual(prepared["owned_count"], 2)
             cleaned = artifact_store.finalize_job_output_scope(job_id, terminal_state="cancelled")

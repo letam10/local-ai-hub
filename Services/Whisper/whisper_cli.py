@@ -72,6 +72,23 @@ def _request(value: object) -> tuple[dict[str, object] | None, str | None]:
     if end < start:
         return None, "invalid_range"
     timeout = _finite_number(value.get("timeout_seconds"), default=1_200.0, minimum=1.0, maximum=_MAX_TIMEOUT_SECONDS)
+    output_paths: dict[str, Path] = {}
+    for field in ("output_json_path", "output_srt_path"):
+        if value.get(field) in (None, ""):
+            continue
+        raw_output = Path(os.path.expandvars(str(value.get(field)))).expanduser()
+        try:
+            root = _local_root()
+            output_parent = (root / "Output").resolve(strict=True) if root is not None else None
+            if output_parent is None:
+                return None, "output_unavailable"
+            candidate = raw_output.resolve(strict=True)
+            candidate.parent.resolve(strict=True).relative_to(output_parent)
+            if candidate.exists() or candidate.is_symlink() or _is_reparse(candidate.parent):
+                return None, "output_unavailable"
+            output_paths[field] = candidate
+        except (OSError, RuntimeError, ValueError):
+            return None, "output_unavailable"
     return {
         "source": source,
         "start": start,
@@ -79,6 +96,8 @@ def _request(value: object) -> tuple[dict[str, object] | None, str | None]:
         "device": requested_device.lower(),
         "language": language.lower(),
         "timeout": int(timeout),
+        "output_json_path": output_paths.get("output_json_path"),
+        "output_srt_path": output_paths.get("output_srt_path"),
     }, None
 
 
@@ -127,12 +146,14 @@ def handle_request(value: object) -> dict[str, object]:
     if not python.is_file() or _is_reparse(python):
         return _response("error", code="runtime_unavailable")
     token = uuid.uuid4().hex
-    transcript = root / "Output" / "Speech" / f"whisper_{token}.json"
-    srt = transcript.with_suffix(".srt")
+    transcript = request.get("output_json_path") if isinstance(request.get("output_json_path"), Path) else root / "Output" / "Speech" / f"whisper_{token}.json"
+    srt = request.get("output_srt_path") if isinstance(request.get("output_srt_path"), Path) else transcript.with_suffix(".srt")
     command = [
         str(python), str(worker), str(request["source"]), token, str(request["start"]), str(request["end"]),
         str(request["device"]), model_id, str(request["language"]),
     ]
+    if request.get("output_json_path") is not None:
+        command.append(str(transcript))
     try:
         result = subprocess.run(
             command,

@@ -12,7 +12,7 @@ from src.services.api.config import component
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
 from src.services.artifact_store import describe, resolve
 from src.shared.paths.registry import OUTPUT_ROOT, TEMP_ROOT
-from src.shared.utils.adapter_common import local_root, unavailable
+from src.shared.utils.adapter_common import local_root, reserve_output_namespace, reserved_worker_result, seal_output_reservations, unavailable
 
 
 WORKER = Path(__file__).with_name("worker.py")
@@ -144,18 +144,27 @@ def run_practical_rife(payload: dict[str, Any], context: ProcessOwner | None = N
     except (TypeError, ValueError):
         target_fps = 48
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    reservation_context = callable(getattr(context, "reserve_output_namespace", None))
+    reservation = reserve_output_namespace(context, "practical_rife", expected_patterns=["*.mp4"], max_children=1)
+    if reservation_context and reservation is None:
+        return unavailable("practical_rife", "Practical-RIFE không nhận được output reservation server-owned.", code="output_reservation_unavailable")
+    output_root = reservation["path"] if reservation else str(OUTPUT_ROOT / "Practical-RIFE")
     request = {
         "path": str(source),
         "runtime": str(runtime),
         "model_dir": str(model_dir),
         "ffmpeg": str(ffmpeg),
         "ffprobe": str(ffprobe),
-        "output_root": str(OUTPUT_ROOT / "Practical-RIFE"),
+        "output_root": output_root,
+        "output_reserved": bool(reservation),
+        "output_reservation_token": reservation.get("token") if reservation else None,
         "temp_root": str(TEMP_ROOT / "jobs" / f"rife_{stamp}"),
         "target_fps": target_fps,
         "half": bool(payload.get("half", True)),
     }
-    return run_json_worker(
+    if reservation and not seal_output_reservations(context):
+        return unavailable("practical_rife", "Practical-RIFE không thể chốt output reservation trước khi chạy.", code="output_reservation_unavailable")
+    result = run_json_worker(
         [str(python), str(WORKER)],
         request,
         label="practical_rife_interpolate",
@@ -164,6 +173,9 @@ def run_practical_rife(payload: dict[str, Any], context: ProcessOwner | None = N
         owner=context,
         timeout_seconds=float(payload.get("timeout_seconds", 1800)),
     )
+    if reservation_context:
+        return reserved_worker_result(result, context, {"output": reservation}, ("output",)) or unavailable("practical_rife", "Practical-RIFE output reservation could not be attested.", code="output_scope_unavailable")
+    return result
 
 
 def capability() -> dict[str, Any]:

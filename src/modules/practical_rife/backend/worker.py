@@ -105,6 +105,7 @@ def main() -> int:
         ffmpeg = Path(str(request.get("ffmpeg") or ""))
         ffprobe = Path(str(request.get("ffprobe") or ""))
         output_root = Path(str(request.get("output_root") or ""))
+        output_reserved = request.get("output_reserved") is True
         temp_root = Path(str(request.get("temp_root") or ""))
         hub_root = Path(os.environ.get("LOCALAIHUB_ROOT", ""))
         script = runtime / "inference_video.py"
@@ -130,7 +131,11 @@ def main() -> int:
             or not _safe_existing_under(expected_tools, ffmpeg)
             or not _safe_existing_under(expected_tools, ffprobe)
             or ffmpeg.parent.resolve(strict=False) != ffprobe.parent.resolve(strict=False)
-            or output_root.resolve(strict=False) != expected_output.resolve(strict=False)
+            or (
+                not _safe_existing_under(_safe_tree(hub_root, Path("Output")), output_root)
+                if output_reserved
+                else output_root.resolve(strict=False) != expected_output.resolve(strict=False)
+            )
             or temp_root.parent.resolve(strict=False) != expected_jobs.resolve(strict=False)
             or not temp_root.name.startswith("rife_")
             or temp_root.parent.name != "jobs"
@@ -138,7 +143,11 @@ def main() -> int:
             return _emit({"status": "error", "error": "Practical-RIFE runtime contract không hợp lệ."})
         output_root.mkdir(parents=True, exist_ok=True)
         expected_output = _safe_tree(hub_root, Path("Output") / "Practical-RIFE")
-        if expected_output is None or output_root.is_symlink() or output_root.resolve(strict=False) != expected_output.resolve(strict=False):
+        if expected_output is None or output_root.is_symlink() or (
+            not _safe_existing_under(_safe_tree(hub_root, Path("Output")), output_root)
+            if output_reserved
+            else output_root.resolve(strict=False) != expected_output.resolve(strict=False)
+        ):
             return _emit({"status": "error", "error": "Output Practical-RIFE không khả dụng."})
         temp_root.parent.mkdir(parents=True, exist_ok=True)
         expected_jobs = _safe_tree(hub_root, Path("Temp") / "jobs")

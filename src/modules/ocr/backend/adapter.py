@@ -11,7 +11,9 @@ from src.shared.utils.adapter_common import (
     normalize_worker_result,
     registered_model,
     registered_runtime,
+    reserve_output_namespace,
     resolve_artifact_input,
+    seal_output_reservations,
     unavailable,
 )
 
@@ -33,16 +35,22 @@ def parse(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[
     if not runtime[0].is_file() or not runtime[1].is_file() or not model[1].exists():
         return unavailable("paddleocr_vl", "PaddleOCR-VL runtime/model leaf không còn tồn tại sau khi registry được đọc.", code="runtime_leaf_missing")
     python, helper, service = runtime
+    reservation_context = callable(getattr(context, "reserve_output_namespace", None))
+    reservation = reserve_output_namespace(context, "paddleocr_vl", expected_patterns=["*.json", "*.png", "*.jpg", "*.txt"], max_children=32)
+    if reservation_context and reservation is None:
+        return unavailable("paddleocr_vl", "PaddleOCR-VL không nhận được output reservation server-owned.", code="output_reservation_unavailable")
+    if reservation and not seal_output_reservations(context):
+        return unavailable("paddleocr_vl", "PaddleOCR-VL không thể chốt output reservation trước khi chạy.", code="output_reservation_unavailable")
     result = run_json_worker(
         [str(python), str(helper)],
-        {"path": str(source), "model_id": model[0], "output_format": str(payload.get("output_format") or "all")[:20]},
+        {"path": str(source), "model_id": model[0], "output_format": str(payload.get("output_format") or "all")[:20], "output_root": reservation["path"] if reservation else str(local_root() / "Output" / "OCR"), "output_reservation_token": reservation.get("token") if reservation else None},
         label="paddleocr",
         cwd=service,
         env={**os.environ, "LOCALAIHUB_ROOT": str(local_root()), "PADDLEOCR_HOME": str(service), "PADDLE_PDX_CACHE_HOME": str(local_cache_root() / "PaddleX"), "FLAGS_use_cuda": "1", "PYTHONIOENCODING": "utf-8"},
         owner=context,
         timeout_seconds=bounded_timeout(payload.get("timeout_seconds"), 900, maximum=900),
     )
-    return normalize_worker_result(result, component_id="paddleocr_vl", context=context, output_fields=("output", "files", "outputs"))
+    return normalize_worker_result(result, component_id="paddleocr_vl", context=context, output_fields=("output", "files", "outputs"), reservations={"*": reservation} if reservation else None)
 
 
 def capability() -> dict[str, Any]:

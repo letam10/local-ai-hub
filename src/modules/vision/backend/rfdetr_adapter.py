@@ -10,7 +10,9 @@ from src.shared.utils.adapter_common import (
     normalize_worker_result,
     registered_model,
     registered_runtime,
+    reserve_output_namespace,
     resolve_artifact_input,
+    seal_output_reservations,
     unavailable,
 )
 
@@ -32,20 +34,26 @@ def detect(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict
     if not runtime[0].is_file() or not runtime[1].is_file() or not model[1].exists():
         return unavailable("rfdetr", "RF-DETR runtime/model leaf không còn tồn tại sau khi registry được đọc.", code="runtime_leaf_missing")
     python, helper, service = runtime
+    reservation_context = callable(getattr(context, "reserve_output_namespace", None))
+    reservation = reserve_output_namespace(context, "rfdetr", expected_patterns=["*.json", "*.png", "*.jpg", "*.txt"], max_children=32)
+    if reservation_context and reservation is None:
+        return unavailable("rfdetr", "RF-DETR không nhận được output reservation server-owned.", code="output_reservation_unavailable")
     try:
         threshold = max(0.0, min(1.0, float(payload.get("threshold", 0.5))))
     except (TypeError, ValueError):
         threshold = 0.5
+    if reservation and not seal_output_reservations(context):
+        return unavailable("rfdetr", "RF-DETR không thể chốt output reservation trước khi chạy.", code="output_reservation_unavailable")
     result = run_json_worker(
         [str(python), str(helper)],
-        {"path": str(source), "threshold": threshold, "model_id": model[0]},
+        {"path": str(source), "threshold": threshold, "model_id": model[0], "output_root": reservation["path"] if reservation else str(local_root() / "Output" / "Vision"), "output_reservation_token": reservation.get("token") if reservation else None},
         label="rfdetr",
         cwd=service,
         env={**os.environ, "LOCALAIHUB_ROOT": str(local_root()), "RF_HOME": str(local_root() / "Models" / "Vision" / "RF-DETR"), "PYTHONIOENCODING": "utf-8"},
         owner=context,
         timeout_seconds=bounded_timeout(payload.get("timeout_seconds"), 300, maximum=300),
     )
-    return normalize_worker_result(result, component_id="rfdetr", context=context, output_fields=("output", "files", "outputs"))
+    return normalize_worker_result(result, component_id="rfdetr", context=context, output_fields=("output", "files", "outputs"), reservations={"*": reservation} if reservation else None)
 
 
 def capability() -> dict[str, Any]:

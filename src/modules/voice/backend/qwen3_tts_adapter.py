@@ -11,8 +11,10 @@ from src.shared.utils.adapter_common import (
     normalize_worker_result,
     registered_model,
     registered_runtime,
+    reserve_output_namespace,
     reject_raw_worker_fields,
     resolve_artifact_input,
+    seal_output_reservations,
     unavailable,
 )
 
@@ -34,6 +36,10 @@ def synthesize(payload: dict[str, Any], context: ProcessOwner | None = None) -> 
     if not runtime[0].is_file() or not runtime[1].is_file() or not model[1].exists():
         return unavailable("qwen3_tts", "Qwen3-TTS runtime/model leaf không còn tồn tại sau khi registry được đọc.", code="runtime_leaf_missing")
     python, helper, service = runtime
+    reservation_context = callable(getattr(context, "reserve_output_namespace", None))
+    reservation = reserve_output_namespace(context, "qwen3_tts", expected_patterns=["*.wav", "*.mp3", "*.flac", "*.json"], max_children=8)
+    if reservation_context and reservation is None:
+        return unavailable("qwen3_tts", "Qwen3-TTS không nhận được output reservation server-owned.", code="output_reservation_unavailable")
     text = str(payload.get("text") or "").strip()[:2_000]
     if not text:
         return {"status": "error", "component": "qwen3_tts", "code": "text_required", "error": "Nhập một câu ngắn cho Qwen3-TTS."}
@@ -41,12 +47,14 @@ def synthesize(payload: dict[str, Any], context: ProcessOwner | None = None) -> 
     if operation not in {"text_to_speech", "design_voice", "clone_voice"}:
         return {"status": "error", "component": "qwen3_tts", "code": "operation_not_allowed", "error": "Thao tác Qwen3-TTS không nằm trong allowlist."}
     request = {key: value for key, value in payload.items() if key in {"language", "speaker", "instruct", "reference_text"}}
-    request.update({"operation": operation, "text": text, "model_id": model[0]})
+    request.update({"operation": operation, "text": text, "model_id": model[0], "output_root": reservation["path"] if reservation else str(local_root() / "Output" / "Voice"), "output_reservation_token": reservation.get("token") if reservation else None})
     if operation == "clone_voice":
         reference, input_error = resolve_artifact_input(payload, "reference_asset_id")
         if input_error:
             return {"status": "error", "component": "qwen3_tts", "code": input_error, "error": "Voice Clone cần reference artifact Hub hợp lệ."}
         request["reference_audio"] = str(reference)
+    if reservation and not seal_output_reservations(context):
+        return unavailable("qwen3_tts", "Qwen3-TTS không thể chốt output reservation trước khi chạy.", code="output_reservation_unavailable")
     result = run_json_worker(
         [str(python), str(helper)],
         request,
@@ -56,7 +64,7 @@ def synthesize(payload: dict[str, Any], context: ProcessOwner | None = None) -> 
         owner=context,
         timeout_seconds=bounded_timeout(payload.get("timeout_seconds"), 900, maximum=900),
     )
-    return normalize_worker_result(result, component_id="qwen3_tts", context=context, output_fields=("output", "audio", "files", "outputs"))
+    return normalize_worker_result(result, component_id="qwen3_tts", context=context, output_fields=("output", "audio", "files", "outputs"), reservations={"*": reservation} if reservation else None)
 
 
 def capability() -> dict[str, Any]:

@@ -904,6 +904,21 @@ class VideoRuntimeContractTests(unittest.TestCase):
         finally:
             outside.unlink(missing_ok=True)
 
+    def _reserved_mixed_result(self, context, _good_ref, _unmanaged):
+        reservation = context.reserve_output("video_contract", suffix=".mp4")
+        self.assertIsNotNone(reservation)
+        assert reservation is not None
+        target = Path(str(reservation["path"]))
+        target.write_bytes(b"good output")
+        self.assertEqual(context.attest_output(reservation["token"], target)["status"], "attested")
+        return {
+            "status": "completed",
+            "output_reservations": [
+                {"token": reservation["token"], "field": "output"},
+                {"token": "resv_" + "0" * 32, "field": "files"},
+            ],
+        }
+
     def test_video_worker_output_is_published_as_job_bound_artifact(self) -> None:
         """A completed video worker must survive the Hub job/artifact boundary."""
 
@@ -916,7 +931,7 @@ class VideoRuntimeContractTests(unittest.TestCase):
         output_root.mkdir()
         index_path = root / "Config" / "artifacts.json"
         target = output_root / "AnimeSR" / "clip_AnimeSR_x2.mp4"
-        target.parent.mkdir(parents=True)
+        target_ref = {"path": target}
         manager = HubJobManager()
         try:
             with (
@@ -925,13 +940,18 @@ class VideoRuntimeContractTests(unittest.TestCase):
                 patch.object(artifact_store, "OUTPUT_ROOT", output_root),
                 patch.object(artifact_store, "INDEX_PATH", index_path),
             ):
-                def runner(_payload, _context):
-                    target.write_bytes(b"bounded video output")
+                def runner(_payload, context):
+                    reservation = context.reserve_output("video_contract", suffix=".mp4")
+                    self.assertIsNotNone(reservation)
+                    assert reservation is not None
+                    target_ref["path"] = Path(str(reservation["path"]))
+                    target_ref["path"].write_bytes(b"bounded video output")
+                    self.assertEqual(context.attest_output(reservation["token"], target_ref["path"])["status"], "attested")
                     return {
                         "status": "completed",
                         "operation": "upscale_anime_video",
                         "backend": "animesr",
-                        "output": str(target),
+                        "output_reservations": [{"token": reservation["token"], "field": "output"}],
                     }
 
                 record = manager.submit(
@@ -952,7 +972,7 @@ class VideoRuntimeContractTests(unittest.TestCase):
                 self.assertEqual(artifact["media_type"], "video/mp4")
                 self.assertEqual(artifact["provenance"]["job_id"], record["id"])
                 self.assertEqual(artifact["provenance"]["status"], "completed")
-                self.assertNotIn(str(target), json.dumps(public, ensure_ascii=False))
+                self.assertNotIn(str(target_ref["path"]), json.dumps(public, ensure_ascii=False))
                 self.assertNotIn("output", public["result"])
                 self.assertEqual(artifact_store.describe(artifact["id"])["provenance"]["adapter_id"], "upscale_anime_video")
         finally:
@@ -987,7 +1007,7 @@ class VideoRuntimeContractTests(unittest.TestCase):
                 self.assertIsNotNone(public)
                 assert public is not None
                 self.assertEqual(public["status"], "failed")
-                self.assertEqual(public["result"]["status"], "failed")
+                self.assertEqual(public["result"]["status"], "unavailable")
                 self.assertNotIn(str(outside), json.dumps(public, ensure_ascii=False))
                 self.assertFalse((root / "Config" / "artifacts.json").exists())
         finally:
@@ -1025,7 +1045,7 @@ class VideoRuntimeContractTests(unittest.TestCase):
                 self.assertIsNotNone(public)
                 assert public is not None
                 self.assertEqual(public["status"], "failed")
-                self.assertEqual(public["result"]["status"], "failed")
+                self.assertEqual(public["result"]["status"], "unavailable")
                 self.assertNotIn(str(upload), json.dumps(public, ensure_ascii=False))
                 self.assertFalse((root / "Config" / "artifacts.json").exists())
                 self.assertTrue(upload.is_file())
@@ -1041,8 +1061,7 @@ class VideoRuntimeContractTests(unittest.TestCase):
         output_root = root / "Output"
         output_root.mkdir()
         good = output_root / "AnimeSR" / "good.mp4"
-        good.parent.mkdir(parents=True)
-        good.write_bytes(b"good output")
+        good_ref = {"path": good}
         unmanaged = root / "unmanaged.mp4"
         unmanaged.write_bytes(b"unmanaged output")
         manager = HubJobManager()
@@ -1056,7 +1075,7 @@ class VideoRuntimeContractTests(unittest.TestCase):
                 record = manager.submit(
                     "run_media_operation",
                     {"source_artifact_id": "artifact_" + "f" * 32},
-                    lambda _payload, _context: {"status": "completed", "output": str(good), "files": [str(unmanaged)]},
+                    lambda _payload, context: self._reserved_mixed_result(context, good_ref, unmanaged),
                 )
                 idle, remaining = manager.wait_for_idle(5)
                 self.assertTrue(idle, remaining)
@@ -1064,9 +1083,9 @@ class VideoRuntimeContractTests(unittest.TestCase):
                 self.assertIsNotNone(public)
                 assert public is not None
                 self.assertEqual(public["status"], "failed")
-                self.assertEqual(public["result"]["status"], "failed")
+                self.assertEqual(public["result"]["status"], "unavailable")
                 self.assertFalse((root / "Config" / "artifacts.json").exists())
-                self.assertTrue(good.is_file())
+                self.assertFalse(good_ref["path"].is_file())
                 self.assertTrue(unmanaged.is_file())
         finally:
             manager.cancel_all_and_wait(3)
@@ -1145,9 +1164,14 @@ class VideoRuntimeContractTests(unittest.TestCase):
                     self.assertTrue(release_publication.wait(3))
                     return register(*args, **kwargs)
 
-                def runner(_payload, _context):
-                    target.write_bytes(b"completed output")
-                    return {"status": "completed", "output": str(target)}
+                def runner(_payload, context):
+                    reservation = context.reserve_output("video_contract", suffix=".mp4")
+                    self.assertIsNotNone(reservation)
+                    assert reservation is not None
+                    target_ref = Path(str(reservation["path"]))
+                    target_ref.write_bytes(b"completed output")
+                    self.assertEqual(context.attest_output(reservation["token"], target_ref)["status"], "attested")
+                    return {"status": "completed", "output_reservations": [{"token": reservation["token"], "field": "output"}]}
 
                 with patch.object(artifact_store, "register_worker_outputs", side_effect=blocking_register):
                     record = manager.submit(

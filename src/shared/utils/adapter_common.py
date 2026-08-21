@@ -64,6 +64,105 @@ _OUTPUT_FIELD_ALIASES = {
 }
 
 
+def _has_reservation_context(context: object | None) -> bool:
+    return context is not None and callable(getattr(context, "reserve_output_namespace", None)) and callable(getattr(context, "attest_output", None))
+
+
+def reserve_output_namespace(
+    context: object | None,
+    producer: str,
+    *,
+    expected_patterns: list[str],
+    max_children: int,
+) -> dict[str, Any] | None:
+    """Request an internal producer namespace only from a real JobContext."""
+
+    if not _has_reservation_context(context):
+        return None
+    try:
+        value = context.reserve_output_namespace(producer, expected_patterns=expected_patterns, max_children=max_children)
+    except Exception:
+        return None
+    return value if isinstance(value, dict) and value.get("status") == "reserved" and isinstance(value.get("token"), str) and isinstance(value.get("path"), str) else None
+
+
+def reserve_output_leaf(context: object | None, producer: str, *, suffix: str) -> dict[str, Any] | None:
+    """Request an internal exact output leaf from a real JobContext."""
+
+    if not _has_reservation_context(context) or not callable(getattr(context, "reserve_output", None)):
+        return None
+    try:
+        value = context.reserve_output(producer, suffix=suffix)
+    except Exception:
+        return None
+    return value if isinstance(value, dict) and value.get("status") == "reserved" and isinstance(value.get("token"), str) and isinstance(value.get("path"), str) else None
+
+
+def seal_output_reservations(context: object | None) -> bool:
+    if not _has_reservation_context(context) or not callable(getattr(context, "seal_output_reservations", None)):
+        return False
+    try:
+        return context.seal_output_reservations() is True
+    except Exception:
+        return False
+
+
+def _reservation_for_field(value: object, field: str) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+        return list(value)
+    return []
+
+
+def reserved_worker_result(
+    value: object,
+    context: object | None,
+    reservations: dict[str, object] | None,
+    output_fields: tuple[str, ...],
+) -> dict[str, Any] | None:
+    """Convert internal output paths into opaque token references before publication."""
+
+    if not isinstance(value, dict) or value.get("status") != "completed" or not _has_reservation_context(context):
+        return dict(value) if isinstance(value, dict) else None
+    reservation_map = reservations or {}
+    references: list[dict[str, str]] = []
+    updated = dict(value)
+    for field in output_fields:
+        candidate = value.get(field)
+        if candidate in (None, "", []):
+            continue
+        values = [candidate] if isinstance(candidate, str) else candidate if isinstance(candidate, list) else []
+        if not values or not all(isinstance(item, str) and item for item in values):
+            return None
+        target_field = _OUTPUT_FIELD_ALIASES.get(field, field)
+        reservation_value = reservation_map.get(field) or reservation_map.get(target_field) or reservation_map.get("*")
+        specs = _reservation_for_field(reservation_value, target_field)
+        if not specs or len(specs) not in {1, len(values)}:
+            return None
+        used_tokens: list[str] = []
+        for index, path in enumerate(values):
+            spec = specs[0] if len(specs) == 1 else specs[index]
+            token = spec.get("token") if isinstance(spec, dict) else None
+            if not isinstance(token, str):
+                return None
+            try:
+                attested = context.attest_output(token, path, spec.get("producer"))
+            except Exception:
+                return None
+            if not isinstance(attested, dict) or attested.get("status") != "attested":
+                return None
+            if token not in used_tokens:
+                used_tokens.append(token)
+        references.extend({"token": token, "field": target_field} for token in used_tokens)
+        updated.pop(field, None)
+    if any(key in value and value.get(key) not in (None, "", []) for key in output_fields) and not references:
+        return None
+    if references:
+        updated["output_reservations"] = references
+    return updated
+
+
 def configured_path(
     component_id: str,
     field: str,
@@ -285,12 +384,26 @@ def normalize_worker_result(
     component_id: str,
     context: object | None = None,
     output_fields: tuple[str, ...] = (),
+    reservations: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     """Return bounded metadata; output paths are internal only for JobContext."""
 
     if not isinstance(value, dict) or value.get("status") not in {"completed", "failed", "unavailable", "cancelled", "error"}:
         return {"status": "error", "component": component_id, "code": "invalid_worker_result"}
     status = str(value.get("status"))
+    reserved_value = reserved_worker_result(value, context, reservations, output_fields)
+    if status == "completed" and _has_reservation_context(context) and reserved_value is None:
+        return {
+            "status": "unavailable",
+            "component": component_id,
+            "code": "output_scope_unavailable",
+            "execution": "not_run",
+            "dry_run": True,
+            "reason": "Producer output reservation could not be attested.",
+            "next_action": "Create a new job through the server-owned output reservation contract.",
+        }
+    if reserved_value is not None:
+        value = reserved_value
     safe: dict[str, Any] = {"status": status, "component": component_id}
     for key in _WORKER_COMMON_FIELDS:
         if key in value:
@@ -314,6 +427,8 @@ def normalize_worker_result(
                 safe[target_key] = candidate
             elif isinstance(candidate, list) and len(candidate) <= _MAX_WORKER_ITEMS and all(isinstance(item, str) and item for item in candidate):
                 safe[target_key] = list(candidate)
+        if isinstance(value.get("output_reservations"), list):
+            safe["output_reservations"] = value["output_reservations"]
     if status in {"error", "failed"}:
         raw_code = str(value.get("code") or "").casefold()
         error_text = str(value.get("error") or value.get("reason") or "").casefold()

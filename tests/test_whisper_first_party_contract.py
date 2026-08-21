@@ -202,6 +202,58 @@ class WhisperFirstPartyContractTests(unittest.TestCase):
             self.assertEqual(len(public["artifacts"]), 2)
             self.assertNotIn(str(root), json.dumps(public, ensure_ascii=False))
 
+    def test_job_context_whisper_uses_reservation_token_references(self) -> None:
+        from src.modules.whisper.backend import adapter
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "input.wav"
+            source.write_bytes(b"audio")
+            output_root = root / "Output"
+            output_root.mkdir()
+            token = "d" * 32
+            reservation_tokens = {".json": "resv_" + "e" * 32, ".srt": "resv_" + "f" * 32}
+
+            class Context:
+                def reserve_output(self, producer, *, suffix):
+                    path = output_root / f"{producer}{suffix}"
+                    return {"status": "reserved", "token": reservation_tokens[suffix], "producer": producer, "path": str(path)}
+
+                def reserve_output_namespace(self, _producer, *, expected_patterns, max_children):
+                    self.path = output_root / "reserved"
+                    self.path.mkdir()
+                    return {"status": "reserved", "token": reservation_token, "producer": "whisper", "path": str(self.path)}
+
+                def attest_output(self, token_value, path, producer=None):
+                    self.asserted = (token_value, Path(path), producer)
+                    return {"status": "attested"} if token_value in reservation_tokens.values() and Path(path).is_file() else {"status": "manual_review"}
+
+                def seal_output_reservations(self):
+                    return True
+
+            context = Context()
+            python = root / "python.exe"
+            wrapper = root / "whisper_cli.py"
+            python.write_bytes(b"")
+            wrapper.write_text("# tracked wrapper fixture\n", encoding="utf-8")
+            registry = [{"id": "approved-asr", "engine": "Faster-Whisper", "local_path": "server-owned"}]
+            artifact_id = "artifact_" + "f" * 32
+
+            def fake_worker(_command, request, **_kwargs):
+                target = Path(request["output_json_path"])
+                transcript = target
+                srt = Path(request["output_srt_path"])
+                transcript.write_text("{}", encoding="utf-8")
+                srt.write_text("1\n", encoding="utf-8")
+                return {"status": "completed", "operation": "transcribe_media", "transcript_token": token, "segment_count": 1, "device": "cpu"}
+
+            with patch.object(adapter, "models", return_value=registry), patch.object(adapter, "_runtime", return_value=(python, wrapper, root)), patch.object(adapter, "resolve", return_value=source), patch.object(adapter, "describe", return_value={"id": artifact_id, "media_type": "audio/wav"}), patch.object(adapter, "run_json_worker", side_effect=fake_worker):
+                result = adapter.transcribe({"source_artifact_id": artifact_id}, context)
+            self.assertEqual(result["status"], "completed")
+            self.assertNotIn("files", result)
+            self.assertEqual({item["token"] for item in result["output_reservations"]}, set(reservation_tokens.values()))
+            self.assertIn(context.asserted[0], reservation_tokens.values())
+
     def test_adapter_rejects_raw_path_path_like_wrong_media_and_reparse_before_worker(self) -> None:
         from src.modules.whisper.backend import adapter
 
