@@ -5464,6 +5464,8 @@ LGraphNode.prototype.executeAction = function(action)
      * @method clear
      */
     LGraphCanvas.prototype.clear = function() {
+        this._removeDocumentPointerListeners();
+        this._clearPointerInteractionState();
         this.frame = 0;
         this.last_draw_time = 0;
         this.render_time = 0;
@@ -5748,6 +5750,44 @@ LGraphNode.prototype.executeAction = function(action)
         this._active_pointer_id = null;
     };
 
+    LGraphCanvas.prototype._removeDocumentPointerListeners = function() {
+        var ref_window = this.getCanvasWindow ? this.getCanvasWindow() : null;
+        var document = ref_window && ref_window.document;
+        if (!document) {
+            return;
+        }
+        this._pointerListenerRemove(document, "move", this._mousemove_callback, true);
+        this._pointerListenerRemove(document, "up", this._mouseup_callback, true);
+        this._pointerListenerRemove(document, "cancel", this._pointercancel_callback, true);
+        this._pointerListenerRemove(document, "lostpointercapture", this._lostpointercapture_callback, true);
+    };
+
+    LGraphCanvas.prototype._clearPointerInteractionState = function() {
+        this._releasePointer();
+        this.node_widget = null;
+        this.node_capturing_input = null;
+        this.node_dragged = null;
+        this.resizing_node = null;
+        this.selected_group = null;
+        this.selected_group_resizing = false;
+        this.dragging_rectangle = null;
+        this.dragging_canvas = false;
+        this.last_mouse_dragging = false;
+        this.connecting_output = null;
+        this.connecting_input = null;
+        this.connecting_pos = null;
+        this.connecting_node = null;
+        this.connecting_slot = -1;
+        this._highlight_input = null;
+        this._highlight_output = null;
+        this.pointer_is_down = false;
+        this.pointer_is_double = false;
+        this.block_click = false;
+        if (this.canvas && this.canvas.style) {
+            this.canvas.style.cursor = "";
+        }
+    };
+
     /**
      * binds mouse, keyboard, touch and drag events to the canvas
      * @method bindEvents
@@ -5822,8 +5862,9 @@ LGraphNode.prototype.executeAction = function(action)
      * @method unbindEvents
      **/
     LGraphCanvas.prototype.unbindEvents = function() {
+        this._removeDocumentPointerListeners();
+        this._clearPointerInteractionState();
         if (!this._events_binded) {
-            console.warn("LGraphCanvas: no events binded");
             return;
         }
 
@@ -6773,6 +6814,20 @@ LGraphNode.prototype.executeAction = function(action)
      **/
     LGraphCanvas.prototype.processMouseUp = function(e) {
 		e = LiteGraph.normalizePointerEvent(e, "up");
+		if (!this.graph) {
+			this._removeDocumentPointerListeners();
+			this._clearPointerInteractionState();
+			if (this.canvas && this._events_binded) {
+				this._pointerListenerAdd(this.canvas, "move", this._mousemove_callback, true);
+			}
+			if (e && e.stopPropagation) {
+				e.stopPropagation();
+			}
+			if (e && e.preventDefault) {
+				e.preventDefault();
+			}
+			return false;
+		}
 		if (!this._acceptPointerEvent(e, true)) {
 			return false;
 		}
@@ -6791,12 +6846,6 @@ LGraphNode.prototype.executeAction = function(action)
     	
 		if( this.set_canvas_dirty_on_mouse_event )
 			this.dirty_canvas = true;
-
-        if (!this.graph) {
-			this._releasePointer(e);
-            return;
-        }
-
         var window = this.getCanvasWindow();
         var document = window.document;
         LGraphCanvas.active_canvas = this;
@@ -7094,39 +7143,12 @@ LGraphNode.prototype.executeAction = function(action)
 			return false;
 		}
 
-		var window = this.getCanvasWindow();
-		var document = window.document;
+		this._removeDocumentPointerListeners();
 		if (!this.options.skip_events) {
-			this._pointerListenerRemove(document, "move", this._mousemove_callback, true);
-			this._pointerListenerRemove(document, "up", this._mouseup_callback, true);
-			this._pointerListenerRemove(document, "cancel", this._pointercancel_callback, true);
-			this._pointerListenerRemove(document, "lostpointercapture", this._lostpointercapture_callback, true);
 			this._pointerListenerAdd(this.canvas, "move", this._mousemove_callback, true);
 		}
 
-		this.node_widget = null;
-		this.node_capturing_input = null;
-		this.node_dragged = null;
-		this.resizing_node = null;
-		this.selected_group = null;
-		this.selected_group_resizing = false;
-		this.dragging_rectangle = null;
-		this.dragging_canvas = false;
-		this.last_mouse_dragging = false;
-		this.connecting_output = null;
-		this.connecting_input = null;
-		this.connecting_pos = null;
-		this.connecting_node = null;
-		this.connecting_slot = -1;
-		this._highlight_input = null;
-		this._highlight_output = null;
-		this.pointer_is_down = false;
-		this.pointer_is_double = false;
-		this.block_click = false;
-		if (this.canvas && this.canvas.style) {
-			this.canvas.style.cursor = "";
-		}
-		this._releasePointer(e);
+		this._clearPointerInteractionState();
 		if (this.onPointerCancel) {
 			this.onPointerCancel(e);
 		}

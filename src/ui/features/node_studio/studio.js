@@ -572,6 +572,7 @@ class HubGraphEditor {
     if (this.autoTimer) clearTimeout(this.autoTimer);
     this.resizeObserver?.disconnect();
     this.liteCanvas?.stopRendering?.();
+    this.liteCanvas?.setCanvas?.(null);
     this.liteCanvas?.setGraph?.(null);
   }
 

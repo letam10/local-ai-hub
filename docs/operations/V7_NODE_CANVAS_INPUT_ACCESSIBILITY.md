@@ -23,6 +23,11 @@ changed, so another canvas cannot inherit the editor's input mode accidentally.
   connection-preview state. The Studio adapter restores the bounded
   pre-change graph snapshot when one exists. Cancellation does not call
   `afterChange`, write history, autosave, or start a job.
+- Studio teardown calls `setCanvas(null)` before `setGraph(null)`. The
+  `unbindEvents` path is idempotent, removes any document-level drag listeners, calls
+  `releasePointerCapture` before clearing the active pointer, and clears all
+  transient interaction state without persistence callbacks. A graph-null
+  pointer-up follows the same cleanup path before returning.
 - The connection-picker wrapper rebinds through the canvas's selected method,
   so pointer-mode socket drops are handled once and cancellation closes the
   picker without publishing a second edit.

@@ -81,6 +81,39 @@ class NodeCanvasInputAccessibilityTests(unittest.TestCase):
         self.assertIn("cancelNativeConnection", cancel_block)
         self.assertIn("closeConnectionPicker(false)", cancel_block)
 
+    def test_destroy_and_graph_detach_unbind_before_pointer_state_is_cleared(self) -> None:
+        destroy_start = self.studio.index("  destroy()")
+        destroy_end = self.studio.index("  readLocalGraph()", destroy_start)
+        destroy_block = self.studio[destroy_start:destroy_end]
+        self.assertIn("this.liteCanvas?.setCanvas?.(null);", destroy_block)
+        self.assertIn("this.liteCanvas?.setGraph?.(null);", destroy_block)
+        self.assertLess(destroy_block.index("setCanvas"), destroy_block.index("setGraph"))
+        self.assertNotIn("persist(", destroy_block)
+        self.assertNotIn("afterChange", destroy_block)
+
+        clear_start = self.litegraph.index("LGraphCanvas.prototype.clear = function()")
+        clear_end = self.litegraph.index("this.frame = 0;", clear_start)
+        clear_prefix = self.litegraph[clear_start:clear_end]
+        self.assertIn("this._removeDocumentPointerListeners();", clear_prefix)
+        self.assertIn("this._clearPointerInteractionState();", clear_prefix)
+
+        unbind_start = self.litegraph.index("LGraphCanvas.prototype.unbindEvents = function()")
+        unbind_end = self.litegraph.index("LGraphCanvas.getFileExtension", unbind_start)
+        unbind_block = self.litegraph[unbind_start:unbind_end]
+        self.assertIn("this._removeDocumentPointerListeners();", unbind_block)
+        self.assertIn("this._clearPointerInteractionState();", unbind_block)
+        self.assertLess(unbind_block.index("_clearPointerInteractionState"), unbind_block.index("this._active_pointer_id = null"))
+
+        up_start = self.litegraph.index("LGraphCanvas.prototype.processMouseUp = function(e)")
+        null_start = self.litegraph.index("if (!this.graph)", up_start)
+        null_end = self.litegraph.index("var window = this.getCanvasWindow();", null_start)
+        null_block = self.litegraph[null_start:null_end]
+        self.assertIn("this._removeDocumentPointerListeners();", null_block)
+        self.assertIn("this._clearPointerInteractionState();", null_block)
+        self.assertNotIn("graph.change", null_block)
+        self.assertNotIn("afterChange", null_block)
+        self.assertIn("return false;", null_block)
+
     def test_connection_picker_rebinds_using_the_canvas_method(self) -> None:
         start = self.studio.index("  bindConnectionPickerHook()")
         end = self.studio.index("  openConnectionPicker(", start)
@@ -112,6 +145,10 @@ class NodeCanvasInputAccessibilityTests(unittest.TestCase):
             "pointercancel",
             "lostpointercapture",
             "setPointerCapture",
+            "setCanvas(null)",
+            "unbindEvents",
+            "idempotent",
+            "graph-null",
             "primary",
             "no duplicate",
             "execution=not_run",
