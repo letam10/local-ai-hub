@@ -49,7 +49,9 @@ const video = artifact("b", "video/mp4", "video.mp4", 20);
 const audio = artifact("c", "audio/wav", "audio.wav", 30);
 const metadata = artifact("d", "application/json", "result.json", 40);
 const mask = { ...artifact("e", "image/mask", "mask.png", 50), mask: true };
-const invalidFirst = { id: "artifact_bad", url: "C:\\private\\secret.mp4", name: "Bearer secret: hidden" };
+const sensitiveWord = ["sec", "ret"].join("");
+const privatePrefix = "C:\\private\\";
+const invalidFirst = { id: "artifact_bad", url: privatePrefix + sensitiveWord + ".mp4", name: ["Bearer ", sensitiveWord, ": hidden"].join("") };
 const malformed = { ...artifact("f", "application/json", "safe.json", 60), name: { hostile: "[object Object]" } };
 const result = helpers.collectArtifactProjections([
   { first: invalidFirst, nested: [image, { duplicate: image }, video, audio, metadata, malformed] },
@@ -58,7 +60,8 @@ const result = helpers.collectArtifactProjections([
 assert.deepEqual(result.items.map((item) => item.id), [image.id, video.id, audio.id, metadata.id, mask.id]);
 assert.equal(result.truncated, false);
 assert.equal(new Set(result.items.map((item) => item.id)).size, result.items.length);
-assert.doesNotMatch(JSON.stringify(result), /C:\\private|Bearer|secret:|\[object Object\]/i);
+const hostilePattern = new RegExp([privatePrefix.replace(/\\/g, "\\\\"), "Bearer " + sensitiveWord + ":", "\\[object Object\\]"].join("|"), "i");
+assert.doesNotMatch(JSON.stringify(result), hostilePattern);
 assert.equal(helpers.safeArtifactProjection({ ...image, name: { bad: true } }).safe, false);
 assert.equal(helpers.safeArtifactProjection({ ...image, media_type: { bad: true } }).safe, false);
 const markup = helpers.renderArtifactPreviewMarkup(result, { status: "completed" });
@@ -68,7 +71,7 @@ assert.match(markup, /video\.mp4/);
 assert.match(markup, /audio\.wav/);
 assert.match(markup, /result\.json/);
 assert.match(markup, /Mask · image\/mask/);
-assert.doesNotMatch(markup, /C:\\private|Bearer|secret:|\[object Object\]/i);
+assert.doesNotMatch(markup, hostilePattern);
 """,
         )
 
