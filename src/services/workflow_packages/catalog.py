@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import stat
 from functools import cmp_to_key
 from pathlib import Path
 from typing import Any
@@ -22,42 +24,201 @@ from .io import _DuplicateJsonKey, _duplicate_key_guard, _non_finite_number, saf
 from .linting import lint_workflow_package
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+_MAX_WALK_DEPTH = 16
+_MAX_WALK_ENTRIES = 4096
+_MAX_ANCESTOR_DEPTH = 64
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+class _ManagedPathRefused(Exception):
+    """Internal fixed-code refusal; never expose filesystem details."""
+
+
+REPOSITORY_ROOT = Path(os.path.abspath(os.fspath(Path(__file__)))).parents[3]
 MANAGED_PACKAGE_ROOT = REPOSITORY_ROOT / "workflow_packages"
+
+
+def _absolute_without_resolve(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _is_reparse(result: os.stat_result) -> bool:
+    return stat.S_ISLNK(result.st_mode) or bool(getattr(result, "st_file_attributes", 0) & _REPARSE_POINT)
+
+
+def _identity(result: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        int(getattr(result, "st_dev", 0)),
+        int(getattr(result, "st_ino", 0)),
+        int(result.st_mode),
+        int(result.st_size),
+        int(getattr(result, "st_mtime_ns", 0)),
+        int(getattr(result, "st_ctime_ns", 0)),
+        int(getattr(result, "st_file_attributes", 0)),
+    )
+
+
+def _lstat_checked(path: Path, *, kind: str) -> tuple[int, int, int, int, int, int, int]:
+    try:
+        result = os.lstat(path)
+    except (OSError, TypeError, ValueError) as exc:
+        raise _ManagedPathRefused from exc
+    if _is_reparse(result):
+        raise _ManagedPathRefused
+    if kind == "directory" and not stat.S_ISDIR(result.st_mode):
+        raise _ManagedPathRefused
+    if kind == "file" and not stat.S_ISREG(result.st_mode):
+        raise _ManagedPathRefused
+    return _identity(result)
 
 
 def _contained(path: Path, root: Path) -> bool:
     try:
-        path.resolve().relative_to(root.resolve())
+        _absolute_without_resolve(path).relative_to(_absolute_without_resolve(root))
         return True
-    except (OSError, ValueError):
+    except (OSError, TypeError, ValueError):
         return False
+
+
+def _directory_chain(root: Path, target_parent: Path) -> dict[Path, tuple[int, int, int, int, int, int, int]]:
+    """Validate the fixed root, its ancestors, and every target-parent directory."""
+
+    root_abs = _absolute_without_resolve(root)
+    parent_abs = _absolute_without_resolve(target_parent)
+    if not _contained(parent_abs, root_abs):
+        raise _ManagedPathRefused
+    try:
+        parent_abs.relative_to(root_abs)
+    except ValueError as exc:
+        raise _ManagedPathRefused from exc
+    identities: dict[Path, tuple[int, int, int, int, int, int, int]] = {}
+    current = parent_abs
+    depth = 0
+    while True:
+        identities[current] = _lstat_checked(current, kind="directory")
+        if current == root_abs:
+            break
+        current = current.parent
+        depth += 1
+        if depth > _MAX_ANCESTOR_DEPTH:
+            raise _ManagedPathRefused
+    current = root_abs.parent
+    depth = 0
+    while current.parent != current:
+        identities[current] = _lstat_checked(current, kind="directory")
+        current = current.parent
+        depth += 1
+        if depth > _MAX_ANCESTOR_DEPTH:
+            raise _ManagedPathRefused
+    return identities
 
 
 def _read_managed_json(path: Path) -> tuple[bytes | None, str | None]:
     """Read one fixed-root descriptor only after containment and size checks."""
 
-    if path.is_symlink() or not _contained(path, MANAGED_PACKAGE_ROOT):
-        return None, "managed_descriptor_refused"
-    parent = path.parent
-    while parent != MANAGED_PACKAGE_ROOT:
-        if parent.is_symlink():
-            return None, "managed_descriptor_refused"
-        parent = parent.parent
     try:
-        size = path.stat().st_size
-    except OSError:
+        path_abs = _absolute_without_resolve(path)
+        root_abs = _absolute_without_resolve(MANAGED_PACKAGE_ROOT)
+        if path_abs == root_abs or not _contained(path_abs, root_abs):
+            raise _ManagedPathRefused
+        chain_before = _directory_chain(root_abs, path_abs.parent)
+        before = _lstat_checked(path_abs, kind="file")
+        size = before[3]
+    except (OSError, TypeError, ValueError, _ManagedPathRefused):
         return None, "managed_descriptor_refused"
     if size <= 0 or size > MAX_PACKAGE_BYTES:
         return None, "managed_descriptor_size"
     try:
-        payload = path.read_bytes()
-    except OSError:
+        payload = path_abs.read_bytes()
+    except (OSError, TypeError, ValueError):
         return None, "managed_descriptor_refused"
-    # Defend against a descriptor changing between stat() and read_bytes().
+    try:
+        chain_after = _directory_chain(root_abs, path_abs.parent)
+        after = _lstat_checked(path_abs, kind="file")
+    except (OSError, TypeError, ValueError, _ManagedPathRefused):
+        return None, "managed_descriptor_refused"
+    # Defend against same-size/same-byte replacement and ancestor replacement.
+    if chain_before != chain_after or before != after:
+        return None, "managed_descriptor_refused"
     if len(payload) != size or len(payload) > MAX_PACKAGE_BYTES:
         return None, "managed_descriptor_size"
     return payload, None
+
+
+def _walk_managed_files(root: Path, suffix: str) -> tuple[bool, list[Path], list[str]]:
+    """Bounded no-follow walk returning only regular files under a safe root."""
+
+    try:
+        root_abs = _absolute_without_resolve(root)
+        _directory_chain(root_abs, root_abs)
+    except _ManagedPathRefused:
+        return False, [], ["managed_root_unavailable"]
+
+    paths: list[Path] = []
+    errors: list[str] = []
+    stack: list[tuple[Path, int]] = [(root_abs, 0)]
+    seen_entries = 0
+    while stack:
+        directory, depth = stack.pop()
+        try:
+            chain_before = _directory_chain(root_abs, directory)
+            entries = []
+            bounded = True
+            with os.scandir(directory) as iterator:
+                for entry in iterator:
+                    if len(entries) >= _MAX_WALK_ENTRIES:
+                        bounded = False
+                        break
+                    entries.append(entry)
+        except (OSError, TypeError, ValueError, _ManagedPathRefused):
+            errors.append("managed_directory_refused")
+            continue
+        if not bounded or seen_entries + len(entries) > _MAX_WALK_ENTRIES:
+            errors.append("managed_catalog_bounds")
+            try:
+                _directory_chain(root_abs, directory)
+            except _ManagedPathRefused:
+                errors.append("managed_directory_refused")
+            continue
+        seen_entries += len(entries)
+        local_paths: list[Path] = []
+        local_errors: list[str] = []
+        for entry in sorted(entries, key=lambda item: item.name):
+            try:
+                entry_path = directory / entry.name
+                result = os.lstat(entry_path)
+            except (OSError, TypeError, ValueError):
+                local_errors.append("managed_entry_refused")
+                continue
+            if _is_reparse(result):
+                local_errors.append("managed_entry_refused")
+                continue
+            if stat.S_ISDIR(result.st_mode):
+                if entry.name.endswith(suffix) or depth >= _MAX_WALK_DEPTH:
+                    local_errors.append("managed_entry_refused" if entry.name.endswith(suffix) else "managed_catalog_bounds")
+                    continue
+                stack.append((entry_path, depth + 1))
+                continue
+            if not stat.S_ISREG(result.st_mode):
+                local_errors.append("managed_entry_refused")
+                continue
+            if entry.name.endswith(suffix):
+                local_paths.append(entry_path)
+        try:
+            chain_after = _directory_chain(root_abs, directory)
+            if chain_before != chain_after:
+                errors.append("managed_directory_changed")
+                continue
+        except _ManagedPathRefused:
+            errors.append("managed_directory_refused")
+            continue
+        paths.extend(local_paths)
+        errors.extend(local_errors)
+    try:
+        _directory_chain(root_abs, root_abs)
+    except _ManagedPathRefused:
+        errors.append("managed_root_changed")
+    return True, sorted(paths, key=lambda item: str(item)), errors
 
 
 def _deduplicated_errors(errors: list[str]) -> list[dict[str, str]]:
@@ -98,17 +259,18 @@ def _package_record(imported: dict[str, Any]) -> dict[str, Any]:
 def _scan_managed_packages() -> dict[str, Any]:
     """Collect unique, catalog-ready managed packages without using filenames as IDs."""
 
-    if not MANAGED_PACKAGE_ROOT.is_dir() or MANAGED_PACKAGE_ROOT.is_symlink():
+    root_available, package_paths, walk_errors = _walk_managed_files(MANAGED_PACKAGE_ROOT, ".workflow-package.json")
+    if not root_available:
         return {
             "root_available": False,
             "packages": {},
             "ambiguous": set(),
             "not_ready": set(),
-            "errors": ["managed_root_unavailable"],
+            "errors": walk_errors or ["managed_root_unavailable"],
         }
-    errors: list[str] = []
+    errors: list[str] = list(walk_errors)
     candidates: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for path in sorted(MANAGED_PACKAGE_ROOT.rglob("*.workflow-package.json")):
+    for path in package_paths:
         payload, error = _read_managed_json(path)
         if error is not None:
             errors.append(error)
@@ -170,11 +332,16 @@ def discover_managed_packages() -> dict[str, Any]:
             "records": [],
             "scenarios": [],
             "errors": _deduplicated_errors(scan["errors"]),
+            "execution": "not_run",
         }
     records = [_package_record(imported) for _identity, imported in sorted(scan["packages"].items())]
     scenarios: list[dict[str, Any]] = []
     errors: list[str] = list(scan["errors"])
-    for path in sorted(MANAGED_PACKAGE_ROOT.rglob("*.evaluation-scenario.json")):
+    scenario_root_available, scenario_paths, scenario_errors = _walk_managed_files(MANAGED_PACKAGE_ROOT, ".evaluation-scenario.json")
+    errors.extend(scenario_errors)
+    if not scenario_root_available:
+        errors.append("managed_scenario_refused")
+    for path in scenario_paths:
         payload, error = _read_managed_json(path)
         if error is not None:
             errors.append("managed_scenario_size" if error == "managed_descriptor_size" else "managed_scenario_refused")
@@ -218,6 +385,7 @@ def discover_managed_packages() -> dict[str, Any]:
         "records": records,
         "scenarios": scenarios,
         "errors": _deduplicated_errors(errors),
+        "execution": "not_run",
     }
 
 
