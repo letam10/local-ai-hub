@@ -10,9 +10,48 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from src.services.api.api_server import HubHTTPServer, HubHandler
+from src.services.api.context import ApiContext
+from src.services.api.router import ApiRequest
+from src.services.api.router_registry import build_router
 import src.shared.paths.registry as paths_mod
 import src.services.diagnostics.center as diag_center_mod
 import src.services.node_studio.state as ns_state_mod
+
+
+_PUBLIC_SUBSYSTEM_KEYS = (
+    "git_integrity",
+    "config_registry",
+    "jobs_store",
+    "artifact_store",
+    "workflow_store",
+    "models_inventory",
+    "environments_inventory",
+    "runtime_inventory",
+    "storage",
+    "gpu",
+    "latest_app_errors",
+    "recovery_forensic",
+)
+
+
+def _safe_snapshot_fixture():
+    return {
+        key: {
+            "status": "UNKNOWN",
+            "reason": "Diagnostic snapshot unavailable or ambiguous.",
+            "next_action": "Review the diagnostic source manually.",
+            "execution": "not_run",
+            "dry_run": True,
+            "code": "diagnostic_projection_unavailable",
+        }
+        for key in _PUBLIC_SUBSYSTEM_KEYS
+    }
+
+
+def _direct_request(router, method: str, path: str, context: ApiContext, body: dict | None = None):
+    encoded = json.dumps(body or {}).encode("utf-8")
+    request = ApiRequest(method, path, {}, {"content-length": str(len(encoded))}, lambda strict: body or {})
+    return router.dispatch(request, context)
 
 
 class TestV6ApiDiagnosticsSurface(unittest.TestCase):
@@ -90,6 +129,13 @@ class TestV6ApiDiagnosticsSurface(unittest.TestCase):
             self.assertIn("status", snapshot[sub])
             self.assertIn("reason", snapshot[sub])
             self.assertIn("next_action", snapshot[sub])
+            self.assertEqual(snapshot[sub]["execution"], "not_run")
+            self.assertTrue(snapshot[sub]["dry_run"])
+            self.assertNotIn("lines", snapshot[sub])
+            self.assertNotIn("files", snapshot[sub])
+            self.assertNotIn("origin", snapshot[sub])
+            self.assertNotIn("head_sha", snapshot[sub])
+            self.assertNotIn("branch", snapshot[sub])
 
     def test_get_diagnostics_export_bundle(self):
         status, payload = self._request("GET", "/api/diagnostics/export")
@@ -153,6 +199,58 @@ class TestV6ApiDiagnosticsSurface(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["status"], "completed")
         self.assertFalse(draft_file.exists())
+
+
+class TestV6DiagnosticsPublicRouteProjection(unittest.TestCase):
+    def _context(self, snapshot=None):
+        safe_snapshot = _safe_snapshot_fixture() if snapshot is None else snapshot
+
+        def fail_raw(*args, **kwargs):
+            raise AssertionError("raw diagnostics callback was called")
+
+        return ApiContext({
+            "diagnostics_snapshot": lambda: safe_snapshot,
+            "diagnostics_subsystem": fail_raw,
+            "diagnostics_recovery_drafts": fail_raw,
+            "diagnostics_recovery_state": fail_raw,
+            "diagnostics_config_registry": fail_raw,
+        })
+
+    def test_public_routes_select_center_projection_only(self):
+        router = build_router()
+        context = self._context()
+        paths = (
+            "/api/diagnostics/snapshot",
+            "/api/diagnostics/subsystem/config_registry",
+            "/api/diagnostics/repair/recovery-drafts",
+            "/api/diagnostics/repair/inspect-recovery",
+        )
+        for path in paths:
+            response = _direct_request(router, "GET" if "snapshot" in path or "subsystem" in path or "recovery-drafts" in path else "POST", path, context)
+            self.assertEqual(response.status, 200, path)
+            serialized = json.dumps(response.payload, ensure_ascii=True)
+            self.assertNotIn("raw diagnostics callback", serialized)
+            self.assertNotIn("[object Object]", serialized)
+
+    def test_unknown_subsystem_keeps_404_without_raw_callback(self):
+        router = build_router()
+        response = _direct_request(router, "GET", "/api/diagnostics/subsystem/not-allowlisted", self._context())
+        self.assertEqual(response.status, 404)
+        self.assertEqual(response.payload["error"], "unknown_diagnostic_subsystem")
+
+    def test_malformed_center_snapshot_falls_back_without_echo(self):
+        marker = "C:" + r"\Users\diagnostic marker\private.txt"
+        malformed = {"git_integrity": {"status": "HEALTHY", "origin": marker}, "jobs_store": object()}
+        router = build_router()
+        response = _direct_request(router, "GET", "/api/diagnostics/snapshot", self._context(malformed))
+        self.assertEqual(response.status, 200)
+        serialized = json.dumps(response.payload, ensure_ascii=True)
+        self.assertNotIn(marker, serialized)
+        for key in _PUBLIC_SUBSYSTEM_KEYS:
+            row = response.payload["snapshot"][key]
+            self.assertEqual(row["status"], "UNKNOWN")
+            self.assertEqual(row["execution"], "not_run")
+            self.assertTrue(row["dry_run"])
 
 
 if __name__ == "__main__":

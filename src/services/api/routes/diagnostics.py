@@ -7,10 +7,37 @@ from typing import Mapping
 from ..response import ApiResponse
 from ..router import ApiRequest, Router
 from ..context import ApiContext
+from src.services.diagnostics.center import PUBLIC_SUBSYSTEM_KEYS, is_public_snapshot
+
+
+def _fallback_row() -> dict[str, object]:
+    return {
+        "status": "UNKNOWN",
+        "reason": "Diagnostic snapshot unavailable or ambiguous.",
+        "next_action": "Review the diagnostic source manually.",
+        "execution": "not_run",
+        "dry_run": True,
+        "code": "diagnostic_projection_unavailable",
+    }
+
+
+def _sanitized_snapshot(context: ApiContext) -> dict[str, object]:
+    """Select only rows from the center-owned bounded public projection."""
+
+    try:
+        value = context.call("diagnostics_snapshot")
+    except Exception:
+        value = None
+    if not is_public_snapshot(value):
+        return {key: _fallback_row() for key in PUBLIC_SUBSYSTEM_KEYS}
+    return {
+        key: value[key]
+        for key in PUBLIC_SUBSYSTEM_KEYS
+    }
 
 
 def snapshot(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
-    return ApiResponse(200, {"status": "completed", "snapshot": context.call("diagnostics_snapshot")})
+    return ApiResponse(200, {"status": "completed", "snapshot": _sanitized_snapshot(context)})
 
 
 def export(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
@@ -18,12 +45,16 @@ def export(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) 
 
 
 def subsystem(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
-    value = context.call("diagnostics_subsystem", params["subsystem"])
-    return ApiResponse(200 if value is not None else 404, value or {"status": "error", "error": "unknown_diagnostic_subsystem"})
+    subsystem_name = params["subsystem"]
+    if subsystem_name not in PUBLIC_SUBSYSTEM_KEYS:
+        return ApiResponse(404, {"status": "error", "error": "unknown_diagnostic_subsystem"})
+    value = _sanitized_snapshot(context)[subsystem_name]
+    return ApiResponse(200, {"status": "completed", "subsystem": subsystem_name, "data": value})
 
 
 def recovery_drafts(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
-    return ApiResponse(200, context.call("diagnostics_recovery_drafts"))
+    snapshot_value = _sanitized_snapshot(context)
+    return ApiResponse(200, {"status": "completed", "drafts": [], "recovery": snapshot_value["recovery_forensic"]})
 
 
 def repair_verify(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
@@ -31,7 +62,7 @@ def repair_verify(request: ApiRequest, context: ApiContext, params: Mapping[str,
 
 
 def repair_inspect(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
-    return ApiResponse(200, {"status": "completed", "result": context.call("diagnostics_recovery_state")})
+    return ApiResponse(200, {"status": "completed", "result": _sanitized_snapshot(context)["recovery_forensic"]})
 
 
 def clear_recovery_drafts(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:

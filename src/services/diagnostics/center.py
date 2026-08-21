@@ -32,6 +32,44 @@ NEEDS_ATTENTION = "NEEDS_ATTENTION"
 UNAVAILABLE = "UNAVAILABLE"
 UNKNOWN = "UNKNOWN"
 
+PUBLIC_SUBSYSTEM_KEYS = (
+    "git_integrity",
+    "config_registry",
+    "jobs_store",
+    "artifact_store",
+    "workflow_store",
+    "models_inventory",
+    "environments_inventory",
+    "runtime_inventory",
+    "storage",
+    "gpu",
+    "latest_app_errors",
+    "recovery_forensic",
+)
+_PUBLIC_STATUS_VALUES = frozenset({HEALTHY, NEEDS_ATTENTION, UNAVAILABLE, UNKNOWN, "MANUAL_REVIEW"})
+_PUBLIC_MAX_COUNT = 100_000
+_PUBLIC_MAX_BYTES = 1 << 50
+_PUBLIC_MAX_TEXT = 4_096
+_PUBLIC_STATUS_COPY = {
+    HEALTHY: ("Diagnostic subsystem is healthy.", "No action required."),
+    NEEDS_ATTENTION: ("Diagnostic subsystem needs attention.", "Review the bounded diagnostic summary."),
+    UNAVAILABLE: ("Diagnostic subsystem is unavailable.", "Restore the managed source or review it manually."),
+    UNKNOWN: ("Diagnostic subsystem state is unknown.", "Review the diagnostic source manually."),
+    "MANUAL_REVIEW": ("Diagnostic subsystem requires manual review.", "Review the diagnostic source manually."),
+}
+_PUBLIC_ROW_FIELDS = frozenset({
+    "status", "reason", "next_action", "execution", "dry_run", "code",
+    "root_verified", "inside_work_tree", "record_count", "status_bucket_count",
+    "artifact_count", "workflow_count", "total_size_bytes", "environment_count",
+    "drive_count", "gpu_count", "error_count", "has_errors", "file_count",
+    "has_recovery_files", "category_flags",
+})
+_PUBLIC_COUNT_FIELDS = frozenset({
+    "record_count", "status_bucket_count", "artifact_count", "workflow_count",
+    "environment_count", "drive_count", "gpu_count", "error_count", "file_count",
+})
+_PUBLIC_BOOL_FIELDS = frozenset({"root_verified", "inside_work_tree", "has_errors", "has_recovery_files"})
+
 # Maximum number of error log lines to tail
 _MAX_LOG_LINES = 50
 # Secret key pattern for sanitization
@@ -48,6 +86,223 @@ def _status(status: str, reason: str, next_action: str) -> dict[str, str]:
 def _sanitize_log_line(line: str) -> str:
     """Scrub likely secret values from a log line."""
     return re.sub(r"(?i)(api[_-]?key|token|password|secret)\s*[=:]\s*\S+", r"\1=[REDACTED]", line)
+
+
+def _public_base(status: str, *, code: str | None = None) -> dict[str, Any]:
+    reason, next_action = _PUBLIC_STATUS_COPY[status]
+    result: dict[str, Any] = {
+        "status": status,
+        "reason": reason,
+        "next_action": next_action,
+        "execution": "not_run",
+        "dry_run": True,
+    }
+    if code is not None:
+        result["code"] = code
+    return result
+
+
+def _public_failure() -> dict[str, Any]:
+    return _public_base(UNKNOWN, code="diagnostic_projection_unavailable")
+
+
+def _bounded_int(value: object) -> int:
+    if type(value) is not int or isinstance(value, bool) or value < 0 or value > _PUBLIC_MAX_COUNT:
+        raise ValueError("bounded diagnostic count unavailable")
+    return value
+
+
+def _optional_int(source: dict[str, Any], key: str) -> int | None:
+    if key not in source:
+        return None
+    return _bounded_int(source[key])
+
+
+def _optional_bytes(source: dict[str, Any], key: str) -> int | None:
+    if key not in source:
+        return None
+    value = source[key]
+    if type(value) is not int or isinstance(value, bool) or value < 0 or value > _PUBLIC_MAX_BYTES:
+        raise ValueError("diagnostic byte count unavailable")
+    return value
+
+
+def _optional_bool(source: dict[str, Any], key: str) -> bool | None:
+    if key not in source:
+        return None
+    value = source[key]
+    if type(value) is not bool:
+        raise ValueError("diagnostic boolean unavailable")
+    return value
+
+
+def _bounded_scalar(value: object) -> bool:
+    if type(value) is str:
+        return len(value) <= _PUBLIC_MAX_TEXT
+    if type(value) is bool:
+        return True
+    if type(value) is int:
+        return not isinstance(value, bool) and 0 <= value <= _PUBLIC_MAX_COUNT
+    return value is None
+
+
+def _optional_mapping_count(source: dict[str, Any], key: str, *, value_kind: str = "scalar") -> int | None:
+    if key not in source:
+        return None
+    value = source[key]
+    if type(value) is not dict or len(value) > _PUBLIC_MAX_COUNT:
+        raise ValueError("diagnostic mapping unavailable")
+    for item_key, item_value in value.items():
+        if type(item_key) is not str or len(item_key) > _PUBLIC_MAX_TEXT:
+            raise ValueError("diagnostic mapping key unavailable")
+        if value_kind == "scalar" and not _bounded_scalar(item_value):
+            raise ValueError("diagnostic mapping value unavailable")
+        if value_kind == "count":
+            _bounded_int(item_value)
+        if value_kind == "bool" and type(item_value) is not bool:
+            raise ValueError("diagnostic boolean mapping unavailable")
+        if value_kind == "record" and type(item_value) is not dict:
+            raise ValueError("diagnostic record mapping unavailable")
+    return len(value)
+
+
+def _optional_text_list_count(source: dict[str, Any], key: str) -> int | None:
+    if key not in source:
+        return None
+    value = source[key]
+    if type(value) is not list or len(value) > _PUBLIC_MAX_COUNT:
+        raise ValueError("diagnostic list unavailable")
+    if any(type(item) is not str or len(item) > _PUBLIC_MAX_TEXT for item in value):
+        raise ValueError("diagnostic text unavailable")
+    return len(value)
+
+
+def _recovery_categories(source: dict[str, Any]) -> tuple[int | None, dict[str, bool] | None]:
+    if "files" not in source:
+        return None, None
+    value = source["files"]
+    if type(value) is not list or len(value) > _PUBLIC_MAX_COUNT:
+        raise ValueError("recovery list unavailable")
+    categories = {"node_studio": False, "project": False, "temporary": False}
+    for item in value:
+        if type(item) is not str or len(item) > _PUBLIC_MAX_TEXT:
+            raise ValueError("recovery filename unavailable")
+        if item.startswith("node_studio_draft_") and item.endswith(".json"):
+            categories["node_studio"] = True
+        elif item.startswith("draft_") and item.endswith(".json"):
+            categories["project"] = True
+        elif item.startswith(".") and item.endswith(".tmp"):
+            categories["temporary"] = True
+        else:
+            raise ValueError("unknown recovery category")
+    return len(value), categories
+
+
+def _public_subsystem(key: str, raw: object) -> dict[str, Any]:
+    """Project one raw collector result to a bounded public diagnostic row."""
+
+    if type(raw) is not dict:
+        return _public_failure()
+    status = raw.get("status")
+    if type(status) is not str or status not in _PUBLIC_STATUS_VALUES:
+        return _public_failure()
+    result = _public_base(status)
+    try:
+        if key == "git_integrity":
+            for field in ("root_verified", "inside_work_tree"):
+                value = _optional_bool(raw, field)
+                if value is not None:
+                    result[field] = value
+        elif key == "config_registry":
+            value = _optional_mapping_count(raw, "schema_versions")
+            if value is not None:
+                result["record_count"] = value
+        elif key == "jobs_store":
+            value = _optional_mapping_count(raw, "counts", value_kind="count")
+            if value is not None:
+                result["status_bucket_count"] = value
+        elif key == "artifact_store":
+            value = _optional_int(raw, "artifact_count")
+            if value is not None:
+                result["artifact_count"] = value
+        elif key == "workflow_store":
+            value = _optional_int(raw, "workflow_count")
+            if value is not None:
+                result["workflow_count"] = value
+        elif key == "models_inventory":
+            value = _optional_mapping_count(raw, "models", value_kind="record")
+            if value is not None:
+                result["record_count"] = value
+            value = _optional_bytes(raw, "total_size_bytes")
+            if value is not None:
+                result["total_size_bytes"] = value
+        elif key == "environments_inventory":
+            value = _optional_text_list_count(raw, "environments")
+            if value is not None:
+                result["environment_count"] = value
+        elif key == "runtime_inventory":
+            value = _optional_mapping_count(raw, "runtimes", value_kind="bool")
+            if value is not None:
+                result["record_count"] = value
+        elif key == "storage":
+            value = _optional_mapping_count(raw, "drives", value_kind="record")
+            if value is not None:
+                result["drive_count"] = value
+        elif key == "gpu":
+            value = _optional_text_list_count(raw, "gpus")
+            if value is not None:
+                result["gpu_count"] = value
+        elif key == "latest_app_errors":
+            value = _optional_text_list_count(raw, "lines")
+            if value is not None:
+                result["error_count"] = value
+                result["has_errors"] = value > 0
+        elif key == "recovery_forensic":
+            count, categories = _recovery_categories(raw)
+            if count is not None and categories is not None:
+                result["file_count"] = count
+                result["has_recovery_files"] = count > 0
+                result["category_flags"] = categories
+    except (TypeError, ValueError, RecursionError):
+        return _public_failure()
+    return result
+
+
+def is_public_snapshot(value: object) -> bool:
+    """Validate the already-projected snapshot before a route selects rows."""
+
+    if type(value) is not dict or set(value) != set(PUBLIC_SUBSYSTEM_KEYS):
+        return False
+    for row in value.values():
+        if type(row) is not dict or not set(row).issubset(_PUBLIC_ROW_FIELDS):
+            return False
+        status = row.get("status")
+        if type(status) is not str or status not in _PUBLIC_STATUS_VALUES:
+            return False
+        if row.get("reason") != _PUBLIC_STATUS_COPY[status][0] or row.get("next_action") != _PUBLIC_STATUS_COPY[status][1]:
+            return False
+        if row.get("execution") != "not_run" or row.get("dry_run") is not True:
+            return False
+        if "code" in row and row["code"] != "diagnostic_projection_unavailable":
+            return False
+        for key in _PUBLIC_COUNT_FIELDS:
+            if key in row:
+                try:
+                    _bounded_int(row[key])
+                except (TypeError, ValueError):
+                    return False
+        if "total_size_bytes" in row:
+            value = row["total_size_bytes"]
+            if type(value) is not int or isinstance(value, bool) or value < 0 or value > _PUBLIC_MAX_BYTES:
+                return False
+        for key in _PUBLIC_BOOL_FIELDS:
+            if key in row and type(row[key]) is not bool:
+                return False
+        if "category_flags" in row:
+            flags = row["category_flags"]
+            if type(flags) is not dict or set(flags) != {"node_studio", "project", "temporary"} or any(type(item) is not bool for item in flags.values()):
+                return False
+    return True
 
 
 class DiagnosticsCenter:
@@ -376,45 +631,46 @@ class DiagnosticsCenter:
         return {**_status(HEALTHY, "No recovery or draft files found.", "No action required."), "files": []}
 
     # ------------------------------------------------------------------
-    # Full snapshot
+    # Bounded public snapshot
     # ------------------------------------------------------------------
 
+    def _raw_snapshot(self) -> dict[str, Any]:
+        """Collect server-owned diagnostics before the public projection."""
+
+        collectors = {
+            "git_integrity": self.git_integrity_state,
+            "config_registry": self.config_registry_state,
+            "jobs_store": self.jobs_store_state,
+            "artifact_store": self.artifact_store_state,
+            "workflow_store": self.workflow_store_state,
+            "models_inventory": self.models_inventory,
+            "environments_inventory": self.environments_inventory,
+            "runtime_inventory": self.runtime_inventory,
+            "storage": self.storage_state,
+            "gpu": self.gpu_detection,
+            "latest_app_errors": self.latest_app_errors,
+            "recovery_forensic": self.recovery_forensic_state,
+        }
+        raw: dict[str, Any] = {}
+        for key in PUBLIC_SUBSYSTEM_KEYS:
+            collector = collectors[key]
+            try:
+                raw[key] = collector()
+            except Exception:
+                raw[key] = None
+        return raw
+
     def snapshot(self) -> dict[str, Any]:
-        """Return a full diagnostics snapshot across all subsystems."""
+        """Return only the bounded public diagnostic projection."""
+
         with self._lock:
-            return {
-                "git_integrity": self.git_integrity_state(),
-                "config_registry": self.config_registry_state(),
-                "jobs_store": self.jobs_store_state(),
-                "artifact_store": self.artifact_store_state(),
-                "workflow_store": self.workflow_store_state(),
-                "models_inventory": self.models_inventory(),
-                "environments_inventory": self.environments_inventory(),
-                "runtime_inventory": self.runtime_inventory(),
-                "storage": self.storage_state(),
-                "gpu": self.gpu_detection(),
-                "latest_app_errors": self.latest_app_errors(),
-                "recovery_forensic": self.recovery_forensic_state(),
-            }
+            raw = self._raw_snapshot()
+        return {key: _public_subsystem(key, raw.get(key)) for key in PUBLIC_SUBSYSTEM_KEYS}
 
     def export_diagnostics_bundle(self) -> dict[str, Any]:
-        """Return a sanitised snapshot safe for sharing (no secrets, no raw paths)."""
-        raw = self.snapshot()
-        def _clean(obj: Any) -> Any:
-            if isinstance(obj, dict):
-                return {k: ("[REDACTED]" if _SECRET_KEY_RE.search(k) else _clean(v)) for k, v in obj.items()}
-            if isinstance(obj, list):
-                return [_clean(item) for item in obj]
-            if isinstance(obj, str):
-                s = obj
-                s = re.sub(r"(https?://)[^:@/\s]+:[^@/\s]+@", r"\1[REDACTED]@", s)
-                s = re.sub(r"(https?://)[^:@/\s]+@", r"\1[REDACTED]@", s)
-                s = re.sub(r"([A-Za-z]:)[\\/][^\s,;\"'<>|]+", r"\1:[PATH]", s)
-                s = re.sub(r"\\\\[^\s,;\"'<>|]+", r"\\[PATH]", s)
-                s = re.sub(r"/(Users|home|tmp)/[^\s,;\"'<>|]+", r"/\1/[PATH]", s)
-                return s
-            return obj
-        return {"bundle": _clean(raw), "sanitized": True}
+        """Return the same bounded projection used by all public diagnostics routes."""
+
+        return {"bundle": self.snapshot(), "sanitized": True}
 
 
 diagnostics_center = DiagnosticsCenter()
