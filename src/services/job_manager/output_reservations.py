@@ -19,6 +19,8 @@ import stat
 import tempfile
 import threading
 import uuid
+import ctypes
+from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -114,6 +116,76 @@ def _safe_chain(path: Path, stop: Path) -> bool:
         current = parent
 
 
+def _directory_identity(path: Path) -> dict[str, int] | None:
+    """Return a bounded identity for one existing, non-reparse directory."""
+
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if _reparse(path) or not stat.S_ISDIR(info.st_mode):
+        return None
+    size = int(info.st_size)
+    mtime = int(getattr(info, "st_mtime_ns", 0) or 0)
+    inode = int(getattr(info, "st_ino", 0) or 0)
+    if size < 0 or mtime < 0 or inode < 0:
+        return None
+    return {"size_bytes": size, "mtime_ns": mtime, "file_id": min(inode, 2**63 - 1)}
+
+
+def _full_safe_chain(path: Path) -> bool:
+    """Validate every existing ancestor up to the filesystem root."""
+
+    try:
+        absolute = path.absolute()
+        boundary = Path(absolute.anchor)
+        if not _safe_chain(absolute, boundary):
+            return False
+        return _directory_identity(absolute) is not None
+    except OSError:
+        return False
+
+
+def _ensure_safe_directory(path: Path) -> bool:
+    """Create only missing directory nodes below an already safe chain."""
+
+    try:
+        absolute = path.absolute()
+        missing: list[Path] = []
+        current = absolute
+        while not current.exists():
+            missing.append(current)
+            parent = current.parent
+            if parent == current:
+                return False
+            current = parent
+        if _directory_identity(current) is None or not _full_safe_chain(current):
+            return False
+        for child in reversed(missing):
+            child.mkdir()
+            if _directory_identity(child) is None or not _full_safe_chain(child):
+                return False
+        return _directory_identity(absolute) is not None and _full_safe_chain(absolute)
+    except OSError:
+        return False
+
+
+def _same_object(expected: object, current: object) -> bool:
+    """Compare ownership identity without treating producer writes as replacement."""
+
+    if not isinstance(expected, Mapping) or not isinstance(current, Mapping):
+        return False
+    expected_id = expected.get("file_id")
+    current_id = current.get("file_id")
+    return isinstance(expected_id, int) and not isinstance(expected_id, bool) and expected_id == current_id
+
+
+def _valid_identity(value: object) -> bool:
+    if type(value) is not dict or set(value) != {"size_bytes", "mtime_ns", "file_id"}:
+        return False
+    return all(isinstance(value.get(key), int) and not isinstance(value.get(key), bool) and value.get(key) >= 0 for key in ("size_bytes", "mtime_ns", "file_id"))
+
+
 def _identity(path: Path) -> dict[str, int] | None:
     try:
         info = path.lstat()
@@ -127,6 +199,52 @@ def _identity(path: Path) -> dict[str, int] | None:
     if size < 0 or size > MAX_OUTPUT_BYTES or mtime < 0 or inode < 0:
         return None
     return {"size_bytes": size, "mtime_ns": mtime, "file_id": min(inode, 2**63 - 1)}
+
+
+def _delete_identity_attested(path: Path, expected: Mapping[str, Any], *, directory: bool = False) -> bool:
+    """Delete only the object bound to ``expected``.
+
+    Windows opens the exact leaf with delete sharing denied and applies the
+    disposition to that handle.  A pathname replacement after the preflight
+    therefore cannot redirect the delete.  Other platforms refuse rather
+    than falling back to a pathname-only unlink in this ownership boundary.
+    """
+
+    if not _valid_identity(dict(expected)):
+        return False
+    if os.name != "nt":
+        return False
+    desired_access = 0x80000000 | 0x00010000  # GENERIC_READ | DELETE
+    share_mode = 0x00000001 | 0x00000002  # FILE_SHARE_READ | FILE_SHARE_WRITE
+    flags = 0x00200000  # FILE_FLAG_OPEN_REPARSE_POINT
+    if directory:
+        flags |= 0x02000000  # FILE_FLAG_BACKUP_SEMANTICS
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel32.CreateFileW
+    create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    create.restype = wintypes.HANDLE
+    close = kernel32.CloseHandle
+    close.argtypes = [wintypes.HANDLE]
+    close.restype = wintypes.BOOL
+    handle = create(str(path), desired_access, share_mode, None, 3, flags, None)  # OPEN_EXISTING
+    invalid = wintypes.HANDLE(-1).value
+    if handle == invalid:
+        return False
+    try:
+        current = _identity(path) if not directory else _directory_identity(path)
+        if not isinstance(current, dict) or not _same_object(expected, current):
+            return False
+        # FILE_DISPOSITION_INFO { BOOLEAN DeleteFile; }.
+        class _Disposition(ctypes.Structure):
+            _fields_ = [("DeleteFile", wintypes.BOOLEAN)]
+
+        disposition = _Disposition(1)
+        set_info = kernel32.SetFileInformationByHandle
+        set_info.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD]
+        set_info.restype = wintypes.BOOL
+        return bool(set_info(handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)))
+    finally:
+        close(handle)
 
 
 def _strict_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -145,7 +263,7 @@ def _empty_manifest() -> dict[str, Any]:
 def _load_manifest() -> dict[str, Any] | None:
     path = _manifest_path()
     try:
-        if _reparse(path) or path.stat().st_size > MAX_MANIFEST_BYTES:
+        if not _full_safe_chain(path.parent) or _reparse(path) or path.stat().st_size > MAX_MANIFEST_BYTES:
             return None
         raw = path.read_text(encoding="utf-8")
         value = json.loads(raw, object_pairs_hook=_strict_pairs, parse_constant=lambda _value: (_ for _ in ()).throw(ValueError("nonfinite")))
@@ -169,7 +287,7 @@ def _load_manifest() -> dict[str, Any] | None:
 def _valid_record(value: object, reservation_id: str) -> bool:
     if type(value) is not dict:
         return False
-    required = {"reservation_id", "job_id", "job_fingerprint", "adapter_id", "state", "created_at", "max_output_count", "max_output_bytes", "allowed_paths", "allowed_directories"}
+    required = {"reservation_id", "job_id", "job_fingerprint", "adapter_id", "state", "created_at", "max_output_count", "max_output_bytes", "root_identity", "allowed_paths", "allowed_directories"}
     if set(value) != required or value.get("reservation_id") != reservation_id:
         return False
     if _safe_job_id(value.get("job_id")) is None or not isinstance(value.get("job_fingerprint"), str) or FINGERPRINT_RE.fullmatch(value["job_fingerprint"]) is None:
@@ -184,45 +302,74 @@ def _valid_record(value: object, reservation_id: str) -> bool:
         return False
     if isinstance(total, bool) or not isinstance(total, int) or not 1 <= total <= MAX_OUTPUT_BYTES:
         return False
+    if not _valid_identity(value.get("root_identity")):
+        return False
     paths = value.get("allowed_paths")
     directories = value.get("allowed_directories")
-    if type(paths) is not dict or len(paths) > MAX_OUTPUT_COUNT or type(directories) is not list or len(directories) > MAX_DIRECTORY_COUNT:
+    if type(paths) is not dict or len(paths) > MAX_OUTPUT_COUNT or type(directories) is not dict or len(directories) > MAX_DIRECTORY_COUNT:
         return False
-    if any(_safe_relative(key) is None or item is not True for key, item in paths.items()):
+    if any(_safe_relative(key) is None or not _valid_identity(item) for key, item in paths.items()):
         return False
-    return all(_safe_relative(item) is not None for item in directories)
+    return all(_safe_relative(key) is not None and _valid_identity(item) for key, item in directories.items())
 
 
 def _save_manifest(manifest: Mapping[str, Any]) -> bool:
     path = _manifest_path()
     temporary: Path | None = None
+    temporary_identity: dict[str, int] | None = None
+    parent: Path | None = None
+    parent_identity: dict[str, int] | None = None
+    target_before: dict[str, int] | None = None
+    target_existed = False
     try:
         payload = {"schema_version": RESERVATION_SCHEMA, "records": manifest.get("records", {})}
         encoded = (json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
         if len(encoded) > MAX_MANIFEST_BYTES:
             return False
         parent = path.parent
-        parent.mkdir(parents=True, exist_ok=True)
-        if not _safe_chain(parent, parent):
+        if not _ensure_safe_directory(parent):
+            return False
+        parent_identity = _directory_identity(parent)
+        if parent_identity is None or not _full_safe_chain(parent):
+            return False
+        target_existed = path.exists()
+        if target_existed:
+            target_before = _identity(path)
+            if target_before is None:
+                return False
+        elif _reparse(path):
             return False
         handle, name = tempfile.mkstemp(prefix=".job-output-reservation-", suffix=".tmp", dir=parent)
         os.close(handle)
         temporary = Path(name)
+        temporary_identity = _identity(temporary)
+        if temporary_identity is None:
+            return False
         with temporary.open("wb") as stream:
             stream.write(encoded)
             stream.flush()
             os.fsync(stream.fileno())
+        if (
+            _directory_identity(parent) is None
+            or not _same_object(parent_identity, _directory_identity(parent))
+            or not _full_safe_chain(parent)
+            or _identity(temporary) is None
+            or not _same_object(temporary_identity, _identity(temporary))
+            or (target_existed and (_identity(path) is None or not _same_object(target_before, _identity(path))))
+            or (not target_existed and (_reparse(path) or path.exists()))
+        ):
+            return False
         os.replace(temporary, path)
         temporary = None
+        if _identity(path) is None or _reparse(path) or not _full_safe_chain(parent):
+            return False
         return True
     except (OSError, TypeError, ValueError):
         return False
     finally:
         if temporary is not None:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
+            if temporary_identity is not None:
+                _delete_identity_attested(temporary, temporary_identity)
 
 
 def _copy_detached(value: object) -> object:
@@ -252,14 +399,19 @@ def create_reservation(job_id: str, job_fingerprint: str, adapter_id: str, *, ma
         manifest = _load_manifest()
         if manifest is None:
             return None
+        records = manifest.get("records")
+        if type(records) is not dict or len(records) >= MAX_RESERVATIONS:
+            return None
         reservation_id = f"output_res_{uuid.uuid4().hex}"
         parent = _reservation_parent()
         root = _reservation_root(reservation_id)
         try:
-            parent.mkdir(parents=True, exist_ok=True)
-            if not _safe_chain(parent, parent) or root.exists() or _reparse(parent):
+            if not _ensure_safe_directory(parent) or root.exists() or _reparse(parent):
                 return None
             root.mkdir()
+            root_identity = _directory_identity(root)
+            if root_identity is None or not _full_safe_chain(root):
+                return None
         except OSError:
             return None
         record = {
@@ -271,15 +423,13 @@ def create_reservation(job_id: str, job_fingerprint: str, adapter_id: str, *, ma
             "created_at": _now(),
             "max_output_count": count,
             "max_output_bytes": total,
+            "root_identity": root_identity,
             "allowed_paths": {},
-            "allowed_directories": [],
+            "allowed_directories": {},
         }
         manifest["records"][reservation_id] = record
         if not _save_manifest(manifest):
-            try:
-                root.rmdir()
-            except OSError:
-                pass
+            _delete_identity_attested(root, root_identity, directory=True)
             return None
         return {"reservation_id": reservation_id, "job_id": job_id, "state": "created", "max_output_count": count, "max_output_bytes": total}
 
@@ -319,13 +469,29 @@ def reserve_output_path(reservation_id: str, filename: str) -> Path:
         if not isinstance(record, dict) or record.get("state") not in {"created", "producing"}:
             raise ReservationError("OUTPUT_RESERVATION_UNAVAILABLE")
         root = _reservation_root(reservation_id)
-        if not _safe_chain(root, _reservation_parent()) or not root.is_dir():
+        if (
+            not _full_safe_chain(_reservation_parent())
+            or not _safe_chain(root, _reservation_parent())
+            or _directory_identity(root) is None
+            or not _same_object(record.get("root_identity"), _directory_identity(root))
+            or len(record["allowed_paths"]) + len(record["allowed_directories"]) >= int(record["max_output_count"])
+        ):
             raise ReservationError("OUTPUT_RESERVATION_UNAVAILABLE")
         target = root / relative
-        if target.exists() or _reparse(target.parent):
+        if target.exists() or _reparse(target) or _directory_identity(target.parent) is None:
             raise ReservationError("OUTPUT_LEAF_ALREADY_EXISTS")
-        record["allowed_paths"][relative] = True
+        try:
+            with target.open("xb") as stream:
+                stream.flush()
+                os.fsync(stream.fileno())
+            expected = _identity(target)
+        except OSError as exc:
+            raise ReservationError("OUTPUT_RESERVATION_UNAVAILABLE") from exc
+        if expected is None:
+            raise ReservationError("OUTPUT_RESERVATION_UNAVAILABLE")
+        record["allowed_paths"][relative] = expected
         if not _save_manifest(manifest):
+            _delete_identity_attested(target, expected)
             raise ReservationError("OUTPUT_RESERVATION_UNAVAILABLE")
         return target
 
@@ -341,15 +507,24 @@ def reserve_output_directory(reservation_id: str, name: str) -> Path:
             raise ReservationError("OUTPUT_RESERVATION_UNAVAILABLE")
         root = _reservation_root(reservation_id)
         directory = root / relative
-        if not _safe_chain(root, _reservation_parent()) or directory.exists():
+        if (
+            not _full_safe_chain(_reservation_parent())
+            or not _safe_chain(root, _reservation_parent())
+            or not _same_object(record.get("root_identity"), _directory_identity(root))
+            or len(record["allowed_paths"]) + len(record["allowed_directories"]) >= int(record["max_output_count"])
+            or directory.exists()
+        ):
             raise ReservationError("OUTPUT_DIRECTORY_ALREADY_EXISTS")
-        directory.mkdir()
-        record["allowed_directories"].append(relative)
+        try:
+            directory.mkdir()
+            expected = _directory_identity(directory)
+        except OSError as exc:
+            raise ReservationError("OUTPUT_RESERVATION_UNAVAILABLE") from exc
+        if expected is None:
+            raise ReservationError("OUTPUT_RESERVATION_UNAVAILABLE")
+        record["allowed_directories"][relative] = expected
         if not _save_manifest(manifest):
-            try:
-                directory.rmdir()
-            except OSError:
-                pass
+            _delete_identity_attested(directory, expected, directory=True)
             raise ReservationError("OUTPUT_RESERVATION_UNAVAILABLE")
         return directory
 
@@ -374,7 +549,7 @@ def _relative_candidate(root: Path, candidate: Path) -> str | None:
     except (OSError, ValueError):
         return None
     safe = _safe_relative(relative.as_posix())
-    if safe is None or not _safe_chain(absolute, root) or _reparse(absolute) or not absolute.is_file():
+    if safe is None or not _full_safe_chain(root) or not _safe_chain(absolute, root) or _reparse(absolute) or not absolute.is_file():
         return None
     return safe
 
@@ -400,32 +575,71 @@ def _hash_stable(path: Path) -> tuple[int, str, dict[str, int]] | None:
     return total, digest.hexdigest(), after
 
 
-def _copy_reserved_file(source: Path, reservation_id: str, relative: str) -> Path | None:
+def _copy_reserved_file(source: Path, reservation_id: str, relative: str, expected: tuple[int, str, dict[str, int]]) -> Path | None:
     destination_root = artifact_store.OUTPUT_ROOT / ".hub-reserved" / reservation_id
     destination = destination_root / Path(relative).name
     temporary: Path | None = None
+    parent_identity: dict[str, int] | None = None
+    temporary_identity: dict[str, int] | None = None
+    destination_root_identity: dict[str, int] | None = None
+    destination_identity: dict[str, int] | None = None
+    published = False
     try:
-        destination_root.mkdir(parents=True, exist_ok=True)
-        if not _safe_chain(destination_root, artifact_store.OUTPUT_ROOT) or destination.exists():
+        output_root = artifact_store.OUTPUT_ROOT
+        if not _full_safe_chain(output_root) or _directory_identity(output_root) is None:
+            return None
+        stage_parent = output_root / ".hub-reserved"
+        if not _ensure_safe_directory(stage_parent):
+            return None
+        if destination_root.exists() or _reparse(destination_root):
+            return None
+        destination_root.mkdir()
+        if not _full_safe_chain(destination_root) or destination.exists():
+            return None
+        parent_identity = _directory_identity(destination_root)
+        destination_root_identity = parent_identity
+        if parent_identity is None:
+            return None
+        initial = _hash_stable(source)
+        if initial is None or initial != expected or not _full_safe_chain(source.parent) or not _safe_chain(source, source.parent) or _identity(source) is None:
             return None
         handle, name = tempfile.mkstemp(prefix=".reserved-output-", suffix=".tmp", dir=destination_root)
         os.close(handle)
         temporary = Path(name)
+        temporary_identity = _identity(temporary)
+        if temporary_identity is None:
+            return None
         with source.open("rb") as source_stream, temporary.open("wb") as destination_stream:
             shutil.copyfileobj(source_stream, destination_stream, length=1024 * 1024)
             destination_stream.flush()
             os.fsync(destination_stream.fileno())
+        if (
+            _hash_stable(source) != expected
+            or _directory_identity(destination_root) is None
+            or not _same_object(parent_identity, _directory_identity(destination_root))
+            or not _full_safe_chain(destination_root)
+            or _identity(temporary) is None
+            or not _same_object(temporary_identity, _identity(temporary))
+            or destination.exists()
+        ):
+            return None
         os.replace(temporary, destination)
         temporary = None
+        destination_identity = _identity(destination)
+        if destination_identity is None or not _full_safe_chain(destination_root):
+            return None
+        published = True
         return destination
     except OSError:
         return None
     finally:
         if temporary is not None:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
+            if temporary_identity is not None:
+                _delete_identity_attested(temporary, temporary_identity)
+        if not published and destination_identity is not None and destination.exists():
+            _delete_identity_attested(destination, destination_identity)
+        if not published and destination_root_identity is not None and destination_root.exists():
+            _delete_identity_attested(destination_root, destination_root_identity, directory=True)
 
 
 def commit_reservation(reservation_id: str, result: object, *, provenance: Mapping[str, Any], require_output: bool = False) -> dict[str, Any]:
@@ -446,7 +660,7 @@ def commit_reservation(reservation_id: str, result: object, *, provenance: Mappi
             record["state"] = "manual_review"
             _save_manifest(manifest)
             return {"status": "manual_review", "code": "OUTPUT_COUNT_LIMIT"}
-        copied: list[Path] = []
+        copied: list[tuple[Path, dict[str, int]]] = []
         seen: set[str] = set()
         total_bytes = 0
         for candidate in candidates:
@@ -463,19 +677,21 @@ def commit_reservation(reservation_id: str, result: object, *, provenance: Mappi
                 record["state"] = "manual_review"
                 _save_manifest(manifest)
                 return {"status": "manual_review", "code": "OUTPUT_SIZE_LIMIT"}
-            destination = _copy_reserved_file(candidate, reservation_id, relative)
+            destination = _copy_reserved_file(candidate, reservation_id, relative, stable)
             if destination is None:
-                record["state"] = "failed"
+                record["state"] = "manual_review"
                 _save_manifest(manifest)
-                return {"status": "failed", "code": "OUTPUT_STAGE_FAILED"}
-            copied.append(destination)
-        artifacts = artifact_store.register_worker_outputs(copied, provenance=dict(provenance))
+                return {"status": "manual_review", "code": "OUTPUT_OWNERSHIP_UNPROVEN"}
+            destination_identity = _identity(destination)
+            if destination_identity is None:
+                record["state"] = "manual_review"
+                _save_manifest(manifest)
+                return {"status": "manual_review", "code": "OUTPUT_OWNERSHIP_UNPROVEN"}
+            copied.append((destination, destination_identity))
+        artifacts = artifact_store.register_worker_outputs([path for path, _identity_value in copied], provenance=dict(provenance))
         if not isinstance(artifacts, list) or len(artifacts) != len(copied):
-            for staged_path in copied:
-                try:
-                    staged_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            for staged_path, staged_identity in copied:
+                _delete_identity_attested(staged_path, staged_identity)
             record["state"] = "failed"
             _save_manifest(manifest)
             return {"status": "failed", "code": "OUTPUT_PUBLISH_FAILED"}
@@ -499,11 +715,31 @@ def abort_reservation(reservation_id: str, *, state: str = "failed") -> dict[str
         removed = 0
         ambiguous = False
         try:
-            if not _safe_chain(root, _reservation_parent()) or _reparse(root):
+            if (
+                not _full_safe_chain(_reservation_parent())
+                or not _safe_chain(root, _reservation_parent())
+                or not _same_object(record.get("root_identity"), _directory_identity(root))
+            ):
                 ambiguous = True
             else:
-                allowed = set(record["allowed_paths"])
-                directories = tuple(record["allowed_directories"])
+                allowed = dict(record["allowed_paths"])
+                directories = dict(record["allowed_directories"])
+                files_to_remove: list[tuple[Path, dict[str, int]]] = []
+                directories_to_remove: list[tuple[Path, dict[str, int]]] = []
+                for relative, expected in allowed.items():
+                    candidate = root / relative
+                    current = _identity(candidate)
+                    if current is None or not _same_object(expected, current):
+                        ambiguous = True
+                    else:
+                        files_to_remove.append((candidate, expected))
+                for relative, expected in directories.items():
+                    directory = root / relative
+                    current = _directory_identity(directory)
+                    if current is None or not _same_object(expected, current):
+                        ambiguous = True
+                    else:
+                        directories_to_remove.append((directory, expected))
                 for current, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
                     current_path = Path(current)
                     if _reparse(current_path):
@@ -511,30 +747,31 @@ def abort_reservation(reservation_id: str, *, state: str = "failed") -> dict[str
                         dirnames[:] = []
                         continue
                     dirnames[:] = [name for name in dirnames if not _reparse(current_path / name)]
+                    if len(dirnames) > MAX_OUTPUT_COUNT or len(filenames) > MAX_OUTPUT_COUNT:
+                        ambiguous = True
                     for name in filenames:
                         candidate = current_path / name
                         relative = _safe_relative(candidate.relative_to(root).as_posix())
-                        owned = relative in allowed if relative is not None else False
-                        owned = owned or (relative is not None and any(relative == item or relative.startswith(item + "/") for item in directories))
-                        if not owned or _identity(candidate) is None:
+                        if relative not in allowed:
                             ambiguous = True
-                            continue
-                        try:
-                            candidate.unlink()
-                            removed += 1
-                        except OSError:
+                    for name in dirnames:
+                        candidate = current_path / name
+                        relative = _safe_relative(candidate.relative_to(root).as_posix())
+                        if relative not in directories:
                             ambiguous = True
                 if not ambiguous:
-                    for current, dirnames, _filenames in os.walk(root, topdown=False, followlinks=False):
-                        for name in dirnames:
-                            try:
-                                (Path(current) / name).rmdir()
-                            except OSError:
-                                ambiguous = True
-                    try:
-                        root.rmdir()
-                    except OSError:
-                        ambiguous = True
+                    for candidate, expected in files_to_remove:
+                        if not _delete_identity_attested(candidate, expected):
+                            ambiguous = True
+                            break
+                        removed += 1
+                if not ambiguous:
+                    for directory, expected in sorted(directories_to_remove, key=lambda item: len(item[0].parts), reverse=True):
+                        if not _delete_identity_attested(directory, expected, directory=True):
+                            ambiguous = True
+                            break
+                if not ambiguous and not _delete_identity_attested(root, record["root_identity"], directory=True):
+                    ambiguous = True
         except OSError:
             ambiguous = True
         record["state"] = "manual_review" if ambiguous else state

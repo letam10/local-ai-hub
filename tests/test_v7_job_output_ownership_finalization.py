@@ -235,6 +235,57 @@ class V7JobOutputOwnershipFinalizationTests(unittest.TestCase):
         manifest.write_bytes(b"x" * (reservations.MAX_OUTPUT_COUNT * 4096))
         self.assertIsNone(reservations.create_reservation("job_20260821_010101_ffffffff", "f" * 64, "legacy"))
 
+    def test_reservation_capacity_refuses_without_overflowing_manifest(self) -> None:
+        for index in range(reservations.MAX_RESERVATIONS):
+            job_id = f"job_20260821_010101_{index:08x}"
+            created = reservations.create_reservation(job_id, f"{index:064x}", "legacy")
+            self.assertIsNotNone(created)
+        refused = reservations.create_reservation("job_20260821_010101_deadbeef", "d" * 64, "legacy")
+        self.assertIsNone(refused)
+        manifest = self._manifest()
+        self.assertEqual(len(manifest["records"]), reservations.MAX_RESERVATIONS)
+        self.assertIsNotNone(reservations.inspect_reservation(next(iter(manifest["records"]))))
+
+    def test_replacement_before_abort_is_preserved_and_requires_manual_review(self) -> None:
+        job = reservations.create_reservation("job_20260821_010101_abab abab".replace(" ", ""), "a" * 64, "legacy")
+        self.assertIsNotNone(job)
+        rid = job["reservation_id"]
+        target = reservations.reserve_output_path(rid, "owned.bin")
+        target.write_bytes(b"owner")
+        reservations.begin_producing(rid)
+        replacement = target.with_name("foreign.bin")
+        replacement.write_bytes(b"foreign")
+        replacement.replace(target)
+        result = reservations.abort_reservation(rid, state="cancelled")
+        self.assertEqual(result["status"], "manual_review")
+        self.assertEqual(target.read_bytes(), b"foreign")
+
+    def test_source_replacement_between_hash_and_copy_is_not_published(self) -> None:
+        job = reservations.create_reservation("job_20260821_010101_cacacaca", "c" * 64, "run_media_operation")
+        self.assertIsNotNone(job)
+        rid = job["reservation_id"]
+        target = reservations.reserve_output_path(rid, "race.bin")
+        target.write_bytes(b"owned")
+        reservations.begin_producing(rid)
+        original_copy = reservations._copy_reserved_file
+        replaced = {"done": False}
+
+        def race(source, reservation_id, relative, expected):
+            if not replaced["done"]:
+                replacement = source.with_name("foreign.bin")
+                replacement.write_bytes(b"foreign")
+                source.unlink()
+                replacement.replace(source)
+                replaced["done"] = True
+            return original_copy(source, reservation_id, relative, expected)
+
+        provenance = {"job_id": job["job_id"], "job_spec_fingerprint": "c" * 64, "adapter_id": "run_media_operation", "attempt": 1, "status": "completed"}
+        with patch.object(reservations, "_copy_reserved_file", side_effect=race):
+            result = reservations.commit_reservation(rid, {"status": "completed", "output": str(target)}, provenance=provenance, require_output=True)
+        self.assertEqual(result["status"], "manual_review")
+        self.assertEqual(target.read_bytes(), b"foreign")
+        self.assertEqual(artifact_store.list_artifacts(), [])
+
     def test_inventory_has_no_unknown_producer(self) -> None:
         self.assertTrue(validate_producer_inventory())
         self.assertTrue(producer_inventory())
