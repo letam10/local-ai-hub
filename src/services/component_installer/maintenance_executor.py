@@ -126,7 +126,10 @@ class MaintenanceExecutor:
         except (OSError, UnicodeError, json.JSONDecodeError):
             raw = {}
         records = raw.get("records") if isinstance(raw, Mapping) else None
-        return {"schema_version": "component-install-receipts.v2", "records": dict(records) if isinstance(records, Mapping) else {}}
+        schema = raw.get("schema_version") if isinstance(raw, Mapping) else None
+        if schema not in {"component-install-receipts.v2", "component-install-receipts.v3"}:
+            schema = "component-install-receipts.v2"
+        return {"schema_version": schema, "records": dict(records) if isinstance(records, Mapping) else {}}
 
     def _shared_reference(self, component_id: str, record: Mapping[str, Any], receipts: Mapping[str, Any]) -> bool:
         shared = record.get("shared_dependency_id")

@@ -33,4 +33,13 @@ Successful update/rollback results remain `INSTALLED_UNVERIFIED` and
 network work and does not promote capability readiness. Public plan data
 contains only bounded identifiers, statuses and fingerprints. Candidate
 paths, URLs, commands, credentials and source payloads remain server-owned
-and private.
+and private. The server keeps execution plans in a private map and exposes a
+separate lookup projection, so the existing read-only plan lookup cannot
+return the private record, typed binding, fingerprint payload or staged
+candidate.
+
+Maintenance uninstall removes only the selected component record and writes
+the same receipt envelope that was already present. In particular, an
+uninstall against a V2-bound component preserves a
+`component-install-receipts.v3` envelope and all unrelated record provenance;
+it never downgrades the store to the legacy V2 envelope.

@@ -127,7 +127,11 @@ class UpdateResolver:
         self.catalog = catalog
         self.sources = source_service or SourceAvailabilityService(paths=self.paths)
         self.schedule = UpdateSchedule(paths=self.paths)
+        # _plans is the read-only public lookup projection used by the API
+        # context. Private candidates, records and typed bindings live in a
+        # separate server-owned map and never cross that lookup boundary.
         self._plans: dict[str, dict[str, Any]] = {}
+        self._private_plans: dict[str, dict[str, Any]] = {}
         self._applied_plans: dict[str, dict[str, Any]] = {}
 
     def _record(self, component_id: str) -> tuple[str, Mapping[str, Any]]:
@@ -334,12 +338,14 @@ class UpdateResolver:
             "_candidate_fingerprint": candidate_fingerprint,
             "_plan_fingerprint_payload": execution_payload,
         }
-        self._plans[plan_id] = plan
         public_plan = {key: value for key, value in plan.items() if not key.startswith("_") and key != "update_candidate"}
-        return {**public_plan, "status": "planned", "execution": "not_run", "dry_run": True, "rollback_available": report["rollback_available"], "next_action": "Confirm a fresh plan through the explicit component update executor."}
+        public_value = {**public_plan, "status": "planned", "execution": "not_run", "dry_run": True, "rollback_available": report["rollback_available"], "next_action": "Confirm a fresh plan through the explicit component update executor."}
+        self._private_plans[plan_id] = plan
+        self._plans[plan_id] = public_value
+        return dict(public_value)
 
     def apply_update(self, plan_id: str, *, confirmed: bool = False) -> dict[str, Any]:
-        plan = self._plans.get(plan_id)
+        plan = self._private_plans.get(plan_id)
         if not confirmed:
             return {"status": "waiting_confirmation", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
         if not isinstance(plan, Mapping):

@@ -272,6 +272,19 @@ class ComponentUpdateExecutor:
             # path never follows a reparse point or exposes this error.
             return
 
+    def _restore_rollback(self, root: Path, previous: Path, current_backup: Path) -> None:
+        """Restore both roots after a rollback receipt failure or drift."""
+
+        try:
+            if root.exists() and not _is_reparse(root) and not previous.exists():
+                os.rename(root, previous)
+            if current_backup.exists() and not _is_reparse(current_backup) and not root.exists():
+                os.rename(current_backup, root)
+        except OSError:
+            # Never follow or remove an unexpected/reparse path while trying
+            # to compensate. The caller returns a fixed failed projection.
+            return
+
     def apply(
         self,
         plan: Mapping[str, Any],
@@ -456,19 +469,12 @@ class ComponentUpdateExecutor:
                 binding_provider=binding_provider,
             )
             if binding is None:
-                if root.exists() and not _is_reparse(root):
-                    os.rename(root, previous)
-                if current_backup.exists() and not _is_reparse(current_backup) and not root.exists():
-                    os.rename(current_backup, root)
+                self._restore_rollback(root, previous, current_backup)
                 return binding_refusal(binding_error or "catalog_binding_stale", component_id=component_id)
             write_component_receipt(self.paths.config_root, component_id, receipt, catalog_binding=binding)
             return {"status": "completed", "execution": "completed", "component_id": component_id, "state": "INSTALLED_UNVERIFIED"}
         except (OSError, ReceiptError, ValueError):
-            if current_backup.exists() and not root.exists():
-                try:
-                    os.rename(current_backup, root)
-                except OSError:
-                    pass
+            self._restore_rollback(root, previous, current_backup)
             return {"status": "failed", "code": "rollback_activation_failed", "execution": "not_run"}
 
 
