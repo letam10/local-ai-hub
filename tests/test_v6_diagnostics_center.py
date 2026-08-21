@@ -97,6 +97,18 @@ class TestDiagnosticsConfigRegistry(unittest.TestCase):
                 result = dc.config_registry_state()
                 self.assertEqual(result['status'], HEALTHY)
 
+    def test_hostile_schema_version_is_fixed_and_not_echoed(self):
+        marker = 'C:' + r'\Users\Alice Smith\private.json'
+        with TemporaryDirectory() as tmpdir:
+            with _TmpDiagnostics(tmpdir) as (dc, td, cm):
+                (cm.CONFIG_ROOT / 'settings.json').write_text(
+                    json.dumps({"schema_version": {"path": marker}, "status": {"reason": marker}}), encoding='utf-8'
+                )
+                result = dc.config_registry_state()
+        self.assertEqual(result['status'], NEEDS_ATTENTION)
+        self.assertEqual(result['schema_versions']['settings.json'], 'invalid')
+        self.assertNotIn(marker, json.dumps(result, ensure_ascii=True))
+
 
 class TestDiagnosticsWorkflowStore(unittest.TestCase):
     def test_absent_library_healthy(self):

@@ -50,6 +50,8 @@ _PUBLIC_STATUS_VALUES = frozenset({HEALTHY, NEEDS_ATTENTION, UNAVAILABLE, UNKNOW
 _PUBLIC_MAX_COUNT = 100_000
 _PUBLIC_MAX_BYTES = 1 << 50
 _PUBLIC_MAX_TEXT = 4_096
+_PUBLIC_CONFIG_KEYS = frozenset({"settings.json", "creative_workspace.json", "workflow_library.json"})
+_PUBLIC_SCHEMA_VALUES = frozenset({"absent", "present", "unknown", "corrupt", "invalid"})
 _PUBLIC_STATUS_COPY = {
     HEALTHY: ("Diagnostic subsystem is healthy.", "No action required."),
     NEEDS_ATTENTION: ("Diagnostic subsystem needs attention.", "Review the bounded diagnostic summary."),
@@ -163,6 +165,8 @@ def _optional_mapping_count(source: dict[str, Any], key: str, *, value_kind: str
             raise ValueError("diagnostic boolean mapping unavailable")
         if value_kind == "record" and type(item_value) is not dict:
             raise ValueError("diagnostic record mapping unavailable")
+        if value_kind == "schema" and (item_key not in _PUBLIC_CONFIG_KEYS or type(item_value) is not str or item_value not in _PUBLIC_SCHEMA_VALUES):
+            raise ValueError("diagnostic schema mapping unavailable")
     return len(value)
 
 
@@ -214,7 +218,7 @@ def _public_subsystem(key: str, raw: object) -> dict[str, Any]:
                 if value is not None:
                     result[field] = value
         elif key == "config_registry":
-            value = _optional_mapping_count(raw, "schema_versions")
+            value = _optional_mapping_count(raw, "schema_versions", value_kind="schema")
             if value is not None:
                 result["record_count"] = value
         elif key == "jobs_store":
@@ -429,20 +433,34 @@ class DiagnosticsCenter:
                 continue
             try:
                 data = json.loads(path.read_bytes())
-                schema_versions[name] = data.get("schema_version", "unknown")
-                if data.get("recovery_required") or data.get("status") == "recovery_required":
-                    issues.append(f"{name}: recovery_required")
-            except (OSError, json.JSONDecodeError):
-                issues.append(f"{name}: unreadable")
+                if type(data) is not dict:
+                    schema_versions[name] = "invalid"
+                    issues.append("config_record_invalid")
+                    continue
+                version = data.get("schema_version")
+                if "schema_version" not in data:
+                    schema_versions[name] = "unknown"
+                elif (type(version) is int and not isinstance(version, bool) and 0 <= version <= _PUBLIC_MAX_COUNT) or (type(version) is str and re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", version)):
+                    schema_versions[name] = "present"
+                else:
+                    schema_versions[name] = "invalid"
+                    issues.append("config_schema_invalid")
+                recovery_required = data.get("recovery_required")
+                if recovery_required is not None and type(recovery_required) is not bool:
+                    issues.append("config_recovery_flag_invalid")
+                if recovery_required is True or data.get("status") == "recovery_required":
+                    issues.append("config_recovery_required")
+            except (OSError, json.JSONDecodeError, TypeError, ValueError, RecursionError):
+                issues.append("config_record_unavailable")
                 schema_versions[name] = "corrupt"
 
         if issues:
             return {
-                **_status(NEEDS_ATTENTION, f"Config issues: {'; '.join(issues)}", "Inspect and repair or restore from backup."),
+                **_status(NEEDS_ATTENTION, "Config registry requires manual review.", "Review the bounded configuration summary."),
                 "schema_versions": schema_versions,
             }
         return {
-            **_status(HEALTHY, "All tracked config files readable.", "No action required."),
+            **_status(HEALTHY, "Config registry is readable.", "No action required."),
             "schema_versions": schema_versions,
         }
 

@@ -224,6 +224,7 @@ class TestV6DiagnosticsPublicRouteProjection(unittest.TestCase):
             "/api/diagnostics/subsystem/config_registry",
             "/api/diagnostics/repair/recovery-drafts",
             "/api/diagnostics/repair/inspect-recovery",
+            "/api/diagnostics/repair/verify-config",
         )
         for path in paths:
             response = _direct_request(router, "GET" if "snapshot" in path or "subsystem" in path or "recovery-drafts" in path else "POST", path, context)
@@ -251,6 +252,30 @@ class TestV6DiagnosticsPublicRouteProjection(unittest.TestCase):
             self.assertEqual(row["status"], "UNKNOWN")
             self.assertEqual(row["execution"], "not_run")
             self.assertTrue(row["dry_run"])
+
+    def test_repair_verify_rejects_hostile_config_projection(self):
+        marker_path = "C:" + r"\Users\Alice Smith\private.json"
+        marker_bearer = "Authorization: Bearer " + "diagnostic-marker"
+        malformed = _safe_snapshot_fixture()
+        malformed["config_registry"] = {
+            "status": "NEEDS_ATTENTION",
+            "reason": marker_path,
+            "next_action": marker_bearer,
+            "execution": "not_run",
+            "dry_run": True,
+            "object_marker": "[object Object]",
+            "schema_versions": {"settings.json": marker_path},
+        }
+        router = build_router()
+        response = _direct_request(router, "POST", "/api/diagnostics/repair/verify-config", self._context(malformed))
+        self.assertEqual(response.status, 200)
+        serialized = json.dumps(response.payload, ensure_ascii=True)
+        for marker in (marker_path, marker_bearer, "[object Object]"):
+            self.assertNotIn(marker, serialized)
+        self.assertEqual(response.payload["result"]["status"], "UNKNOWN")
+        self.assertEqual(response.payload["result"]["code"], "diagnostic_projection_unavailable")
+        self.assertEqual(response.payload["result"]["execution"], "not_run")
+        self.assertTrue(response.payload["result"]["dry_run"])
 
 
 if __name__ == "__main__":

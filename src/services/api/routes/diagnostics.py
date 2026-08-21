@@ -58,7 +58,7 @@ def recovery_drafts(request: ApiRequest, context: ApiContext, params: Mapping[st
 
 
 def repair_verify(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
-    return ApiResponse(200, {"status": "completed", "result": context.call("diagnostics_config_registry")})
+    return ApiResponse(200, {"status": "completed", "result": _sanitized_snapshot(context)["config_registry"]})
 
 
 def repair_inspect(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
