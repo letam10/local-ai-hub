@@ -917,7 +917,6 @@ class VideoRuntimeContractTests(unittest.TestCase):
         index_path = root / "Config" / "artifacts.json"
         target = output_root / "AnimeSR" / "clip_AnimeSR_x2.mp4"
         target.parent.mkdir(parents=True)
-        target.write_bytes(b"bounded video output")
         manager = HubJobManager()
         try:
             with (
@@ -926,15 +925,19 @@ class VideoRuntimeContractTests(unittest.TestCase):
                 patch.object(artifact_store, "OUTPUT_ROOT", output_root),
                 patch.object(artifact_store, "INDEX_PATH", index_path),
             ):
-                record = manager.submit(
-                    "upscale_anime_video",
-                    {"source_artifact_id": "artifact_" + "a" * 32},
-                    lambda _payload, _context: {
+                def runner(_payload, _context):
+                    target.write_bytes(b"bounded video output")
+                    return {
                         "status": "completed",
                         "operation": "upscale_anime_video",
                         "backend": "animesr",
                         "output": str(target),
-                    },
+                    }
+
+                record = manager.submit(
+                    "upscale_anime_video",
+                    {"source_artifact_id": "artifact_" + "a" * 32},
+                    runner,
                 )
                 idle, remaining = manager.wait_for_idle(5)
                 self.assertTrue(idle, remaining)
@@ -1107,6 +1110,8 @@ class VideoRuntimeContractTests(unittest.TestCase):
                 self.assertEqual(public["status"], "cancelled")
                 self.assertEqual(public["result"]["status"], "cancelled")
                 self.assertNotIn("artifacts", public["result"])
+                self.assertTrue(target.exists())
+                self.assertEqual(public["result"].get("cleanup_status"), "manual_review")
                 self.assertFalse((root / "Config" / "artifacts.json").exists())
         finally:
             release_runner.set()
@@ -1122,7 +1127,6 @@ class VideoRuntimeContractTests(unittest.TestCase):
         output_root.mkdir()
         target = output_root / "RIFE" / "completed.mp4"
         target.parent.mkdir(parents=True)
-        target.write_bytes(b"completed output")
         publication_started = threading.Event()
         release_publication = threading.Event()
         cancel_result: list[tuple[bool, str]] = []
@@ -1141,11 +1145,15 @@ class VideoRuntimeContractTests(unittest.TestCase):
                     self.assertTrue(release_publication.wait(3))
                     return register(*args, **kwargs)
 
+                def runner(_payload, _context):
+                    target.write_bytes(b"completed output")
+                    return {"status": "completed", "output": str(target)}
+
                 with patch.object(artifact_store, "register_worker_outputs", side_effect=blocking_register):
                     record = manager.submit(
                         "frame_interpolate",
                         {"source_artifact_id": "artifact_" + "e" * 32},
-                        lambda _payload, _context: {"status": "completed", "output": str(target)},
+                        runner,
                     )
                     self.assertTrue(publication_started.wait(3))
                     cancel_thread = threading.Thread(target=lambda: cancel_result.append(manager.cancel(record["id"])), daemon=True)

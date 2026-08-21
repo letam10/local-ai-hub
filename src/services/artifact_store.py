@@ -14,6 +14,8 @@ import mimetypes
 import os
 import re
 import shutil
+import stat
+import tempfile
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -34,6 +36,11 @@ OWNED_OUTPUT_PREFIX = "hub-job-"
 OWNED_STAGE_PREFIX = "hub-job-stage-"
 DEFAULT_ORPHAN_EXPIRY_SECONDS = 24 * 60 * 60
 MAX_JOB_OUTPUT_BYTES = 8 * 1024 * 1024 * 1024
+JOB_OUTPUT_SCOPE_SCHEMA = "job-output-scope.v1"
+JOB_OUTPUT_SCOPE_MAX_BYTES = 128 * 1024
+JOB_OUTPUT_SCOPE_MAX_JOBS = 128
+JOB_OUTPUT_SCOPE_MAX_ENTRIES = 256
+JOB_OUTPUT_SCOPE_MAX_CANDIDATES = 64
 ARTIFACT_VISIBILITY_STAGED = "staged"
 ARTIFACT_VISIBILITY_PUBLISHED = "published"
 MANAGED_OUTPUT_NAME = "video_grade.mp4"
@@ -69,6 +76,12 @@ _PATH_FIELDS = {
     "srt",
     "video",
 }
+_JOB_OUTPUT_SCOPE_STATES = frozenset({"open", "completed", "failed", "cancelled", "unavailable", "interrupted", "manual_review"})
+_JOB_OUTPUT_SCOPE_OWNERSHIP = frozenset({"owned", "ambiguous"})
+_JOB_OUTPUT_SCOPE_ROOT_KEYS = frozenset({"schema_version", "records"})
+_JOB_OUTPUT_SCOPE_RECORD_KEYS = frozenset({"job_id", "job_fingerprint", "state", "snapshot_complete", "baseline", "candidates"})
+_JOB_OUTPUT_SCOPE_ENTRY_KEYS = frozenset({"relative_path", "ownership", "before", "current"})
+_JOB_OUTPUT_SCOPE_IDENTITY_KEYS = frozenset({"size_bytes", "mtime_ns", "file_id"})
 
 
 class UploadError(ValueError):
@@ -318,6 +331,444 @@ def _safe_provenance(value: Any) -> dict[str, Any]:
         "attempt": attempt,
         "status": status,
     }
+
+
+def _job_output_scope_path() -> Path:
+    """Keep the private manifest beside the patched/test artifact index."""
+
+    return INDEX_PATH.with_name(".job_output_scopes.json")
+
+
+def _scope_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate output scope key")
+        result[key] = value
+    return result
+
+
+def _scope_identity(value: object) -> dict[str, int] | None:
+    if type(value) is not dict or set(value) != _JOB_OUTPUT_SCOPE_IDENTITY_KEYS:
+        return None
+    result: dict[str, int] = {}
+    for key in _JOB_OUTPUT_SCOPE_IDENTITY_KEYS:
+        item = value.get(key)
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0 or item > 2**63 - 1:
+            return None
+        result[key] = item
+    return result
+
+
+def _scope_relative(value: object) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > 240 or "\\" in value or ":" in value or "\x00" in value:
+        return None
+    path = Path(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return None
+    return path.as_posix()
+
+
+def _scope_entry(value: object) -> dict[str, Any] | None:
+    if type(value) is not dict or set(value) != _JOB_OUTPUT_SCOPE_ENTRY_KEYS:
+        return None
+    relative = _scope_relative(value.get("relative_path"))
+    ownership = value.get("ownership")
+    before = value.get("before")
+    current = _scope_identity(value.get("current"))
+    if relative is None or not isinstance(ownership, str) or ownership not in _JOB_OUTPUT_SCOPE_OWNERSHIP or current is None:
+        return None
+    if before is not None and _scope_identity(before) is None:
+        return None
+    return {"relative_path": relative, "ownership": ownership, "before": before, "current": current}
+
+
+def _scope_record(value: object, job_id: str | None = None) -> dict[str, Any] | None:
+    if type(value) is not dict or set(value) != _JOB_OUTPUT_SCOPE_RECORD_KEYS:
+        return None
+    record_job_id = value.get("job_id")
+    fingerprint = value.get("job_fingerprint")
+    state = value.get("state")
+    snapshot_complete = value.get("snapshot_complete")
+    baseline = value.get("baseline")
+    candidates = value.get("candidates")
+    if (
+        not isinstance(record_job_id, str)
+        or _JOB_ID.fullmatch(record_job_id) is None
+        or (job_id is not None and record_job_id != job_id)
+        or not isinstance(fingerprint, str)
+        or _FINGERPRINT.fullmatch(fingerprint) is None
+        or not isinstance(state, str)
+        or state not in _JOB_OUTPUT_SCOPE_STATES
+        or type(snapshot_complete) is not bool
+        or type(baseline) is not dict
+        or type(candidates) is not dict
+        or len(baseline) > JOB_OUTPUT_SCOPE_MAX_ENTRIES
+        or len(candidates) > JOB_OUTPUT_SCOPE_MAX_CANDIDATES
+    ):
+        return None
+    normalized_baseline: dict[str, Any] = {}
+    for relative, identity in baseline.items():
+        safe_relative = _scope_relative(relative)
+        safe_identity = _scope_identity(identity)
+        if safe_relative is None or safe_identity is None:
+            return None
+        normalized_baseline[safe_relative] = safe_identity
+    normalized_candidates: dict[str, Any] = {}
+    for relative, entry in candidates.items():
+        safe_entry = _scope_entry(entry)
+        if safe_entry is None or safe_entry["relative_path"] != relative:
+            return None
+        normalized_candidates[relative] = safe_entry
+    return {
+        "job_id": record_job_id,
+        "job_fingerprint": fingerprint,
+        "state": state,
+        "snapshot_complete": snapshot_complete,
+        "baseline": normalized_baseline,
+        "candidates": normalized_candidates,
+    }
+
+
+def _empty_job_output_scopes() -> dict[str, Any]:
+    return {"schema_version": JOB_OUTPUT_SCOPE_SCHEMA, "records": {}}
+
+
+def _load_job_output_scopes() -> dict[str, Any] | None:
+    path = _job_output_scope_path()
+    try:
+        if path.is_symlink() or path.stat().st_size > JOB_OUTPUT_SCOPE_MAX_BYTES:
+            return None
+        raw = path.read_text(encoding="utf-8")
+        value = json.loads(raw, object_pairs_hook=_scope_pairs)
+    except FileNotFoundError:
+        return _empty_job_output_scopes()
+    except (OSError, UnicodeError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if type(value) is not dict or set(value) != _JOB_OUTPUT_SCOPE_ROOT_KEYS or value.get("schema_version") != JOB_OUTPUT_SCOPE_SCHEMA:
+        return None
+    records = value.get("records")
+    if type(records) is not dict or len(records) > JOB_OUTPUT_SCOPE_MAX_JOBS:
+        return None
+    normalized: dict[str, Any] = {}
+    for job_id, record in records.items():
+        if not isinstance(job_id, str) or _JOB_ID.fullmatch(job_id) is None:
+            return None
+        safe_record = _scope_record(record, job_id)
+        if safe_record is None:
+            return None
+        normalized[job_id] = safe_record
+    return {"schema_version": JOB_OUTPUT_SCOPE_SCHEMA, "records": normalized}
+
+
+def _save_job_output_scopes(scopes: dict[str, Any]) -> bool:
+    temporary: Path | None = None
+    path = _job_output_scope_path()
+    try:
+        if path.is_symlink() or (path.exists() and _scope_reparse(path)):
+            return False
+        payload = {"schema_version": JOB_OUTPUT_SCOPE_SCHEMA, "records": scopes.get("records", {})}
+        encoded = (json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        if len(encoded) > JOB_OUTPUT_SCOPE_MAX_BYTES:
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle, name = tempfile.mkstemp(prefix=".job-output-scope-", suffix=".tmp", dir=path.parent)
+        os.close(handle)
+        temporary = Path(name)
+        with temporary.open("wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+        temporary = None
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _scope_file_identity(path: Path) -> dict[str, int] | None:
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    size = int(info.st_size)
+    mtime_ns = int(getattr(info, "st_mtime_ns", 0))
+    file_id = int(getattr(info, "st_ino", 0) or 0)
+    if size < 0 or size > MAX_JOB_OUTPUT_BYTES or mtime_ns < 0 or file_id < 0:
+        return None
+    return {"size_bytes": size, "mtime_ns": mtime_ns, "file_id": min(file_id, 2**63 - 1)}
+
+
+def _scope_reparse(path: Path) -> bool:
+    try:
+        info = path.lstat()
+        flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+        return bool(stat.S_ISLNK(info.st_mode) or int(getattr(info, "st_file_attributes", 0) or 0) & flag)
+    except OSError:
+        return True
+
+
+def _scope_output_file(value: object) -> tuple[Path, str, dict[str, int]] | None:
+    if not isinstance(value, (str, Path)):
+        return None
+    raw = Path(value).expanduser()
+    try:
+        root = OUTPUT_ROOT.resolve()
+        raw_absolute = raw.absolute()
+        cursor = raw_absolute
+        while True:
+            if _scope_reparse(cursor):
+                return None
+            if cursor == root:
+                break
+            if cursor.parent == cursor:
+                return None
+            cursor = cursor.parent
+        resolved = raw.resolve(strict=True)
+        resolved.relative_to(root)
+        if _scope_reparse(resolved) or not resolved.is_file():
+            return None
+        relative = _scope_relative(resolved.relative_to(root).as_posix())
+        identity = _scope_file_identity(resolved)
+    except (OSError, ValueError):
+        return None
+    if relative is None or identity is None:
+        return None
+    return resolved, relative, identity
+
+
+def _scope_output_candidates(value: object) -> list[object]:
+    if not isinstance(value, dict):
+        return []
+    result: list[object] = []
+    output = value.get("output")
+    if isinstance(output, (str, Path)) and str(output):
+        result.append(output)
+    for field in ("files", "outputs"):
+        values = value.get(field)
+        if isinstance(values, list):
+            result.extend(item for item in values[:JOB_OUTPUT_SCOPE_MAX_CANDIDATES] if isinstance(item, (str, Path)) and str(item))
+    return result[:JOB_OUTPUT_SCOPE_MAX_CANDIDATES]
+
+
+def _scope_snapshot() -> tuple[dict[str, dict[str, int]], bool]:
+    try:
+        root = OUTPUT_ROOT.resolve()
+        if not root.exists():
+            return {}, True
+        if _scope_reparse(root) or not root.is_dir():
+            return {}, False
+    except OSError:
+        return {}, False
+    baseline: dict[str, dict[str, int]] = {}
+    complete = True
+    for current, directories, filenames in os.walk(root, topdown=True, followlinks=False):
+        directories.sort()
+        filenames.sort()
+        safe_current = Path(current)
+        directories[:] = [name for name in directories if not _scope_reparse(safe_current / name)]
+        if len(baseline) + len(filenames) > JOB_OUTPUT_SCOPE_MAX_ENTRIES:
+            complete = False
+            break
+        for name in filenames:
+            candidate = safe_current / name
+            item = _scope_output_file(candidate)
+            if item is None:
+                complete = False
+                continue
+            _resolved, relative, identity = item
+            baseline[relative] = identity
+    return baseline, complete
+
+
+def begin_job_output_scope(job_id: str) -> dict[str, Any] | None:
+    """Create a bounded private output manifest before a worker starts."""
+
+    if not isinstance(job_id, str) or _JOB_ID.fullmatch(job_id) is None:
+        return None
+    with _LOCK:
+        scopes = _load_job_output_scopes()
+        if scopes is None:
+            return None
+        existing = scopes["records"].get(job_id)
+        if existing is not None and existing.get("state") == "open":
+            return {"status": "ready"}
+        baseline, complete = _scope_snapshot()
+        scopes["records"][job_id] = {
+            "job_id": job_id,
+            "job_fingerprint": hashlib.sha256(job_id.encode("utf-8")).hexdigest(),
+            "state": "open",
+            "snapshot_complete": complete,
+            "baseline": baseline,
+            "candidates": {},
+        }
+        terminal_ids = [key for key, value in scopes["records"].items() if value.get("state") != "open"]
+        while len(scopes["records"]) > JOB_OUTPUT_SCOPE_MAX_JOBS and terminal_ids:
+            scopes["records"].pop(terminal_ids.pop(0), None)
+        return {"status": "ready"} if _save_job_output_scopes(scopes) else None
+
+
+def _claim_job_output_scope_locked(scopes: dict[str, Any], job_id: str, result: object) -> dict[str, Any]:
+    record = scopes["records"].get(job_id)
+    if not isinstance(record, dict):
+        return {"status": "unavailable", "owned_count": 0, "ambiguous_count": 0, "invalid_count": 0}
+    values = _scope_output_candidates(result)
+    if not values:
+        return {"status": "no_output", "owned_count": 0, "ambiguous_count": 0, "invalid_count": 0}
+    entries: dict[str, Any] = {}
+    invalid_count = 0
+    for value in values:
+        item = _scope_output_file(value)
+        if item is None:
+            invalid_count += 1
+            continue
+        _resolved, relative, current = item
+        if relative in entries:
+            invalid_count += 1
+            continue
+        before = record["baseline"].get(relative)
+        ownership = "ambiguous" if before is not None or not record["snapshot_complete"] else "owned"
+        entries[relative] = {
+            "relative_path": relative,
+            "ownership": ownership,
+            "before": before,
+            "current": current,
+        }
+    record["candidates"] = entries
+    owned_count = sum(entry["ownership"] == "owned" for entry in entries.values())
+    ambiguous_count = sum(entry["ownership"] == "ambiguous" for entry in entries.values())
+    status = "invalid" if invalid_count else "manual_review" if ambiguous_count else "owned"
+    return {"status": status, "owned_count": owned_count, "ambiguous_count": ambiguous_count, "invalid_count": invalid_count}
+
+
+def prepare_job_output_scope(job_id: str, result: object) -> dict[str, Any]:
+    """Claim returned output candidates without exposing their paths."""
+
+    if not isinstance(job_id, str) or _JOB_ID.fullmatch(job_id) is None:
+        return {"status": "unavailable", "owned_count": 0, "ambiguous_count": 0, "invalid_count": 0}
+    with _LOCK:
+        scopes = _load_job_output_scopes()
+        if scopes is None:
+            return {"status": "unavailable", "owned_count": 0, "ambiguous_count": 0, "invalid_count": 0}
+        record = scopes["records"].get(job_id)
+        if not isinstance(record, dict) or record.get("state") != "open":
+            return {"status": "unavailable", "owned_count": 0, "ambiguous_count": 0, "invalid_count": 0}
+        result_value = _claim_job_output_scope_locked(scopes, job_id, result)
+        if not _save_job_output_scopes(scopes):
+            return {"status": "unavailable", "owned_count": 0, "ambiguous_count": 0, "invalid_count": 0}
+        return result_value
+
+
+def _cleanup_scope_candidates_locked(record: dict[str, Any]) -> tuple[int, int]:
+    removed = 0
+    ambiguous = 0
+    root = OUTPUT_ROOT.resolve()
+    for relative, entry in record["candidates"].items():
+        if entry.get("ownership") != "owned":
+            if entry.get("ownership") == "ambiguous":
+                ambiguous += 1
+            continue
+        candidate = root / relative
+        current = _scope_output_file(candidate)
+        expected = entry.get("current")
+        if current is None or current[1] != relative:
+            if candidate.exists():
+                entry["ownership"] = "ambiguous"
+                ambiguous += 1
+            continue
+        if current[2] != expected:
+            entry["ownership"] = "ambiguous"
+            ambiguous += 1
+            continue
+        try:
+            current[0].unlink()
+            removed += 1
+        except OSError:
+            entry["ownership"] = "ambiguous"
+            ambiguous += 1
+    return removed, ambiguous
+
+
+def finalize_job_output_scope(
+    job_id: str,
+    result: object = None,
+    *,
+    terminal_state: str,
+    published: bool = False,
+) -> dict[str, Any]:
+    """Resolve one job scope; delete only identity-matching owned files."""
+
+    safe_states = {"completed", "failed", "cancelled", "unavailable", "interrupted"}
+    if not isinstance(job_id, str) or _JOB_ID.fullmatch(job_id) is None or not isinstance(terminal_state, str) or terminal_state not in safe_states:
+        return {"status": "unavailable", "removed_count": 0, "ambiguous_count": 0}
+    with _LOCK:
+        scopes = _load_job_output_scopes()
+        if scopes is None:
+            return {"status": "unavailable", "removed_count": 0, "ambiguous_count": 0}
+        record = scopes["records"].get(job_id)
+        if not isinstance(record, dict):
+            return {"status": "unavailable", "removed_count": 0, "ambiguous_count": 0}
+        if result is not None:
+            _claim_job_output_scope_locked(scopes, job_id, result)
+        if terminal_state == "completed" and published:
+            record["state"] = "completed"
+            if not _save_job_output_scopes(scopes):
+                return {"status": "unavailable", "removed_count": 0, "ambiguous_count": 0}
+            return {"status": "published", "removed_count": 0, "ambiguous_count": 0}
+        removed, ambiguous = _cleanup_scope_candidates_locked(record)
+        record["state"] = "manual_review" if ambiguous else terminal_state
+        if not _save_job_output_scopes(scopes):
+            return {"status": "unavailable", "removed_count": removed, "ambiguous_count": ambiguous}
+        return {"status": "manual_review" if ambiguous else "cleaned", "removed_count": removed, "ambiguous_count": ambiguous}
+
+
+def reconcile_job_output_scopes(*, active_job_ids: set[str] | None = None) -> dict[str, int]:
+    """Boundedly reconcile only explicitly persisted job scopes."""
+
+    active = active_job_ids or set()
+    cleaned = 0
+    manual_review = 0
+    with _LOCK:
+        scopes = _load_job_output_scopes()
+        if scopes is None:
+            return {"cleaned": 0, "manual_review": 0}
+        for job_id, record in scopes["records"].items():
+            if record.get("state") == "open" and job_id in active:
+                continue
+            if record.get("state") == "completed":
+                continue
+            removed, ambiguous = _cleanup_scope_candidates_locked(record)
+            if ambiguous:
+                record["state"] = "manual_review"
+                manual_review += 1
+            else:
+                record["state"] = "failed"
+                cleaned += removed
+        _save_job_output_scopes(scopes)
+    return {"cleaned": cleaned, "manual_review": manual_review}
+
+
+def inspect_job_output_scope(job_id: str) -> dict[str, Any] | None:
+    """Return path-free scope state for deterministic tests/diagnostics."""
+
+    if not isinstance(job_id, str) or _JOB_ID.fullmatch(job_id) is None:
+        return None
+    with _LOCK:
+        scopes = _load_job_output_scopes()
+        record = scopes.get("records", {}).get(job_id) if isinstance(scopes, dict) else None
+        if not isinstance(record, dict):
+            return None
+        return {
+            "job_id": job_id,
+            "state": record["state"],
+            "snapshot_complete": record["snapshot_complete"],
+            "candidate_count": len(record["candidates"]),
+            "owned_count": sum(entry["ownership"] == "owned" for entry in record["candidates"].values()),
+            "ambiguous_count": sum(entry["ownership"] == "ambiguous" for entry in record["candidates"].values()),
+        }
 
 
 def register_path(
