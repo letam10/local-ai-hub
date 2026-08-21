@@ -2,11 +2,26 @@
 
 from __future__ import annotations
 
+import re
 from typing import Mapping
 
 from ..context import ApiContext
 from ..response import ApiResponse
 from ..router import ApiRequest, Router
+from ...node_studio.state import public_draft
+
+
+_SAFE_RESULT_STATUSES = frozenset({"completed", "error", "manual_review", "not_found"})
+_SAFE_DRAFT_ID = re.compile(r"^draft_[a-z][a-z0-9_-]{0,31}\.json$")
+_SAFE_RESULT_REASONS = frozenset({
+    "scope_invalid",
+    "graph_invalid",
+    "draft_storage_unavailable",
+    "draft_storage_conflict",
+    "draft_manual_review",
+    "draft_read_unavailable",
+    "draft_write_failed",
+})
 
 
 def registry(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
@@ -53,19 +68,42 @@ def run_snapshot(request: ApiRequest, context: ApiContext, params: Mapping[str, 
 
 
 def draft_get(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
-    value = context.call("node_draft_load", params["scope"])
+    value = public_draft(context.call("node_draft_load", params["scope"]))
     return ApiResponse(200 if value is not None else 404, {"status": "completed", "draft": value} if value is not None else {"status": "error", "error": "node_draft_not_found", "draft": None})
+
+
+def _public_mutation_result(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping) or not isinstance(value.get("accepted"), bool):
+        return {"accepted": False, "status": "error", "reason": "draft_storage_unavailable", "execution": "not_run", "dry_run": True}
+    accepted = bool(value["accepted"])
+    raw_status = value.get("status")
+    status = raw_status if isinstance(raw_status, str) and raw_status in _SAFE_RESULT_STATUSES else ("completed" if accepted else "error")
+    result: dict[str, object] = {"accepted": accepted, "status": status}
+    draft_id = value.get("draft_id")
+    if isinstance(draft_id, str) and _SAFE_DRAFT_ID.fullmatch(draft_id):
+        result["draft_id"] = draft_id
+    if accepted:
+        if value.get("deleted") is True:
+            result["deleted"] = True
+        return result
+    raw_reason = value.get("reason")
+    reason = raw_reason if isinstance(raw_reason, str) and raw_reason in _SAFE_RESULT_REASONS else "draft_storage_unavailable"
+    result.update({"reason": reason, "execution": "not_run", "dry_run": True})
+    return result
 
 
 def draft_save(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
     body = request.json()
-    result = context.call("node_draft_persist", params["scope"], body.get("graph", {}))
-    return ApiResponse(200 if result.get("accepted", True) else 400, result)
+    graph = body.get("graph", {}) if isinstance(body, Mapping) else {}
+    result = _public_mutation_result(context.call("node_draft_persist", params["scope"], graph))
+    return ApiResponse(200 if result.get("accepted") else 400, result)
 
 
 def draft_delete(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
-    context.call("node_draft_clear", params["scope"])
-    return ApiResponse(200, {"status": "completed", "scope": params["scope"]})
+    result = _public_mutation_result(context.call("node_draft_clear", params["scope"]))
+    if result.get("accepted") and result.get("status") == "not_found":
+        return ApiResponse(404, {"status": "error", "error": "node_draft_not_found", "draft": None})
+    return ApiResponse(200 if result.get("accepted") else 409, result)
 
 
 def register(router: Router) -> None:

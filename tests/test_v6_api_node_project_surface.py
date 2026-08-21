@@ -10,6 +10,9 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from src.services.api.api_server import HubHTTPServer, HubHandler
+from src.services.api.context import ApiContext
+from src.services.api.router import ApiRequest
+from src.services.api.routes import node_studio as node_studio_routes
 from src.services.project_manager.manager import CreativeProjectManager
 import src.shared.paths.registry as paths_mod
 import src.services.node_studio.state as ns_state_mod
@@ -119,6 +122,54 @@ class TestV6ApiNodeProjectSurface(unittest.TestCase):
         status, payload = self._request("GET", f"/api/artifacts/artifact_{'f'*32}/status")
         self.assertEqual(status, 404)
         self.assertFalse(payload.get("found"))
+
+
+class TestNodeStudioDraftDirectRoutes(unittest.TestCase):
+    """Direct route projection checks; loopback coverage remains unchanged."""
+
+    @staticmethod
+    def _request(method: str, body: dict | None = None) -> ApiRequest:
+        return ApiRequest(
+            method=method,
+            path="/api/node-studio/drafts/image",
+            query={},
+            headers={},
+            _body_reader=lambda strict: body or {},
+        )
+
+    def test_route_projection_does_not_echo_legacy_path_fields(self):
+        marker = r"C:\Users\secret https://example.invalid Bearer token"
+        context = ApiContext({
+            "node_draft_load": lambda scope: {"draft_path": marker, "scope": "image", "graph": {"nodes": [], "edges": []}},
+            "node_draft_persist": lambda scope, graph: {"accepted": False, "reason": marker, "draft_path": marker},
+            "node_draft_clear": lambda scope: {"accepted": False, "status": "manual_review", "reason": marker, "draft_path": marker},
+        })
+        responses = [
+            node_studio_routes.draft_get(self._request("GET"), context, {"scope": "image"}),
+            node_studio_routes.draft_save(self._request("POST", {"graph": {}}), context, {"scope": "image"}),
+            node_studio_routes.draft_delete(self._request("DELETE"), context, {"scope": "image"}),
+        ]
+        rendered = json.dumps([response.payload for response in responses], ensure_ascii=False)
+        self.assertNotIn(marker, rendered)
+        self.assertNotIn("Bearer", rendered)
+        self.assertEqual(responses[0].status, 404)
+        self.assertEqual(responses[1].status, 400)
+        self.assertEqual(responses[2].status, 409)
+
+    def test_route_clear_propagates_safe_storage_failure(self):
+        context = ApiContext({
+            "node_draft_clear": lambda scope: {
+                "accepted": False,
+                "status": "manual_review",
+                "reason": "draft_manual_review",
+                "execution": "not_run",
+                "dry_run": True,
+            },
+        })
+        response = node_studio_routes.draft_delete(self._request("DELETE"), context, {"scope": "image"})
+        self.assertEqual(response.status, 409)
+        self.assertEqual(response.payload["reason"], "draft_manual_review")
+        self.assertEqual(response.payload["execution"], "not_run")
 
 
 if __name__ == "__main__":
