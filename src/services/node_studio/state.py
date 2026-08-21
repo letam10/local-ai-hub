@@ -292,6 +292,18 @@ def _is_reparse(stat_result: os.stat_result) -> bool:
     return stat.S_ISLNK(stat_result.st_mode) or bool(int(getattr(stat_result, "st_file_attributes", 0) or 0) & _REPARSE_POINT)
 
 
+def _signature_from_stat(stat_result: os.stat_result) -> _StorageSignature:
+    return _StorageSignature(
+        device=int(getattr(stat_result, "st_dev", 0)),
+        inode=int(getattr(stat_result, "st_ino", 0)),
+        mode=int(stat_result.st_mode),
+        size=int(getattr(stat_result, "st_size", 0)),
+        mtime_ns=int(getattr(stat_result, "st_mtime_ns", 0)),
+        ctime_ns=int(getattr(stat_result, "st_ctime_ns", 0)),
+        attributes=int(getattr(stat_result, "st_file_attributes", 0) or 0),
+    )
+
+
 def _signature(path: Path, *, kind: str, allow_missing: bool = False) -> _StorageSignature | None:
     try:
         stat_result = os.lstat(path)
@@ -307,15 +319,7 @@ def _signature(path: Path, *, kind: str, allow_missing: bool = False) -> _Storag
         raise _DraftStorageError("draft_storage_unavailable")
     if kind == "file" and not stat.S_ISREG(stat_result.st_mode):
         raise _DraftStorageError("draft_manual_review")
-    return _StorageSignature(
-        device=int(getattr(stat_result, "st_dev", 0)),
-        inode=int(getattr(stat_result, "st_ino", 0)),
-        mode=int(stat_result.st_mode),
-        size=int(getattr(stat_result, "st_size", 0)),
-        mtime_ns=int(getattr(stat_result, "st_mtime_ns", 0)),
-        ctime_ns=int(getattr(stat_result, "st_ctime_ns", 0)),
-        attributes=int(getattr(stat_result, "st_file_attributes", 0) or 0),
-    )
+    return _signature_from_stat(stat_result)
 
 
 def _same_directory_identity(left: _StorageSignature, right: _StorageSignature) -> bool:
@@ -324,6 +328,26 @@ def _same_directory_identity(left: _StorageSignature, right: _StorageSignature) 
 
 def _same_file_signature(left: _StorageSignature, right: _StorageSignature) -> bool:
     return left == right
+
+
+def _same_delete_identity(left: _StorageSignature, right: _StorageSignature) -> bool:
+    """Compare stable handle identity/metadata; Windows may update ctime on open."""
+
+    return (
+        left.device,
+        left.inode,
+        left.mode,
+        left.size,
+        left.mtime_ns,
+        left.attributes,
+    ) == (
+        right.device,
+        right.inode,
+        right.mode,
+        right.size,
+        right.mtime_ns,
+        right.attributes,
+    )
 
 
 def _ancestor_signatures(root: Path) -> tuple[tuple[Path, _StorageSignature], ...]:
@@ -735,6 +759,87 @@ def _replace_safely(location: _DraftLocation, old_raw: bytes | None, new_raw: by
         raise _DraftStorageError("draft_write_failed") from exc
 
 
+def _delete_identity_attested(location: _DraftLocation, expected_raw: bytes) -> bool:
+    """Delete the already-attested file without reopening a pathname race.
+
+    Windows is the production platform.  The handle is opened with
+    ``FILE_FLAG_OPEN_REPARSE_POINT`` and without ``FILE_SHARE_DELETE``; a
+    replacement cannot win after the handle is acquired.  Deletion is then
+    marked on that same handle, rather than issuing a second pathname-based
+    unlink.  Non-Windows callers refuse because the portable fallback would
+    reintroduce the race this boundary is designed to prevent.
+    """
+
+    if os.name != "nt":
+        return False
+    fd: int | None = None
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        handle = create_file(
+            os.fspath(location.path),
+            0x80000000 | 0x00010000,  # GENERIC_READ | DELETE
+            0x00000001 | 0x00000002,  # FILE_SHARE_READ | FILE_SHARE_WRITE; deny delete
+            None,
+            3,  # OPEN_EXISTING
+            0x00200000,  # FILE_FLAG_OPEN_REPARSE_POINT
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        handle_value = int(handle)
+        if handle_value == invalid_handle:
+            return False
+        try:
+            fd = msvcrt.open_osfhandle(handle_value, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        except (OSError, ValueError):
+            kernel32.CloseHandle(handle)
+            return False
+
+        opened = os.fstat(fd)
+        opened_signature = _signature_from_stat(opened)
+        if _is_reparse(opened) or location.target is None or not _same_delete_identity(opened_signature, location.target):
+            return False
+        os.lseek(fd, 0, os.SEEK_SET)
+        observed = os.read(fd, _DRAFT_MAX_BYTES + 1)
+        if observed != expected_raw or len(observed) > _DRAFT_MAX_BYTES:
+            return False
+        if not _location_current(location):
+            return False
+
+        class _FileDispositionInfo(ctypes.Structure):
+            _fields_ = [("DeleteFile", wintypes.BOOLEAN)]
+
+        disposition = _FileDispositionInfo(1)
+        set_file_information = kernel32.SetFileInformationByHandle
+        set_file_information.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD]
+        set_file_information.restype = wintypes.BOOL
+        # FileDispositionInfo = 4.  This marks this exact opened file for
+        # deletion and cannot be redirected to a later pathname replacement.
+        return bool(set_file_information(handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)))
+    except (AttributeError, ImportError, OSError, TypeError, ValueError):
+        return False
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 def draft_persist(scope: str, graph: dict[str, Any]) -> dict[str, Any]:
     """Persist a validated editable graph inside the fixed Config boundary."""
 
@@ -793,7 +898,8 @@ def draft_clear(scope: str) -> dict[str, Any]:
         _validated_envelope(value, raw=raw, scope=scope)
         if not _location_current(location) or _read_stable(location) != raw:
             raise _DraftStorageError("draft_storage_conflict")
-        location.path.unlink()
+        if not _delete_identity_attested(location, raw):
+            raise _DraftStorageError("draft_storage_conflict")
         if _signature(location.path, kind="file", allow_missing=True) is not None:
             raise _DraftStorageError("draft_storage_conflict")
         return {"accepted": True, "status": "completed", "draft_id": draft_id, "deleted": True}

@@ -136,6 +136,33 @@ class TestNodeDraftStorageSafety(unittest.TestCase):
         self.assertFalse(result["accepted"])
         self.assertTrue(path.exists())
 
+    def test_foreign_replacement_immediately_before_delete_is_preserved(self) -> None:
+        self.assertTrue(state.draft_persist("image", self.graph())["accepted"])
+        path = self.root / "node_studio_draft_image.json"
+        foreign_path = self.root / ".foreign-draft.json"
+        foreign = {
+            "draft_schema_version": 1,
+            "owner": "node_studio",
+            "draft_id": "draft_image.json",
+            "scope": "image",
+            "graph": {"nodes": [], "edges": [], "title": "foreign replacement"},
+        }
+        foreign_bytes = state._canonical_json(foreign)
+        original_delete = state._delete_identity_attested
+
+        def replace_before_identity_open(location, expected_raw):
+            foreign_path.write_bytes(foreign_bytes)
+            os.replace(foreign_path, location.path)
+            return original_delete(location, expected_raw)
+
+        with patch.object(state, "_delete_identity_attested", side_effect=replace_before_identity_open):
+            result = state.draft_clear("image")
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["status"], "manual_review")
+        self.assertEqual(path.read_bytes(), foreign_bytes)
+        self.assertNotIn(str(path), json.dumps(result))
+        self.assertNotIn("replacement", json.dumps(result))
+
     def test_write_failure_cleans_only_attested_task_temp_and_keeps_prior_bytes(self) -> None:
         first = state.draft_persist("image", self.graph())
         self.assertTrue(first["accepted"])
