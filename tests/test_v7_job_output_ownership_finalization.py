@@ -286,6 +286,33 @@ class V7JobOutputOwnershipFinalizationTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), b"foreign")
         self.assertEqual(artifact_store.list_artifacts(), [])
 
+    def test_source_replacement_after_attestation_before_publication_is_refused(self) -> None:
+        job = reservations.create_reservation("job_20260821_010101_dadadada", "d" * 64, "run_media_operation")
+        self.assertIsNotNone(job)
+        rid = job["reservation_id"]
+        target = reservations.reserve_output_path(rid, "late-race.bin")
+        target.write_bytes(b"owned")
+        reservations.begin_producing(rid)
+        original_hash = reservations._hash_stable
+        replaced = {"done": False}
+
+        def attest_then_replace(source):
+            result = original_hash(source)
+            if result is not None and source == target and not replaced["done"]:
+                replacement = source.with_name("late-foreign.bin")
+                replacement.write_bytes(b"foreign")
+                source.unlink()
+                replacement.replace(source)
+                replaced["done"] = True
+            return result
+
+        provenance = {"job_id": job["job_id"], "job_spec_fingerprint": "d" * 64, "adapter_id": "run_media_operation", "attempt": 1, "status": "completed"}
+        with patch.object(reservations, "_hash_stable", side_effect=attest_then_replace):
+            result = reservations.commit_reservation(rid, {"status": "completed", "output": str(target)}, provenance=provenance, require_output=True)
+        self.assertEqual(result["status"], "manual_review")
+        self.assertEqual(target.read_bytes(), b"foreign")
+        self.assertEqual(artifact_store.list_artifacts(), [])
+
     def test_inventory_has_no_unknown_producer(self) -> None:
         self.assertTrue(validate_producer_inventory())
         self.assertTrue(producer_inventory())

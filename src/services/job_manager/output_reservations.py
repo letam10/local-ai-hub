@@ -14,13 +14,13 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import stat
 import tempfile
 import threading
 import uuid
 import ctypes
 from ctypes import wintypes
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -245,6 +245,50 @@ def _delete_identity_attested(path: Path, expected: Mapping[str, Any], *, direct
         return bool(set_info(handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)))
     finally:
         close(handle)
+
+
+@contextmanager
+def _open_source_locked(path: Path, expected: tuple[int, str, dict[str, int]]):
+    """Hold a no-delete/no-write-sharing source handle through publication."""
+
+    if os.name != "nt":
+        # The package is fail-closed outside Windows rather than using a
+        # pathname-only copy window for a reservation-owned source.
+        yield None
+        return
+    desired_access = 0x80000000  # GENERIC_READ
+    share_mode = 0x00000001  # FILE_SHARE_READ only: deny write/delete races
+    flags = 0x00200000  # FILE_FLAG_OPEN_REPARSE_POINT
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel32.CreateFileW
+    create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    create.restype = wintypes.HANDLE
+    handle = create(str(path), desired_access, share_mode, None, 3, flags, None)
+    invalid = wintypes.HANDLE(-1).value
+    if handle == invalid:
+        yield None
+        return
+    fd = None
+    stream = None
+    try:
+        current = _identity(path)
+        if current is None or not _same_object(expected[2], current):
+            yield None
+            return
+        import msvcrt
+
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+        handle = invalid
+        stream = os.fdopen(fd, "rb", closefd=True)
+        fd = None
+        yield stream
+    finally:
+        if stream is not None:
+            stream.close()
+        elif fd is not None:
+            os.close(fd)
+        elif handle != invalid:
+            kernel32.CloseHandle(handle)
 
 
 def _strict_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -609,27 +653,41 @@ def _copy_reserved_file(source: Path, reservation_id: str, relative: str, expect
         temporary_identity = _identity(temporary)
         if temporary_identity is None:
             return None
-        with source.open("rb") as source_stream, temporary.open("wb") as destination_stream:
-            shutil.copyfileobj(source_stream, destination_stream, length=1024 * 1024)
-            destination_stream.flush()
-            os.fsync(destination_stream.fileno())
-        if (
-            _hash_stable(source) != expected
-            or _directory_identity(destination_root) is None
-            or not _same_object(parent_identity, _directory_identity(destination_root))
-            or not _full_safe_chain(destination_root)
-            or _identity(temporary) is None
-            or not _same_object(temporary_identity, _identity(temporary))
-            or destination.exists()
-        ):
-            return None
-        os.replace(temporary, destination)
-        temporary = None
-        destination_identity = _identity(destination)
-        if destination_identity is None or not _full_safe_chain(destination_root):
-            return None
-        published = True
-        return destination
+        with _open_source_locked(source, expected) as source_stream:
+            if source_stream is None:
+                return None
+            digest = hashlib.sha256()
+            copied_bytes = 0
+            with temporary.open("wb") as destination_stream:
+                while True:
+                    chunk = source_stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    copied_bytes += len(chunk)
+                    if copied_bytes > MAX_OUTPUT_BYTES:
+                        return None
+                    digest.update(chunk)
+                    destination_stream.write(chunk)
+                destination_stream.flush()
+                os.fsync(destination_stream.fileno())
+            if copied_bytes != expected[0] or digest.hexdigest() != expected[1]:
+                return None
+            if (
+                _directory_identity(destination_root) is None
+                or not _same_object(parent_identity, _directory_identity(destination_root))
+                or not _full_safe_chain(destination_root)
+                or _identity(temporary) is None
+                or not _same_object(temporary_identity, _identity(temporary))
+                or destination.exists()
+            ):
+                return None
+            os.replace(temporary, destination)
+            temporary = None
+            destination_identity = _identity(destination)
+            if destination_identity is None or not _full_safe_chain(destination_root):
+                return None
+            published = True
+            return destination
     except OSError:
         return None
     finally:
