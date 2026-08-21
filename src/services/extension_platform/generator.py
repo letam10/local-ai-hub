@@ -3,13 +3,25 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from src.shared.schemas.extension_manifest import EXTENSION_ID_PATTERN, MANIFEST_SCHEMA_VERSION, validate_extension_manifest
 
 from .capability_pack import validate_capability_pack
-from .config import project_root
+from .config import (
+    ExtensionStorageError,
+    StorageGuard,
+    _lexical_path,
+    bounded_directory_entries,
+    ensure_directory,
+    guard_is_current,
+    guarded_location,
+    guarded_read_bytes,
+    project_root,
+)
 
 
 def _display_name(extension_id: str) -> str:
@@ -17,7 +29,7 @@ def _display_name(extension_id: str) -> str:
 
 
 def _safe_root(root: Path | None) -> Path:
-    return (root or project_root()).resolve()
+    return _lexical_path(root or project_root())
 
 
 def _capability_pack_id(extension_id: str) -> str:
@@ -26,6 +38,64 @@ def _capability_pack_id(extension_id: str) -> str:
     if len(extension_id) <= 59:
         return f"{extension_id}-pack"
     return f"{extension_id[:59].rstrip('-')}-pack"
+
+
+def _same_identity(left: Any, right: Any) -> bool:
+    return bool(left is not None and right is not None and left.device == right.device and left.inode == right.inode)
+
+
+def _cleanup_owned_directory(
+    root: Path,
+    directory: Path,
+    *,
+    expected_identity: Any = None,
+    expected_files: dict[str, Any] | None = None,
+) -> bool:
+    """Remove only a still-contained task directory with the expected identity."""
+
+    try:
+        guard = guarded_location(root, directory, kind="directory")
+        if expected_identity is not None and not _same_identity(guard.target, expected_identity):
+            return False
+        if not guard_is_current(guard):
+            return False
+        entries = bounded_directory_entries(guard, maximum=8)
+        for path, kind, _entry_signature in entries:
+            if kind != "file" or (expected_files is not None and path.name not in expected_files):
+                return False
+            file_guard = guarded_location(root, path, kind="file")
+            if expected_files is not None and not _same_identity(file_guard.target, expected_files[path.name]):
+                return False
+            if not guard_is_current(file_guard):
+                return False
+            path.unlink()
+            if guarded_location(root, path, kind="file", allow_missing=True).target is not None:
+                return False
+        if not guard_is_current(guard):
+            return False
+        directory.rmdir()
+        return guarded_location(root, directory, kind="directory", allow_missing=True).target is None
+    except (ExtensionStorageError, OSError):
+        return False
+
+
+def _write_staged_file(root: Path, stage: Path, relative_name: str, contents: str) -> None:
+    path = stage / relative_name
+    stage_guard = guarded_location(root, stage, kind="directory")
+    if not guard_is_current(stage_guard):
+        raise ExtensionStorageError("scaffold_stage_changed")
+    try:
+        with path.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(contents)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileExistsError:
+        raise
+    except (OSError, UnicodeError) as exc:
+        raise ExtensionStorageError("scaffold_write_failed") from exc
+    file_guard = guarded_location(root, path, kind="file")
+    if not guard_is_current(file_guard):
+        raise ExtensionStorageError("scaffold_file_changed")
 
 
 def generate_extension_scaffold(extension_id: str, *, root: Path | None = None, display_name: str | None = None) -> dict[str, Any]:
@@ -41,13 +111,16 @@ def generate_extension_scaffold(extension_id: str, *, root: Path | None = None, 
     title = display_name or _display_name(extension_id)
     if not isinstance(title, str) or not title.strip() or "\n" in title or "\r" in title or "\x00" in title or len(title) > 120:
         raise ValueError("display_name must be concise single-line text")
-    base = _safe_root(root) / "extensions"
+    repository_root = _safe_root(root)
+    repository_guard = guarded_location(repository_root, repository_root, kind="directory")
+    base = repository_root / "extensions"
+    base_guard = ensure_directory(repository_root, base)
+    repository_guard = guarded_location(repository_root, repository_root, kind="directory")
+    if not guard_is_current(repository_guard) or not guard_is_current(base_guard):
+        raise ValueError("extension_scaffold_unavailable")
     destination = base / extension_id
-    try:
-        destination.resolve().relative_to(base.resolve())
-    except (OSError, ValueError) as exc:
-        raise ValueError("extension destination is outside the managed extensions root") from exc
-    if destination.exists():
+    destination_guard = guarded_location(repository_root, destination, kind="directory", allow_missing=True)
+    if destination_guard.target is not None:
         raise FileExistsError("a managed extension already uses this extension_id")
     manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -92,13 +165,102 @@ def generate_extension_scaffold(extension_id: str, *, root: Path | None = None, 
     }
     validate_extension_manifest(manifest)
     validate_capability_pack(capability_pack)
-    base.mkdir(parents=True, exist_ok=True)
-    destination.mkdir()
     files = {
         "extension.json": json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         "capability-pack.json": json.dumps(capability_pack, ensure_ascii=False, indent=2) + "\n",
         "README.md": f"# {title}\n\nThis is a declarative Local AI Hub extension scaffold. It contains no executable code.\n",
     }
-    for relative_name, contents in files.items():
-        (destination / relative_name).write_text(contents, encoding="utf-8")
-    return {"status": "created", "extension_id": extension_id, "files": sorted(files)}
+    stage: Path | None = None
+    stage_guard: StorageGuard | None = None
+    stage_identity: Any = None
+    staged_file_identities: dict[str, Any] = {}
+    moved = False
+    try:
+        try:
+            stage = Path(tempfile.mkdtemp(prefix=".extension-staging-", dir=base))
+        except (OSError, ValueError) as exc:
+            raise ExtensionStorageError("scaffold_stage_unavailable") from exc
+        stage_guard = guarded_location(repository_root, stage, kind="directory")
+        stage_identity = stage_guard.target
+        if not guard_is_current(stage_guard) or not guard_is_current(base_guard):
+            raise ExtensionStorageError("scaffold_stage_changed")
+        for relative_name in ("extension.json", "capability-pack.json", "README.md"):
+            _write_staged_file(repository_root, stage, relative_name, files[relative_name])
+            staged_file_identities[relative_name] = guarded_location(
+                repository_root, stage / relative_name, kind="file"
+            ).target
+        if not guard_is_current(stage_guard) or not guard_is_current(base_guard):
+            raise ExtensionStorageError("scaffold_stage_changed")
+        destination_guard = guarded_location(repository_root, destination, kind="directory", allow_missing=True)
+        if destination_guard.target is not None:
+            raise FileExistsError("a managed extension already uses this extension_id")
+        try:
+            os.rename(stage, destination)
+        except FileExistsError:
+            raise
+        except OSError as exc:
+            raise ExtensionStorageError("scaffold_publish_failed") from exc
+        moved = True
+        published_guard = guarded_location(repository_root, destination, kind="directory")
+        if not _same_identity(published_guard.target, stage_identity) or not guard_is_current(published_guard):
+            raise ExtensionStorageError("scaffold_publish_changed")
+        entries = bounded_directory_entries(published_guard, maximum=8)
+        names = {path.name for path, kind, _entry_signature in entries if kind == "file"}
+        if names != set(files):
+            raise ExtensionStorageError("scaffold_publish_incomplete")
+        for relative_name, contents in files.items():
+            actual = guarded_read_bytes(repository_root, destination / relative_name, maximum=len(contents.encode("utf-8")) + 1)
+            if actual != contents.encode("utf-8"):
+                raise ExtensionStorageError("scaffold_publish_changed")
+        if not guard_is_current(base_guard):
+            raise ExtensionStorageError("scaffold_parent_changed")
+        return {"status": "created", "extension_id": extension_id, "files": sorted(files)}
+    except FileExistsError:
+        if moved:
+            _cleanup_owned_directory(
+                repository_root,
+                destination,
+                expected_identity=stage_identity,
+                expected_files=staged_file_identities,
+            )
+        elif stage is not None:
+            _cleanup_owned_directory(
+                repository_root,
+                stage,
+                expected_identity=stage_identity,
+                expected_files=staged_file_identities,
+            )
+        raise
+    except ExtensionStorageError as exc:
+        if moved:
+            if not _cleanup_owned_directory(
+                repository_root,
+                destination,
+                expected_identity=stage_identity,
+                expected_files=staged_file_identities,
+            ):
+                raise ValueError("extension_scaffold_manual_review") from None
+        elif stage is not None and not _cleanup_owned_directory(
+            repository_root,
+            stage,
+            expected_identity=stage_identity,
+            expected_files=staged_file_identities,
+        ):
+            raise ValueError("extension_scaffold_manual_review") from None
+        raise ValueError("extension_scaffold_unavailable") from None
+    except OSError:
+        if moved:
+            _cleanup_owned_directory(
+                repository_root,
+                destination,
+                expected_identity=stage_identity,
+                expected_files=staged_file_identities,
+            )
+        elif stage is not None:
+            _cleanup_owned_directory(
+                repository_root,
+                stage,
+                expected_identity=stage_identity,
+                expected_files=staged_file_identities,
+            )
+        raise OSError("extension_scaffold_unavailable") from None
