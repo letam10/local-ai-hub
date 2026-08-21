@@ -42,4 +42,9 @@ Maintenance uninstall removes only the selected component record and writes
 the same receipt envelope that was already present. In particular, an
 uninstall against a V2-bound component preserves a
 `component-install-receipts.v3` envelope and all unrelated record provenance;
-it never downgrades the store to the legacy V2 envelope.
+it never downgrades the store to the legacy V2 envelope. A missing receipt is
+not materialized as a legacy store. Malformed or unsupported receipt state
+refuses before deletion. Known leaves are moved into a private, reversible
+task-owned quarantine, the current binding is checked again after the move,
+and only then is the receipt envelope changed; drift or write failure moves
+the leaves back and leaves the receipt bytes unchanged.

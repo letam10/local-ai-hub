@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import tempfile
 import time
@@ -121,15 +122,59 @@ class MaintenanceExecutor:
         return self.paths.config_root / "component_install_receipts.json"
 
     def _receipts(self) -> dict[str, Any]:
+        path = self._receipt_path()
+        if _is_reparse(path):
+            return {"schema_version": None, "records": {}, "_present": True, "_valid": False, "_raw_bytes": None}
+        if not path.exists():
+            return {"schema_version": None, "records": {}, "_present": False, "_valid": True, "_raw_bytes": None}
         try:
-            raw = json.loads(self._receipt_path().read_text(encoding="utf-8"))
+            raw_bytes = path.read_bytes()
+            raw = json.loads(raw_bytes.decode("utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
-            raw = {}
+            return {"schema_version": None, "records": {}, "_present": True, "_valid": False, "_raw_bytes": None}
+        if not isinstance(raw, Mapping):
+            return {"schema_version": None, "records": {}, "_present": True, "_valid": False, "_raw_bytes": raw_bytes}
         records = raw.get("records") if isinstance(raw, Mapping) else None
         schema = raw.get("schema_version") if isinstance(raw, Mapping) else None
         if schema not in {"component-install-receipts.v2", "component-install-receipts.v3"}:
-            schema = "component-install-receipts.v2"
-        return {"schema_version": schema, "records": dict(records) if isinstance(records, Mapping) else {}}
+            return {"schema_version": schema, "records": {}, "_present": True, "_valid": False, "_raw_bytes": raw_bytes}
+        if not isinstance(records, Mapping):
+            return {"schema_version": schema, "records": {}, "_present": True, "_valid": False, "_raw_bytes": raw_bytes}
+        return {"schema_version": schema, "records": dict(records), "_present": True, "_valid": True, "_raw_bytes": raw_bytes}
+
+    @staticmethod
+    def _restore_uninstall(moved: list[tuple[Path, Path]]) -> bool:
+        """Restore reversible uninstall moves without overwriting a new file."""
+
+        try:
+            for original, backup in reversed(moved):
+                if not backup.exists():
+                    return False
+                if original.exists() or _is_reparse(original) or _is_reparse(backup):
+                    return False
+                original.parent.mkdir(parents=True, exist_ok=True)
+                os.rename(backup, original)
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _discard_uninstall_backup(backup_root: Path) -> None:
+        try:
+            if not _is_reparse(backup_root):
+                shutil.rmtree(backup_root, ignore_errors=True)
+        except OSError:
+            return
+
+    @staticmethod
+    def _receipt_state_refusal(code: str = "receipt_state_unavailable") -> dict[str, Any]:
+        return {
+            "status": "unavailable",
+            "code": code,
+            "execution": "not_run",
+            "dry_run": True,
+            "next_action": "Review the managed receipt state before retrying the component action.",
+        }
 
     def _shared_reference(self, component_id: str, record: Mapping[str, Any], receipts: Mapping[str, Any]) -> bool:
         shared = record.get("shared_dependency_id")
@@ -190,6 +235,10 @@ class MaintenanceExecutor:
         if not valid_root:
             return {"status": "failed", "code": "unsafe_or_reparse_component_leaf", "execution": "not_run"}
         receipts = self._receipts()
+        if not receipts.get("_valid"):
+            return self._receipt_state_refusal()
+        if action == "uninstall" and binding.catalog_schema == "v7-production-catalog.v2" and receipts.get("_present") and receipts.get("schema_version") != "component-install-receipts.v3":
+            return binding_refusal("catalog_schema_unsupported", component_id=component_id)
         if action == "repair":
             if not leaves or not all(item.get("present") for item in leaves):
                 return {"status": "unavailable", "code": "repair_source_required", "execution": "not_run", "next_action": "Create a trusted source or manual-import plan for the missing catalog leaves."}
@@ -289,21 +338,71 @@ class MaintenanceExecutor:
             if target.is_file() and not _is_reparse(target):
                 continue
             return {"status": "failed", "code": "uninstall_target_changed", "execution": "not_run"}
-        removed = 0
-        for relative in self._leaves(record, str(component_type)):
-            target = _safe_leaf(root, relative)
-            if target is not None and target.is_file() and not _is_reparse(target):
-                try:
-                    target.unlink()
-                    removed += 1
-                except OSError:
-                    return {"status": "failed", "code": "uninstall_delete_failed", "execution": "not_run"}
-        receipts["records"].pop(component_id, None)
         try:
-            _atomic_json(self._receipt_path(), receipts)
+            self.paths.temp_root.mkdir(parents=True, exist_ok=True)
+            backup_root = Path(tempfile.mkdtemp(prefix=".component-uninstall-", dir=str(self.paths.temp_root)))
         except OSError:
-            return {"status": "failed", "code": "receipt_write_failed", "execution": "not_run"}
-        return {"status": "completed", "action": "uninstall", "component_id": component_id, "removed_known_leaves": removed, "state": "NOT_INSTALLED", "execution": "completed", "next_action": "Refresh the component catalog."}
+            return {"status": "unavailable", "code": "uninstall_transaction_unavailable", "execution": "not_run", "dry_run": True}
+        moved: list[tuple[Path, Path]] = []
+        for item, relative in zip(leaves, self._leaves(record, str(component_type))):
+            if not item.get("present"):
+                continue
+            target = _safe_leaf(root, relative)
+            if target is None or not target.is_file() or _is_reparse(target):
+                restored = self._restore_uninstall(moved)
+                self._discard_uninstall_backup(backup_root)
+                return {"status": "failed" if restored else "unavailable", "code": "uninstall_target_changed" if restored else "uninstall_manual_review", "execution": "not_run", "dry_run": True}
+            backup = _safe_leaf(backup_root, relative)
+            if backup is None:
+                self._restore_uninstall(moved)
+                self._discard_uninstall_backup(backup_root)
+                return {"status": "failed", "code": "uninstall_target_changed", "execution": "not_run"}
+            try:
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                os.rename(target, backup)
+                moved.append((target, backup))
+            except OSError:
+                restored = self._restore_uninstall(moved)
+                self._discard_uninstall_backup(backup_root)
+                return {"status": "failed" if restored else "unavailable", "code": "uninstall_delete_failed" if restored else "uninstall_manual_review", "execution": "not_run", "dry_run": True}
+
+        # The binding must still be current after all output moves and before
+        # receipt mutation. A drift here restores the original bytes.
+        binding, bound_record, binding_error = resolve_execution_binding(
+            plan,
+            catalog_binding=binding,
+            current_record=record,
+            binding_provider=binding_provider,
+        )
+        if binding is None:
+            restored = self._restore_uninstall(moved)
+            self._discard_uninstall_backup(backup_root) if restored else None
+            if not restored:
+                return {"status": "unavailable", "code": "uninstall_manual_review", "execution": "not_run", "dry_run": True}
+            return binding_refusal(binding_error or "catalog_binding_stale", component_id=component_id)
+
+        receipt_path = self._receipt_path()
+        if receipts.get("_present"):
+            try:
+                if receipts.get("_raw_bytes") is not None and receipt_path.read_bytes() != receipts["_raw_bytes"]:
+                    raise OSError("receipt_state_changed")
+                receipts["records"].pop(component_id, None)
+                _atomic_json(receipt_path, {"schema_version": receipts["schema_version"], "records": receipts["records"]})
+            except OSError:
+                restored = self._restore_uninstall(moved)
+                self._discard_uninstall_backup(backup_root) if restored else None
+                if not restored:
+                    return {"status": "unavailable", "code": "uninstall_manual_review", "execution": "not_run", "dry_run": True}
+                return {"status": "failed", "code": "receipt_write_failed", "execution": "not_run", "dry_run": True}
+        elif receipt_path.exists():
+            restored = self._restore_uninstall(moved)
+            self._discard_uninstall_backup(backup_root) if restored else None
+            if not restored:
+                return {"status": "unavailable", "code": "uninstall_manual_review", "execution": "not_run", "dry_run": True}
+            return self._receipt_state_refusal()
+
+        self._discard_uninstall_backup(backup_root)
+        return {"status": "completed", "action": "uninstall", "component_id": component_id, "removed_known_leaves": len(moved), "state": "NOT_INSTALLED", "execution": "completed", "next_action": "Refresh the component catalog."}
 
 
 __all__ = ["MaintenanceExecutor"]

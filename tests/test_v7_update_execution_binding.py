@@ -80,6 +80,33 @@ class V7UpdateExecutionBindingTests(unittest.TestCase):
     def _resolver(self) -> UpdateResolver:
         return UpdateResolver(paths=self.paths, catalog=self.catalog, source_service=_SourceService())
 
+    def _v2_uninstall_fixture(self) -> tuple[dict[str, object], SimpleNamespace, CatalogBindingContext, dict[str, object], Path]:
+        record = {**self.record, "files": [{"relative_path": "demo.bin", "size_bytes": 3}]}
+        catalog = SimpleNamespace(models={"demo-model": record}, runtimes={})
+        binding = CatalogBindingContext.for_v2(
+            catalog_version=self.catalog.catalog_version,
+            catalog_fingerprint=self.catalog.fingerprint,
+            source_identity=record["source_identity"],
+        )
+        root = self.paths.models_root / "demo-model"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "demo.bin").write_bytes(b"old")
+        candidate = record["update_candidate"]
+        plan: dict[str, object] = {
+            "schema_version": "component-maintenance-plan.v1",
+            "component_id": "demo-model",
+            "component_type": "model",
+            "action": "uninstall",
+            "catalog_fingerprint": binding.catalog_fingerprint,
+            "_catalog_binding": binding,
+            "_record": record,
+            "_record_revision": record["revision"],
+            "_install_strategy": record["install_strategy"],
+            "_latest_supported_revision": record["latest_supported_revision"],
+            "_candidate_fingerprint": hashlib.sha256(json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
+        }
+        return record, catalog, binding, plan, root
+
     def test_v2_update_writes_exact_typed_receipt_without_public_candidate(self) -> None:
         active = self.paths.models_root / "demo-model"
         active.mkdir(parents=True, exist_ok=True)
@@ -301,6 +328,59 @@ class V7UpdateExecutionBindingTests(unittest.TestCase):
         self.assertEqual(lookup["plan_id"], plan["plan_id"])
         self.assertEqual(lookup["execution"], "not_run")
         self.assertTrue(lookup["dry_run"])
+
+    def test_v2_uninstall_with_missing_receipt_removes_bytes_without_creating_legacy_store(self) -> None:
+        record, catalog, binding, plan, root = self._v2_uninstall_fixture()
+        receipt_path = self.paths.config_root / "component_install_receipts.json"
+        self.assertFalse(receipt_path.exists())
+        result = MaintenanceExecutor(paths=self.paths, catalog=catalog).apply(plan, confirmed=True, catalog_binding=binding, current_record=record)
+        self.assertEqual(result["status"], "completed")
+        self.assertFalse((root / "demo.bin").exists())
+        self.assertFalse(receipt_path.exists())
+
+    def test_v2_uninstall_with_malformed_or_unsupported_receipt_refuses_before_delete(self) -> None:
+        for raw in (b"{not-json", b'{"schema_version":"component-install-receipts.v1","records":{}}'):
+            with self.subTest(raw=raw):
+                record, catalog, binding, plan, root = self._v2_uninstall_fixture()
+                receipt_path = self.paths.config_root / "component_install_receipts.json"
+                receipt_path.write_bytes(raw)
+                result = MaintenanceExecutor(paths=self.paths, catalog=catalog).apply(plan, confirmed=True, catalog_binding=binding, current_record=record)
+                self.assertEqual(result["status"], "unavailable")
+                self.assertEqual(result["code"], "receipt_state_unavailable")
+                self.assertTrue(result["dry_run"])
+                self.assertEqual((root / "demo.bin").read_bytes(), b"old")
+                self.assertEqual(receipt_path.read_bytes(), raw)
+
+    def test_v2_uninstall_binding_drift_after_moves_restores_bytes_and_receipt(self) -> None:
+        record, catalog, binding, plan, root = self._v2_uninstall_fixture()
+        receipt_path = self.paths.config_root / "component_install_receipts.json"
+        original = b'{"schema_version":"component-install-receipts.v3","records":{"demo-model":{"state":"INSTALLED_UNVERIFIED"}}}\n'
+        receipt_path.write_bytes(original)
+        calls = 0
+        drifted = CatalogBindingContext.for_v2(
+            catalog_version="2026.08.22",
+            catalog_fingerprint=binding.catalog_fingerprint,
+            source_identity=binding.source_identity,
+        )
+
+        def provider(_component_id: object, _component_type: object) -> tuple[CatalogBindingContext, dict[str, object]]:
+            nonlocal calls
+            calls += 1
+            return (drifted if calls >= 3 else binding), record
+
+        result = MaintenanceExecutor(paths=self.paths, catalog=catalog).apply(
+            plan,
+            confirmed=True,
+            catalog_binding=binding,
+            current_record=record,
+            binding_provider=provider,
+        )
+        self.assertGreaterEqual(calls, 3)
+        self.assertEqual(result["status"], "conflict")
+        self.assertEqual(result["code"], "catalog_binding_stale")
+        self.assertTrue(result["dry_run"])
+        self.assertEqual((root / "demo.bin").read_bytes(), b"old")
+        self.assertEqual(receipt_path.read_bytes(), original)
 
     def test_v2_uninstall_preserves_v3_receipt_envelope_and_unrelated_record(self) -> None:
         record = {**self.record, "files": [{"relative_path": "demo.bin", "size_bytes": 3}]}
