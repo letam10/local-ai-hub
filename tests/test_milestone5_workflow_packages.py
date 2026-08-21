@@ -235,6 +235,7 @@ class WorkflowPackageServiceTests(unittest.TestCase):
 
         catalog = discover_managed_packages()
         self.assertEqual(catalog["status"], "partial")
+        self.assertEqual(catalog["execution"], "not_run")
         self.assertGreaterEqual(len(catalog["records"]), 2)
         self.assertNotIn(str(ROOT), json.dumps(catalog, ensure_ascii=False))
         loaded = load_managed_package("local-ai-hub.image-review", "1.1.0")
@@ -305,6 +306,75 @@ class WorkflowPackageServiceTests(unittest.TestCase):
             with mock.patch("src.services.workflow_packages.catalog.MANAGED_PACKAGE_ROOT", root), mock.patch.object(Path, "read_bytes", side_effect=AssertionError("oversized descriptor was read")):
                 catalog = discover_managed_packages()
             self.assertIn("managed_descriptor_size", {item["code"] for item in catalog["errors"]})
+
+    def test_catalog_rejects_same_size_same_byte_replacement_after_read(self) -> None:
+        import os
+
+        from src.services.workflow_packages import catalog as catalog_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            descriptor = root / "replacement.workflow-package.json"
+            payload = json.dumps(package_sample(), separators=(",", ":")).encode("utf-8")
+            descriptor.write_bytes(payload)
+            original_read_bytes = Path.read_bytes
+
+            def read_then_replace(path: Path) -> bytes:
+                value = original_read_bytes(path)
+                replacement = path.with_name("replacement.tmp")
+                replacement.write_bytes(value)
+                os.replace(replacement, path)
+                return value
+
+            with mock.patch.object(catalog_module, "MANAGED_PACKAGE_ROOT", root), mock.patch.object(Path, "read_bytes", side_effect=read_then_replace):
+                read_payload, error = catalog_module._read_managed_json(descriptor)
+            self.assertIsNone(read_payload)
+            self.assertEqual(error, "managed_descriptor_refused")
+
+    def test_catalog_rejects_directory_and_nested_reparse_descriptors_without_echo(self) -> None:
+        from src.services.workflow_packages import discover_managed_packages
+
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside_directory:
+            root = Path(directory)
+            outside = Path(outside_directory)
+            (root / "directory.workflow-package.json").mkdir()
+            (outside / "outside.workflow-package.json").write_text(json.dumps(package_sample()), encoding="utf-8")
+            link = root / "nested"
+            try:
+                link.symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest("symlink creation is unavailable in this test environment")
+            with mock.patch("src.services.workflow_packages.catalog.MANAGED_PACKAGE_ROOT", root):
+                catalog = discover_managed_packages()
+            codes = {item["code"] for item in catalog["errors"]}
+            self.assertIn("managed_entry_refused", codes)
+            self.assertEqual(catalog["records"], [])
+            self.assertEqual(catalog["execution"], "not_run")
+            serialized = json.dumps(catalog, ensure_ascii=False)
+            self.assertNotIn(str(outside), serialized)
+            self.assertNotIn("outside.workflow-package.json", serialized)
+
+    def test_catalog_root_reparse_is_unavailable_and_consumers_remain_static(self) -> None:
+        from src.services.workflow_packages import discover_managed_packages
+
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside_directory:
+            root = Path(directory)
+            outside = Path(outside_directory)
+            (outside / "outside.workflow-package.json").write_text(json.dumps(package_sample()), encoding="utf-8")
+            linked_root = root / "linked-root"
+            try:
+                linked_root.symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest("symlink creation is unavailable in this test environment")
+            with mock.patch("src.services.workflow_packages.catalog.MANAGED_PACKAGE_ROOT", linked_root):
+                catalog = discover_managed_packages()
+            self.assertEqual(catalog["status"], "unavailable")
+            self.assertEqual(catalog["records"], [])
+            self.assertEqual(catalog["scenarios"], [])
+            self.assertEqual(catalog["execution"], "not_run")
+            serialized = json.dumps(catalog, ensure_ascii=False)
+            self.assertNotIn(str(outside), serialized)
+            self.assertNotIn("outside.workflow-package.json", serialized)
 
     def test_diff_marks_hub_contract_changes_for_manual_review_and_orders_prereleases(self) -> None:
         from src.services.workflow_packages import diff_workflow_packages, plan_workflow_migration
