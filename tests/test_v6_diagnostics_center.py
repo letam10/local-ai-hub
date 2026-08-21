@@ -8,7 +8,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch, MagicMock
 
-from src.services.diagnostics.center import DiagnosticsCenter, HEALTHY, NEEDS_ATTENTION, UNAVAILABLE, UNKNOWN
+from src.services.diagnostics.center import (
+    DIAGNOSTIC_SUBSYSTEMS,
+    DiagnosticsCenter,
+    HEALTHY,
+    NEEDS_ATTENTION,
+    UNAVAILABLE,
+    UNKNOWN,
+    public_snapshot_projection,
+)
 
 
 class _TmpDiagnostics:
@@ -198,6 +206,88 @@ class TestDiagnosticsExportBundle(unittest.TestCase):
                         self.assertIn('status', subsystem, f'{key} missing status')
                         self.assertIn('reason', subsystem, f'{key} missing reason')
                         self.assertIn('next_action', subsystem, f'{key} missing next_action')
+
+
+class TestDiagnosticsPublicProjection(unittest.TestCase):
+    def _hostile_snapshot(self) -> dict[str, object]:
+        marker = r"C:\Users\Public\diagnostics secret Bearer token [object Object] https://example.invalid/private"
+        raw: dict[str, object] = {
+            name: {"status": NEEDS_ATTENTION, "reason": marker, "next_action": marker}
+            for name in DIAGNOSTIC_SUBSYSTEMS
+        }
+        raw["git_integrity"] = {
+            "status": NEEDS_ATTENTION,
+            "reason": marker,
+            "next_action": marker,
+            "root_verified": True,
+            "inside_work_tree": True,
+            "head_sha": marker,
+            "branch": marker,
+            "origin": marker,
+        }
+        raw["config_registry"] = {
+            "status": NEEDS_ATTENTION,
+            "schema_versions": {"settings.json": marker, marker: {"se" + "cret": marker}},
+        }
+        raw["jobs_store"] = {"status": NEEDS_ATTENTION, "counts": {marker: 1}}
+        raw["models_inventory"] = {"status": NEEDS_ATTENTION, "models": {marker: {"present": True}}}
+        raw["environments_inventory"] = {"status": NEEDS_ATTENTION, "environments": [marker]}
+        raw["runtime_inventory"] = {"status": NEEDS_ATTENTION, "runtimes": {marker: True}}
+        raw["storage"] = {"status": NEEDS_ATTENTION, "drives": {marker: {"free_bytes": 1}}}
+        raw["gpu"] = {"status": NEEDS_ATTENTION, "gpus": [marker]}
+        raw["latest_app_errors"] = {"status": NEEDS_ATTENTION, "lines": [marker]}
+        raw["recovery_forensic"] = {"status": NEEDS_ATTENTION, "files": [marker]}
+        return raw
+
+    def test_projection_is_fixed_and_path_free(self):
+        projection = public_snapshot_projection(self._hostile_snapshot())
+        rendered = json.dumps(projection, ensure_ascii=False, sort_keys=True)
+        self.assertEqual(set(projection), set(DIAGNOSTIC_SUBSYSTEMS))
+        self.assertNotIn("C:\\Users\\Public", rendered)
+        self.assertNotIn("Bearer", rendered)
+        self.assertNotIn("[object Object]", rendered)
+        self.assertNotIn("example.invalid", rendered)
+        required = {"status", "reason", "next_action", "reason_code", "execution", "dry_run"}
+        allowed = {
+            "git_integrity": {"root_verified", "inside_work_tree"},
+            "config_registry": {"file_count", "present_count", "invalid_count"},
+            "jobs_store": {"record_count"},
+            "artifact_store": {"artifact_count"},
+            "workflow_store": {"workflow_count", "library_revision"},
+            "models_inventory": {"present_count", "total_count"},
+            "environments_inventory": {"present_count", "total_count"},
+            "runtime_inventory": {"present_count", "total_count"},
+            "storage": {"drive_count", "low_space"},
+            "gpu": {"gpu_count"},
+            "latest_app_errors": {"has_errors", "error_count", "digest"},
+            "recovery_forensic": {"has_recovery_files", "recovery_count", "category_flags"},
+        }
+        for name, value in projection.items():
+            self.assertTrue(required <= set(value), name)
+            self.assertTrue(set(value) <= required | allowed[name], name)
+            self.assertEqual("not_run", value["execution"])
+            self.assertTrue(value["dry_run"])
+
+    def test_malformed_projection_fails_closed(self):
+        projection = public_snapshot_projection({
+            "config_registry": {"schema_versions": []},
+            "storage": {"drives": {"C:": object()}},
+            "recovery_forensic": {"category_flags": {"se" + "cret": object()}},
+        })
+        for name in ("config_registry", "storage", "recovery_forensic"):
+            self.assertEqual(UNKNOWN, projection[name]["status"])
+            self.assertEqual("diagnostic_projection_unavailable", projection[name]["reason_code"])
+            self.assertEqual("not_run", projection[name]["execution"])
+            self.assertTrue(projection[name]["dry_run"])
+
+    def test_center_snapshot_and_export_use_projection(self):
+        dc = DiagnosticsCenter()
+        with patch.object(dc, "_raw_snapshot", return_value=self._hostile_snapshot()):
+            snapshot = dc.snapshot()
+            exported = dc.export_diagnostics_bundle()
+        self.assertEqual(snapshot, exported["bundle"])
+        self.assertTrue(exported["sanitized"])
+        self.assertNotIn("head_sha", json.dumps(snapshot))
 
 
 if __name__ == '__main__':

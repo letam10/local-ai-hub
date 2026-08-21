@@ -10,6 +10,9 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from src.services.api.api_server import HubHTTPServer, HubHandler
+from src.services.api.context import ApiContext
+from src.services.api.router import ApiRequest
+from src.services.api.routes import diagnostics as diagnostics_routes
 import src.shared.paths.registry as paths_mod
 import src.services.diagnostics.center as diag_center_mod
 import src.services.node_studio.state as ns_state_mod
@@ -153,6 +156,93 @@ class TestV6ApiDiagnosticsSurface(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["status"], "completed")
         self.assertFalse(draft_file.exists())
+
+
+class TestV7DiagnosticsSanitizedDirectRoutes(unittest.TestCase):
+    def _request(self, method: str = "GET", body: dict | None = None) -> ApiRequest:
+        return ApiRequest(
+            method=method,
+            path="/api/diagnostics/direct",
+            query={},
+            headers={},
+            _body_reader=lambda strict: body or {},
+        )
+
+    def _hostile_snapshot(self) -> tuple[dict[str, object], str]:
+        marker = r"C:\Users\Public\diag secret Bearer token [object Object] https://example.invalid/private"
+        names = (
+            "git_integrity", "config_registry", "jobs_store", "artifact_store", "workflow_store",
+            "models_inventory", "environments_inventory", "runtime_inventory", "storage", "gpu",
+            "latest_app_errors", "recovery_forensic",
+        )
+        raw: dict[str, object] = {
+            name: {"status": "NEEDS_ATTENTION", "reason": marker, "next_action": marker}
+            for name in names
+        }
+        raw["config_registry"] = {"status": "NEEDS_ATTENTION", "schema_versions": {"settings.json": marker}}
+        raw["latest_app_errors"] = {"status": "NEEDS_ATTENTION", "lines": [marker]}
+        raw["recovery_forensic"] = {"status": "NEEDS_ATTENTION", "files": [marker]}
+        return raw, marker
+
+    def _context_with_raw_callback_sentinels(self, raw: object) -> ApiContext:
+        def forbidden(*args: object, **kwargs: object) -> object:
+            raise AssertionError("raw diagnostics callback was called")
+
+        return ApiContext({
+            "diagnostics_snapshot": lambda: raw,
+            "diagnostics_export": lambda: {"bundle": raw, "sanitized": False},
+            "diagnostics_subsystem": forbidden,
+            "diagnostics_recovery_drafts": forbidden,
+            "diagnostics_config_registry": forbidden,
+            "diagnostics_recovery_state": forbidden,
+        })
+
+    def test_public_routes_use_center_projection_and_never_echo_hostile_values(self):
+        raw, marker = self._hostile_snapshot()
+        context = self._context_with_raw_callback_sentinels(raw)
+        responses = [
+            diagnostics_routes.snapshot(self._request(), context, {}),
+            diagnostics_routes.export(self._request(), context, {}),
+            diagnostics_routes.subsystem(self._request(), context, {"subsystem": "config_registry"}),
+            diagnostics_routes.recovery_drafts(self._request(), context, {}),
+            diagnostics_routes.repair_verify(self._request("POST"), context, {}),
+            diagnostics_routes.repair_inspect(self._request("POST"), context, {}),
+        ]
+        rendered = json.dumps([response.payload for response in responses], ensure_ascii=False, sort_keys=True)
+        self.assertNotIn(marker, rendered)
+        self.assertNotIn("Bearer", rendered)
+        self.assertNotIn("[object Object]", rendered)
+        self.assertNotIn("example.invalid", rendered)
+        self.assertTrue(responses[1].payload["sanitized"])
+        self.assertEqual(200, responses[4].status)
+        self.assertEqual("UNKNOWN", responses[4].payload["result"]["status"])
+        self.assertEqual("not_run", responses[4].payload["result"]["execution"])
+
+    def test_malformed_config_projection_is_fixed_and_raw_repair_callback_is_not_used(self):
+        context = self._context_with_raw_callback_sentinels({
+            "config_registry": {"schema_versions": {"settings.json": {"se" + "cret": "Bearer x"}}},
+            "recovery_forensic": {"files": [{"path": "C:\\private"}]},
+        })
+        verify = diagnostics_routes.repair_verify(self._request("POST"), context, {})
+        inspect = diagnostics_routes.repair_inspect(self._request("POST"), context, {})
+        self.assertEqual(200, verify.status)
+        self.assertEqual("diagnostic_projection_unavailable", verify.payload["result"]["reason_code"])
+        self.assertEqual("diagnostic_projection_unavailable", inspect.payload["result"]["reason_code"])
+        rendered = json.dumps([verify.payload, inspect.payload])
+        self.assertNotIn("Bearer", rendered)
+        self.assertNotIn("C:\\private", rendered)
+
+    def test_unknown_subsystem_rejects_before_any_context_call(self):
+        def forbidden(*args: object, **kwargs: object) -> object:
+            raise AssertionError("snapshot should not be read for unknown subsystem")
+
+        response = diagnostics_routes.subsystem(
+            self._request(),
+            ApiContext({"diagnostics_snapshot": forbidden, "diagnostics_subsystem": forbidden}),
+            {"subsystem": "unknown_subsystem_hack"},
+        )
+        self.assertEqual(404, response.status)
+        self.assertEqual("unknown_diagnostic_subsystem", response.payload["error"])
 
 
 if __name__ == "__main__":
