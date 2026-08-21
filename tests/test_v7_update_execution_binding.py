@@ -383,6 +383,53 @@ class V7UpdateExecutionBindingTests(unittest.TestCase):
         self.assertEqual((root / "demo.bin").read_bytes(), b"old")
         self.assertEqual(receipt_path.read_bytes(), original)
 
+    def test_v2_uninstall_models_parent_reparse_before_restore_keeps_quarantine(self) -> None:
+        record, catalog, binding, plan, root = self._v2_uninstall_fixture()
+        receipt_path = self.paths.config_root / "component_install_receipts.json"
+        original = b'{"schema_version":"component-install-receipts.v3","records":{"demo-model":{"state":"INSTALLED_UNVERIFIED"}}}\n'
+        receipt_path.write_bytes(original)
+        outside = self.paths.data_root.parent / "outside-uninstall-restore"
+        outside.mkdir(parents=True, exist_ok=True)
+        sentinel = outside / "sentinel.bin"
+        sentinel.write_bytes(b"outside")
+        calls = 0
+        drifted = CatalogBindingContext.for_v2(
+            catalog_version="2026.08.22",
+            catalog_fingerprint=binding.catalog_fingerprint,
+            source_identity=binding.source_identity,
+        )
+
+        def provider(_component_id: object, _component_type: object) -> tuple[CatalogBindingContext, dict[str, object]]:
+            nonlocal calls
+            calls += 1
+            if calls >= 3:
+                # The managed component directory is empty after quarantine;
+                # replace the Models parent before the executor restores it.
+                root.rmdir()
+                self.paths.models_root.rmdir()
+                os.symlink(outside, self.paths.models_root, target_is_directory=True)
+                return drifted, record
+            return binding, record
+
+        try:
+            result = MaintenanceExecutor(paths=self.paths, catalog=catalog).apply(
+                plan,
+                confirmed=True,
+                catalog_binding=binding,
+                current_record=record,
+                binding_provider=provider,
+            )
+            self.assertEqual(result["status"], "unavailable")
+            self.assertEqual(result["code"], "uninstall_manual_review")
+            self.assertTrue(result["dry_run"])
+            self.assertEqual(sentinel.read_bytes(), b"outside")
+            self.assertFalse((outside / "demo.bin").exists())
+            self.assertEqual(receipt_path.read_bytes(), original)
+            self.assertTrue(list(self.paths.temp_root.glob(".component-uninstall-*")))
+        finally:
+            if self.paths.models_root.is_symlink():
+                self.paths.models_root.unlink()
+
     def test_v2_uninstall_same_byte_symlink_replacement_after_binding_check_refuses_and_restores(self) -> None:
         record, catalog, binding, plan, root = self._v2_uninstall_fixture()
         receipt_path = self.paths.config_root / "component_install_receipts.json"

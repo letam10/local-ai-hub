@@ -210,20 +210,54 @@ class MaintenanceExecutor:
             return {"schema_version": schema, "records": {}, "_present": True, "_valid": False, "_raw_bytes": raw_bytes, "_identity": initial_identity}
         return {"schema_version": schema, "records": dict(records), "_present": True, "_valid": True, "_raw_bytes": raw_bytes, "_identity": initial_identity}
 
-    @staticmethod
-    def _restore_uninstall(moved: list[tuple[Path, Path]]) -> bool:
-        """Restore reversible uninstall moves without overwriting a new file."""
+    def _restore_uninstall(
+        self,
+        moved: list[tuple[Path, Path, str]],
+        *,
+        record: Mapping[str, Any],
+        component_id: str,
+        component_type: str,
+        backup_root: Path,
+    ) -> bool:
+        """Restore only while the managed and quarantine chains remain safe.
 
+        A quarantine path is not authority to recreate a replaced managed
+        parent.  The full server-owned root chain and both leaves are checked
+        immediately before every rename; if any check is uncertain, the
+        quarantine is intentionally retained for manual review.
+        """
+
+        if not moved:
+            return True
         try:
-            for original, backup in reversed(moved):
-                if not backup.exists():
+            temp_relative = backup_root.relative_to(self.paths.temp_root).as_posix()
+        except (OSError, ValueError):
+            return False
+        try:
+            if _safe_leaf(self.paths.temp_root, temp_relative) != backup_root:
+                return False
+            if not backup_root.is_dir() or _is_reparse(backup_root):
+                return False
+            for original, backup, relative in reversed(moved):
+                managed_root = self._root(record, component_id, component_type)
+                if _safe_leaf(managed_root, relative) != original:
+                    return False
+                if _safe_leaf(backup_root, relative) != backup:
+                    return False
+                if original.exists() or _is_reparse(original) or not original.parent.is_dir() or _is_reparse(original.parent):
+                    return False
+                if not backup.is_file() or _is_reparse(backup) or not backup.parent.is_dir() or _is_reparse(backup.parent):
+                    return False
+                # Repeat all containment/identity checks immediately before
+                # this particular restore move; do not rely on the prior loop.
+                managed_root = self._root(record, component_id, component_type)
+                if _safe_leaf(managed_root, relative) != original or _safe_leaf(backup_root, relative) != backup:
                     return False
                 if original.exists() or _is_reparse(original) or _is_reparse(backup):
                     return False
-                original.parent.mkdir(parents=True, exist_ok=True)
                 os.rename(backup, original)
             return True
-        except OSError:
+        except (ComponentPathError, OSError, ValueError):
             return False
 
     @staticmethod
@@ -424,7 +458,17 @@ class MaintenanceExecutor:
             backup_root = Path(tempfile.mkdtemp(prefix=".component-uninstall-", dir=str(self.paths.temp_root)))
         except OSError:
             return {"status": "unavailable", "code": "uninstall_transaction_unavailable", "execution": "not_run", "dry_run": True}
-        moved: list[tuple[Path, Path]] = []
+        moved: list[tuple[Path, Path, str]] = []
+
+        def restore_moved() -> bool:
+            return self._restore_uninstall(
+                moved,
+                record=record,
+                component_id=component_id,
+                component_type=str(component_type),
+                backup_root=backup_root,
+            )
+
         for item, relative in zip(leaves, self._leaves(record, str(component_type))):
             if not item.get("present"):
                 continue
@@ -437,14 +481,14 @@ class MaintenanceExecutor:
             else:
                 target = _safe_leaf(root, relative)
             if target is None or not _leaf_matches(item, target):
-                restored = self._restore_uninstall(moved)
-                self._discard_uninstall_backup(backup_root)
+                restored = restore_moved()
+                self._discard_uninstall_backup(backup_root) if restored else None
                 return {"status": "failed" if restored else "unavailable", "code": "uninstall_target_changed" if restored else "uninstall_manual_review", "execution": "not_run", "dry_run": True}
             backup = _safe_leaf(backup_root, relative)
             if backup is None:
-                self._restore_uninstall(moved)
-                self._discard_uninstall_backup(backup_root)
-                return {"status": "failed", "code": "uninstall_target_changed", "execution": "not_run"}
+                restored = restore_moved()
+                self._discard_uninstall_backup(backup_root) if restored else None
+                return {"status": "failed" if restored else "unavailable", "code": "uninstall_target_changed" if restored else "uninstall_manual_review", "execution": "not_run", "dry_run": True}
             try:
                 backup.parent.mkdir(parents=True, exist_ok=True)
                 # The path and identity are checked again after backup
@@ -453,14 +497,14 @@ class MaintenanceExecutor:
                 if not _leaf_matches(item, target):
                     raise _ReceiptStateChanged("uninstall_target_changed")
                 os.rename(target, backup)
-                moved.append((target, backup))
+                moved.append((target, backup, relative))
             except _ReceiptStateChanged:
-                restored = self._restore_uninstall(moved)
-                self._discard_uninstall_backup(backup_root)
+                restored = restore_moved()
+                self._discard_uninstall_backup(backup_root) if restored else None
                 return {"status": "failed" if restored else "unavailable", "code": "uninstall_target_changed" if restored else "uninstall_manual_review", "execution": "not_run", "dry_run": True}
             except OSError:
-                restored = self._restore_uninstall(moved)
-                self._discard_uninstall_backup(backup_root)
+                restored = restore_moved()
+                self._discard_uninstall_backup(backup_root) if restored else None
                 return {"status": "failed" if restored else "unavailable", "code": "uninstall_delete_failed" if restored else "uninstall_manual_review", "execution": "not_run", "dry_run": True}
 
         # The binding must still be current after all output moves and before
@@ -472,7 +516,7 @@ class MaintenanceExecutor:
             binding_provider=binding_provider,
         )
         if binding is None:
-            restored = self._restore_uninstall(moved)
+            restored = restore_moved()
             self._discard_uninstall_backup(backup_root) if restored else None
             if not restored:
                 return {"status": "unavailable", "code": "uninstall_manual_review", "execution": "not_run", "dry_run": True}
@@ -481,7 +525,7 @@ class MaintenanceExecutor:
         receipt_path = self._receipt_path()
         if receipts.get("_present"):
             if receipts.get("_identity") is None or _receipt_identity(receipt_path) != receipts.get("_identity"):
-                restored = self._restore_uninstall(moved)
+                restored = restore_moved()
                 self._discard_uninstall_backup(backup_root) if restored else None
                 if not restored:
                     return {"status": "unavailable", "code": "uninstall_manual_review", "execution": "not_run", "dry_run": True}
@@ -497,19 +541,19 @@ class MaintenanceExecutor:
                     expected_bytes=receipts.get("_raw_bytes"),
                 )
             except _ReceiptStateChanged:
-                restored = self._restore_uninstall(moved)
+                restored = restore_moved()
                 self._discard_uninstall_backup(backup_root) if restored else None
                 if not restored:
                     return {"status": "unavailable", "code": "uninstall_manual_review", "execution": "not_run", "dry_run": True}
                 return self._receipt_state_refusal()
             except OSError:
-                restored = self._restore_uninstall(moved)
+                restored = restore_moved()
                 self._discard_uninstall_backup(backup_root) if restored else None
                 if not restored:
                     return {"status": "unavailable", "code": "uninstall_manual_review", "execution": "not_run", "dry_run": True}
                 return {"status": "failed", "code": "receipt_write_failed", "execution": "not_run", "dry_run": True}
         elif receipt_path.exists() or _is_reparse(receipt_path):
-            restored = self._restore_uninstall(moved)
+            restored = restore_moved()
             self._discard_uninstall_backup(backup_root) if restored else None
             if not restored:
                 return {"status": "unavailable", "code": "uninstall_manual_review", "execution": "not_run", "dry_run": True}

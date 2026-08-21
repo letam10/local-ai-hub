@@ -53,6 +53,13 @@ same identity and raw bytes. Same-byte replacement with a symlink/reparse or
 any other identity drift moves the leaves back and leaves the receipt state
 unchanged.
 
+Restoration is guarded by the same full data-root-to-component chain and by
+validated containment of both the managed and quarantine leaves immediately
+before each reverse move. If the managed parent becomes a reparse point or
+otherwise changes during the refusal path, no parent is created and no
+quarantine file is renamed through it; the quarantine is retained for bounded
+manual review and the public result remains `not_run`/`dry_run`.
+
 Managed model paths are resolved through the server-owned data-root to
 `Models/<component>` chain. Every existing ancestor is checked for ordinary
 directory identity and reparse state before inspection, directory creation,
