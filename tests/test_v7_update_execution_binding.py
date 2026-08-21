@@ -406,6 +406,31 @@ class V7UpdateExecutionBindingTests(unittest.TestCase):
         self.assertTrue(receipt_path.is_symlink())
         self.assertEqual(receipt_path.read_bytes(), original)
 
+    def test_v2_uninstall_same_size_leaf_replacement_after_preflight_is_not_moved(self) -> None:
+        record, catalog, binding, plan, root = self._v2_uninstall_fixture()
+        receipt_path = self.paths.config_root / "component_install_receipts.json"
+        original_receipt = b'{"schema_version":"component-install-receipts.v3","records":{"other":{"state":"INSTALLED_UNVERIFIED"}}}\n'
+        receipt_path.write_bytes(original_receipt)
+        module = __import__("src.services.component_installer.maintenance_executor", fromlist=["_leaf_matches"])
+        original_match = module._leaf_matches
+        calls = 0
+
+        def replace_after_preflight(item: object, path: Path) -> bool:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                # Same path and size, but different bytes.  The captured
+                # digest/stat must prevent this foreign file from being moved.
+                path.write_bytes(b"new")
+            return original_match(item, path)
+
+        with patch("src.services.component_installer.maintenance_executor._leaf_matches", side_effect=replace_after_preflight):
+            result = MaintenanceExecutor(paths=self.paths, catalog=catalog).apply(plan, confirmed=True, catalog_binding=binding, current_record=record)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["code"], "uninstall_target_changed")
+        self.assertEqual((root / "demo.bin").read_bytes(), b"new")
+        self.assertEqual(receipt_path.read_bytes(), original_receipt)
+
     def test_v2_uninstall_preserves_v3_receipt_envelope_and_unrelated_record(self) -> None:
         record = {**self.record, "files": [{"relative_path": "demo.bin", "size_bytes": 3}]}
         catalog = SimpleNamespace(models={"demo-model": record}, runtimes={})
@@ -462,6 +487,89 @@ class V7UpdateExecutionBindingTests(unittest.TestCase):
         self.assertNotIn("demo-model", after["records"])
         self.assertEqual(after["records"]["other-model"], before["records"]["other-model"])
         self.assertFalse((root / "demo.bin").exists())
+
+    def test_update_refuses_reparse_models_root_before_any_managed_write(self) -> None:
+        outside = self.paths.data_root.parent / "outside-model-root"
+        outside.mkdir(parents=True, exist_ok=True)
+        sentinel = outside / "sentinel.bin"
+        sentinel.write_bytes(b"outside")
+        self.paths.models_root.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(outside, self.paths.models_root, target_is_directory=True)
+        try:
+            resolver = self._resolver()
+            plan = resolver.plan_update("demo-model")
+            result = resolver.apply_update(plan["plan_id"], confirmed=True)
+            self.assertIn(result["code"], {"unsafe_update_root", "update_root_reparse"})
+            self.assertEqual(sentinel.read_bytes(), b"outside")
+            self.assertFalse((self.paths.config_root / "component_install_receipts.json").exists())
+        finally:
+            if self.paths.models_root.is_symlink():
+                self.paths.models_root.unlink()
+
+    def test_update_refuses_models_parent_replacement_before_activation(self) -> None:
+        self.paths.models_root.mkdir(parents=True, exist_ok=True)
+        outside = self.paths.data_root.parent / "outside-model-parent"
+        outside.mkdir(parents=True, exist_ok=True)
+        sentinel = outside / "sentinel.bin"
+        sentinel.write_bytes(b"outside")
+        resolver = self._resolver()
+        plan = resolver.plan_update("demo-model")
+        module = __import__("src.services.operational_closure.update_executor", fromlist=["_safe_model_root"])
+        original_root = module._safe_model_root
+        calls = 0
+
+        def replace_parent(paths: HubPaths, component_id: str) -> Path | None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                self.paths.models_root.rmdir()
+                os.symlink(outside, self.paths.models_root, target_is_directory=True)
+            return original_root(paths, component_id)
+
+        try:
+            with patch("src.services.operational_closure.update_executor._safe_model_root", side_effect=replace_parent):
+                result = resolver.apply_update(plan["plan_id"], confirmed=True)
+            self.assertEqual(result["code"], "update_root_reparse")
+            self.assertEqual(sentinel.read_bytes(), b"outside")
+            self.assertFalse((self.paths.config_root / "component_install_receipts.json").exists())
+        finally:
+            if self.paths.models_root.is_symlink():
+                self.paths.models_root.unlink()
+
+    def test_maintenance_refuses_reparse_models_root_before_leaf_inspection(self) -> None:
+        outside = self.paths.data_root.parent / "outside-maintenance-root"
+        outside.mkdir(parents=True, exist_ok=True)
+        sentinel = outside / "sentinel.bin"
+        sentinel.write_bytes(b"outside")
+        record = {**self.record, "files": [{"relative_path": "demo.bin", "size_bytes": 3}]}
+        catalog = SimpleNamespace(models={"demo-model": record}, runtimes={})
+        binding = CatalogBindingContext.for_v2(
+            catalog_version=self.catalog.catalog_version,
+            catalog_fingerprint=self.catalog.fingerprint,
+            source_identity=record["source_identity"],
+        )
+        plan = {
+            "schema_version": "component-maintenance-plan.v1",
+            "component_id": "demo-model",
+            "component_type": "model",
+            "action": "uninstall",
+            "catalog_fingerprint": binding.catalog_fingerprint,
+            "_catalog_binding": binding,
+            "_record": record,
+            "_record_revision": record["revision"],
+            "_install_strategy": record["install_strategy"],
+            "_latest_supported_revision": record["latest_supported_revision"],
+            "_candidate_fingerprint": hashlib.sha256(json.dumps(record["update_candidate"], sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
+        }
+        os.symlink(outside, self.paths.models_root, target_is_directory=True)
+        try:
+            result = MaintenanceExecutor(paths=self.paths, catalog=catalog).apply(plan, confirmed=True, catalog_binding=binding, current_record=record)
+            self.assertEqual(result["code"], "unsafe_or_reparse_component_root")
+            self.assertEqual(sentinel.read_bytes(), b"outside")
+            self.assertFalse((self.paths.config_root / "component_install_receipts.json").exists())
+        finally:
+            if self.paths.models_root.is_symlink():
+                self.paths.models_root.unlink()
 
 
 if __name__ == "__main__":

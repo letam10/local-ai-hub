@@ -21,7 +21,7 @@ import tempfile
 import time
 from typing import Any
 
-from src.platform.paths import HubPaths
+from src.platform.paths import ComponentPathError, HubPaths, resolve_component_leaf, resolve_component_root
 
 
 class _ReceiptStateChanged(OSError):
@@ -48,25 +48,12 @@ def _is_reparse(path: Path) -> bool:
 
 def _safe_leaf(root: Path, relative: str) -> Path | None:
     try:
-        root = root.absolute()
-        candidate = (root / Path(relative)).absolute()
-        candidate.relative_to(root)
-    except (OSError, ValueError):
+        # The shared resolver checks the full original ancestor chain before
+        # using resolved containment.  It also allows an absent leaf for the
+        # first-use/maintenance inspection seam without following reparses.
+        return resolve_component_leaf(root, relative, require_exists=False)
+    except (ComponentPathError, OSError, ValueError):
         return None
-    current = candidate
-    while True:
-        if _is_reparse(current):
-            return None
-        if current == root:
-            break
-        if current.parent == current:
-            return None
-        current = current.parent
-    try:
-        candidate.resolve().relative_to(root.resolve())
-    except (OSError, ValueError):
-        return None
-    return candidate
 
 
 def _sha256(path: Path) -> str:
@@ -75,6 +62,37 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _leaf_attestation(path: Path) -> dict[str, Any] | None:
+    """Capture a bounded regular-file identity before an uninstall move."""
+
+    identity = _receipt_identity(path)
+    if identity is None:
+        return None
+    try:
+        size = int(path.stat().st_size)
+        digest = _sha256(path) if size <= 64 * 1024 * 1024 else None
+    except (OSError, ValueError, TypeError):
+        return None
+    # A hash read is only useful if the same ordinary file remained present for
+    # the whole capture.  Never treat absence from a later snapshot as proof.
+    if _receipt_identity(path) != identity:
+        return None
+    return {"identity": identity, "size_bytes": size, "sha256": digest}
+
+
+def _leaf_matches(item: Mapping[str, Any], path: Path) -> bool:
+    attestation = _leaf_attestation(path)
+    if attestation is None:
+        return False
+    expected_identity = item.get("_identity")
+    if not isinstance(expected_identity, tuple) or attestation["identity"] != expected_identity:
+        return False
+    if attestation["size_bytes"] != item.get("size_bytes"):
+        return False
+    expected_hash = item.get("sha256")
+    return expected_hash is None or attestation["sha256"] == expected_hash
 
 
 def _receipt_identity(path: Path) -> tuple[int, int, int, int, int] | None:
@@ -149,11 +167,16 @@ class MaintenanceExecutor:
         return records.get(component_id) if isinstance(records, Mapping) else None
 
     def _root(self, record: Mapping[str, Any], component_id: str, component_type: str) -> Path:
-        if component_type == "model":
-            return self.paths.models_root / component_id
-        if record.get("root_class") == "environments_root":
-            return self.paths.environments_root
-        return self.paths.runtime_root
+        root_class = "models_root" if component_type == "model" else record.get("root_class")
+        if root_class not in {"models_root", "runtime_root", "environments_root", "external_managed", None}:
+            raise ComponentPathError("unknown_root_class")
+        return resolve_component_root(
+            self.paths,
+            component_id,
+            component_type,
+            root_class=root_class,
+            require_exists=False,
+        )
 
     def _leaves(self, record: Mapping[str, Any], component_type: str) -> list[str]:
         if component_type == "model":
@@ -241,8 +264,12 @@ class MaintenanceExecutor:
             present = target.is_file() and not _is_reparse(target)
             item: dict[str, Any] = {"relative_leaf": relative, "present": present}
             if present:
-                item["size_bytes"] = target.stat().st_size
-                item["sha256"] = _sha256(target) if target.stat().st_size <= 64 * 1024 * 1024 else None
+                attestation = _leaf_attestation(target)
+                if attestation is None:
+                    return False, leaves
+                item["_identity"] = attestation["identity"]
+                item["size_bytes"] = attestation["size_bytes"]
+                item["sha256"] = attestation["sha256"]
             leaves.append(item)
         return True, leaves
 
@@ -275,7 +302,10 @@ class MaintenanceExecutor:
         record = bound_record if isinstance(bound_record, Mapping) else self._record(component_id, str(component_type))
         if not isinstance(record, Mapping):
             return {"status": "error", "code": "unknown_component", "execution": "not_run"}
-        root = self._root(record, component_id, str(component_type))
+        try:
+            root = self._root(record, component_id, str(component_type))
+        except (ComponentPathError, OSError, ValueError):
+            return {"status": "unavailable", "code": "unsafe_or_reparse_component_root", "execution": "not_run", "dry_run": True}
         valid_root, leaves = self._verify_leaves(root, record, str(component_type))
         if not valid_root:
             return {"status": "failed", "code": "unsafe_or_reparse_component_leaf", "execution": "not_run"}
@@ -372,6 +402,12 @@ class MaintenanceExecutor:
         )
         if binding is None:
             return binding_refusal(binding_error or "catalog_binding_stale", component_id=component_id)
+        # Revalidate the complete server-owned data -> managed-root chain
+        # immediately before any uninstall transaction can create/move data.
+        try:
+            root = self._root(record, component_id, str(component_type))
+        except (ComponentPathError, OSError, ValueError):
+            return {"status": "unavailable", "code": "unsafe_or_reparse_component_root", "execution": "not_run", "dry_run": True}
         if self._shared_reference(component_id, record, receipts["records"]):
             return {"status": "conflict", "code": "shared_dependency_in_use", "execution": "not_run", "next_action": "Remove dependent components first; shared runtime/model leaves are preserved."}
         # Validate all leaves before the first delete.  Unknown files are never
@@ -380,7 +416,7 @@ class MaintenanceExecutor:
             target = _safe_leaf(root, relative)
             if target is None or not item.get("present"):
                 continue
-            if target.is_file() and not _is_reparse(target):
+            if _leaf_matches(item, target):
                 continue
             return {"status": "failed", "code": "uninstall_target_changed", "execution": "not_run"}
         try:
@@ -392,8 +428,15 @@ class MaintenanceExecutor:
         for item, relative in zip(leaves, self._leaves(record, str(component_type))):
             if not item.get("present"):
                 continue
-            target = _safe_leaf(root, relative)
-            if target is None or not target.is_file() or _is_reparse(target):
+            try:
+                # Recheck the full data-root -> managed-root chain and the
+                # captured leaf identity immediately before each move.
+                root = self._root(record, component_id, str(component_type))
+            except (ComponentPathError, OSError, ValueError):
+                target = None
+            else:
+                target = _safe_leaf(root, relative)
+            if target is None or not _leaf_matches(item, target):
                 restored = self._restore_uninstall(moved)
                 self._discard_uninstall_backup(backup_root)
                 return {"status": "failed" if restored else "unavailable", "code": "uninstall_target_changed" if restored else "uninstall_manual_review", "execution": "not_run", "dry_run": True}
@@ -404,8 +447,17 @@ class MaintenanceExecutor:
                 return {"status": "failed", "code": "uninstall_target_changed", "execution": "not_run"}
             try:
                 backup.parent.mkdir(parents=True, exist_ok=True)
+                # The path and identity are checked again after backup
+                # preparation, so a same-size replacement cannot be moved as
+                # if it were the catalog-attested leaf.
+                if not _leaf_matches(item, target):
+                    raise _ReceiptStateChanged("uninstall_target_changed")
                 os.rename(target, backup)
                 moved.append((target, backup))
+            except _ReceiptStateChanged:
+                restored = self._restore_uninstall(moved)
+                self._discard_uninstall_backup(backup_root)
+                return {"status": "failed" if restored else "unavailable", "code": "uninstall_target_changed" if restored else "uninstall_manual_review", "execution": "not_run", "dry_run": True}
             except OSError:
                 restored = self._restore_uninstall(moved)
                 self._discard_uninstall_backup(backup_root)

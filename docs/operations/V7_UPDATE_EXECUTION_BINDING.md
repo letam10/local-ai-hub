@@ -52,3 +52,14 @@ inside the atomic replacement, the path must still be non-reparse with the
 same identity and raw bytes. Same-byte replacement with a symlink/reparse or
 any other identity drift moves the leaves back and leaves the receipt state
 unchanged.
+
+Managed model paths are resolved through the server-owned data-root to
+`Models/<component>` chain. Every existing ancestor is checked for ordinary
+directory identity and reparse state before inspection, directory creation,
+activation, rollback, or restoration, and the chain is checked again at each
+rename boundary. An absent component leaf is therefore not permission to
+follow a replaced `Models` parent or an external junction. During uninstall,
+each catalog leaf carries a bounded lstat identity, size, and streaming hash
+attestation; a same-size or same-byte path replacement is a fixed
+`uninstall_target_changed`/manual-review refusal and is never moved as the
+managed component.

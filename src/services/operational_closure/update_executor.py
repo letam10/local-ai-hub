@@ -19,7 +19,7 @@ import tempfile
 import time
 from typing import Any
 
-from src.platform.paths import HubPaths
+from src.platform.paths import ComponentPathError, HubPaths, resolve_component_root
 from src.services.component_installer.downloader import DownloadError, TrustedDownloader
 from src.services.component_installer.receipts import CatalogBindingContext, ReceiptError, read_receipts, source_identity, write_component_receipt
 
@@ -180,25 +180,43 @@ def _is_reparse(path: Path) -> bool:
 
 def _safe_leaf(root: Path, relative: str) -> Path | None:
     try:
-        root = root.absolute()
-        candidate = (root / Path(relative)).absolute()
+        if not isinstance(relative, str) or not relative or relative.startswith(("/", "\\")) or ":" in relative:
+            return None
+        relative_parts = relative.replace("\\", "/").split("/")
+        if any(part in {"", ".", ".."} for part in relative_parts):
+            return None
+        root = Path(os.path.normpath(os.path.abspath(os.fspath(root))))
+        candidate = Path(os.path.normpath(os.path.join(os.fspath(root), *relative_parts)))
         candidate.relative_to(root)
     except (OSError, ValueError):
         return None
+    # Validate every existing original ancestor, not only the supplied
+    # component root.  This catches a reparse/junction at Models or any data
+    # ancestor before resolved containment is considered.
     current = candidate
     while True:
         if _is_reparse(current):
             return None
-        if current == root:
-            break
         if current.parent == current:
-            return None
+            break
         current = current.parent
     try:
-        candidate.resolve().relative_to(root.resolve())
+        resolved_root = os.path.realpath(os.fspath(root))
+        resolved_candidate = os.path.realpath(os.fspath(candidate))
+        if os.path.commonpath((os.path.normcase(resolved_root), os.path.normcase(resolved_candidate))) != os.path.normcase(resolved_root):
+            return None
     except (OSError, ValueError):
         return None
     return candidate
+
+
+def _safe_model_root(paths: HubPaths, component_id: str) -> Path | None:
+    """Resolve the complete data-root -> Models -> component chain."""
+
+    try:
+        return resolve_component_root(paths, component_id, "model", root_class="models_root", require_exists=False)
+    except (ComponentPathError, OSError, ValueError):
+        return None
 
 
 def _sha256(path: Path) -> str:
@@ -263,6 +281,8 @@ class ComponentUpdateExecutor:
         """Restore the pre-activation roots after a binding/receipt refusal."""
 
         try:
+            if _safe_model_root(self.paths, root.name) is None:
+                return
             if root.exists() and not _is_reparse(root):
                 os.rename(root, candidate_root)
             if previous_root is not None and previous_root.exists() and not _is_reparse(previous_root) and not root.exists():
@@ -276,6 +296,8 @@ class ComponentUpdateExecutor:
         """Restore both roots after a rollback receipt failure or drift."""
 
         try:
+            if _safe_model_root(self.paths, root.name) is None:
+                return
             if root.exists() and not _is_reparse(root) and not previous.exists():
                 os.rename(root, previous)
             if current_backup.exists() and not _is_reparse(current_backup) and not root.exists():
@@ -320,7 +342,9 @@ class ComponentUpdateExecutor:
         actual_hash = _sha256(source)
         if not isinstance(expected_hash, str) or len(expected_hash) != 64 or actual_hash != expected_hash.lower():
             return {"status": "failed", "code": "update_candidate_checksum_mismatch", "execution": "not_run"}
-        root = self.paths.models_root / component_id
+        root = _safe_model_root(self.paths, component_id)
+        if root is None:
+            return {"status": "unavailable", "code": "unsafe_update_root", "execution": "not_run", "dry_run": True}
         target = _safe_leaf(root, relative)
         if target is None:
             return {"status": "failed", "code": "unsafe_update_target", "execution": "not_run"}
@@ -341,14 +365,24 @@ class ComponentUpdateExecutor:
             shutil.copy2(source, staged_target)
             if _sha256(staged_target) != actual_hash:
                 return {"status": "failed", "code": "update_stage_checksum_mismatch", "execution": "not_run"}
+            # Revalidate the full data-root -> Models -> component chain
+            # before creating or renaming any managed model directory.
+            if _safe_model_root(self.paths, component_id) is None:
+                return {"status": "failed", "code": "update_root_reparse", "execution": "not_run"}
             root.parent.mkdir(parents=True, exist_ok=True)
-            if root.exists() and _is_reparse(root):
+            root = _safe_model_root(self.paths, component_id)
+            if root is None or (root.exists() and _is_reparse(root)):
                 return {"status": "failed", "code": "update_root_reparse", "execution": "not_run"}
             if root.exists():
                 previous_root = self.paths.models_root / ".versions" / component_id / str(plan.get("installed_revision") or "previous")
+                previous_relative = Path(".versions") / component_id / str(plan.get("installed_revision") or "previous")
+                if _safe_leaf(self.paths.models_root, previous_relative.as_posix()) is None:
+                    return {"status": "failed", "code": "update_root_reparse", "execution": "not_run"}
                 if previous_root.exists() or _is_reparse(previous_root):
                     return {"status": "conflict", "code": "rollback_slot_exists", "execution": "not_run"}
                 previous_root.parent.mkdir(parents=True, exist_ok=True)
+                if _safe_model_root(self.paths, component_id) is None or _safe_leaf(self.paths.models_root, previous_relative.as_posix()) is None:
+                    return {"status": "failed", "code": "update_root_reparse", "execution": "not_run"}
                 os.rename(root, previous_root)
             binding, bound_record, binding_error = resolve_execution_binding(
                 plan,
@@ -361,6 +395,8 @@ class ComponentUpdateExecutor:
                 return binding_refusal(binding_error or "catalog_binding_stale", component_id=component_id)
             staged_mtime_ns = int(staged_target.stat().st_mtime_ns)
             try:
+                if _safe_model_root(self.paths, component_id) is None or _is_reparse(root) or _safe_leaf(self.paths.temp_root, candidate_root.relative_to(self.paths.temp_root).as_posix()) is None:
+                    raise OSError("update_root_reparse")
                 os.rename(candidate_root, root)
             except OSError:
                 if previous_root is not None and previous_root.exists() and not root.exists():
@@ -441,11 +477,17 @@ class ComponentUpdateExecutor:
         receipt_binding = _coerce_binding({key: receipt.get(key) for key in ("catalog_schema", "catalog_revision", "catalog_fingerprint", "source_identity")})
         if receipt_binding is None or receipt_binding.as_record_fields() != binding.as_record_fields():
             return binding_refusal("catalog_binding_stale", component_id=component_id)
-        previous = self.paths.models_root / ".versions" / component_id / str(receipt.get("previous_version") or "previous")
-        root = self.paths.models_root / component_id
+        previous_relative = Path(".versions") / component_id / str(receipt.get("previous_version") or "previous")
+        previous = self.paths.models_root / previous_relative
+        root = _safe_model_root(self.paths, component_id)
+        if root is None or _safe_leaf(self.paths.models_root, previous_relative.as_posix()) is None:
+            return {"status": "unavailable", "code": "rollback_candidate_missing", "execution": "not_run"}
         if not previous.is_dir() or _is_reparse(previous) or root.exists() and _is_reparse(root):
             return {"status": "unavailable", "code": "rollback_candidate_missing", "execution": "not_run"}
         current_backup = self.paths.models_root / ".versions" / component_id / f"active-{int(time.time())}"
+        backup_relative = Path(".versions") / component_id / current_backup.name
+        if _safe_leaf(self.paths.models_root, backup_relative.as_posix()) is None:
+            return {"status": "unavailable", "code": "rollback_candidate_missing", "execution": "not_run"}
         try:
             binding, bound_record, binding_error = resolve_execution_binding(
                 expected_plan,
@@ -456,7 +498,12 @@ class ComponentUpdateExecutor:
             if binding is None:
                 return binding_refusal(binding_error or "catalog_binding_stale", component_id=component_id)
             if root.exists():
+                if _safe_model_root(self.paths, component_id) is None or _safe_leaf(self.paths.models_root, backup_relative.as_posix()) is None:
+                    return {"status": "unavailable", "code": "rollback_candidate_missing", "execution": "not_run"}
                 os.rename(root, current_backup)
+            if _safe_model_root(self.paths, component_id) is None or _safe_leaf(self.paths.models_root, previous_relative.as_posix()) is None:
+                self._restore_rollback(root, previous, current_backup)
+                return {"status": "unavailable", "code": "rollback_candidate_missing", "execution": "not_run"}
             os.rename(previous, root)
             receipt = dict(receipt)
             receipt["rollback_candidate"] = False
