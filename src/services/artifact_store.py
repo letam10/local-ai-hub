@@ -20,7 +20,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from src.shared.paths.registry import CONFIG_ROOT, OUTPUT_ROOT, ROOT, TEMP_ROOT
 
@@ -827,6 +827,7 @@ def register_worker_outputs(
     paths: list[str | Path],
     *,
     provenance: dict[str, Any],
+    expected_outputs: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]] | None:
     """Publish a completed worker output batch atomically.
 
@@ -863,6 +864,21 @@ def register_worker_outputs(
         public: list[dict[str, Any]] = []
         changed = False
         for candidate in candidates:
+            expected = expected_outputs.get(str(candidate)) if isinstance(expected_outputs, Mapping) else None
+            if ".hub-reserved" in candidate.parts and expected is None:
+                # Reservation staging must carry the identity/digest attestation
+                # into this publication boundary; legacy callers cannot claim it.
+                return None
+            if expected is not None:
+                current = _scope_file_identity(candidate)
+                if (
+                    current is None
+                    or _scope_reparse(candidate)
+                    or current.get("file_id") != expected.get("file_id")
+                    or current.get("size_bytes") != expected.get("size_bytes")
+                    or _hash_file(candidate) != (expected.get("size_bytes"), expected.get("sha256"))
+                ):
+                    return None
             record = next((item for item in index.values() if item.get("path") == str(candidate)), None)
             if record is not None:
                 existing_provenance = record.get("provenance")

@@ -313,6 +313,58 @@ class V7JobOutputOwnershipFinalizationTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), b"foreign")
         self.assertEqual(artifact_store.list_artifacts(), [])
 
+    def test_staged_replacement_before_registration_is_not_published(self) -> None:
+        job = reservations.create_reservation("job_20260821_010101_efefefef", "e" * 64, "run_media_operation")
+        self.assertIsNotNone(job)
+        rid = job["reservation_id"]
+        target = reservations.reserve_output_path(rid, "stage-race.bin")
+        target.write_bytes(b"owned-stage")
+        reservations.begin_producing(rid)
+        original_register = artifact_store.register_worker_outputs
+        attempted = {"done": False}
+
+        def replace_then_register(paths, *, provenance, expected_outputs=None):
+            stage = Path(paths[0])
+            replacement = stage.with_name("foreign-stage.bin")
+            replacement.write_bytes(b"foreign-stage")
+            try:
+                replacement.replace(stage)
+            except OSError:
+                attempted["done"] = True
+                raise
+            attempted["done"] = True
+            return original_register(paths, provenance=provenance)
+
+        provenance = {"job_id": job["job_id"], "job_spec_fingerprint": "e" * 64, "adapter_id": "run_media_operation", "attempt": 1, "status": "completed"}
+        with patch.object(artifact_store, "register_worker_outputs", side_effect=replace_then_register):
+            result = reservations.commit_reservation(rid, {"status": "completed", "output": str(target)}, provenance=provenance, require_output=True)
+        self.assertTrue(attempted["done"])
+        self.assertEqual(result["status"], "manual_review")
+        staged_foreign = list((self.output_root / ".hub-reserved").rglob("foreign-stage.bin"))
+        self.assertEqual(len(staged_foreign), 1)
+        self.assertEqual(staged_foreign[0].read_bytes(), b"foreign-stage")
+        self.assertEqual(artifact_store.list_artifacts(), [])
+
+    def test_manifest_replacement_after_atomic_install_refuses_and_cleans_scope(self) -> None:
+        manifest = self.index_path.with_name(".job_output_reservations.json")
+        original_replace = reservations.os.replace
+        replaced = {"done": False}
+
+        def replace_then_foreign(source, destination):
+            original_replace(source, destination)
+            if destination == manifest and not replaced["done"]:
+                foreign = manifest.with_name(".foreign-manifest.json")
+                foreign.write_text('{"schema_version":"job-output-reservation.v1","records":{}}\n', encoding="utf-8")
+                original_replace(foreign, manifest)
+                replaced["done"] = True
+
+        with patch.object(reservations.os, "replace", side_effect=replace_then_foreign):
+            created = reservations.create_reservation("job_20260821_010101_fefefefe", "f" * 64, "legacy")
+        self.assertIsNone(created)
+        self.assertTrue(replaced["done"])
+        self.assertEqual(reservations._load_manifest()["records"], {})
+        self.assertFalse(any((self.temp_root / "job-reservations").glob("output_res_*")))
+
     def test_inventory_has_no_unknown_producer(self) -> None:
         self.assertTrue(validate_producer_inventory())
         self.assertTrue(producer_inventory())

@@ -20,7 +20,7 @@ import threading
 import uuid
 import ctypes
 from ctypes import wintypes
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -291,6 +291,27 @@ def _open_source_locked(path: Path, expected: tuple[int, str, dict[str, int]]):
             kernel32.CloseHandle(handle)
 
 
+def _stream_matches_expected(stream: Any, expected: tuple[int, str, dict[str, int]]) -> bool:
+    """Hash an already-held stream without reopening the mutable pathname."""
+
+    try:
+        stream.seek(0)
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_OUTPUT_BYTES:
+                return False
+            digest.update(chunk)
+        stream.seek(0)
+        return total == expected[0] and digest.hexdigest() == expected[1]
+    except (OSError, ValueError):
+        return False
+
+
 def _strict_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -365,6 +386,7 @@ def _save_manifest(manifest: Mapping[str, Any]) -> bool:
     parent_identity: dict[str, int] | None = None
     target_before: dict[str, int] | None = None
     target_existed = False
+    previous_bytes: bytes | None = None
     try:
         payload = {"schema_version": RESERVATION_SCHEMA, "records": manifest.get("records", {})}
         encoded = (json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
@@ -381,6 +403,9 @@ def _save_manifest(manifest: Mapping[str, Any]) -> bool:
             target_before = _identity(path)
             if target_before is None:
                 return False
+            if path.stat().st_size > MAX_MANIFEST_BYTES:
+                return False
+            previous_bytes = path.read_bytes()
         elif _reparse(path):
             return False
         handle, name = tempfile.mkstemp(prefix=".job-output-reservation-", suffix=".tmp", dir=parent)
@@ -405,7 +430,39 @@ def _save_manifest(manifest: Mapping[str, Any]) -> bool:
             return False
         os.replace(temporary, path)
         temporary = None
-        if _identity(path) is None or _reparse(path) or not _full_safe_chain(parent):
+        installed_identity = _identity(path)
+        installed_bytes = path.read_bytes() if installed_identity is not None and path.stat().st_size <= MAX_MANIFEST_BYTES else None
+        if (
+            installed_identity is None
+            or installed_bytes != encoded
+            or _reparse(path)
+            or not _full_safe_chain(parent)
+        ):
+            # If a previous manifest existed, make a best-effort atomic
+            # restoration before reporting refusal.  When the target was
+            # absent, leave an ambiguous foreign replacement untouched.
+            if previous_bytes is not None and _full_safe_chain(parent) and _same_object(parent_identity, _directory_identity(parent)):
+                restore_temp: Path | None = None
+                restore_identity: dict[str, int] | None = None
+                try:
+                    handle, name = tempfile.mkstemp(prefix=".job-output-reservation-restore-", suffix=".tmp", dir=parent)
+                    os.close(handle)
+                    restore_temp = Path(name)
+                    restore_identity = _identity(restore_temp)
+                    if restore_identity is None:
+                        return False
+                    with restore_temp.open("wb") as stream:
+                        stream.write(previous_bytes)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    if _identity(restore_temp) is not None and _same_object(restore_identity, _identity(restore_temp)) and _same_object(parent_identity, _directory_identity(parent)):
+                        os.replace(restore_temp, path)
+                        restore_temp = None
+                except OSError:
+                    pass
+                finally:
+                    if restore_temp is not None and restore_identity is not None:
+                        _delete_identity_attested(restore_temp, restore_identity)
             return False
         return True
     except (OSError, TypeError, ValueError):
@@ -619,7 +676,7 @@ def _hash_stable(path: Path) -> tuple[int, str, dict[str, int]] | None:
     return total, digest.hexdigest(), after
 
 
-def _copy_reserved_file(source: Path, reservation_id: str, relative: str, expected: tuple[int, str, dict[str, int]]) -> Path | None:
+def _copy_reserved_file(source: Path, reservation_id: str, relative: str, expected: tuple[int, str, dict[str, int]]) -> tuple[Path, tuple[int, str, dict[str, int]]] | None:
     destination_root = artifact_store.OUTPUT_ROOT / ".hub-reserved" / reservation_id
     destination = destination_root / Path(relative).name
     temporary: Path | None = None
@@ -687,7 +744,7 @@ def _copy_reserved_file(source: Path, reservation_id: str, relative: str, expect
             if destination_identity is None or not _full_safe_chain(destination_root):
                 return None
             published = True
-            return destination
+            return destination, (expected[0], expected[1], destination_identity)
     except OSError:
         return None
     finally:
@@ -718,7 +775,7 @@ def commit_reservation(reservation_id: str, result: object, *, provenance: Mappi
             record["state"] = "manual_review"
             _save_manifest(manifest)
             return {"status": "manual_review", "code": "OUTPUT_COUNT_LIMIT"}
-        copied: list[tuple[Path, dict[str, int]]] = []
+        copied: list[tuple[Path, tuple[int, str, dict[str, int]]]] = []
         seen: set[str] = set()
         total_bytes = 0
         for candidate in candidates:
@@ -735,24 +792,54 @@ def commit_reservation(reservation_id: str, result: object, *, provenance: Mappi
                 record["state"] = "manual_review"
                 _save_manifest(manifest)
                 return {"status": "manual_review", "code": "OUTPUT_SIZE_LIMIT"}
-            destination = _copy_reserved_file(candidate, reservation_id, relative, stable)
-            if destination is None:
+            staged = _copy_reserved_file(candidate, reservation_id, relative, stable)
+            if staged is None:
                 record["state"] = "manual_review"
                 _save_manifest(manifest)
                 return {"status": "manual_review", "code": "OUTPUT_OWNERSHIP_UNPROVEN"}
-            destination_identity = _identity(destination)
-            if destination_identity is None:
-                record["state"] = "manual_review"
-                _save_manifest(manifest)
-                return {"status": "manual_review", "code": "OUTPUT_OWNERSHIP_UNPROVEN"}
-            copied.append((destination, destination_identity))
-        artifacts = artifact_store.register_worker_outputs([path for path, _identity_value in copied], provenance=dict(provenance))
-        if not isinstance(artifacts, list) or len(artifacts) != len(copied):
-            for staged_path, staged_identity in copied:
-                _delete_identity_attested(staged_path, staged_identity)
-            record["state"] = "failed"
+            copied.append(staged)
+        registration_failure = False
+        artifacts: list[dict[str, Any]] | None = None
+        with ExitStack() as locks:
+            for staged_path, staged_expected in copied:
+                stream = locks.enter_context(_open_source_locked(staged_path, staged_expected))
+                if stream is None or not _stream_matches_expected(stream, staged_expected):
+                    registration_failure = True
+                    break
+            if not registration_failure:
+                try:
+                    expected_outputs = {
+                        str(path): {
+                            "size_bytes": expected[0],
+                            "sha256": expected[1],
+                            "file_id": expected[2].get("file_id"),
+                        }
+                        for path, expected in copied
+                    }
+                    artifacts = artifact_store.register_worker_outputs(
+                        [path for path, _expected in copied],
+                        provenance=dict(provenance),
+                        expected_outputs=expected_outputs,
+                    )
+                    if isinstance(artifacts, list):
+                        for staged_path, staged_expected in copied:
+                            if not _same_object(staged_expected[2], _identity(staged_path)):
+                                registration_failure = True
+                                break
+                except (OSError, ValueError, TypeError):
+                    registration_failure = True
+        if registration_failure:
+            for staged_path, staged_expected in copied:
+                _delete_identity_attested(staged_path, staged_expected[2])
+            record["state"] = "manual_review"
             _save_manifest(manifest)
-            return {"status": "failed", "code": "OUTPUT_PUBLISH_FAILED"}
+            return {"status": "manual_review", "code": "OUTPUT_OWNERSHIP_UNPROVEN"}
+        if not isinstance(artifacts, list) or len(artifacts) != len(copied):
+            for staged_path, staged_expected in copied:
+                _delete_identity_attested(staged_path, staged_expected[2])
+            record["state"] = "manual_review"
+            _save_manifest(manifest)
+            return {"status": "manual_review", "code": "OUTPUT_OWNERSHIP_UNPROVEN"}
         record["state"] = "published"
         if not _save_manifest(manifest):
             return {"status": "unavailable", "code": "OUTPUT_RESERVATION_PERSISTENCE_FAILED"}
