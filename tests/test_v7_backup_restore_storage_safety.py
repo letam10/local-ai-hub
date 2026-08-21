@@ -92,6 +92,27 @@ class V7BackupRestoreStorageSafetyTests(unittest.TestCase):
         self.assertTrue(applied["verified"])
         self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8")), {"schema_version": 2, "settings_revision": 1})
 
+    def test_root_level_draft_uses_fixed_public_category_and_root_target(self) -> None:
+        marker = "node_studio_draft_archive_marker.json"
+        draft = self.config / marker
+        draft.write_text('{"draft":true}', encoding="utf-8")
+        manager = self.manager()
+        created = manager.create_backup()
+        self.assertTrue(created["accepted"], created)
+
+        draft.unlink()
+        plan = manager.plan_restore(created["backup_id"])
+        self.assertTrue(plan["accepted"], plan)
+        encoded = json.dumps(plan, ensure_ascii=False)
+        self.assertNotIn(marker, encoded)
+        self.assertEqual(plan["categories"].get("drafts"), 1)
+        self.assertTrue(set(plan["categories"]).issubset({"settings", "creative_workspace", "workflow_library", "drafts"}))
+
+        applied = manager.apply_restore(plan["plan_id"], confirmed=True)
+        self.assertTrue(applied["accepted"], applied)
+        self.assertEqual(json.loads(draft.read_text(encoding="utf-8")), {"draft": True})
+        self.assertFalse((self.config / "drafts" / marker).exists())
+
     def test_manifest_closed_schema_duplicate_and_wrong_types_fail_without_echo(self) -> None:
         marker = "archive-marker-" + "sentinel"
         cases: list[tuple[str, dict[str, object] | None, bytes | None]] = [
@@ -225,6 +246,39 @@ class V7BackupRestoreStorageSafetyTests(unittest.TestCase):
             original_replace(source, target)
 
         with patch.object(bm.os, "replace", side_effect=fail_second):
+            result = manager.apply_restore(plan["plan_id"], confirmed=True)
+        self.assertFalse(result["accepted"])
+        self.assertFalse(result["verified"])
+        self.assertEqual(self.settings.read_bytes(), settings_before)
+        self.assertEqual(self.workspace.read_bytes(), workspace_before)
+        self.assertEqual(list(self.config.glob(".backup-restore-*")), [])
+
+    def test_post_replace_guard_failure_rolls_back_already_replaced_file(self) -> None:
+        manager = self.manager()
+        created = manager.create_backup()
+        self.assertTrue(created["accepted"], created)
+        self.settings.write_text('{"schema_version":2,"settings_revision":99}', encoding="utf-8")
+        self.workspace.write_text('{"schema_version":1,"projects":["new"]}', encoding="utf-8")
+        plan = manager.plan_restore(created["backup_id"])
+        self.assertTrue(plan["accepted"], plan)
+        settings_before = self.settings.read_bytes()
+        workspace_before = self.workspace.read_bytes()
+        archive = manager._resolve_backup_target(created["backup_id"])
+        self.assertIsNotNone(archive)
+        archive = archive if archive is not None else self.backups / "missing.zip"
+        original_replace = bm.os.replace
+        calls = 0
+
+        def replace_then_replace_archive(source: object, target: object) -> None:
+            nonlocal calls
+            calls += 1
+            original_replace(source, target)
+            if calls == 1:
+                replacement = self.backups / ".same-byte-archive-replacement.zip"
+                replacement.write_bytes(archive.read_bytes())
+                original_replace(replacement, archive)
+
+        with patch.object(bm.os, "replace", side_effect=replace_then_replace_archive):
             result = manager.apply_restore(plan["plan_id"], confirmed=True)
         self.assertFalse(result["accepted"])
         self.assertFalse(result["verified"])

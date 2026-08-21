@@ -284,8 +284,17 @@ def _public_member(member: str) -> str:
     return member if member in _FIXED_MEMBERS else "drafts"
 
 
+def _public_category(member: str) -> str:
+    categories = {
+        "settings.json": "settings",
+        "creative_workspace.json": "creative_workspace",
+        "workflow_library.json": "workflow_library",
+    }
+    return categories.get(member, "drafts")
+
+
 def _public_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
-    categories = sorted({_public_member(str(member)) for member in manifest.get("files", {})})
+    categories = sorted({_public_category(str(member)) for member in manifest.get("files", {})})
     return {
         "schema_version": manifest.get("schema_version"),
         "hub_backup_version": manifest.get("hub_backup_version"),
@@ -648,7 +657,15 @@ class BackupManager:
     def _member_target_guard(self, member: str, config_guard: _Guard) -> tuple[Path, _Guard]:
         if not _safe_member(member):
             raise _StorageUnsafe
-        target = _lexical(config_guard.path / member)
+        if member in _FIXED_MEMBERS:
+            target_name = member
+        elif _DRAFT_MEMBER_RE.fullmatch(member) is not None:
+            # Drafts are archived under a fixed namespace but remain root-level
+            # Config leaves for compatibility with Node Studio's storage shape.
+            target_name = member.removeprefix("drafts/")
+        else:
+            raise _StorageUnsafe
+        target = _lexical(config_guard.path / target_name)
         return target, _guard(target, kind="file", anchor=config_guard.path, allow_missing=True)
 
     def _state_fingerprint(self, config_guard: _Guard) -> str:
@@ -670,7 +687,7 @@ class BackupManager:
             manifest = inspect["manifest"]
             entries: list[dict[str, Any]] = []
             changes: list[dict[str, Any]] = []
-            categories: dict[str, list[str]] = {"settings": [], "creative_workspace": [], "workflow_library": [], "drafts": []}
+            categories: dict[str, int] = {"settings": 0, "creative_workspace": 0, "workflow_library": 0, "drafts": 0}
             backup_epoch = 0.0
             try:
                 backup_epoch = datetime.fromisoformat(str(manifest["created_at"])).timestamp()
@@ -684,14 +701,7 @@ class BackupManager:
                 action = "create" if target_guard.target_identity is None else "overwrite"
                 if target_guard.target_identity is not None and backup_epoch and target_guard.target_identity.mtime_ns / 1_000_000_000 > backup_epoch + 5:
                     action = "skip_newer"
-                if member.startswith("drafts/"):
-                    categories["drafts"].append(member)
-                elif member == "settings.json":
-                    categories["settings"].append(member)
-                elif member == "creative_workspace.json":
-                    categories["creative_workspace"].append(member)
-                elif member == "workflow_library.json":
-                    categories["workflow_library"].append(member)
+                categories[_public_category(member)] += 1
                 changes.append({"member": _public_member(member), "action": action, "size_bytes": int(meta["size_bytes"]), "reason": "Review the fixed Config member before confirmation."})
                 entries.append({"member": member, "action": action, "target": target, "prior_identity": target_guard.target_identity, "prior_bytes": prior_bytes})
             if len(entries) > _MAX_PLAN_ENTRIES or not _guard_same(config_guard):
@@ -844,9 +854,12 @@ class BackupManager:
                         raise _StorageUnsafe
                     os.replace(item["stage"], target)
                     item["stage"] = None
+                    # Record the successful replacement before any post-commit
+                    # guard. If a guard detects drift, rollback must still know
+                    # which file was changed and the identity to restore/remove.
+                    applied.append({"target": target, "prior_bytes": entry.get("prior_bytes"), "applied_identity": item["stage_guard"].target_identity})
                     if not _guard_same(config_guard) or not _guard_same(archive_guard):
                         raise _StorageUnsafe
-                    applied.append({"target": target, "prior_bytes": entry.get("prior_bytes"), "applied_identity": _guard(target, kind="file", anchor=config_guard.path, allow_missing=False).target_identity})
                 applied_members = [item["entry"]["member"] for item in staged]
                 result = {"accepted": True, "applied": [_public_member(member) for member in applied_members], "skipped": [item["member"] for item in plan.get("changes", []) if item.get("action") == "skip_newer"], "verified": True}
                 with _PLANS_LOCK:

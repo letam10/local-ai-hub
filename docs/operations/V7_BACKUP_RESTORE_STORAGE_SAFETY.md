@@ -38,17 +38,23 @@ duplicate ZIP members, oversized entries, and decompression over the fixed
 bound are rejected.
 
 Public inspection and plan projections expose only opaque backup/plan IDs,
-fixed categories, bounded counts, statuses, and fixed safe codes. Archive
-member names, local paths, ZIP/library errors, exception text, URLs, secrets,
-and client-supplied archive values are not reflected.
+fixed categories, bounded counts, statuses, and fixed safe codes. Draft
+members use the fixed `drafts` category/count; their archive-controlled names
+are never public. Internally, the archive namespace `drafts/<safe-name>` maps
+back to the existing root-level Config draft leaf, and never creates an
+arbitrary `Config/drafts` restore path. Archive member names, local paths,
+ZIP/library errors, exception text, URLs, secrets, and client-supplied archive
+values are not reflected.
 
 ## Restore transaction
 
 Restore is plan-first and requires explicit confirmation. The complete target
 set is revalidated and staged before the first Config replacement. A failure,
 identity race, reparse change, or write error rolls back already-applied
-members using their identity-bound prior bytes. If rollback cannot be proven
-safe, the result is `recovery_required`/manual review with
+members using their identity-bound prior bytes. Every successful replacement
+is recorded before its post-commit guard, so a guard failure after a replace
+still enters rollback. If rollback cannot be proven safe, the result is
+`recovery_required`/manual review with
 `accepted=false` and `verified=false`; the manager never reports a partial
 restore as accepted.
 
