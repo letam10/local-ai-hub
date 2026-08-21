@@ -41,6 +41,12 @@ const NODE_UI_STATE_VERSION = 1;
 const NODE_UI_STATE_PREFIX = `${LOCAL_PREFIX}:ui:v${NODE_UI_STATE_VERSION}`;
 const OPAQUE_ARTIFACT_ID = /^artifact_[a-f0-9]{32}$/;
 const SAFE_ARTIFACT_URL = /^\/api\/artifacts\/artifact_[a-f0-9]{32}$/;
+const SAFE_MEDIA_TYPE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/;
+const UNSAFE_ARTIFACT_TEXT = /(?:[a-z]:[\\/]|\\\\|(?:https?|file|data|ftp):|\b(?:bearer|api[_-]?key|password|secret|token|cookie|private[_ -]?key)\b|\b(?:cmd|powershell|bash|ffmpeg|python|callable|manifest|command)\b)/i;
+const MAX_PREVIEW_ARTIFACTS = 32;
+const MAX_ARTIFACT_SCAN_ITEMS = 256;
+const MAX_ARTIFACT_CHILDREN = 128;
+const MAX_ARTIFACT_NAME_LENGTH = 160;
 const MEDIA_OPERATION_SCOPE_IDS = Object.freeze(["video_grade", "logo_overlay", "encode"]);
 const MEDIA_OPERATION_SCOPE_LABELS = Object.freeze({ video_grade: "Video grade", logo_overlay: "Logo overlay", encode: "Encode" });
 const MEDIA_OPERATION_SCOPE_FALLBACK = Object.freeze({ status: "unavailable", execution: "not_run", evidenceVerified: false, availableOperations: [], operationStatus: { video_grade: "partial", logo_overlay: "partial", encode: "partial" }, reason: "No completed exact media evidence is available in this server snapshot.", nextAction: "Keep these operations partial until separately evidenced." });
@@ -150,24 +156,36 @@ export function chooseConnectionCandidate(candidates) {
 }
 
 export function safeArtifactProjection(value) {
-  if (!value || typeof value !== "object") return { safe: false, reason: "Artifact metadata is unavailable." };
-  const id = String(value.id || "");
-  const url = String(value.url || "");
-  const mediaType = String(value.media_type || "application/octet-stream").split(";", 1)[0].trim().toLocaleLowerCase();
-  if (!OPAQUE_ARTIFACT_ID.test(id) || url !== `/api/artifacts/${id}` || !SAFE_ARTIFACT_URL.test(url)) {
-    return { safe: false, reason: "Preview requires the existing opaque Hub artifact URL." };
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return { safe: false, reason: "Artifact metadata is unavailable." };
+    const id = typeof value.id === "string" ? value.id : "";
+    const url = typeof value.url === "string" ? value.url : "";
+    if (!OPAQUE_ARTIFACT_ID.test(id) || url !== `/api/artifacts/${id}` || !SAFE_ARTIFACT_URL.test(url)) {
+      return { safe: false, reason: "Preview requires the existing opaque Hub artifact URL." };
+    }
+    if (value.media_type !== undefined && typeof value.media_type !== "string") return { safe: false, reason: "Artifact metadata is unavailable." };
+    if (value.name !== undefined && typeof value.name !== "string") return { safe: false, reason: "Artifact metadata is unavailable." };
+    if (value.size_bytes !== undefined && value.size_bytes !== null && (!Number.isSafeInteger(value.size_bytes) || value.size_bytes < 0)) return { safe: false, reason: "Artifact metadata is unavailable." };
+    if (value.mask !== undefined && typeof value.mask !== "boolean") return { safe: false, reason: "Artifact metadata is unavailable." };
+    const mediaType = (value.media_type || "application/octet-stream").split(";", 1)[0].trim().toLocaleLowerCase();
+    if (!SAFE_MEDIA_TYPE.test(mediaType)) return { safe: false, reason: "Artifact metadata is unavailable." };
+    const rawName = value.name || "Artifact";
+    if (UNSAFE_ARTIFACT_TEXT.test(rawName)) return { safe: false, reason: "Artifact metadata is unavailable." };
+    const name = rawName.replace(/[\\/\r\n]+/g, " ").replace(/\s+/g, " ").trim().slice(0, MAX_ARTIFACT_NAME_LENGTH) || "Artifact";
+    const kind = mediaType.startsWith("image/") ? "image" : mediaType.startsWith("video/") ? "video" : mediaType.startsWith("audio/") ? "audio" : "metadata";
+    return {
+      safe: true,
+      id,
+      url,
+      name,
+      mediaType,
+      sizeBytes: value.size_bytes === undefined || value.size_bytes === null ? null : value.size_bytes,
+      kind,
+      mask: value.mask === true || mediaType.includes("mask"),
+    };
+  } catch {
+    return { safe: false, reason: "Artifact metadata is unavailable." };
   }
-  const kind = mediaType.startsWith("image/") ? "image" : mediaType.startsWith("video/") ? "video" : mediaType.startsWith("audio/") ? "audio" : "metadata";
-  return {
-    safe: true,
-    id,
-    url,
-    name: String(value.name || "Artifact").replace(/[\\/\r\n]+/g, " ").slice(0, 160),
-    mediaType,
-    sizeBytes: Number.isFinite(Number(value.size_bytes)) ? Number(value.size_bytes) : null,
-    kind,
-    mask: Boolean(value.mask || mediaType.includes("mask")),
-  };
 }
 
 function readWorkflowIndex(scope) {
@@ -225,14 +243,108 @@ function emptyGraph(scope) {
   return { schema_version: 1, id: `local-${scope}`, title: `Workflow ${scope}`, scope, nodes: [], edges: [], groups: [] };
 }
 
-function firstArtifact(value) {
-  if (!value || typeof value !== "object") return null;
-  if (value.id && value.url) return value;
-  for (const child of Object.values(value)) {
-    const found = firstArtifact(child);
-    if (found) return found;
+export function collectArtifactProjections(values) {
+  const roots = Array.isArray(values) ? values : [values];
+  const items = [];
+  const seenIds = new Set();
+  const seenObjects = new Set();
+  let inspected = 0;
+  let truncated = false;
+  const visit = (value) => {
+    if (inspected >= MAX_ARTIFACT_SCAN_ITEMS || items.length >= MAX_PREVIEW_ARTIFACTS) {
+      truncated = true;
+      return;
+    }
+    if (!value || typeof value !== "object" || seenObjects.has(value)) return;
+    seenObjects.add(value);
+    inspected += 1;
+    try {
+      if (!Array.isArray(value)) {
+        const id = typeof value.id === "string" ? value.id : typeof value.artifact_id === "string" ? value.artifact_id : "";
+        if (id && (Object.prototype.hasOwnProperty.call(value, "url") || Object.prototype.hasOwnProperty.call(value, "media_type"))) {
+          const safe = safeArtifactProjection({
+            id,
+            url: value.url,
+            media_type: value.media_type,
+            name: value.name,
+            size_bytes: value.size_bytes,
+            mask: value.mask,
+          });
+          if (safe.safe && !seenIds.has(safe.id)) {
+            seenIds.add(safe.id);
+            items.push(safe);
+          }
+        }
+      }
+      if (items.length >= MAX_PREVIEW_ARTIFACTS) {
+        truncated = true;
+        return;
+      }
+      const keys = Array.isArray(value) ? value.map((_, index) => index) : Object.keys(value);
+      if (keys.length > MAX_ARTIFACT_CHILDREN) truncated = true;
+      for (const key of keys.slice(0, MAX_ARTIFACT_CHILDREN)) {
+        visit(value[key]);
+        if (items.length >= MAX_PREVIEW_ARTIFACTS) {
+          truncated = true;
+          return;
+        }
+      }
+    } catch {
+      return;
+    }
+  };
+  for (const root of roots) {
+    visit(root);
+    if (items.length >= MAX_PREVIEW_ARTIFACTS) {
+      truncated = true;
+      break;
+    }
   }
-  return null;
+  return { items, truncated };
+}
+
+const ARTIFACT_PREVIEW_STATE_COPY = Object.freeze({
+  completed: ["Published artifacts", "This node completed, but only server-published opaque artifacts are shown."],
+  partial: ["Partial output", "This node is partial; only safe published artifacts can be previewed."],
+  failed: ["No artifact from failed run", "This node failed or was cancelled; no artifact is available from this run."],
+  unavailable: ["Preview unavailable", "This node is unavailable; no artifact is claimed in this snapshot."],
+  not_run: ["No artifact output yet", "Execution is not claimed; run state has not published an artifact."],
+});
+
+function artifactPreviewState(value) {
+  const status = typeof value === "string" ? value.toLocaleLowerCase() : "";
+  if (status === "error" || status === "cancelled") return "failed";
+  return Object.prototype.hasOwnProperty.call(ARTIFACT_PREVIEW_STATE_COPY, status) ? status : "not_run";
+}
+
+function artifactPreviewButton(artifact) {
+  const metadata = JSON.stringify({ media_type: artifact.mediaType, ...(artifact.sizeBytes === null ? {} : { size_bytes: artifact.sizeBytes }) });
+  return `<button class="button button--compact" type="button" data-preview-artifact="${escapeHtml(artifact.id)}" data-artifact-url="${escapeHtml(artifact.url)}" data-artifact-name="${escapeHtml(artifact.name)}" data-artifact-type="${escapeHtml(artifact.mediaType)}" data-artifact-mask="${String(artifact.mask)}" data-artifact-meta="${escapeHtml(metadata)}">Open preview</button>`;
+}
+
+function artifactPreviewItem(artifact) {
+  const label = artifact.mask ? `Mask · ${artifact.mediaType}` : artifact.mediaType;
+  const media = artifact.kind === "image"
+    ? `<img class="graph-preview-image${artifact.mask ? " graph-preview-image--mask" : ""}" src="${escapeHtml(artifact.url)}" alt="${escapeHtml(artifact.name)}" loading="lazy" />`
+    : artifact.kind === "video"
+      ? `<video class="graph-preview-media" controls preload="metadata" src="${escapeHtml(artifact.url)}">Video preview unavailable in this browser.</video>`
+      : artifact.kind === "audio"
+        ? `<audio class="graph-preview-media" controls preload="metadata" src="${escapeHtml(artifact.url)}">Audio preview unavailable in this browser.</audio>`
+        : `<div class="graph-preview-fallback"><strong>No native preview</strong><p>Escaped metadata only; this artifact type is not rendered as media.</p></div>`;
+  return `<article class="graph-preview-card" data-artifact-id="${escapeHtml(artifact.id)}"><div class="graph-preview-card__head"><strong>${escapeHtml(artifact.name)}</strong><span class="tag">${escapeHtml(label)}</span></div>${media}<dl class="graph-preview-meta"><div><dt>Artifact</dt><dd>${escapeHtml(artifact.id)}</dd></div><div><dt>Type</dt><dd>${escapeHtml(label)}</dd></div><div><dt>Size</dt><dd>${artifact.sizeBytes === null ? "unavailable" : `${escapeHtml(String(artifact.sizeBytes))} bytes`}</dd></div></dl><div class="graph-preview-card__actions">${artifactPreviewButton(artifact)}</div></article>`;
+}
+
+export function renderArtifactPreviewMarkup(collection, state = {}) {
+  const collected = collection && Array.isArray(collection.items)
+    ? collection
+    : collectArtifactProjections(collection);
+  const items = Array.isArray(collected.items) ? collected.items : [];
+  const previewState = artifactPreviewState(state?.status);
+  const [title, message] = ARTIFACT_PREVIEW_STATE_COPY[previewState];
+  const summary = `<div class="graph-preview-summary" data-artifact-state="${escapeHtml(previewState)}"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(message)}</span></div>`;
+  if (!items.length) return `${summary}<p class="graph-empty graph-preview-empty">Preview unavailable in this node snapshot; no safe artifact was published.</p>`;
+  const truncation = collected.truncated ? `<p class="graph-preview-truncated">Showing the first ${MAX_PREVIEW_ARTIFACTS} safe artifacts; additional output metadata is unavailable.</p>` : "";
+  return `${summary}<div class="graph-preview-list" aria-label="Node output artifacts">${items.map(artifactPreviewItem).join("")}</div>${truncation}`;
 }
 
 function graphFingerprint(graph) {
@@ -285,6 +397,7 @@ class HubGraphEditor {
     this.future = [];
     this.dirty = new Set();
     this.nodeStates = new Map();
+    this.runProvenance = [];
     this.activeJobId = null;
     this.autoPreview = localStorage.getItem(`${keyFor(this.scope)}:auto`) === "true";
     this.draft = localStorage.getItem(`${keyFor(this.scope)}:draft`) !== "false";
@@ -584,6 +697,7 @@ class HubGraphEditor {
       this.history = [];
       this.future = [];
       this.nodeStates.clear();
+      this.runProvenance = [];
       this.hydrateLiteGraph(result.validation.graph);
       this.savedFingerprint = graphFingerprint(result.validation.graph);
       this.unsaved = false;
@@ -601,6 +715,7 @@ class HubGraphEditor {
     this.history = [];
     this.future = [];
     this.nodeStates.clear();
+    this.runProvenance = [];
     this.hydrateLiteGraph(copy);
     this.savedFingerprint = "";
     this.unsaved = true;
@@ -1181,8 +1296,9 @@ class HubGraphEditor {
     const node = nodes[0];
     const definition = this.registry.get(node.hubType);
     const state = this.nodeStates.get(node.hubId) || {};
-    const artifact = firstArtifact(state.output);
-    const preview = this.renderArtifactPreview(artifact);
+    const provenance = this.runProvenance.filter((item) => item && item.node_id === node.hubId);
+    const artifactCollection = collectArtifactProjections([state.output, provenance]);
+    const preview = this.renderArtifactPreview(artifactCollection, state);
     const operationEvidence = this.operationEvidenceFor(definition);
     const availability = this.operationAvailabilityFor(definition);
     const action = this.scope === "media" && !operationEvidence ? availability.action : state.next_action || availability.action;
@@ -1204,16 +1320,8 @@ class HubGraphEditor {
     }
   }
 
-  renderArtifactPreview(artifact) {
-    if (!artifact) return `<p class="graph-empty">No artifact output yet; execution has not been claimed.</p>`;
-    const safe = safeArtifactProjection(artifact);
-    if (!safe.safe) return `<div class="graph-preview-fallback"><strong>Preview unavailable</strong><p>${escapeHtml(safe.reason)}</p><p>Only escaped, opaque Hub artifact metadata is displayed.</p></div>`;
-    const metadata = `<dl class="graph-preview-meta"><div><dt>Artifact</dt><dd>${escapeHtml(safe.name)}</dd></div><div><dt>Type</dt><dd>${escapeHtml(safe.mediaType)}</dd></div>${safe.sizeBytes === null ? "" : `<div><dt>Size</dt><dd>${escapeHtml(String(safe.sizeBytes))} bytes</dd></div>`}</dl>`;
-    const open = `<button class="button button--compact" type="button" data-preview-artifact="${escapeHtml(safe.id)}" data-artifact-url="${escapeHtml(safe.url)}" data-artifact-name="${escapeHtml(safe.name)}" data-artifact-type="${escapeHtml(safe.mediaType)}" data-artifact-mask="${String(safe.mask)}">Open preview</button>`;
-    if (safe.kind === "image") return `${metadata}<img class="graph-preview-image" src="${escapeHtml(safe.url)}" alt="${escapeHtml(safe.name)}" loading="lazy" />${open}`;
-    if (safe.kind === "video") return `${metadata}<video class="graph-preview-media" controls preload="metadata" src="${escapeHtml(safe.url)}">Video preview unavailable in this browser.</video>${open}`;
-    if (safe.kind === "audio") return `${metadata}<audio class="graph-preview-media" controls preload="metadata" src="${escapeHtml(safe.url)}">Audio preview unavailable in this browser.</audio>${open}`;
-    return `${metadata}<div class="graph-preview-fallback"><strong>No native preview</strong><p>Escaped metadata only; this artifact type is not rendered as media.</p></div>`;
+  renderArtifactPreview(collection, state = {}) {
+    return renderArtifactPreviewMarkup(collection, state);
   }
 
   selectedNodes() {
@@ -1396,6 +1504,7 @@ class HubGraphEditor {
       this.history = [];
       this.future = [];
       this.nodeStates.clear();
+      this.runProvenance = [];
       this.dirty = new Set((result.graph.nodes || []).map((node) => node.id));
       this.graphData = result.graph;
       this.savedFingerprint = "";
@@ -1498,6 +1607,7 @@ class HubGraphEditor {
         const response = await getNodeRun(this.activeJobId);
         const run = response.run || {};
         this.runStatus = run.status || this.runStatus;
+        this.runProvenance = Array.isArray(run.provenance) ? run.provenance.slice(0, MAX_PREVIEW_ARTIFACTS) : [];
         for (const state of run.nodes || []) {
           this.nodeStates.set(state.id, state);
           const node = this.liteGraph._nodes.find((candidate) => candidate.hubId === state.id);
