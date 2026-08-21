@@ -4,6 +4,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -130,12 +131,12 @@ class WorkflowLibraryStoreTests(unittest.TestCase):
             interleaved = False
             original_atomic = first._atomic_write
 
-            def interleave(value: dict[str, object], *, expected_bytes: bytes | None = None) -> str:
+            def interleave(value: dict[str, object], *, expected_bytes: bytes | None = None, expected_identity: object = None) -> str:
                 nonlocal interleaved
                 if not interleaved:
                     interleaved = True
                     concurrent_result["result"] = second.save_workflow(entry("concurrent"), expected_revision=0)
-                return original_atomic(value, expected_bytes=expected_bytes)
+                return original_atomic(value, expected_bytes=expected_bytes, expected_identity=expected_identity)
 
             with patch.object(first, "_atomic_write", side_effect=interleave):
                 stale = first.save_workflow(entry("stale"), expected_revision=0)
@@ -159,12 +160,12 @@ class WorkflowLibraryStoreTests(unittest.TestCase):
                 original_atomic = first._atomic_write
                 interleaved = False
 
-                def interleave(value: dict[str, object], *, expected_bytes: bytes | None = None) -> str:
+                def interleave(value: dict[str, object], *, expected_bytes: bytes | None = None, expected_identity: object = None) -> str:
                     nonlocal interleaved
                     if not interleaved:
                         interleaved = True
                         self.assertTrue(second.save_workflow(entry("concurrent"), expected_revision=1)["accepted"])
-                    return original_atomic(value, expected_bytes=expected_bytes)
+                    return original_atomic(value, expected_bytes=expected_bytes, expected_identity=expected_identity)
 
                 with patch.object(first, "_atomic_write", side_effect=interleave):
                     if operation == "delete":
@@ -188,12 +189,12 @@ class WorkflowLibraryStoreTests(unittest.TestCase):
             original_atomic = first._atomic_write
             interleaved = False
 
-            def interleave(value: dict[str, object], *, expected_bytes: bytes | None = None) -> str:
+            def interleave(value: dict[str, object], *, expected_bytes: bytes | None = None, expected_identity: object = None) -> str:
                 nonlocal interleaved
                 if not interleaved:
                     interleaved = True
                     self.assertTrue(second.save_workflow(entry("concurrent"), expected_revision=1)["accepted"])
-                return original_atomic(value, expected_bytes=expected_bytes)
+                return original_atomic(value, expected_bytes=expected_bytes, expected_identity=expected_identity)
 
             with patch.object(first, "_atomic_write", side_effect=interleave):
                 result = first.confirm_migration([entry("migrated")], expected_revision=1)
@@ -248,6 +249,218 @@ class WorkflowLibraryStoreTests(unittest.TestCase):
             confirmed = store.confirm_migration([candidate], expected_revision=0)
             self.assertTrue(confirmed["accepted"])
             self.assertTrue(store.list_workflows()["workflows"])
+
+
+class WorkflowLibraryLocationSafetyTests(unittest.TestCase):
+    @staticmethod
+    def _same_path(left: object, right: Path) -> bool:
+        try:
+            return Path(left).absolute() == right.absolute()
+        except (TypeError, ValueError, OSError):
+            return False
+
+    def _assert_location_refusal(self, value: dict[str, object], path: Path) -> None:
+        encoded = json.dumps(value, ensure_ascii=True)
+        self.assertIn("recovery_required", encoded)
+        self.assertNotIn(str(path), encoded)
+        self.assertNotIn("https://", encoded)
+        self.assertNotIn("secret", encoded.casefold())
+        self.assertNotIn("[object Object]", encoded)
+
+    def test_safe_first_use_regular_parent_and_full_metadata_flow(self) -> None:
+        from src.services.workflow_library import WorkflowLibraryStore
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "workflow_library.json"
+            store = WorkflowLibraryStore(path)
+            saved = store.save_workflow(entry(), expected_revision=0)
+            self.assertTrue(saved["accepted"])
+            self.assertTrue(store.list_workflows()["workflows"])
+            self.assertTrue(store.get_workflow("image-review")["workflow"])
+            self.assertTrue(store.export_json()["ready"])
+            imported = store.import_json(json.dumps(library(entry("imported"))), expected_revision=1)
+            self.assertTrue(imported["accepted"])
+            confirmed = store.confirm_migration([entry("migrated")], expected_revision=2)
+            self.assertTrue(confirmed["accepted"])
+            deleted = store.delete_workflow("migrated", expected_revision=3)
+            self.assertTrue(deleted["accepted"])
+
+    def test_reparse_root_ancestor_parent_and_leaf_refuse_without_echo(self) -> None:
+        import src.services.workflow_library.library as library_module
+        from src.services.workflow_library import WorkflowLibraryStore
+
+        with tempfile.TemporaryDirectory() as temporary:
+            config_root = Path(temporary) / "Config"
+            parent = config_root / "nested"
+            parent.mkdir(parents=True)
+            path = parent / "workflow_library.json"
+            store = WorkflowLibraryStore(path)
+            for label, reparse_target, create_leaf in (
+                ("root", config_root, False),
+                ("ancestor", config_root.parent, False),
+                ("parent", parent, False),
+                ("leaf", path, True),
+            ):
+                with self.subTest(label=label):
+                    if create_leaf:
+                        path.write_text("{}", encoding="utf-8")
+                    with patch.object(
+                        library_module,
+                        "is_reparse_point",
+                        side_effect=lambda value, target=reparse_target: self._same_path(value, target),
+                    ):
+                        result = store.list_workflows()
+                    self._assert_location_refusal(result, path)
+                    if create_leaf:
+                        self.assertEqual(path.read_text(encoding="utf-8"), "{}")
+                    if path.exists() and path.is_file():
+                        path.unlink()
+
+    def test_directory_lstat_failure_and_lexical_escape_refuse(self) -> None:
+        import src.services.workflow_library.library as library_module
+        from src.services.workflow_library import WorkflowLibraryStore
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory_target = root / "workflow_library.json"
+            directory_target.mkdir()
+            self._assert_location_refusal(WorkflowLibraryStore(directory_target).list_workflows(), directory_target)
+
+            lstat_target = root / "lstat-failure" / "workflow_library.json"
+            lstat_target.parent.mkdir()
+            store = WorkflowLibraryStore(lstat_target)
+            original_identity = library_module._identity_signature
+
+            def fail_lstat(value: Path, *, expected_kind: str | None = None):
+                if self._same_path(value, lstat_target.parent):
+                    return None, "workflow_library_lstat_failed"
+                return original_identity(value, expected_kind=expected_kind)
+
+            with patch.object(library_module, "_identity_signature", side_effect=fail_lstat):
+                self._assert_location_refusal(store.list_workflows(), lstat_target)
+
+            escaped = root / "Config" / ".." / "outside" / "workflow_library.json"
+            self._assert_location_refusal(WorkflowLibraryStore(escaped).list_workflows(), escaped)
+
+    def test_reparse_temp_parent_after_creation_refuses_without_target_write(self) -> None:
+        import src.services.workflow_library.library as library_module
+        from src.services.workflow_library import WorkflowLibraryStore
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "workflow_library.json"
+            store = WorkflowLibraryStore(path)
+            original_named = library_module.tempfile.NamedTemporaryFile
+            phase = {"after_creation": False}
+
+            def create_then_reparse(*args: object, **kwargs: object):
+                handle = original_named(*args, **kwargs)
+                phase["after_creation"] = True
+                return handle
+
+            def fake_reparse(value: object) -> bool:
+                return phase["after_creation"] and self._same_path(value, path.parent)
+
+            with patch.object(library_module.tempfile, "NamedTemporaryFile", side_effect=create_then_reparse), patch.object(library_module, "is_reparse_point", side_effect=fake_reparse):
+                result = store.save_workflow(entry(), expected_revision=0)
+            self.assertFalse(result["accepted"])
+            self.assertEqual(result["status"], "recovery_required")
+            self.assertFalse(path.exists())
+            self._assert_location_refusal(result, path)
+
+    def test_same_byte_target_replacement_is_conflict_and_preserves_bytes(self) -> None:
+        import src.services.workflow_library.library as library_module
+        from src.services.workflow_library import WorkflowLibraryStore
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "workflow_library.json"
+            store = WorkflowLibraryStore(path)
+            self.assertTrue(store.save_workflow(entry(), expected_revision=0)["accepted"])
+            before = path.read_bytes()
+            original_named = library_module.tempfile.NamedTemporaryFile
+
+            def replace_after_creation(*args: object, **kwargs: object):
+                handle = original_named(*args, **kwargs)
+                replacement = path.with_name("replacement.json")
+                replacement.write_bytes(before)
+                os.replace(replacement, path)
+                return handle
+
+            with patch.object(library_module.tempfile, "NamedTemporaryFile", side_effect=replace_after_creation):
+                result = store.save_workflow(entry("changed"), expected_revision=1)
+            self.assertFalse(result["accepted"])
+            self.assertEqual(result["status"], "conflict")
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_parent_identity_drift_between_read_and_replace_refuses(self) -> None:
+        import src.services.workflow_library.library as library_module
+        from src.services.workflow_library import WorkflowLibraryStore
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "workflow_library.json"
+            store = WorkflowLibraryStore(path)
+            self.assertTrue(store.save_workflow(entry(), expected_revision=0)["accepted"])
+            before = path.read_bytes()
+            original_named = library_module.tempfile.NamedTemporaryFile
+            original_identity = library_module._identity_signature
+            drift = {"enabled": False}
+
+            def create_then_drift(*args: object, **kwargs: object):
+                handle = original_named(*args, **kwargs)
+                drift["enabled"] = True
+                return handle
+
+            def drift_parent(value: Path, *, expected_kind: str | None = None):
+                identity, code = original_identity(value, expected_kind=expected_kind)
+                if drift["enabled"] and self._same_path(value, path.parent) and identity is not None:
+                    return (identity[0], identity[1] + 1, *identity[2:]), code
+                return identity, code
+
+            with patch.object(library_module.tempfile, "NamedTemporaryFile", side_effect=create_then_drift), patch.object(library_module, "_identity_signature", side_effect=drift_parent):
+                result = store.save_workflow(entry("changed"), expected_revision=1)
+            self.assertFalse(result["accepted"])
+            self.assertEqual(result["status"], "recovery_required")
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_temp_identity_drift_before_replace_refuses_and_does_not_echo(self) -> None:
+        import src.services.workflow_library.library as library_module
+        from src.services.workflow_library import WorkflowLibraryStore
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "workflow_library.json"
+            store = WorkflowLibraryStore(path)
+            self.assertTrue(store.save_workflow(entry(), expected_revision=0)["accepted"])
+            before = path.read_bytes()
+            original_named = library_module.tempfile.NamedTemporaryFile
+            original_identity = library_module._identity_signature
+            temp_path: dict[str, Path | None] = {"value": None}
+            temp_calls = {"count": 0}
+
+            def capture_temp(*args: object, **kwargs: object):
+                handle = original_named(*args, **kwargs)
+                temp_path["value"] = Path(handle.name)
+                return handle
+
+            def drift_temp(value: Path, *, expected_kind: str | None = None):
+                identity, code = original_identity(value, expected_kind=expected_kind)
+                if temp_path["value"] is not None and self._same_path(value, temp_path["value"]):
+                    temp_calls["count"] += 1
+                    if temp_calls["count"] >= 2 and identity is not None:
+                        return (identity[0], identity[1] + 1, *identity[2:]), code
+                return identity, code
+
+            with patch.object(library_module.tempfile, "NamedTemporaryFile", side_effect=capture_temp), patch.object(library_module, "_identity_signature", side_effect=drift_temp):
+                result = store.save_workflow(entry("changed"), expected_revision=1)
+            self.assertFalse(result["accepted"])
+            self.assertEqual(result["status"], "recovery_required")
+            self.assertEqual(path.read_bytes(), before)
+            self._assert_location_refusal(result, path)
+
+    def test_location_contract_does_not_use_resolve_as_authority(self) -> None:
+        source = (ROOT / "src" / "services" / "workflow_library" / "library.py").read_text(encoding="utf-8")
+        self.assertNotIn(".resolve(", source)
+        self.assertIn("_validate_location", source)
+        self.assertIn("is_reparse_point", source)
+        self.assertIn("expected_identity", source)
 
     def test_schema_module_has_no_runtime_execution_imports(self) -> None:
         source = (ROOT / "src" / "shared" / "schemas" / "workflow_library.py").read_text(encoding="utf-8")
