@@ -10,8 +10,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
+import tempfile
 import threading
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -53,9 +56,150 @@ from .schemas import (
 
 STATE_PATH = CONFIG_ROOT / "creative_workspace.json"
 _STATE_VERSION = 1
+_MAX_WORKSPACE_BYTES = 8 * 1024 * 1024
+_MAX_DRAFT_BYTES = 8 * 1024 * 1024
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _IMAGE_MASK_STUDIO_ID_RE = re.compile(r"^studio_[a-f0-9]{32}$")
 _MAX_IMAGE_MASK_LINKS_PER_ARTIFACT = 32
 _MAX_IMAGE_MASK_LINKS_PER_PROJECT = 96
+
+
+class _StorageRefusal(ValueError):
+    _MESSAGES = {
+        "manual_review": "Workspace storage requires manual review; no data was changed.",
+        "conflict": "Workspace storage changed before the operation completed; reload before retrying.",
+        "write_failed": "Workspace storage could not be written; no data was changed.",
+    }
+
+    def __init__(self, code: str) -> None:
+        self.code = code if code in self._MESSAGES else "manual_review"
+        super().__init__(self._MESSAGES[self.code])
+
+
+@dataclass(frozen=True)
+class _StorageContext:
+    parent_chain: tuple[tuple[int, ...], ...]
+    target: tuple[int, ...] | None
+
+
+def _lexical_absolute(value: Path) -> Path:
+    return Path(os.path.abspath(os.path.normpath(os.fspath(value))))
+
+
+def _same_lexical_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.normpath(os.fspath(left))) == os.path.normcase(os.path.normpath(os.fspath(right)))
+
+
+def _lexically_within(root: Path, candidate: Path) -> bool:
+    root_name = os.path.normcase(os.path.normpath(os.fspath(_lexical_absolute(root))))
+    candidate_name = os.path.normcase(os.path.normpath(os.fspath(_lexical_absolute(candidate))))
+    try:
+        return os.path.commonpath((root_name, candidate_name)) == root_name
+    except ValueError:
+        return False
+
+
+def _is_reparse(stat_result: os.stat_result) -> bool:
+    return stat.S_ISLNK(stat_result.st_mode) or bool(getattr(stat_result, "st_file_attributes", 0) & _REPARSE_POINT)
+
+
+def _directory_identity(stat_result: os.stat_result) -> tuple[int, ...]:
+    return (
+        int(getattr(stat_result, "st_dev", 0)),
+        int(getattr(stat_result, "st_ino", 0)),
+        int(stat_result.st_mode),
+        int(getattr(stat_result, "st_file_attributes", 0)),
+    )
+
+
+def _file_signature(stat_result: os.stat_result) -> tuple[int, ...]:
+    return (
+        int(getattr(stat_result, "st_dev", 0)),
+        int(getattr(stat_result, "st_ino", 0)),
+        int(stat_result.st_size),
+        int(getattr(stat_result, "st_mtime_ns", 0)),
+        int(getattr(stat_result, "st_ctime_ns", 0)),
+        int(stat_result.st_mode),
+        int(getattr(stat_result, "st_file_attributes", 0)),
+    )
+
+
+def _same_file_identity(left: tuple[int, ...] | None, right: tuple[int, ...] | None) -> bool:
+    if left is None or right is None:
+        return left is right
+    return left[0:2] == right[0:2] and left[4:] == right[4:]
+
+
+def _directory_chain(path: Path, root: Path) -> tuple[tuple[int, ...], ...]:
+    root_abs = _lexical_absolute(root)
+    current = _lexical_absolute(path)
+    if not _lexically_within(root_abs, current):
+        raise _StorageRefusal("manual_review")
+    chain: list[tuple[int, ...]] = []
+    reached_root = False
+    while True:
+        try:
+            stat_result = os.lstat(current)
+        except OSError as exc:
+            raise _StorageRefusal("manual_review") from exc
+        if _is_reparse(stat_result) or not stat.S_ISDIR(stat_result.st_mode):
+            raise _StorageRefusal("manual_review")
+        chain.append(_directory_identity(stat_result))
+        if _same_lexical_path(current, root_abs):
+            reached_root = True
+        parent = current.parent
+        if _same_lexical_path(current, parent):
+            if not reached_root:
+                raise _StorageRefusal("manual_review")
+            break
+        if not reached_root and not _lexically_within(root_abs, parent):
+            raise _StorageRefusal("manual_review")
+        current = parent
+    return tuple(chain)
+
+
+def _leaf_signature(path: Path, *, allow_missing: bool) -> tuple[int, ...] | None:
+    try:
+        stat_result = os.lstat(_lexical_absolute(path))
+    except FileNotFoundError:
+        if allow_missing:
+            return None
+        raise _StorageRefusal("manual_review")
+    except OSError as exc:
+        raise _StorageRefusal("manual_review") from exc
+    if _is_reparse(stat_result) or not stat.S_ISREG(stat_result.st_mode):
+        raise _StorageRefusal("manual_review")
+    return _file_signature(stat_result)
+
+
+def _storage_context(target: Path, root: Path, *, allow_missing: bool) -> _StorageContext:
+    target_abs = _lexical_absolute(target)
+    root_abs = _lexical_absolute(root)
+    if not _lexically_within(root_abs, target_abs):
+        raise _StorageRefusal("manual_review")
+    parent_chain = _directory_chain(target_abs.parent, root_abs)
+    target_signature = _leaf_signature(target_abs, allow_missing=allow_missing)
+    return _StorageContext(parent_chain=parent_chain, target=target_signature)
+
+
+def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate_json_key")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite(value: str) -> None:
+    raise ValueError(f"nonfinite_json_value:{value}")
+
+
+def _strict_json_load(payload: bytes, *, maximum: int) -> Any:
+    if len(payload) > maximum:
+        raise ValueError("workspace_json_oversized")
+    text = payload.decode("utf-8")
+    return json.loads(text, object_pairs_hook=_reject_duplicate_pairs, parse_constant=_reject_nonfinite)
 
 
 def _default_state() -> dict[str, Any]:
@@ -95,15 +239,115 @@ class CreativeProjectManager:
 
     def __init__(
         self,
-        path: Path = STATE_PATH,
+        path: Path | None = None,
         *,
         artifact_describer: Callable[[str], dict[str, Any] | None] = describe_artifact,
         artifact_lister: Callable[..., list[dict[str, Any]]] = list_artifacts,
     ) -> None:
-        self.path = path
+        self._production_storage = path is None
+        self.path = Path(path) if path is not None else Path(STATE_PATH)
+        self._storage_root = Path(CONFIG_ROOT) if self._production_storage else self.path.parent
         self._artifact_describer = artifact_describer
         self._artifact_lister = artifact_lister
         self._lock = threading.RLock()
+        self._loaded_context: _StorageContext | None = None
+
+    @staticmethod
+    def _storage_recovery() -> tuple[dict[str, Any], dict[str, str], bool]:
+        return (
+            _default_state(),
+            {
+                "status": "recovery_required",
+                "reason": "Workspace storage requires manual review; no data was changed.",
+                "action": "Review the fixed workspace storage boundary before retrying.",
+            },
+            True,
+        )
+
+    def _context(self, target: Path, *, allow_missing: bool) -> _StorageContext:
+        return _storage_context(target, self._storage_root, allow_missing=allow_missing)
+
+    def _cleanup_temp(self, temp: Path | None, signature: tuple[int, ...] | None, expected: _StorageContext | None) -> None:
+        if temp is None or signature is None or expected is None:
+            return
+        try:
+            if _directory_chain(temp.parent, self._storage_root) != expected.parent_chain:
+                return
+            current = _leaf_signature(temp, allow_missing=True)
+            if current is not None and _same_file_identity(current, signature):
+                os.unlink(_lexical_absolute(temp))
+        except (OSError, _StorageRefusal):
+            pass
+
+    def _atomic_write(
+        self,
+        target: Path,
+        value: Mapping[str, Any],
+        *,
+        expected: _StorageContext | None,
+        maximum: int,
+        prefix: str,
+        suffix: str,
+    ) -> _StorageContext:
+        try:
+            encoded = json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8") + b"\n"
+        except (TypeError, ValueError) as exc:
+            raise _StorageRefusal("write_failed") from exc
+        if len(encoded) > maximum:
+            raise _StorageRefusal("write_failed")
+
+        before = self._context(target, allow_missing=True)
+        if expected is not None and before != expected:
+            raise _StorageRefusal("conflict")
+        temp: Path | None = None
+        temp_identity: tuple[int, ...] | None = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="wb", dir=target.parent, prefix=prefix, suffix=suffix, delete=False) as handle:
+                temp = Path(handle.name)
+                initial = _leaf_signature(temp, allow_missing=False)
+                temp_identity = initial
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+
+            if self._context(target, allow_missing=True) != before:
+                raise _StorageRefusal("conflict")
+            current_temp = _leaf_signature(temp, allow_missing=False)
+            if not _same_file_identity(current_temp, temp_identity):
+                raise _StorageRefusal("conflict")
+            if self._context(target, allow_missing=True) != before:
+                raise _StorageRefusal("conflict")
+            os.replace(_lexical_absolute(temp), _lexical_absolute(target))
+            temp = None
+            return self._context(target, allow_missing=False)
+        except _StorageRefusal:
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            raise _StorageRefusal("write_failed") from exc
+        finally:
+            self._cleanup_temp(temp, temp_identity, before)
+
+    def _draft_path(self, project_id: object) -> Path | None:
+        if not isinstance(project_id, str) or not PROJECT_ID_RE.fullmatch(project_id):
+            return None
+        return self.path.parent / f"draft_{project_id}.json"
+
+    def _assert_draft_owner(self, path: Path, project_id: str, context: _StorageContext) -> None:
+        if context.target is None:
+            return
+        if context.target[2] > _MAX_DRAFT_BYTES:
+            raise _StorageRefusal("manual_review")
+        try:
+            payload = _lexical_absolute(path).read_bytes()
+            if self._context(path, allow_missing=False) != context:
+                raise _StorageRefusal("conflict")
+            value = _strict_json_load(payload, maximum=_MAX_DRAFT_BYTES)
+        except _StorageRefusal:
+            raise
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise _StorageRefusal("manual_review") from exc
+        if not isinstance(value, Mapping) or value.get("schema_version") != 1 or value.get("project_id") != project_id or not isinstance(value.get("graph"), Mapping):
+            raise _StorageRefusal("manual_review")
 
     def _load(self) -> tuple[dict[str, Any], dict[str, str], bool]:
         """Return normalized state and safe recovery information.
@@ -113,11 +357,27 @@ class CreativeProjectManager:
         record and advertises the recovery result without exposing its path.
         """
 
-        if not self.path.exists():
-            return _default_state(), {"status": "clean", "reason": "Chưa có workspace local; sẵn sàng tạo project.", "action": "Tạo project đầu tiên hoặc import manifest đã validate."}, False
         try:
-            source = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            context = self._context(self.path, allow_missing=True)
+        except _StorageRefusal:
+            self._loaded_context = None
+            return self._storage_recovery()
+        if context.target is None:
+            self._loaded_context = context
+            return _default_state(), {"status": "clean", "reason": "Chưa có workspace local; sẵn sàng tạo project.", "action": "Tạo project đầu tiên hoặc import manifest đã validate."}, False
+        if context.target[2] > _MAX_WORKSPACE_BYTES:
+            self._loaded_context = None
+            return self._storage_recovery()
+        try:
+            source_bytes = _lexical_absolute(self.path).read_bytes()
+            if self._context(self.path, allow_missing=False) != context:
+                raise _StorageRefusal("conflict")
+            source = _strict_json_load(source_bytes, maximum=_MAX_WORKSPACE_BYTES)
+        except _StorageRefusal:
+            self._loaded_context = None
+            return self._storage_recovery()
+        except (OSError, UnicodeError, ValueError):
+            self._loaded_context = None
             return _default_state(), {"status": "recovery_required", "reason": "Workspace local không đọc được; Hub không tự ghi đè dữ liệu này.", "action": "Import một manifest an toàn vào workspace mới hoặc kiểm tra file local bằng công cụ quản trị."}, True
         if not isinstance(source, Mapping):
             return _default_state(), {"status": "recovery_required", "reason": "Workspace local không đúng định dạng; Hub không tự ghi đè dữ liệu này.", "action": "Import một manifest an toàn vào workspace mới hoặc kiểm tra file local bằng công cụ quản trị."}, True
@@ -262,93 +522,70 @@ class CreativeProjectManager:
             }
         else:
             recovery = {"status": "clean", "reason": "Workspace local hợp lệ.", "action": "Có thể tiếp tục tạo project, recipe và compare board."}
+        self._loaded_context = context
         return state, recovery, False
 
     def _save(self, state: Mapping[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        import tempfile as _tempfile
-        tmp: Path | None = None
-        try:
-            with _tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=self.path.parent,
-                prefix=".workspace-",
-                suffix=".tmp",
-                delete=False,
-            ) as handle:
-                tmp = Path(handle.name)
-                handle.write(json.dumps(state, ensure_ascii=False, indent=2))
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp, self.path)
-            tmp = None
-        finally:
-            if tmp is not None:
-                try:
-                    tmp.unlink()
-                except OSError:
-                    pass
+        self._loaded_context = self._atomic_write(
+            self.path,
+            state,
+            expected=self._loaded_context,
+            maximum=_MAX_WORKSPACE_BYTES,
+            prefix=".workspace-",
+            suffix=".tmp",
+        )
 
-    def _save_draft(self, draft_path: Path, data: dict[str, Any]) -> None:
-        """Write an autosave recovery draft atomically without touching main state."""
-        import tempfile as _tempfile
-        draft_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp: Path | None = None
-        try:
-            with _tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=draft_path.parent,
-                prefix=".draft-",
-                suffix=".tmp",
-                delete=False,
-            ) as handle:
-                tmp = Path(handle.name)
-                handle.write(json.dumps(data, ensure_ascii=False, indent=2))
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp, draft_path)
-            tmp = None
-        except (OSError, TypeError, ValueError):
-            pass
-        finally:
-            if tmp is not None:
-                try:
-                    tmp.unlink()
-                except OSError:
-                    pass
+    def _save_draft(self, draft_path: Path, data: dict[str, Any], project_id: str) -> None:
+        """Write a server-owned autosave draft without exposing its path."""
+        context = self._context(draft_path, allow_missing=True)
+        self._assert_draft_owner(draft_path, project_id, context)
+        self._atomic_write(
+            draft_path,
+            data,
+            expected=context,
+            maximum=_MAX_DRAFT_BYTES,
+            prefix=".draft-",
+            suffix=".tmp",
+        )
 
     def autosave_draft(self, project_id: str, graph: dict[str, Any]) -> dict[str, Any]:
         """Write a crash-recovery draft for the given project's graph.
 
         The draft file is never the main state file; it is safe to delete after
-        a clean save.  Returns ``{"accepted": bool, "draft_path": str}``.
+        a clean save. The result contains only an opaque server-owned draft id.
         """
-        if not isinstance(project_id, str) or not project_id:
-            return {"accepted": False, "reason": "Project ID không hợp lệ."}
-        safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", project_id)[:80]
-        draft_path = self.path.parent / f"draft_{safe_id}.json"
+        draft_path = self._draft_path(project_id)
+        if draft_path is None:
+            return {"accepted": False, "status": "invalid", "code": "workspace_draft_id_invalid", "reason": "Project ID không hợp lệ."}
         draft_data = {
             "schema_version": 1,
             "project_id": project_id,
             "graph": graph if isinstance(graph, dict) else {},
         }
-        self._save_draft(draft_path, draft_data)
-        return {"accepted": True, "draft_path": str(draft_path)}
-
-    def clear_draft(self, project_id: str) -> None:
-        """Remove the autosave draft after a successful explicit save."""
-        if not isinstance(project_id, str) or not project_id:
-            return
-        safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", project_id)[:80]
-        draft_path = self.path.parent / f"draft_{safe_id}.json"
         try:
-            draft_path.unlink(missing_ok=True)
+            self._save_draft(draft_path, draft_data, project_id)
+        except _StorageRefusal as exc:
+            return {"accepted": False, "status": "manual_review", "code": exc.code, "reason": str(exc)}
+        return {"accepted": True, "status": "completed", "draft_id": draft_path.name}
+
+    def clear_draft(self, project_id: str) -> dict[str, Any]:
+        """Remove the autosave draft after a successful explicit save."""
+        draft_path = self._draft_path(project_id)
+        if draft_path is None:
+            return {"accepted": False, "status": "invalid", "code": "workspace_draft_id_invalid", "reason": "Project ID không hợp lệ."}
+        try:
+            context = self._context(draft_path, allow_missing=True)
+            if context.target is None:
+                return {"accepted": True, "status": "absent"}
+            self._assert_draft_owner(draft_path, project_id, context)
+            if self._context(draft_path, allow_missing=False) != context:
+                raise _StorageRefusal("conflict")
+            os.unlink(_lexical_absolute(draft_path))
+        except _StorageRefusal as exc:
+            return {"accepted": False, "status": "manual_review", "code": exc.code, "reason": str(exc)}
         except OSError:
-            pass
+            return {"accepted": False, "status": "manual_review", "code": "workspace_draft_manual_review", "reason": "Workspace draft requires manual review; no data was changed."}
+        return {"accepted": True, "status": "completed"}
 
 
 
