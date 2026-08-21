@@ -25,6 +25,7 @@ from src.services.artifact_store import UploadError, describe as describe_artifa
 from src.services.artifact_store import open_artifact, resolve as resolve_artifact, stage_upload_stream
 from src.services.image_mask_studio import StudioConflictError, image_mask_studio
 from src.services.job_manager.manager import job_manager
+from src.services.job_manager.output_reservations import reconcile_reservations
 from src.services.project_manager import project_manager
 from src.services.runtime_registry import applications, launch
 from src.services.storage_manager.overview import dashboard_volume_snapshot
@@ -35,7 +36,7 @@ from .config import hub_config
 from .core import capability_control_plane, component_statuses, get_job_or_error, health, prepare_owned_shutdown, submit_graph, submit_tool, tool_catalog
 from .jobs import flush as flush_jobs
 from .jobs import reconcile_startup
-from .jobs import get_job, list_jobs
+from .jobs import active_jobs, get_job, list_jobs
 from .v5_productization import admit_durable_job, durable_jobs_snapshot, reconcile_durable_jobs, resume_durable_job
 from src.services.product_surface import project_product_surface
 from .context import ApiContext
@@ -669,6 +670,10 @@ def main() -> int:
         reconcile_durable_jobs()
     except Exception:
         LOG.warning("V5 durable recovery is unavailable; preserving the existing state.")
+    try:
+        reconcile_reservations(active_job_ids={str(item.get("id")) for item in active_jobs() if item.get("id")})
+    except Exception:
+        LOG.warning("Output reservation recovery is unavailable; preserving private scopes.")
     reconcile_startup()
     LOG.info("Local AI Hub listening on %s:%s", host, port)
     try:

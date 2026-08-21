@@ -68,7 +68,7 @@ def clear_recovery_drafts(request: ApiRequest, context: ApiContext, params: Mapp
     if not isinstance(scopes, list) or not scopes or any(not isinstance(item, str) or not item for item in scopes):
         return ApiResponse(400, {"status": "invalid", "error": "recovery_draft_scopes_invalid"})
     try:
-        context.call("clear_recovery_drafts", scopes)
+        result = context.call("clear_recovery_drafts", scopes)
     except Exception:
         return ApiResponse(503, {
             "status": "unavailable",
@@ -76,11 +76,18 @@ def clear_recovery_drafts(request: ApiRequest, context: ApiContext, params: Mapp
             "execution": "not_run",
             "dry_run": True,
         })
-    return ApiResponse(200, {
-        "status": "completed",
-        "cleared": True,
-        "cleared_count": len(scopes),
-        "message": "Recovery draft clear request completed.",
+    if not isinstance(result, dict):
+        return ApiResponse(503, {"status": "unavailable", "error": "recovery_clear_unavailable", "execution": "not_run", "dry_run": True})
+    status = result.get("status") if result.get("status") in {"completed", "manual_review", "not_found", "unavailable"} else "manual_review"
+    return ApiResponse(200 if status != "unavailable" else 503, {
+        "status": status,
+        "cleared": status == "completed",
+        "cleared_count": result.get("cleared_count", 0),
+        "manual_review_count": result.get("manual_review_count", 0),
+        "results": result.get("results", []),
+        "message": "Recovery draft clear request completed." if status == "completed" else "Recovery draft clear requires manual review; uncertain data was preserved.",
+        "execution": "not_run" if status != "completed" else "completed",
+        "dry_run": status != "completed",
     })
 
 

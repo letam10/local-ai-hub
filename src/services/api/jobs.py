@@ -139,13 +139,19 @@ def _safe_result_scalar(value: object, *, key: str) -> object | None:
     return None
 
 
-def _publish_result(result: object, record: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
-    """Publish worker outputs as opaque, job-bound artifacts.
+def _publish_result(
+    result: object,
+    record: dict[str, Any],
+    *,
+    artifacts: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], str | None]:
+    """Project a worker result after a reservation-bound commit.
 
-    Video/image workers are allowed to return a Hub-owned output path because
-    that path is an internal hand-off only.  It is removed before persistence
-    and replaced by artifact metadata carrying the terminal job provenance.
-    Any path outside the artifact store's managed roots fails closed.
+    A worker path is never an ownership proof.  The job manager must first
+    commit candidates through the pre-execution reservation coordinator and
+    pass the resulting opaque artifact records here.  Direct callers that
+    provide output paths without a reservation fail closed with a fixed
+    refusal instead of publishing path-inferred artifacts.
     """
 
     if not isinstance(result, dict):
@@ -186,26 +192,20 @@ def _publish_result(result: object, record: dict[str, Any]) -> tuple[dict[str, A
     if not candidates:
         # Metadata-only operations such as probe are valid completions.
         return safe, None
-    provenance = {
-        "job_id": str(record.get("id") or ""),
-        "job_spec_fingerprint": _job_fingerprint(record),
-        "adapter_id": _adapter_id(record),
-        "attempt": 1,
-        "status": "completed",
-    }
     for candidate in candidates:
         if not isinstance(candidate, Path):
             return {"status": "failed", "error": "Output không thể publish thành artifact Hub hợp lệ."}, "output_publish"
-    try:
-        artifacts = artifact_store.register_worker_outputs(candidates, provenance=provenance)
-    except Exception:
-        artifacts = None
     if not isinstance(artifacts, list) or not artifacts or any(
-        not isinstance(artifact, dict) or artifact.get("provenance") != provenance
+        not isinstance(artifact, dict)
+        or not isinstance(artifact.get("id"), str)
+        or artifact.get("id", "").startswith("artifact_") is False
         for artifact in artifacts
     ):
-        return {"status": "failed", "error": "Output không thể publish thành artifact Hub hợp lệ."}, "output_publish"
-    safe["artifacts"] = artifacts
+        return {
+            "status": "failed",
+            "error": "Output ownership reservation is required before publication.",
+        }, "OUTPUT_RESERVATION_REQUIRED"
+    safe["artifacts"] = [dict(item) for item in artifacts]
     return safe, None
 
 

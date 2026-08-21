@@ -186,19 +186,12 @@ class WhisperFirstPartyContractTests(unittest.TestCase):
             self.assertNotIn("output", result)
             self.assertNotIn("srt", result)
             self.assertEqual(worker.call_args.kwargs["env"]["WHISPER_MODEL_ID"], "approved-asr")
-            published_paths: list[Path] = []
-
-            def register_worker_outputs(paths, *, provenance):
-                published_paths.extend(paths)
-                return [
-                    {"id": "artifact_" + suffix * 32, "url": f"/api/artifacts/artifact_{suffix * 32}", "provenance": provenance}
-                    for suffix in ("b", "c")
-                ]
-
-            with patch.object(jobs.artifact_store, "register_worker_outputs", side_effect=register_worker_outputs):
-                public, publish_error = jobs._publish_result(result, {"id": "job_example", "tool": "transcribe_media"})
+            public, publish_error = jobs._publish_result(
+                result,
+                {"id": "job_example", "tool": "transcribe_media"},
+                artifacts=[{"id": "artifact_" + suffix * 32, "url": f"/api/artifacts/artifact_{suffix * 32}"} for suffix in ("b", "c")],
+            )
             self.assertIsNone(publish_error)
-            self.assertEqual(published_paths, [transcript, srt])
             self.assertEqual(len(public["artifacts"]), 2)
             self.assertNotIn(str(root), json.dumps(public, ensure_ascii=False))
 
@@ -259,12 +252,10 @@ class WhisperFirstPartyContractTests(unittest.TestCase):
             self.assertEqual(scalar_error, "whisper_output_contract")
             self.assertNotIn(str(root), json.dumps(scalar, ensure_ascii=False))
 
-            with patch.object(jobs.artifact_store, "register_worker_outputs", return_value=None) as register:
-                failed, failed_error = jobs._publish_result({"status": "completed", "files": [str(transcript), str(srt)]}, record)
+            failed, failed_error = jobs._publish_result({"status": "completed", "files": [str(transcript), str(srt)]}, record)
             self.assertEqual(failed["status"], "failed")
-            self.assertEqual(failed_error, "output_publish")
+            self.assertEqual(failed_error, "OUTPUT_RESERVATION_REQUIRED")
             self.assertNotIn("artifacts", failed)
-            register.assert_called_once()
             self.assertNotIn(str(root), json.dumps(failed, ensure_ascii=False))
 
     def test_core_keeps_whisper_opaque_and_rejects_raw_path_before_submit(self) -> None:

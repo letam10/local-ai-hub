@@ -205,18 +205,10 @@ class VisionVoiceAdapterContractTests(unittest.TestCase):
         self.assertEqual(normalized["output"], raw_audio)
         self.assertNotIn("audio", normalized)
 
-        seen: list[Path] = []
-
-        def register(paths, *, provenance):
-            seen.extend(paths)
-            return [{"id": _artifact_id("c"), "provenance": provenance}]
-
         record = {"id": "job_20260816_123456_abcd1234", "tool": "text_to_speech"}
-        with patch.object(jobs.artifact_store, "register_worker_outputs", side_effect=register):
-            safe, error = jobs._publish_result(normalized, record)
+        safe, error = jobs._publish_result(normalized, record, artifacts=[{"id": _artifact_id("c")}])
 
         self.assertIsNone(error)
-        self.assertEqual(seen, [Path(raw_audio)])
         self.assertEqual(safe["artifacts"][0]["id"], _artifact_id("c"))
         self.assertNotIn(raw_audio, json.dumps(safe))
         self.assertNotIn("audio", safe)

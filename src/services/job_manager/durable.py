@@ -1052,6 +1052,11 @@ class DurableWorkEngine:
             record = self.store.get(job_id)
             if record is None:
                 return None
+            # Durable adapters are not reservation-aware yet.  Refuse the
+            # generic path writer rather than turning a caller-supplied bytes
+            # blob into a public artifact without a pre-execution reservation.
+            if not isinstance(record.get("output_reservation_id"), str):
+                return None
             raw_spec = record.get("job_spec")
             raw_descriptor = raw_spec.get("descriptor") if isinstance(raw_spec, dict) else None
             if (

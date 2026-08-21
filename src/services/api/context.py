@@ -99,10 +99,18 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
 
     def clear_drafts(scopes: list[str]) -> dict[str, Any]:
         cleared: list[str] = []
+        results: list[dict[str, Any]] = []
         for scope in scopes:
-            draft_clear(scope)
-            cleared.append(scope)
-        return {"status": "completed", "cleared": cleared, "message": f"Đã dọn dẹp {len(cleared)} bản nháp phục hồi."}
+            result = draft_clear(scope)
+            if isinstance(result, dict):
+                safe = {key: result[key] for key in ("accepted", "status", "reason", "draft_id", "deleted", "execution", "dry_run") if key in result}
+                results.append(safe)
+                if result.get("accepted") is True and result.get("status") in {"completed", "not_found"}:
+                    cleared.append(scope)
+            else:
+                results.append({"accepted": False, "status": "manual_review", "reason": "draft_clear_unavailable", "execution": "not_run", "dry_run": True})
+        status = "manual_review" if any(item.get("accepted") is not True for item in results) else "completed"
+        return {"status": status, "cleared": cleared, "cleared_count": len(cleared), "manual_review_count": sum(item.get("accepted") is not True for item in results), "results": results, "message": f"Đã xử lý {len(results)} bản nháp phục hồi."}
 
     project = get("project_manager")
     studio = get("image_mask_studio")

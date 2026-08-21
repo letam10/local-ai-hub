@@ -18,9 +18,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.services import artifact_store
-from src.services.api.jobs import TERMINAL_STATUSES, _publish_result, active_jobs, create_job, get_job_internal, update_job
+from src.services.api.jobs import TERMINAL_STATUSES, _adapter_id, _job_fingerprint, _publish_result, active_jobs, create_job, get_job_internal, update_job
+from src.services.job_manager import output_reservations
 from src.services.process_manager.managed import terminate_owned_process
 from src.services.tool_smoke import (
+    SMOKE_ARTIFACT_REQUIRED_TOOLS,
     has_published_artifact,
     record_completed,
     record_failed,
@@ -32,6 +34,7 @@ from src.services.tool_smoke import (
 Runner = Callable[[dict[str, Any], "JobContext"], dict[str, Any]]
 MAX_RUNNER_SPECS = 64
 JOB_OUTPUT_SCOPE_TOOLS = frozenset({"frame_interpolate", "run_media_operation"})
+JOB_RESERVATION_TOOLS = frozenset(set(JOB_OUTPUT_SCOPE_TOOLS) | set(SMOKE_ARTIFACT_REQUIRED_TOOLS))
 _JOB_OUTPUT_SCOPE_ID = re.compile(r"^(?:jobv5_[a-f0-9]{32}|job_[0-9]{8}_[0-9]{6}_[a-f0-9]{8})$")
 
 
@@ -42,6 +45,7 @@ def _now() -> str:
 @dataclass
 class JobContext:
     job_id: str
+    reservation_id: str | None = None
     _cancel_event: threading.Event = field(default_factory=threading.Event)
     _processes: set[subprocess.Popen[bytes]] = field(default_factory=set)
     _lock: threading.RLock = field(default_factory=threading.RLock)
@@ -67,6 +71,20 @@ class JobContext:
 
     def progress(self, value: int, message: str | None = None) -> None:
         update_job(self.job_id, progress=max(0, min(100, int(value))), message=message)
+
+    def output_path(self, filename: str):
+        """Return a private reservation-bound output capability for a producer."""
+
+        if not isinstance(self.reservation_id, str):
+            raise output_reservations.ReservationError("OUTPUT_RESERVATION_REQUIRED")
+        return output_reservations.reserve_output_path(self.reservation_id, filename)
+
+    def output_directory(self, name: str):
+        """Return a private reservation-bound output directory capability."""
+
+        if not isinstance(self.reservation_id, str):
+            raise output_reservations.ReservationError("OUTPUT_RESERVATION_REQUIRED")
+        return output_reservations.reserve_output_directory(self.reservation_id, name)
 
 
 @dataclass(frozen=True)
@@ -120,21 +138,25 @@ class HubJobManager:
         heavy: bool = True,
     ) -> dict[str, Any]:
         record = create_job(tool, payload, device=device, resume_data=payload)
-        scope_required = tool in JOB_OUTPUT_SCOPE_TOOLS or requires_published_artifact(tool)
-        if scope_required:
-            scope = artifact_store.begin_job_output_scope(str(record.get("id") or ""))
-            if scope is None and isinstance(record.get("id"), str) and _JOB_OUTPUT_SCOPE_ID.fullmatch(record["id"]):
+        reservation_id: str | None = None
+        if tool in JOB_RESERVATION_TOOLS:
+            job_id = str(record.get("id") or "")
+            fingerprint = _job_fingerprint(record)
+            adapter_id = re.sub(r"[^a-z0-9_.-]", "_", tool.casefold())[:64] or "hub_job"
+            reservation = artifact_store.create_output_reservation(job_id, fingerprint, adapter_id)
+            reservation_id = reservation.get("reservation_id") if isinstance(reservation, dict) else None
+            if not isinstance(reservation_id, str):
                 return update_job(
-                    str(record["id"]),
+                    job_id,
                     status="failed",
                     progress=0,
                     finished_at=_now(),
-                    result={"status": "failed", "failure_code": "OUTPUT_SCOPE_UNAVAILABLE"},
-                    error="Hub không thể tạo phạm vi output an toàn cho job.",
-                    message="Không thể bắt đầu output scope an toàn.",
-                    next_action="Kiểm tra quyền Output/Config rồi tạo lại job.",
+                    result={"status": "failed", "failure_code": "OUTPUT_RESERVATION_UNAVAILABLE"},
+                    error="Hub không thể tạo reservation output an toàn cho job.",
+                    message="Không thể tạo reservation output trước khi chạy worker.",
+                    next_action="Kiểm tra quyền Temp/Config rồi tạo lại job.",
                 ) or record
-        context = JobContext(record["id"])
+        context = JobContext(record["id"], reservation_id=reservation_id)
         with self._lock:
             pending_cancel = record["id"] in self._pending_cancellations
             self._pending_cancellations.discard(record["id"])
@@ -164,114 +186,101 @@ class HubJobManager:
 
     def _run(self, job_id: str, tool: str, payload: dict[str, Any], runner: Runner, context: JobContext, heavy: bool) -> None:
         acquired = False
+        reservation_id = context.reservation_id
+
+        def cleanup(state: str) -> dict[str, Any]:
+            if not isinstance(reservation_id, str):
+                return {"status": "cleaned", "removed_count": 0}
+            return output_reservations.abort_reservation(reservation_id, state=state)
+
         try:
             update_job(job_id, status="starting", progress=1, started_at=_now(), message="Đang chuẩn bị worker Hub.")
             if heavy:
                 while not acquired:
                     if context.cancelled:
-                        artifact_store.finalize_job_output_scope(job_id, terminal_state="cancelled")
+                        cleanup("cancelled")
                         record_failed(tool, failure_code="CANCELLED")
                         update_job(job_id, status="cancelled", finished_at=_now(), message="Tác vụ đã được hủy trước khi chạy.")
                         return
                     acquired = self._heavy_slot.acquire(timeout=0.2)
             if context.cancelled:
-                artifact_store.finalize_job_output_scope(job_id, terminal_state="cancelled")
+                cleanup("cancelled")
                 record_failed(tool, failure_code="CANCELLED")
                 update_job(job_id, status="cancelled", finished_at=_now(), message="Tác vụ đã được hủy trước khi chạy.")
                 return
             update_job(job_id, status="running", progress=5, message="Worker Hub đang chạy nền.")
-            artifact_store.reconcile_job_output_scopes(active_job_ids={job_id})
+            if isinstance(reservation_id, str) and not output_reservations.begin_producing(reservation_id):
+                cleanup("failed")
+                record_failed(tool, failure_code="OUTPUT_RESERVATION_UNAVAILABLE")
+                update_job(job_id, status="failed", progress=0, finished_at=_now(), result={"status": "failed", "failure_code": "OUTPUT_RESERVATION_UNAVAILABLE"}, error="Output reservation không khả dụng.", message="Không thể bắt đầu worker với reservation output.")
+                return
             raw_result = runner(payload, context)
             # Cancellation and publication share the context lock.  A cancel
-            # that arrives before this critical section prevents publication;
-            # a cancel that arrives during it waits until the terminal state
-            # is durable, so it cannot leave an orphaned artifact behind.
+            # that arrives before this critical section prevents publication.
             with context._lock:
                 record = get_job_internal(job_id) or {"id": job_id, "tool": tool}
-                scope_state = artifact_store.inspect_job_output_scope(job_id)
+                publication: dict[str, Any] | None = None
+                if isinstance(reservation_id, str) and not context.cancelled:
+                    provenance = {
+                        "job_id": str(record.get("id") or ""),
+                        "job_spec_fingerprint": _job_fingerprint(record),
+                        "adapter_id": _adapter_id(record),
+                        "attempt": 1,
+                        "status": "completed",
+                    }
+                    publication = artifact_store.commit_output(
+                        reservation_id,
+                        raw_result,
+                        provenance=provenance,
+                        require_output=tool in JOB_RESERVATION_TOOLS,
+                    )
+                artifacts = publication.get("artifacts") if isinstance(publication, dict) and publication.get("status") == "published" else None
                 if context.cancelled:
-                    cleanup = artifact_store.finalize_job_output_scope(job_id, raw_result, terminal_state="cancelled")
                     result = {"status": "cancelled"}
-                    if cleanup.get("status") == "manual_review":
+                    cleanup_result = cleanup("cancelled")
+                    if cleanup_result.get("status") == "manual_review":
                         result["cleanup_status"] = "manual_review"
                     publish_error = None
                 else:
-                    scope_result = artifact_store.prepare_job_output_scope(job_id, raw_result) if scope_state is not None else {"status": "no_scope"}
-                    if scope_result.get("status") in {"manual_review", "invalid", "unavailable"}:
-                        result, publish_error = {
-                            "status": "failed",
-                            "error": "Output ownership could not be proven; no artifact was published.",
-                            "next_action": "Review output ownership and create a new job.",
-                        }, "OUTPUT_OWNERSHIP_AMBIGUOUS"
-                    else:
-                        result, publish_error = _publish_result(raw_result, record)
+                    result, publish_error = _publish_result(raw_result, record, artifacts=artifacts)
+                    if isinstance(publication, dict) and publication.get("status") in {"manual_review", "unavailable", "failed"}:
+                        result = {"status": "failed", "error": "Output ownership reservation could not be proven; no artifact was published.", "next_action": "Review the reservation and create a new job."}
+                        publish_error = str(publication.get("code") or "OUTPUT_OWNERSHIP_UNPROVEN")
                 if context.cancelled or result.get("status") == "cancelled":
                     if not context.cancelled:
-                        cleanup = artifact_store.finalize_job_output_scope(job_id, raw_result, terminal_state="cancelled")
-                        if cleanup.get("status") == "manual_review":
+                        cleanup_result = cleanup("cancelled")
+                        if cleanup_result.get("status") == "manual_review":
                             result["cleanup_status"] = "manual_review"
                     record_failed(tool, failure_code="CANCELLED")
                     update_job(job_id, status="cancelled", progress=0, finished_at=_now(), result=result, message="Tác vụ đã được hủy.")
                 elif publish_error is not None:
-                    cleanup = artifact_store.finalize_job_output_scope(job_id, raw_result, terminal_state="failed")
-                    if cleanup.get("status") == "manual_review":
+                    cleanup_result = cleanup("failed")
+                    if cleanup_result.get("status") == "manual_review":
                         result["cleanup_status"] = "manual_review"
                     record_failed(tool, failure_code="OUTPUT_PUBLISH_FAILED")
-                    update_job(
-                        job_id,
-                        status="failed",
-                        progress=0,
-                        finished_at=_now(),
-                        result=result,
-                        error="Output không được publish thành artifact Hub; job giữ trạng thái failed.",
-                        message="Không thể publish output.",
-                        next_action="Kiểm tra runtime/output contract rồi tạo lại job.",
-                    )
+                    update_job(job_id, status="failed", progress=0, finished_at=_now(), result=result, error="Output không được publish thành artifact Hub; job giữ trạng thái failed.", message="Không thể publish output.", next_action="Kiểm tra reservation/output contract rồi tạo lại job.")
                 elif result.get("status") == "completed":
-                    if requires_published_artifact(tool) and not has_published_artifact(result):
-                        cleanup = artifact_store.finalize_job_output_scope(job_id, raw_result, terminal_state="failed")
-                        if cleanup.get("status") == "manual_review":
+                    if tool in JOB_RESERVATION_TOOLS and not has_published_artifact(result):
+                        cleanup_result = cleanup("failed")
+                        if cleanup_result.get("status") == "manual_review":
                             result["cleanup_status"] = "manual_review"
                         record_failed(tool, failure_code="OUTPUT_MISSING")
-                        update_job(
-                            job_id,
-                            status="failed",
-                            progress=0,
-                            finished_at=_now(),
-                            result={
-                                "status": "failed",
-                                "failure_code": "OUTPUT_MISSING",
-                                "error": "Worker completed without a publishable Hub artifact.",
-                            },
-                            error="Job completed without a publishable artifact; capability evidence was not recorded.",
-                            message="Worker không tạo artifact Hub để publish.",
-                            next_action="Kiểm tra output contract rồi tạo lại job.",
-                        )
+                        update_job(job_id, status="failed", progress=0, finished_at=_now(), result={"status": "failed", "failure_code": "OUTPUT_MISSING", "error": "Worker completed without a publishable Hub artifact."}, error="Job completed without a publishable artifact; capability evidence was not recorded.", message="Worker không tạo artifact Hub để publish.", next_action="Kiểm tra output contract rồi tạo lại job.")
                     else:
-                        artifact_store.finalize_job_output_scope(job_id, raw_result, terminal_state="completed", published=True)
                         update_job(job_id, status="completed", progress=100, finished_at=_now(), result=result, message="Hoàn tất.", next_action=result.get("next_action"))
                         record_completed(tool)
                 elif result.get("status") == "unavailable":
-                    artifact_store.finalize_job_output_scope(job_id, raw_result, terminal_state="unavailable")
+                    cleanup("failed")
                     record_unavailable(tool, failure_code="BACKEND_UNAVAILABLE")
-                    update_job(
-                        job_id,
-                        status="unavailable",
-                        progress=0,
-                        finished_at=_now(),
-                        result=result,
-                        error=result.get("error") or result.get("reason") or "Backend chưa khả dụng.",
-                        message=result.get("next_action") or "Backend chưa khả dụng.",
-                        next_action=result.get("next_action"),
-                    )
+                    update_job(job_id, status="unavailable", progress=0, finished_at=_now(), result=result, error=result.get("error") or result.get("reason") or "Backend chưa khả dụng.", message=result.get("next_action") or "Backend chưa khả dụng.", next_action=result.get("next_action"))
                 else:
-                    artifact_store.finalize_job_output_scope(job_id, raw_result, terminal_state="failed")
+                    cleanup("failed")
                     record_failed(tool, failure_code="WORKER_FAILED")
                     update_job(job_id, status="failed", progress=0, finished_at=_now(), result=result, error=result.get("error") or result.get("reason") or "Worker không hoàn tất.", message="Không thể hoàn tất tác vụ.", next_action=result.get("next_action"))
         except Exception as exc:  # pragma: no cover - guards background threads
-            artifact_store.finalize_job_output_scope(job_id, None, terminal_state="failed")
+            cleanup("failed")
             record_failed(tool, failure_code="WORKER_EXCEPTION")
-            update_job(job_id, status="failed", progress=0, finished_at=_now(), error=str(exc), message="Worker Hub gặp lỗi không mong đợi.")
+            update_job(job_id, status="failed", progress=0, finished_at=_now(), error="Worker Hub gặp lỗi không mong đợi.", message="Worker Hub gặp lỗi không mong đợi.")
         finally:
             if acquired:
                 self._heavy_slot.release()

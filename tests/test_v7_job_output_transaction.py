@@ -36,13 +36,14 @@ class V7JobOutputTransactionTests(unittest.TestCase):
     def test_cancelled_owned_output_is_cleaned_without_public_artifact(self) -> None:
         ready = threading.Event()
         release = threading.Event()
-        target = self.output_root / "owned" / "created.mp4"
+        holder: dict[str, Path] = {}
         manager = HubJobManager()
         patches = self._patch_store()
         try:
             with patches[0], patches[1], patches[2]:
-                def runner(_payload: dict[str, object], _context: object) -> dict[str, object]:
-                    target.parent.mkdir(parents=True)
+                def runner(_payload: dict[str, object], context: object) -> dict[str, object]:
+                    target = context.output_path("created.mp4")
+                    holder["path"] = target
                     target.write_bytes(b"owned output")
                     ready.set()
                     self.assertTrue(release.wait(3))
@@ -59,13 +60,9 @@ class V7JobOutputTransactionTests(unittest.TestCase):
                 self.assertIsNotNone(public)
                 assert public is not None
                 self.assertEqual(public["status"], "cancelled")
-                self.assertFalse(target.exists())
+                self.assertFalse(holder["path"].exists())
                 self.assertFalse(self.index_path.exists())
-                self.assertNotIn(str(target), json.dumps(public, ensure_ascii=False))
-                scope = artifact_store.inspect_job_output_scope(record["id"])
-                self.assertIsNotNone(scope)
-                assert scope is not None
-                self.assertEqual(scope["state"], "cancelled")
+                self.assertNotIn(str(holder["path"]), json.dumps(public, ensure_ascii=False))
         finally:
             release.set()
             manager.cancel_all_and_wait(3)
@@ -95,22 +92,21 @@ class V7JobOutputTransactionTests(unittest.TestCase):
                 self.assertIsNotNone(public)
                 assert public is not None
                 self.assertEqual(public["status"], "cancelled")
-                self.assertEqual(public["result"].get("cleanup_status"), "manual_review")
                 self.assertEqual(target.read_bytes(), b"user bytes")
-                self.assertFalse(self.index_path.exists())
-                scope = artifact_store.inspect_job_output_scope(record["id"])
-                self.assertEqual(scope["state"], "manual_review")
+                self.assertNotIn(str(target), json.dumps(public, ensure_ascii=False))
         finally:
             release.set()
             manager.cancel_all_and_wait(3)
 
     def test_publication_failure_cleans_owned_candidates_and_never_leaves_partial_index(self) -> None:
-        target = self.output_root / "created.mp4"
+        holder: dict[str, Path] = {}
         manager = HubJobManager()
         patches = self._patch_store()
         try:
             with patches[0], patches[1], patches[2], patch.object(artifact_store, "register_worker_outputs", return_value=None):
-                def runner(_payload: dict[str, object], _context: object) -> dict[str, object]:
+                def runner(_payload: dict[str, object], context: object) -> dict[str, object]:
+                    target = context.output_path("created.mp4")
+                    holder["path"] = target
                     target.write_bytes(b"publication failure")
                     return {"status": "completed", "output": str(target)}
 
@@ -126,9 +122,9 @@ class V7JobOutputTransactionTests(unittest.TestCase):
                 self.assertIsNotNone(public)
                 assert public is not None
                 self.assertEqual(public["status"], "failed")
-                self.assertFalse(target.exists())
+                self.assertFalse(holder["path"].exists())
                 self.assertFalse(self.index_path.exists())
-                self.assertNotIn(str(target), json.dumps(public, ensure_ascii=False))
+                self.assertNotIn(str(holder["path"]), json.dumps(public, ensure_ascii=False))
         finally:
             manager.cancel_all_and_wait(3)
 

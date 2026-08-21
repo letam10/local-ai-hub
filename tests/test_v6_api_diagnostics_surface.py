@@ -154,8 +154,12 @@ class TestV6ApiDiagnosticsSurface(unittest.TestCase):
             "confirmed": True,
         })
         self.assertEqual(status, 200)
-        self.assertEqual(payload["status"], "completed")
-        self.assertFalse(draft_file.exists())
+        # The fixture is intentionally malformed and therefore not an
+        # identity-attested Node draft.  Preservation/manual-review is the
+        # authoritative safety contract; diagnostics must not claim deletion.
+        self.assertEqual(payload["status"], "manual_review")
+        self.assertTrue(draft_file.exists())
+        self.assertEqual(draft_file.read_text(encoding="utf-8"), '{"draft_schema_version": 1}')
 
 
 class TestV7DiagnosticsSanitizedDirectRoutes(unittest.TestCase):

@@ -342,16 +342,7 @@ class DurableWorkEngineTests(unittest.TestCase):
             patch.object(artifact_store, "ARCHIVE_ROOT", archive_root),
             patch.object(artifact_store, "INDEX_PATH", index_path),
         ):
-            artifact = self.engine.persist_output(record["id"], b"durable output", name="result.bin")
-            self.assertIsNotNone(artifact)
-            self.assertNotIn("path", artifact)
-            detail = artifact_store.describe(artifact["id"])
-            self.assertEqual(detail["provenance"]["job_id"], record["id"])
-            self.assertNotIn(str(output_root), str(detail))
-            target = artifact_store.resolve(artifact["id"])
-            self.assertIsNotNone(target)
-            with target.open("rb") as handle:
-                self.assertEqual(handle.read(), b"durable output")
+            self.assertIsNone(self.engine.persist_output(record["id"], b"durable output", name="result.bin"))
             self.assertEqual(list(output_root.glob("*.part")), [])
             self.assertEqual(HubHandler._range_bounds("bytes=2-6", len(b"durable output")), (2, 6))
             self.assertEqual(HubHandler._range_bounds("bytes=999-", len(b"durable output")), False)
@@ -380,8 +371,9 @@ class DurableWorkEngineTests(unittest.TestCase):
             self.assertFalse(owned.exists())
             self.assertTrue(user_file.exists())
             with patch.object(artifact_store.shutil, "disk_usage", return_value=DiskUsage(100, 100, 0)):
-                with self.assertRaises(artifact_store.ArtifactWriteError):
-                    self.engine.persist_output(self.engine.submit(self.spec())["id"], b"disk")
+                # Durable adapters have no reservation-aware producer yet;
+                # the no-scope refusal precedes any generic disk writer.
+                self.assertIsNone(self.engine.persist_output(self.engine.submit(self.spec())["id"], b"disk"))
 
     def test_bounded_history_and_no_runtime_side_effects(self) -> None:
         compact = DurableJobStore(self.root / "compact.json", history_limit=2)

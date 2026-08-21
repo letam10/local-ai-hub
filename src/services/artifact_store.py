@@ -1550,6 +1550,22 @@ def publicize(value: Any, *, key: str | None = None) -> Any:
     return value
 
 
+def create_output_reservation(job_id: str, job_fingerprint: str, adapter_id: str, **kwargs: Any) -> dict[str, Any] | None:
+    """Create a server-owned output reservation before producer execution."""
+
+    from src.services.job_manager.output_reservations import create_reservation
+
+    return create_reservation(job_id, job_fingerprint, adapter_id, **kwargs)
+
+
+def commit_output(reservation_id: str, result: object, *, provenance: dict[str, Any], require_output: bool = False) -> dict[str, Any]:
+    """Commit one reservation through the authoritative artifact boundary."""
+
+    from src.services.job_manager.output_reservations import commit_reservation
+
+    return commit_reservation(reservation_id, result, provenance=provenance, require_output=require_output)
+
+
 def diagnostics_summary() -> dict[str, Any]:
     """Public read-only diagnostic summary of the artifact store."""
     with _LOCK:

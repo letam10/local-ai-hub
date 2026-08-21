@@ -55,23 +55,11 @@ class Sam2ArtifactContractTests(unittest.TestCase):
         self.assertNotIn("mask", normalized)
         self.assertNotIn("preview", normalized)
 
-        seen: list[Path] = []
-
-        def register(paths, *, provenance):
-            seen.extend(paths)
-            return [
-                {"id": _artifact_id("b"), "provenance": provenance},
-                {"id": _artifact_id("c"), "provenance": provenance},
-            ]
-
         record = {"id": "job_20260816_000000_deadbeef", "tool": "segment_from_points"}
-        with patch.object(jobs.artifact_store, "register_worker_outputs", side_effect=register):
-            safe, error = jobs._publish_result(normalized, record)
+        safe, error = jobs._publish_result(normalized, record, artifacts=[{"id": _artifact_id("b")}, {"id": _artifact_id("c")}])
 
         self.assertIsNone(error)
-        self.assertEqual(seen, [mask, preview])
         self.assertEqual([item["id"] for item in safe["artifacts"]], [_artifact_id("b"), _artifact_id("c")])
-        self.assertEqual(safe["artifacts"][0]["provenance"]["job_id"], record["id"])
         self.assertNotIn(str(root), json.dumps(safe))
 
     def test_adapter_rejects_raw_path_or_wrong_media_before_worker_launch(self) -> None:
@@ -193,13 +181,12 @@ class Sam2ArtifactContractTests(unittest.TestCase):
 
     def test_missing_sam2_output_fails_publication_and_cannot_be_evidence(self) -> None:
         record = {"id": "job_20260816_000000_deadbeef", "tool": "segment_image"}
-        with patch.object(jobs.artifact_store, "register_worker_outputs", return_value=[]):
-            safe, error = jobs._publish_result(
-                {"status": "completed", "operation": "segment_image", "outputs": ["missing-mask.png"]},
-                record,
-            )
+        safe, error = jobs._publish_result(
+            {"status": "completed", "operation": "segment_image", "outputs": ["missing-mask.png"]},
+            record,
+        )
 
-        self.assertEqual(error, "output_publish")
+        self.assertEqual(error, "OUTPUT_RESERVATION_REQUIRED")
         self.assertEqual(safe["status"], "failed")
         self.assertNotIn("artifacts", safe)
 

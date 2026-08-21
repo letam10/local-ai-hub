@@ -25,6 +25,12 @@ package changes the version/tag allowlist. The tagged verifier requires the
 existing reviewed intended tag to resolve exactly to the current source/build
 commit. No safe tag syntax is treated as roadmap approval.
 
+Refusal precedence is deterministic: a source branch mismatch is reported
+before dirty-source or tag-source mismatch, followed by tag occupancy or
+intended-tag availability/version errors. `TAG_SOURCE_MISMATCH` describes a
+tag that resolves to a different commit; it is not a substitute for
+`SOURCE_BRANCH_MISMATCH`, and neither code authorizes a new tag.
+
 ## Detached v2 framing and chain
 
 The v2 record is a closed `release-provenance.v2` object. Its raw detached file

@@ -107,6 +107,7 @@ class V7SourceAndUpdateTests(unittest.TestCase):
         record = self.catalog.models["demo-model"]
         for expected, code in (("AUTH_REQUIRED", "auth"), ("LICENSE_REQUIRED", "license"), ("RATE_LIMITED", "rate"), ("UNKNOWN", "timeout")):
             value = dict(record)
+            value["model_id"] = f"demo-{code}"
             if code == "auth":
                 value["primary_source"] = {"url": "https://example.invalid/demo", "canonical_identity": "demo-artifact-r1", "authentication_required": True}
             elif code == "license":
@@ -114,7 +115,10 @@ class V7SourceAndUpdateTests(unittest.TestCase):
             probe_value = (expected, code, 3600 if code == "rate" else None)
             result = service.check(f"demo-{code}", value, force=True, now=100, probe=lambda _entry, output=probe_value: output)
             self.assertEqual(result["status"], expected)
-            self.assertEqual(service.cached(f"demo-{code}")["status"], expected)
+            # Cache reads stay bound to the same catalog/source record; an
+            # unbound lookup must remain UNKNOWN rather than becoming an
+            # authority for a different component.
+            self.assertEqual(service.cached(f"demo-{code}", value, now=101)["status"], expected)
 
     def test_animesr_local_operational_state_survives_upstream_loss(self) -> None:
         record = dict(self.catalog.models["demo-model"])
@@ -131,7 +135,10 @@ class V7SourceAndUpdateTests(unittest.TestCase):
     def test_source_unavailable_does_not_turn_installed_local_component_into_not_installed(self) -> None:
         model_root = self.paths.models_root / "demo-model"
         model_root.mkdir(parents=True)
-        (model_root / "demo.bin").write_bytes(b"local")
+        # The fixture catalog declares a zero-byte leaf.  Match that local
+        # evidence so the test exercises source-unavailable independence
+        # rather than a catalog-size mismatch.
+        (model_root / "demo.bin").write_bytes(b"")
         service = SourceAvailabilityService(paths=self.paths)
         service.check("demo-model", self.catalog.models["demo-model"], force=True, now=100, probe=lambda _entry: ("UNAVAILABLE", "gone", None))
         resolver = UpdateResolver(paths=self.paths, catalog=self.catalog, source_service=service)

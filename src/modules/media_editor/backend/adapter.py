@@ -299,12 +299,18 @@ def _multi_input_command(operation: str, manifest: Path, target: Path, payload: 
     return None
 
 
-def _output(source: Path, operation: str, extension: str | None = None) -> Path:
-    root = OUTPUT_ROOT / "Media"
-    root.mkdir(parents=True, exist_ok=True)
+def _output(source: Path, operation: str, extension: str | None = None, context: ProcessOwner | None = None) -> Path:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     suffix = extension or source.suffix or ".mp4"
-    return root / f"{source.stem}_{operation}_{stamp}{suffix}"
+    filename = f"{source.stem}_{operation}_{stamp}{suffix}"
+    reserve = getattr(context, "output_path", None)
+    if callable(reserve):
+        return reserve(filename)
+    # Legacy direct adapter callers may still create a local candidate, but
+    # the Hub job manager will not publish or delete it without a reservation.
+    root = OUTPUT_ROOT / "Media"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / filename
 
 
 def probe(path: str) -> dict[str, Any]:
@@ -652,7 +658,7 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
             return {"status": "error", "error": "Concat hoặc image sequence cần ít nhất hai artifact input trong Hub."}
         if operation == "image_sequence_video" and any(item.suffix.casefold() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"} for item in unique_sources):
             return {"status": "error", "error": "Image sequence chỉ nhận ảnh PNG/JPG/WEBP/BMP đã tải lên Hub."}
-        target = _output(source, operation, ".mp4" if operation == "image_sequence_video" else source.suffix or ".mp4")
+        target = _output(source, operation, ".mp4" if operation == "image_sequence_video" else source.suffix or ".mp4", context)
         manifest = _concat_manifest(unique_sources, fps=max(1, min(120, float(payload.get("fps", 24)))) if operation == "image_sequence_video" else None)
         try:
             command = _multi_input_command(operation, manifest, target, payload)
@@ -675,7 +681,7 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
         container = str(payload.get("container") or "mp4").strip().lower().lstrip(".")
         if container not in {"mp4", "mkv", "webm"}:
             return {"status": "error", "error": "Encode container chỉ hỗ trợ MP4, MKV hoặc WebM."}
-        target = _output(source, operation, f".{container}")
+        target = _output(source, operation, f".{container}", context)
         cleanup_prefixes: list[Path] = []
         try:
             commands, cleanup_prefixes = _encode_commands(payload, source, target)
@@ -701,11 +707,12 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
     image_extension = "." + ({"jpeg": "jpg", "jpg": "jpg", "png": "png", "webp": "webp", "bmp": "bmp"}.get(requested_format, "png"))
     extension = ".m4a" if operation == "extract_audio" else (image_extension if operation.startswith("image_") else source.suffix or ".mp4")
     if operation == "extract_frames":
-        output_dir = OUTPUT_ROOT / "Media" / f"frames_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
-        output_dir.mkdir(parents=True, exist_ok=False)
+        reserve_dir = getattr(context, "output_directory", None)
+        output_dir = reserve_dir(f"frames_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}") if callable(reserve_dir) else OUTPUT_ROOT / "Media" / f"frames_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+        output_dir.mkdir(parents=True, exist_ok=False) if not callable(reserve_dir) else None
         target = output_dir / "frame_%06d.png"
     else:
-        target = _output(source, operation, extension)
+        target = _output(source, operation, extension, context)
     try:
         command = _command(payload, source, target, resolved_overlay=resolved_overlay)
     except (TypeError, ValueError) as exc:
