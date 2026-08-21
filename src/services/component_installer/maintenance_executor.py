@@ -153,7 +153,15 @@ class MaintenanceExecutor:
             leaves.append(item)
         return True, leaves
 
-    def apply(self, plan: Mapping[str, Any], *, confirmed: bool) -> dict[str, Any]:
+    def apply(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        confirmed: bool,
+        catalog_binding: Any | None = None,
+        current_record: Mapping[str, Any] | None = None,
+        binding_provider: Any | None = None,
+    ) -> dict[str, Any]:
         if not confirmed:
             return {"status": "waiting_confirmation", "execution": "not_run", "dry_run": True}
         component_id = plan.get("component_id")
@@ -161,7 +169,17 @@ class MaintenanceExecutor:
         action = plan.get("action")
         if not isinstance(component_id, str) or component_type not in {"model", "runtime"} or action not in {"repair", "update", "uninstall"}:
             return {"status": "error", "code": "maintenance_plan_invalid", "execution": "not_run"}
-        record = self._record(component_id, str(component_type))
+        from src.services.operational_closure.update_executor import binding_refusal, resolve_execution_binding
+
+        binding, bound_record, binding_error = resolve_execution_binding(
+            plan,
+            catalog_binding=catalog_binding,
+            current_record=current_record,
+            binding_provider=binding_provider,
+        )
+        if binding is None:
+            return binding_refusal(binding_error or "catalog_binding_stale", component_id=component_id)
+        record = bound_record if isinstance(bound_record, Mapping) else self._record(component_id, str(component_type))
         if not isinstance(record, Mapping):
             return {"status": "error", "code": "unknown_component", "execution": "not_run"}
         root = self._root(record, component_id, str(component_type))
@@ -172,14 +190,50 @@ class MaintenanceExecutor:
         if action == "repair":
             if not leaves or not all(item.get("present") for item in leaves):
                 return {"status": "unavailable", "code": "repair_source_required", "execution": "not_run", "next_action": "Create a trusted source or manual-import plan for the missing catalog leaves."}
-            receipt = receipts["records"].get(component_id)
-            if not isinstance(receipt, dict):
-                receipt = {"component_id": component_id, "component_type": component_type, "source": "existing_install_reuse"}
-            receipt.update({"state": "INSTALLED_UNVERIFIED", "operational": False, "verified_at": int(time.time()), "files": leaves, "installed_size_bytes": sum(int(item.get("size_bytes", 0)) for item in leaves), "last_repair": int(time.time())})
-            receipts["records"][component_id] = receipt
+            binding, bound_record, binding_error = resolve_execution_binding(
+                plan,
+                catalog_binding=binding,
+                current_record=record,
+                binding_provider=binding_provider,
+            )
+            if binding is None:
+                return binding_refusal(binding_error or "catalog_binding_stale", component_id=component_id)
+            record = bound_record if isinstance(bound_record, Mapping) else record
+            previous_receipt = receipts["records"].get(component_id)
+            runtime_root_class = record.get("root_class") if record.get("root_class") in {"runtime_root", "environments_root", "external_managed"} else "runtime_root"
+            receipt: dict[str, Any] = {
+                "component_id": component_id,
+                "component_type": component_type,
+                "catalog_schema": binding.catalog_schema,
+                "catalog_revision": binding.catalog_revision,
+                "catalog_fingerprint": binding.catalog_fingerprint,
+                "source_identity": binding.source_identity,
+                "root_class": "models_root" if component_type == "model" else runtime_root_class,
+                "location_class": "models_root" if component_type == "model" else runtime_root_class,
+                "leaves": [
+                    {
+                        "relative_path": item.get("relative_leaf"),
+                        "observed_size_bytes": int(item.get("size_bytes", 0)),
+                        "observed_mtime_ns": 0,
+                        "verification_level": "unverified",
+                    }
+                    for item in leaves
+                ],
+                "recorded_at": int(time.time()),
+                "verified_at": None,
+                "state": "INSTALLED_UNVERIFIED",
+                "source": "existing_install_reuse",
+                "operational": False,
+            }
+            if isinstance(previous_receipt, Mapping):
+                for key in ("previous_version", "rollback_candidate"):
+                    if key in previous_receipt:
+                        receipt[key] = previous_receipt[key]
             try:
-                _atomic_json(self._receipt_path(), receipts)
-            except OSError:
+                from src.services.component_installer.receipts import ReceiptError, write_component_receipt
+
+                write_component_receipt(self.paths.config_root, component_id, receipt, catalog_binding=binding)
+            except (OSError, ReceiptError, KeyError, TypeError):
                 return {"status": "failed", "code": "receipt_write_failed", "execution": "not_run"}
             return {"status": "completed", "action": "repair", "component_id": component_id, "state": "INSTALLED_UNVERIFIED", "execution": "completed", "next_action": "Run the component-specific bounded verification before operational promotion."}
         if action == "update":
@@ -193,12 +247,34 @@ class MaintenanceExecutor:
             update_plan = {
                 "component_id": component_id,
                 "component_type": component_type,
+                "plan_fingerprint": plan.get("plan_fingerprint"),
                 "installed_revision": str(receipts["records"].get(component_id, {}).get("bundle_revision") or "previous"),
                 "latest_supported_revision": str(record.get("latest_supported_revision") or record.get("revision") or "unknown"),
-                "catalog_fingerprint": str(plan.get("catalog_fingerprint") or ""),
+                "catalog_fingerprint": binding.catalog_fingerprint,
                 "update_candidate": dict(candidate),
+                "_catalog_binding": binding,
+                "_record": record,
+                "_record_revision": plan.get("_record_revision"),
+                "_install_strategy": plan.get("_install_strategy"),
+                "_latest_supported_revision": plan.get("_latest_supported_revision"),
+                "_candidate_fingerprint": plan.get("_candidate_fingerprint"),
+                "_plan_fingerprint_payload": plan.get("_plan_fingerprint_payload"),
             }
-            return ComponentUpdateExecutor(paths=self.paths).apply(update_plan, confirmed=True)
+            return ComponentUpdateExecutor(paths=self.paths).apply(
+                update_plan,
+                confirmed=True,
+                catalog_binding=binding,
+                current_record=record,
+                binding_provider=binding_provider,
+            )
+        binding, bound_record, binding_error = resolve_execution_binding(
+            plan,
+            catalog_binding=binding,
+            current_record=record,
+            binding_provider=binding_provider,
+        )
+        if binding is None:
+            return binding_refusal(binding_error or "catalog_binding_stale", component_id=component_id)
         if self._shared_reference(component_id, record, receipts["records"]):
             return {"status": "conflict", "code": "shared_dependency_in_use", "execution": "not_run", "next_action": "Remove dependent components first; shared runtime/model leaves are preserved."}
         # Validate all leaves before the first delete.  Unknown files are never

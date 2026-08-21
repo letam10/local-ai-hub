@@ -18,6 +18,7 @@ import time
 from typing import Any
 
 from src.platform.paths import HubPaths, get_paths
+from src.services.component_installer.receipts import CatalogBindingContext, ReceiptError
 
 from .source_availability import SOURCE_STATUSES, SourceAvailabilityService, source_status_projection
 
@@ -127,6 +128,7 @@ class UpdateResolver:
         self.sources = source_service or SourceAvailabilityService(paths=self.paths)
         self.schedule = UpdateSchedule(paths=self.paths)
         self._plans: dict[str, dict[str, Any]] = {}
+        self._applied_plans: dict[str, dict[str, Any]] = {}
 
     def _record(self, component_id: str) -> tuple[str, Mapping[str, Any]]:
         component_id = _safe_id(component_id)
@@ -177,6 +179,53 @@ class UpdateResolver:
 
     def _source_for(self, component_id: str, record: Mapping[str, Any], *, kind: str, force: bool) -> dict[str, Any]:
         return self.sources.check(component_id, record, force=force, binding=self._source_binding(component_id, kind, record))
+
+    def _catalog_binding(self, component_id: str, kind: str, record: Mapping[str, Any]) -> tuple[CatalogBindingContext | None, str | None]:
+        """Build the current server-owned typed binding for an update boundary."""
+
+        try:
+            schema = getattr(self.catalog, "catalog_schema_version", None)
+            fingerprint = getattr(self.catalog, "fingerprint", None)
+            if not isinstance(fingerprint, str):
+                return None, "catalog_binding_unavailable"
+            if schema == "v7-production-catalog.v2":
+                version = getattr(self.catalog, "catalog_version", None)
+                if not isinstance(version, str) or not version:
+                    return None, "catalog_binding_unavailable"
+                binding = CatalogBindingContext.for_v2(
+                    catalog_version=version,
+                    catalog_fingerprint=fingerprint,
+                    source_identity=record.get("source_identity") if "source_identity" in record else None,
+                )
+            elif schema == "v7-production-catalog.v1":
+                binding = CatalogBindingContext.for_v1(component_type=kind, record=record, catalog_fingerprint=fingerprint)
+            elif schema in {"model-catalog.v1", "runtime-catalog.v1"}:
+                expected_schema = "model-catalog.v1" if kind == "model" else "runtime-catalog.v1"
+                if schema != expected_schema:
+                    return None, "catalog_schema_unsupported"
+                binding = CatalogBindingContext.for_v1(component_type=kind, record=record, catalog_fingerprint=fingerprint)
+            elif schema is None:
+                return None, "catalog_binding_unavailable"
+            else:
+                return None, "catalog_schema_unsupported"
+            binding.validate_record(component_type=kind, record=record)
+            return binding, None
+        except (ReceiptError, TypeError, ValueError):
+            return None, "catalog_binding_unavailable"
+
+    def _current_execution_binding(self, component_id: object, component_type: object) -> tuple[CatalogBindingContext, Mapping[str, Any]] | None:
+        """Provider callback used immediately before each mutating boundary."""
+
+        if not isinstance(component_id, str) or component_type not in {"model", "runtime"}:
+            return None
+        try:
+            kind, record = self._record(component_id)
+            if kind != component_type:
+                return None
+            binding, _code = self._catalog_binding(component_id, kind, record)
+            return (binding, record) if binding is not None else None
+        except (TypeError, ValueError, KeyError):
+            return None
 
     @staticmethod
     def _revisions(record: Mapping[str, Any], receipt: Mapping[str, Any] | None) -> tuple[str, str, str]:
@@ -248,15 +297,46 @@ class UpdateResolver:
 
     def plan_update(self, component_id: str) -> dict[str, Any]:
         kind, record = self._record(component_id)
+        binding, binding_error = self._catalog_binding(component_id, kind, record)
+        if binding is None:
+            return {"status": "unavailable", "code": binding_error or "catalog_binding_unavailable", "execution": "not_run", "dry_run": True, "next_action": "Refresh the server-owned catalog context before planning an update."}
         report = self.check_component(component_id, force_source_check=False)
         if report["status"] != "UPDATE_AVAILABLE":
             return {"status": "unavailable", "code": report["status"].lower(), "report": report, "execution": "not_run", "dry_run": True}
         body = {key: report[key] for key in ("component_id", "component_type", "installed_revision", "latest_supported_revision", "changed_parts", "download_required")}
         plan_id = "update_plan_" + _fingerprint({**body, "time": int(time.time())})[:24]
-        fingerprint = _fingerprint(body)
-        plan = {"schema_version": "component-update-plan.v1", "plan_id": plan_id, "plan_fingerprint": fingerprint, **body, "component_type": kind, "catalog_fingerprint": getattr(self.catalog, "fingerprint", None), "update_candidate": dict(record.get("update_candidate")) if isinstance(record.get("update_candidate"), Mapping) else None}
+        candidate = dict(record.get("update_candidate")) if isinstance(record.get("update_candidate"), Mapping) else None
+        candidate_fingerprint = _fingerprint(candidate)
+        record_revision = record.get("revision")
+        install_strategy = record.get("install_strategy")
+        execution_payload = {
+            "body": body,
+            "catalog_binding": binding.as_record_fields(),
+            "record_revision": record_revision,
+            "install_strategy": install_strategy,
+            "latest_supported_revision": record.get("latest_supported_revision", record_revision),
+            "candidate_fingerprint": candidate_fingerprint,
+        }
+        fingerprint = _fingerprint(execution_payload)
+        plan = {
+            "schema_version": "component-update-plan.v1",
+            "plan_id": plan_id,
+            "plan_fingerprint": fingerprint,
+            **body,
+            "component_type": kind,
+            "catalog_fingerprint": binding.catalog_fingerprint,
+            "update_candidate": candidate,
+            "_catalog_binding": binding,
+            "_record": record,
+            "_record_revision": record_revision,
+            "_install_strategy": install_strategy,
+            "_latest_supported_revision": record.get("latest_supported_revision", record_revision),
+            "_candidate_fingerprint": candidate_fingerprint,
+            "_plan_fingerprint_payload": execution_payload,
+        }
         self._plans[plan_id] = plan
-        return {**plan, "status": "planned", "execution": "not_run", "dry_run": True, "rollback_available": report["rollback_available"], "next_action": "Confirm a fresh plan through the explicit component update executor."}
+        public_plan = {key: value for key, value in plan.items() if not key.startswith("_") and key != "update_candidate"}
+        return {**public_plan, "status": "planned", "execution": "not_run", "dry_run": True, "rollback_available": report["rollback_available"], "next_action": "Confirm a fresh plan through the explicit component update executor."}
 
     def apply_update(self, plan_id: str, *, confirmed: bool = False) -> dict[str, Any]:
         plan = self._plans.get(plan_id)
@@ -265,11 +345,37 @@ class UpdateResolver:
         if not isinstance(plan, Mapping):
             return {"status": "error", "code": "unknown_update_plan", "execution": "not_run"}
         from .update_executor import ComponentUpdateExecutor
-        return ComponentUpdateExecutor(paths=self.paths).apply(plan, confirmed=True)
+        binding, binding_error = self._catalog_binding(str(plan.get("component_id")), str(plan.get("component_type")), plan.get("_record") if isinstance(plan.get("_record"), Mapping) else {})
+        if binding is None:
+            return {"status": "unavailable", "code": binding_error or "catalog_binding_unavailable", "execution": "not_run", "dry_run": True, "next_action": "Refresh the server-owned catalog context and create a new update plan."}
+        result = ComponentUpdateExecutor(paths=self.paths).apply(
+            plan,
+            confirmed=True,
+            catalog_binding=binding,
+            current_record=plan.get("_record") if isinstance(plan.get("_record"), Mapping) else None,
+            binding_provider=self._current_execution_binding,
+        )
+        if result.get("status") == "completed" and isinstance(plan.get("component_id"), str):
+            self._applied_plans[plan["component_id"]] = dict(plan)
+        return result
 
     def rollback(self, component_id: str) -> dict[str, Any]:
         from .update_executor import ComponentUpdateExecutor
-        return ComponentUpdateExecutor(paths=self.paths).rollback(_safe_id(component_id))
+        component_id = _safe_id(component_id)
+        kind, record = self._record(component_id)
+        binding, binding_error = self._catalog_binding(component_id, kind, record)
+        if binding is None:
+            return {"status": "unavailable", "code": binding_error or "catalog_binding_unavailable", "execution": "not_run", "dry_run": True, "next_action": "Refresh the server-owned catalog context before rollback."}
+        result = ComponentUpdateExecutor(paths=self.paths).rollback(
+            component_id,
+            catalog_binding=binding,
+            current_record=record,
+            binding_provider=self._current_execution_binding,
+            plan=self._applied_plans.get(component_id),
+        )
+        if result.get("status") == "completed":
+            self._applied_plans.pop(component_id, None)
+        return result
 
 
 __all__ = ["UPDATE_STATUSES", "SCHEDULE_POLICIES", "UpdateResolver", "UpdateSchedule"]

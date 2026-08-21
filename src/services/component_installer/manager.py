@@ -197,6 +197,33 @@ class ComponentInstaller:
         except (InstallPlanError, ReceiptError, TypeError, ValueError):
             return None, "stale_binding"
 
+    def _current_update_binding(self, component_id: object, component_type: object) -> tuple[CatalogBindingContext, Mapping[str, Any]] | None:
+        """Rebuild a maintenance binding from the current server-owned manager state."""
+
+        if not isinstance(component_id, str) or component_type not in {"model", "runtime"}:
+            return None
+        try:
+            record = self._catalog_record(component_id, str(component_type))
+            fingerprint = self.model_manager.catalog_fingerprint if component_type == "model" else self.runtime_manager._catalog_fingerprint()
+            if callable(self._catalog_binding_provider):
+                source = self._current_catalog_binding_source(str(component_type), record)
+                if source is None:
+                    return None
+                binding = _binding_context(str(component_type), record, fingerprint, source)
+            else:
+                # A legacy manager can rebuild only its explicit V1 context.
+                # V2 must come from a current server-owned provider, never from
+                # fields copied into a legacy record or plan.
+                if record.get("catalog_schema") == "v7-production-catalog.v2":
+                    return None
+                declared_schema = record.get("catalog_schema")
+                if declared_schema is not None and declared_schema not in {"model-catalog.v1", "runtime-catalog.v1"}:
+                    return None
+                binding = _binding_context(str(component_type), record, fingerprint)
+            return binding, record
+        except (InstallPlanError, ReceiptError, TypeError, ValueError):
+            return None
+
     @staticmethod
     def _binding_refusal(plan_id: object, code: str = "stale_binding") -> dict[str, Any]:
         return {
@@ -715,10 +742,24 @@ class ComponentInstaller:
         default_fingerprint = self.model_manager.catalog_fingerprint if kind == "model" else self.runtime_manager._catalog_fingerprint()
         binding = _binding_context(kind, record, default_fingerprint, catalog_binding)
         state = self._inspect(component_id, kind, catalog_binding=binding)
+        candidate = record.get("update_candidate") if isinstance(record.get("update_candidate"), Mapping) else None
+        candidate_fingerprint = _state_fingerprint(candidate) if isinstance(candidate, Mapping) else None
         body = {"schema_version": "component-maintenance-plan.v1", "component_id": component_id, "component_type": kind, "action": action, "expected_state_fingerprint": _state_fingerprint(state), "catalog_fingerprint": binding.catalog_fingerprint, "shared_dependency_policy": "preserve_referenced_assets"}
         plan_id = f"maintenance_plan_{secrets.token_hex(16)}"
-        fingerprint = plan_fingerprint(body)
-        self._plans[plan_id] = {**body, "plan_id": plan_id, "plan_fingerprint": fingerprint, "_catalog_binding": binding}
+        binding_payload = {"body": body, "catalog_binding": binding.as_record_fields(), "record_revision": record.get("revision"), "install_strategy": record.get("install_strategy"), "latest_supported_revision": record.get("latest_supported_revision", record.get("revision")), "candidate_fingerprint": candidate_fingerprint}
+        fingerprint = plan_fingerprint(binding_payload)
+        self._plans[plan_id] = {
+            **body,
+            "plan_id": plan_id,
+            "plan_fingerprint": fingerprint,
+            "_catalog_binding": binding,
+            "_record": record,
+            "_record_revision": record.get("revision"),
+            "_install_strategy": record.get("install_strategy"),
+            "_latest_supported_revision": record.get("latest_supported_revision", record.get("revision")),
+            "_candidate_fingerprint": candidate_fingerprint,
+            "_plan_fingerprint_payload": binding_payload,
+        }
         return {**body, "plan_id": plan_id, "plan_fingerprint": fingerprint, "status": "planned", "execution": "not_run", "dry_run": True, "current_status": state["status"], "next_action": "Review the plan and explicit destructive confirmation policy."}
 
     def confirm_maintenance(self, plan_id: str, *, confirmed: bool = False, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -730,6 +771,8 @@ class ComponentInstaller:
         current_binding, binding_error = self._fresh_binding_for_plan(plan, catalog_binding=catalog_binding)
         if current_binding is None:
             return self._binding_refusal(plan_id, binding_error or "stale_binding")
+        if current_binding.catalog_schema == "v7-production-catalog.v2" and not callable(self._catalog_binding_provider):
+            return self._binding_refusal(plan_id, "catalog_schema_unsupported")
         current = self._inspect(plan["component_id"], plan["component_type"], catalog_binding=current_binding)
         if _state_fingerprint(current) != plan["expected_state_fingerprint"]:
             return {"status": "conflict", "code": "stale_maintenance_plan", "plan_id": plan_id}
@@ -750,12 +793,21 @@ class ComponentInstaller:
             )
             if verified.get("status") != "completed":
                 return {"status": verified.get("status", "unavailable"), "code": verified.get("code", "repair_unavailable"), "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": verified.get("next_action", "Review the managed installation.")}
+            latest_binding, latest_error = self._fresh_binding_for_plan(plan, catalog_binding=catalog_binding)
+            if latest_binding is None or not self._same_catalog_binding(current_binding, latest_binding):
+                return self._binding_refusal(plan_id, latest_error or "stale_binding")
             try:
-                write_component_receipt(self.paths.config_root, plan["component_id"], verified["receipt"], catalog_binding=current_binding)
+                write_component_receipt(self.paths.config_root, plan["component_id"], verified["receipt"], catalog_binding=latest_binding)
             except (OSError, ReceiptError, KeyError, TypeError):
                 return {"status": "unavailable", "code": "receipt_write_failed", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": "Retry the explicit receipt-only repair after reviewing receipt storage."}
             return {"status": "completed", "action": "repair", "component_id": plan["component_id"], "state": verified["state"], "execution": "not_run", "dry_run": True, "verified": verified["state"] == "INSTALLED_VERIFIED", "operational": False, "next_action": verified["next_action"]}
-        result = MaintenanceExecutor(paths=self.paths, catalog=self._catalog_adapter()).apply(plan, confirmed=True)
+        result = MaintenanceExecutor(paths=self.paths, catalog=self._catalog_adapter()).apply(
+            plan,
+            confirmed=True,
+            catalog_binding=current_binding,
+            current_record=self._catalog_record(plan["component_id"], plan["component_type"]),
+            binding_provider=self._current_update_binding,
+        )
         result["plan_id"] = plan_id
         return result
 

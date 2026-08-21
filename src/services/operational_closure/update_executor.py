@@ -21,7 +21,143 @@ from typing import Any
 
 from src.platform.paths import HubPaths
 from src.services.component_installer.downloader import DownloadError, TrustedDownloader
-from src.services.component_installer.receipts import read_receipts, source_identity, write_component_receipt
+from src.services.component_installer.receipts import CatalogBindingContext, ReceiptError, read_receipts, source_identity, write_component_receipt
+
+
+_V2_CATALOG_SCHEMA = "v7-production-catalog.v2"
+
+
+def _fingerprint(value: object) -> str | None:
+    try:
+        payload = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(payload).hexdigest()
+
+
+def binding_refusal(code: str, *, component_id: object = None) -> dict[str, Any]:
+    """Return one fixed, path-free refusal for every binding boundary."""
+
+    status = "unavailable" if code == "catalog_binding_unavailable" else "conflict"
+    value: dict[str, Any] = {
+        "status": status,
+        "code": code if code in {"catalog_binding_stale", "catalog_schema_unsupported", "catalog_binding_unavailable"} else "catalog_binding_stale",
+        "execution": "not_run",
+        "dry_run": True,
+        "next_action": "Refresh the server-owned catalog context and create a new update plan.",
+    }
+    return value
+
+
+def _coerce_binding(value: object) -> CatalogBindingContext | None:
+    try:
+        if isinstance(value, CatalogBindingContext):
+            return value
+        if isinstance(value, Mapping):
+            return CatalogBindingContext.from_mapping(value)
+    except (ReceiptError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _binding_from_provider(value: object, fallback_record: Mapping[str, Any] | None) -> tuple[CatalogBindingContext | None, Mapping[str, Any] | None]:
+    if isinstance(value, tuple) and len(value) == 2:
+        binding_value, record_value = value
+        binding = _coerce_binding(binding_value)
+        record = record_value if isinstance(record_value, Mapping) else fallback_record
+        return binding, record
+    if isinstance(value, Mapping) and ("binding" in value or "catalog_binding" in value):
+        binding = _coerce_binding(value.get("binding", value.get("catalog_binding")))
+        record_value = value.get("record")
+        record = record_value if isinstance(record_value, Mapping) else fallback_record
+        return binding, record
+    return _coerce_binding(value), fallback_record
+
+
+def _expected_plan_payload(plan: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    value = plan.get("_plan_fingerprint_payload")
+    return value if isinstance(value, Mapping) else None
+
+
+def resolve_execution_binding(
+    plan: Mapping[str, Any],
+    *,
+    catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None,
+    current_record: Mapping[str, Any] | None = None,
+    binding_provider: Any | None = None,
+) -> tuple[CatalogBindingContext | None, Mapping[str, Any] | None, str | None]:
+    """Resolve a current binding without accepting a plan or path as authority."""
+
+    planned_record = plan.get("_record")
+    record = current_record if isinstance(current_record, Mapping) else planned_record if isinstance(planned_record, Mapping) else None
+    binding = _coerce_binding(catalog_binding)
+    if callable(binding_provider):
+        try:
+            provided = binding_provider(plan.get("component_id"), plan.get("component_type"))
+        except Exception:
+            return None, None, "catalog_binding_unavailable"
+        binding, provided_record = _binding_from_provider(provided, record)
+        record = provided_record
+    if binding is None:
+        return None, record, "catalog_binding_unavailable"
+    code = validate_execution_binding(plan, binding, record)
+    if code is not None:
+        return None, record, code
+    return binding, record, None
+
+
+def validate_execution_binding(
+    plan: Mapping[str, Any],
+    binding: CatalogBindingContext,
+    record: Mapping[str, Any] | None,
+) -> str | None:
+    """Validate typed catalog, component and candidate identity before mutation."""
+
+    if not isinstance(plan, Mapping) or not isinstance(binding, CatalogBindingContext):
+        return "catalog_binding_unavailable"
+    planned_value = plan.get("_catalog_binding", plan.get("catalog_binding"))
+    planned = _coerce_binding(planned_value)
+    if planned is None:
+        return "catalog_binding_unavailable"
+    if planned.catalog_schema != binding.catalog_schema:
+        return "catalog_schema_unsupported" if _V2_CATALOG_SCHEMA in {planned.catalog_schema, binding.catalog_schema} else "catalog_binding_stale"
+    if planned.as_record_fields() != binding.as_record_fields():
+        return "catalog_binding_stale"
+    if plan.get("catalog_fingerprint") is not None and plan.get("catalog_fingerprint") != binding.catalog_fingerprint:
+        return "catalog_binding_stale"
+    component_id = plan.get("component_id")
+    component_type = plan.get("component_type")
+    if not isinstance(component_id, str) or component_type not in {"model", "runtime"}:
+        return "catalog_binding_stale"
+    if not isinstance(record, Mapping):
+        return "catalog_binding_unavailable"
+    record_key = "model_id" if component_type == "model" else "runtime_id"
+    if record.get(record_key) != component_id:
+        return "catalog_binding_stale"
+    try:
+        binding.validate_record(component_type=str(component_type), record=record)
+    except (ReceiptError, TypeError, ValueError):
+        return "catalog_binding_stale"
+    for plan_key, record_key in (("_record_revision", "revision"), ("_install_strategy", "install_strategy")):
+        if plan_key not in plan:
+            return "catalog_binding_stale"
+        if plan.get(plan_key) != record.get(record_key):
+            return "catalog_binding_stale"
+    if "_latest_supported_revision" not in plan:
+        return "catalog_binding_stale"
+    current_supported = record.get("latest_supported_revision", record.get("revision"))
+    if plan.get("_latest_supported_revision") != current_supported:
+        return "catalog_binding_stale"
+    expected_candidate_fingerprint = plan.get("_candidate_fingerprint")
+    current_candidate = record.get("update_candidate")
+    current_candidate_fingerprint = _fingerprint(current_candidate) if isinstance(current_candidate, Mapping) else None
+    if expected_candidate_fingerprint != current_candidate_fingerprint:
+        return "catalog_binding_stale"
+    payload = _expected_plan_payload(plan)
+    expected_plan_fingerprint = plan.get("plan_fingerprint")
+    if payload is not None and (not isinstance(expected_plan_fingerprint, str) or _fingerprint(payload) != expected_plan_fingerprint):
+        return "catalog_binding_stale"
+    return None
 
 
 def _is_reparse(path: Path) -> bool:
@@ -123,17 +259,46 @@ class ComponentUpdateExecutor:
             return source, relative, expected_size, expected_hash
         return None, relative, expected_size, expected_hash
 
-    def apply(self, plan: Mapping[str, Any], *, confirmed: bool) -> dict[str, Any]:
+    def _restore_activation(self, root: Path, candidate_root: Path, previous_root: Path | None) -> None:
+        """Restore the pre-activation roots after a binding/receipt refusal."""
+
+        try:
+            if root.exists() and not _is_reparse(root):
+                os.rename(root, candidate_root)
+            if previous_root is not None and previous_root.exists() and not _is_reparse(previous_root) and not root.exists():
+                os.rename(previous_root, root)
+        except OSError:
+            # The caller still returns a fixed refusal.  The ordinary cleanup
+            # path never follows a reparse point or exposes this error.
+            return
+
+    def apply(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        confirmed: bool,
+        catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None,
+        current_record: Mapping[str, Any] | None = None,
+        binding_provider: Any | None = None,
+    ) -> dict[str, Any]:
         if not confirmed:
             return {"status": "waiting_confirmation", "execution": "not_run", "dry_run": True}
         if plan.get("component_type") != "model":
-            return {"status": "unavailable", "code": "runtime_candidate_executor_required", "execution": "not_run"}
+            return {"status": "unavailable", "code": "runtime_candidate_executor_required", "execution": "not_run", "dry_run": True}
         candidate = plan.get("update_candidate")
         if not isinstance(candidate, Mapping):
-            return {"status": "unavailable", "code": "update_candidate_unavailable", "execution": "not_run", "next_action": "Use Manual Import or wait for a catalog-pinned candidate."}
+            return {"status": "unavailable", "code": "update_candidate_unavailable", "execution": "not_run", "dry_run": True, "next_action": "Use Manual Import or wait for a catalog-pinned candidate."}
         component_id = plan.get("component_id")
         if not isinstance(component_id, str):
-            return {"status": "error", "code": "update_plan_invalid", "execution": "not_run"}
+            return {"status": "error", "code": "update_plan_invalid", "execution": "not_run", "dry_run": True}
+        binding, bound_record, binding_error = resolve_execution_binding(
+            plan,
+            catalog_binding=catalog_binding,
+            current_record=current_record,
+            binding_provider=binding_provider,
+        )
+        if binding is None:
+            return binding_refusal(binding_error or "catalog_binding_stale", component_id=component_id)
         source, relative, expected_size, expected_hash = self._candidate_file(candidate)
         if source is None or relative is None or not source.is_file() or _is_reparse(source):
             return {"status": "unavailable", "code": "update_candidate_unavailable", "execution": "not_run"}
@@ -172,6 +337,16 @@ class ComponentUpdateExecutor:
                     return {"status": "conflict", "code": "rollback_slot_exists", "execution": "not_run"}
                 previous_root.parent.mkdir(parents=True, exist_ok=True)
                 os.rename(root, previous_root)
+            binding, bound_record, binding_error = resolve_execution_binding(
+                plan,
+                catalog_binding=binding,
+                current_record=bound_record,
+                binding_provider=binding_provider,
+            )
+            if binding is None:
+                self._restore_activation(root, candidate_root, previous_root)
+                return binding_refusal(binding_error or "catalog_binding_stale", component_id=component_id)
+            staged_mtime_ns = int(staged_target.stat().st_mtime_ns)
             try:
                 os.rename(candidate_root, root)
             except OSError:
@@ -181,42 +356,92 @@ class ComponentUpdateExecutor:
             receipt = {
                 "component_id": component_id,
                 "component_type": "model",
-                "bundle_revision": str(plan.get("latest_supported_revision") or "unknown"),
+                "catalog_schema": binding.catalog_schema,
+                "catalog_revision": binding.catalog_revision,
+                "catalog_fingerprint": binding.catalog_fingerprint,
                 "source": "catalog_candidate",
-                "source_identity": str(candidate.get("source_identity") or "")[:256],
-                "installed_at": int(time.time()),
+                "source_identity": binding.source_identity,
+                "root_class": "models_root",
+                "location_class": "models_root",
+                "leaves": [{"relative_path": relative, "observed_size_bytes": expected_size, "observed_mtime_ns": staged_mtime_ns, "verification_level": "unverified"}],
+                "recorded_at": int(time.time()),
                 "verified_at": None,
                 "state": "INSTALLED_UNVERIFIED",
                 "operational": False,
                 "previous_version": str(plan.get("installed_revision") or "unknown"),
                 "rollback_candidate": True,
-                "catalog_fingerprint": plan.get("catalog_fingerprint"),
-                "files": [{"relative_leaf": relative, "size_bytes": expected_size, "sha256": actual_hash}],
             }
-            write_component_receipt(self.paths.config_root, component_id, receipt)
+            binding, bound_record, binding_error = resolve_execution_binding(
+                plan,
+                catalog_binding=binding,
+                current_record=bound_record,
+                binding_provider=binding_provider,
+            )
+            if binding is None:
+                self._restore_activation(root, candidate_root, previous_root)
+                return binding_refusal(binding_error or "catalog_binding_stale", component_id=component_id)
+            write_component_receipt(self.paths.config_root, component_id, receipt, catalog_binding=binding)
             return {"status": "completed", "execution": "completed", "dry_run": False, "component_id": component_id, "state": "INSTALLED_UNVERIFIED", "rollback_available": previous_root is not None, "next_action": "Run bounded verification before operational promotion."}
         except (OSError, ValueError, DownloadError):
-            if previous_root is not None and previous_root.exists() and not root.exists():
-                try:
-                    os.rename(previous_root, root)
-                except OSError:
-                    pass
+            self._restore_activation(root, candidate_root, previous_root)
             return {"status": "failed", "code": "update_activation_failed", "execution": "not_run"}
         finally:
             if candidate_root.exists():
                 shutil.rmtree(candidate_root, ignore_errors=True)
 
-    def rollback(self, component_id: str) -> dict[str, Any]:
+    def rollback(
+        self,
+        component_id: str,
+        *,
+        catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None,
+        current_record: Mapping[str, Any] | None = None,
+        binding_provider: Any | None = None,
+        plan: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         receipts = read_receipts(self.paths.config_root)
         receipt = receipts["records"].get(component_id)
         if not isinstance(receipt, Mapping) or not receipt.get("rollback_candidate"):
             return {"status": "unavailable", "code": "rollback_unavailable", "execution": "not_run"}
+        expected_plan = plan if isinstance(plan, Mapping) else {
+            "component_id": component_id,
+            "component_type": receipt.get("component_type"),
+            "catalog_fingerprint": receipt.get("catalog_fingerprint"),
+            "_catalog_binding": {
+                "catalog_schema": receipt.get("catalog_schema"),
+                "catalog_revision": receipt.get("catalog_revision"),
+                "catalog_fingerprint": receipt.get("catalog_fingerprint"),
+                "source_identity": receipt.get("source_identity"),
+            },
+            "_record_revision": (current_record or {}).get("revision"),
+            "_install_strategy": (current_record or {}).get("install_strategy"),
+            "_latest_supported_revision": (current_record or {}).get("latest_supported_revision", (current_record or {}).get("revision")),
+            "_candidate_fingerprint": _fingerprint((current_record or {}).get("update_candidate")) if isinstance((current_record or {}).get("update_candidate"), Mapping) else None,
+        }
+        binding, bound_record, binding_error = resolve_execution_binding(
+            expected_plan,
+            catalog_binding=catalog_binding,
+            current_record=current_record,
+            binding_provider=binding_provider,
+        )
+        if binding is None:
+            return binding_refusal(binding_error or "catalog_binding_stale", component_id=component_id)
+        receipt_binding = _coerce_binding({key: receipt.get(key) for key in ("catalog_schema", "catalog_revision", "catalog_fingerprint", "source_identity")})
+        if receipt_binding is None or receipt_binding.as_record_fields() != binding.as_record_fields():
+            return binding_refusal("catalog_binding_stale", component_id=component_id)
         previous = self.paths.models_root / ".versions" / component_id / str(receipt.get("previous_version") or "previous")
         root = self.paths.models_root / component_id
         if not previous.is_dir() or _is_reparse(previous) or root.exists() and _is_reparse(root):
             return {"status": "unavailable", "code": "rollback_candidate_missing", "execution": "not_run"}
         current_backup = self.paths.models_root / ".versions" / component_id / f"active-{int(time.time())}"
         try:
+            binding, bound_record, binding_error = resolve_execution_binding(
+                expected_plan,
+                catalog_binding=binding,
+                current_record=bound_record,
+                binding_provider=binding_provider,
+            )
+            if binding is None:
+                return binding_refusal(binding_error or "catalog_binding_stale", component_id=component_id)
             if root.exists():
                 os.rename(root, current_backup)
             os.rename(previous, root)
@@ -224,9 +449,21 @@ class ComponentUpdateExecutor:
             receipt["rollback_candidate"] = False
             receipt["state"] = "INSTALLED_UNVERIFIED"
             receipt["operational"] = False
-            write_component_receipt(self.paths.config_root, component_id, receipt)
+            binding, bound_record, binding_error = resolve_execution_binding(
+                expected_plan,
+                catalog_binding=binding,
+                current_record=bound_record,
+                binding_provider=binding_provider,
+            )
+            if binding is None:
+                if root.exists() and not _is_reparse(root):
+                    os.rename(root, previous)
+                if current_backup.exists() and not _is_reparse(current_backup) and not root.exists():
+                    os.rename(current_backup, root)
+                return binding_refusal(binding_error or "catalog_binding_stale", component_id=component_id)
+            write_component_receipt(self.paths.config_root, component_id, receipt, catalog_binding=binding)
             return {"status": "completed", "execution": "completed", "component_id": component_id, "state": "INSTALLED_UNVERIFIED"}
-        except OSError:
+        except (OSError, ReceiptError, ValueError):
             if current_backup.exists() and not root.exists():
                 try:
                     os.rename(current_backup, root)
