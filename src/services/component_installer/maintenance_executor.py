@@ -24,6 +24,10 @@ from typing import Any
 from src.platform.paths import HubPaths
 
 
+class _ReceiptStateChanged(OSError):
+    """Private signal for receipt identity/reparse/byte drift."""
+
+
 def _is_reparse(path: Path) -> bool:
     try:
         if stat.S_ISLNK(path.lstat().st_mode):
@@ -73,7 +77,44 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
+def _receipt_identity(path: Path) -> tuple[int, int, int, int, int] | None:
+    """Return bounded regular-file identity/metadata, never for a reparse path."""
+
+    try:
+        if _is_reparse(path):
+            return None
+        value = path.lstat()
+        if not stat.S_ISREG(value.st_mode):
+            return None
+        return (
+            int(getattr(value, "st_dev", 0)),
+            int(getattr(value, "st_ino", 0)),
+            int(value.st_size),
+            int(value.st_mtime_ns),
+            int(getattr(value, "st_ctime_ns", 0)),
+        )
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _atomic_json(
+    path: Path,
+    value: Mapping[str, Any],
+    *,
+    expected_identity: tuple[int, int, int, int, int] | None = None,
+    expected_bytes: bytes | None = None,
+) -> None:
+    """Atomically replace JSON only when the receipt identity stayed stable."""
+
+    def _assert_expected() -> None:
+        if expected_identity is None:
+            return
+        if _receipt_identity(path) != expected_identity:
+            raise _ReceiptStateChanged("receipt_state_changed")
+        if expected_bytes is not None and path.read_bytes() != expected_bytes:
+            raise _ReceiptStateChanged("receipt_state_changed")
+
+    _assert_expected()
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
     try:
@@ -85,6 +126,7 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
+        _assert_expected()
         os.replace(temporary, path)
         temporary = None
     finally:
@@ -123,24 +165,27 @@ class MaintenanceExecutor:
 
     def _receipts(self) -> dict[str, Any]:
         path = self._receipt_path()
-        if _is_reparse(path):
-            return {"schema_version": None, "records": {}, "_present": True, "_valid": False, "_raw_bytes": None}
-        if not path.exists():
-            return {"schema_version": None, "records": {}, "_present": False, "_valid": True, "_raw_bytes": None}
+        initial_identity = _receipt_identity(path)
+        if initial_identity is None:
+            if _is_reparse(path) or path.exists():
+                return {"schema_version": None, "records": {}, "_present": True, "_valid": False, "_raw_bytes": None, "_identity": None}
+            return {"schema_version": None, "records": {}, "_present": False, "_valid": True, "_raw_bytes": None, "_identity": None}
         try:
             raw_bytes = path.read_bytes()
             raw = json.loads(raw_bytes.decode("utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
-            return {"schema_version": None, "records": {}, "_present": True, "_valid": False, "_raw_bytes": None}
+            return {"schema_version": None, "records": {}, "_present": True, "_valid": False, "_raw_bytes": None, "_identity": initial_identity}
+        if _receipt_identity(path) != initial_identity:
+            return {"schema_version": None, "records": {}, "_present": True, "_valid": False, "_raw_bytes": raw_bytes, "_identity": None}
         if not isinstance(raw, Mapping):
-            return {"schema_version": None, "records": {}, "_present": True, "_valid": False, "_raw_bytes": raw_bytes}
+            return {"schema_version": None, "records": {}, "_present": True, "_valid": False, "_raw_bytes": raw_bytes, "_identity": initial_identity}
         records = raw.get("records") if isinstance(raw, Mapping) else None
         schema = raw.get("schema_version") if isinstance(raw, Mapping) else None
         if schema not in {"component-install-receipts.v2", "component-install-receipts.v3"}:
-            return {"schema_version": schema, "records": {}, "_present": True, "_valid": False, "_raw_bytes": raw_bytes}
+            return {"schema_version": schema, "records": {}, "_present": True, "_valid": False, "_raw_bytes": raw_bytes, "_identity": initial_identity}
         if not isinstance(records, Mapping):
-            return {"schema_version": schema, "records": {}, "_present": True, "_valid": False, "_raw_bytes": raw_bytes}
-        return {"schema_version": schema, "records": dict(records), "_present": True, "_valid": True, "_raw_bytes": raw_bytes}
+            return {"schema_version": schema, "records": {}, "_present": True, "_valid": False, "_raw_bytes": raw_bytes, "_identity": initial_identity}
+        return {"schema_version": schema, "records": dict(records), "_present": True, "_valid": True, "_raw_bytes": raw_bytes, "_identity": initial_identity}
 
     @staticmethod
     def _restore_uninstall(moved: list[tuple[Path, Path]]) -> bool:
@@ -383,18 +428,35 @@ class MaintenanceExecutor:
 
         receipt_path = self._receipt_path()
         if receipts.get("_present"):
+            if receipts.get("_identity") is None or _receipt_identity(receipt_path) != receipts.get("_identity"):
+                restored = self._restore_uninstall(moved)
+                self._discard_uninstall_backup(backup_root) if restored else None
+                if not restored:
+                    return {"status": "unavailable", "code": "uninstall_manual_review", "execution": "not_run", "dry_run": True}
+                return self._receipt_state_refusal()
             try:
                 if receipts.get("_raw_bytes") is not None and receipt_path.read_bytes() != receipts["_raw_bytes"]:
-                    raise OSError("receipt_state_changed")
+                    raise _ReceiptStateChanged("receipt_state_changed")
                 receipts["records"].pop(component_id, None)
-                _atomic_json(receipt_path, {"schema_version": receipts["schema_version"], "records": receipts["records"]})
+                _atomic_json(
+                    receipt_path,
+                    {"schema_version": receipts["schema_version"], "records": receipts["records"]},
+                    expected_identity=receipts["_identity"],
+                    expected_bytes=receipts.get("_raw_bytes"),
+                )
+            except _ReceiptStateChanged:
+                restored = self._restore_uninstall(moved)
+                self._discard_uninstall_backup(backup_root) if restored else None
+                if not restored:
+                    return {"status": "unavailable", "code": "uninstall_manual_review", "execution": "not_run", "dry_run": True}
+                return self._receipt_state_refusal()
             except OSError:
                 restored = self._restore_uninstall(moved)
                 self._discard_uninstall_backup(backup_root) if restored else None
                 if not restored:
                     return {"status": "unavailable", "code": "uninstall_manual_review", "execution": "not_run", "dry_run": True}
                 return {"status": "failed", "code": "receipt_write_failed", "execution": "not_run", "dry_run": True}
-        elif receipt_path.exists():
+        elif receipt_path.exists() or _is_reparse(receipt_path):
             restored = self._restore_uninstall(moved)
             self._discard_uninstall_backup(backup_root) if restored else None
             if not restored:

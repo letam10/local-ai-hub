@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -380,6 +381,29 @@ class V7UpdateExecutionBindingTests(unittest.TestCase):
         self.assertEqual(result["code"], "catalog_binding_stale")
         self.assertTrue(result["dry_run"])
         self.assertEqual((root / "demo.bin").read_bytes(), b"old")
+        self.assertEqual(receipt_path.read_bytes(), original)
+
+    def test_v2_uninstall_same_byte_symlink_replacement_after_binding_check_refuses_and_restores(self) -> None:
+        record, catalog, binding, plan, root = self._v2_uninstall_fixture()
+        receipt_path = self.paths.config_root / "component_install_receipts.json"
+        original = b'{"schema_version":"component-install-receipts.v3","records":{"demo-model":{"state":"INSTALLED_UNVERIFIED"}}}\n'
+        receipt_path.write_bytes(original)
+        shadow = self.paths.config_root / "receipt-shadow.json"
+        original_atomic = __import__("src.services.component_installer.maintenance_executor", fromlist=["_atomic_json"])._atomic_json
+
+        def replace_with_same_byte_symlink(path: Path, value: dict[str, object], **kwargs: object) -> None:
+            shadow.write_bytes(path.read_bytes())
+            path.unlink()
+            os.symlink(shadow, path)
+            original_atomic(path, value, **kwargs)
+
+        with patch("src.services.component_installer.maintenance_executor._atomic_json", side_effect=replace_with_same_byte_symlink):
+            result = MaintenanceExecutor(paths=self.paths, catalog=catalog).apply(plan, confirmed=True, catalog_binding=binding, current_record=record)
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["code"], "receipt_state_unavailable")
+        self.assertTrue(result["dry_run"])
+        self.assertEqual((root / "demo.bin").read_bytes(), b"old")
+        self.assertTrue(receipt_path.is_symlink())
         self.assertEqual(receipt_path.read_bytes(), original)
 
     def test_v2_uninstall_preserves_v3_receipt_envelope_and_unrelated_record(self) -> None:

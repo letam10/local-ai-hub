@@ -46,5 +46,9 @@ it never downgrades the store to the legacy V2 envelope. A missing receipt is
 not materialized as a legacy store. Malformed or unsupported receipt state
 refuses before deletion. Known leaves are moved into a private, reversible
 task-owned quarantine, the current binding is checked again after the move,
-and only then is the receipt envelope changed; drift or write failure moves
-the leaves back and leaves the receipt bytes unchanged.
+and only then is the receipt envelope changed. The receipt read captures a
+bounded regular-file identity and metadata signature; immediately before and
+inside the atomic replacement, the path must still be non-reparse with the
+same identity and raw bytes. Same-byte replacement with a symlink/reparse or
+any other identity drift moves the leaves back and leaves the receipt state
+unchanged.
