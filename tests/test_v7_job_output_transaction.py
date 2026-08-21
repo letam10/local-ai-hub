@@ -103,7 +103,7 @@ class V7JobOutputTransactionTests(unittest.TestCase):
         manager = HubJobManager()
         patches = self._patch_store()
         try:
-            with patches[0], patches[1], patches[2], patch.object(artifact_store, "register_worker_outputs", return_value=None):
+            with patches[0], patches[1], patches[2], patch.object(artifact_store, "publish_prepared_transaction", return_value=None):
                 def runner(_payload: dict[str, object], context: object) -> dict[str, object]:
                     target = context.output_path("created.mp4")
                     holder["path"] = target
@@ -123,7 +123,7 @@ class V7JobOutputTransactionTests(unittest.TestCase):
                 assert public is not None
                 self.assertEqual(public["status"], "failed")
                 self.assertFalse(holder["path"].exists())
-                self.assertFalse(self.index_path.exists())
+                self.assertEqual(artifact_store.list_artifacts(), [])
                 self.assertNotIn(str(holder["path"]), json.dumps(public, ensure_ascii=False))
         finally:
             manager.cancel_all_and_wait(3)

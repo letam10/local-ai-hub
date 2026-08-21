@@ -18,7 +18,9 @@ The ownership rule is:
 ```text
 SERVER RESERVES BEFORE WORKER
   -> PRODUCER WRITES ONLY THROUGH THE RESERVATION HANDLE
-  -> ARTIFACT STORE COMMITS THE RESERVATION
+  -> PREPARE: COPY TO A HUB-OWNED NON-PUBLIC TRANSACTION OBJECT
+  -> AUTHORIZE: DURABLY RECORD RESERVATION + TRANSACTION + OBJECT PROOFS
+  -> ONE FINAL PUBLIC COMMIT: STAGED OBJECTS BECOME PUBLISHED TOGETHER
 ```
 
 The presence of a path in `Output` is never ownership proof.  A pre-existing,
@@ -28,22 +30,44 @@ published or deleted.
 ## Lifecycle
 
 Reservations use the finite states `created`, `producing`, `ready_to_commit`,
-`published`, `failed`, `cancelled`, `interrupted` and `manual_review`.
-Creation, producer handoff, commit and cleanup are server-owned transitions.
-Duplicate commit/cancel requests are harmless refusals or idempotent terminal
-observations; they never create a second public artifact.
+`ready_to_publish`, `commit_authorized`, `published`, `failed`, `cancelled`,
+`interrupted` and `manual_review`. Creation, producer handoff, preparation,
+authorization, final publication and cleanup are server-owned transitions.
+After `commit_authorized`, recovery can distinguish a staged transaction from
+one that already committed publicly; a later reservation-manifest
+normalization write is never required for public-commit success.
+
+Preparation is private: each candidate is copied with bounded size/SHA-256 and
+identity proof into a unique Hub-owned managed object under the Artifact Store
+boundary. The object is separate from both the producer reservation root and
+the `.hub-reserved` input/staging path. Its index record is `staged` and is
+ignored by public list/get/resolve/download projections. No prepared artifact
+ID is public-capable.
+
+Authorization persists the reservation ID, transaction ID and exact prepared
+object proofs before any public visibility mutation. The final Artifact Store
+commit validates every prepared object and performs one atomic managed-index
+write from `staged` to `published`. There is no mandatory reservation save
+after that commit. A published artifact never points to the mutable producer
+reservation path; its managed object is copy-once and later identity drift
+causes public resolution to fail closed.
 
 Commit validates the exact private reservation chain, no-follow regular-file
 identity, bounded count/bytes, relative leaves, stable bytes and finite
-provenance before copying into a server-owned managed staging scope and
-registering opaque artifacts.  A failed, cancelled or uncommitted reservation
-cannot create a public artifact entry.
+provenance before preparing the private transaction objects. Any failure
+before authorization aborts transaction-owned staged records and objects, so
+zero public artifacts are visible. A failure to persist authorization also
+aborts before public visibility. A failure during final public commit leaves
+the managed index at its prior non-public state; a successful final commit is
+recoverable even if later cached reservation normalization is unavailable.
 
 Cleanup removes only identity-attested files allocated in the reservation
-scope.  Reparse points, replacement identities, foreign children and any
-uncertain file produce `manual_review`; preservation wins over cleanup.  Crash
-reconciliation reads only explicit reservation manifests and never scans the
-arbitrary Output tree.
+scope. Reparse points, replacement identities, foreign children and any
+uncertain file produce `manual_review`; preservation wins over cleanup. Crash
+reconciliation reads only explicit reservation manifests and transaction
+records: staged authorized work is aborted, while a transaction already
+published is normalized later without another public commit. It never scans
+the arbitrary Output tree.
 
 ## Producer inventory
 

@@ -32,11 +32,12 @@ from src.services import artifact_store
 RESERVATION_SCHEMA = "job-output-reservation.v1"
 RESERVATION_STATES = frozenset({
     "created", "producing", "ready_to_commit", "published", "failed",
-    "cancelled", "interrupted", "manual_review",
+    "cancelled", "interrupted", "manual_review", "ready_to_publish", "commit_authorized",
 })
 RESERVATION_ID_RE = re.compile(r"output_res_[a-f0-9]{32}")
 JOB_ID_RE = re.compile(r"(?:jobv5_[a-f0-9]{32}|job_[0-9]{8}_[0-9]{6}_[a-f0-9]{8})")
 FINGERPRINT_RE = re.compile(r"[a-f0-9]{64}")
+TRANSACTION_ID_RE = re.compile(r"artifact_tx_[a-f0-9]{32}")
 ADAPTER_ID_RE = re.compile(r"[a-z][a-z0-9_.-]{0,63}")
 MAX_RESERVATIONS = 256
 MAX_OUTPUT_COUNT = 64
@@ -184,6 +185,24 @@ def _valid_identity(value: object) -> bool:
     if type(value) is not dict or set(value) != {"size_bytes", "mtime_ns", "file_id"}:
         return False
     return all(isinstance(value.get(key), int) and not isinstance(value.get(key), bool) and value.get(key) >= 0 for key in ("size_bytes", "mtime_ns", "file_id"))
+
+
+def _valid_proof(value: object) -> bool:
+    if type(value) is not dict or set(value) != {"artifact_id", "size_bytes", "sha256", "object_identity"}:
+        return False
+    artifact_id = value.get("artifact_id")
+    size_bytes = value.get("size_bytes")
+    sha256 = value.get("sha256")
+    return (
+        isinstance(artifact_id, str)
+        and re.fullmatch(r"artifact_[a-f0-9]{32}", artifact_id) is not None
+        and isinstance(size_bytes, int)
+        and not isinstance(size_bytes, bool)
+        and 0 <= size_bytes <= MAX_OUTPUT_BYTES
+        and isinstance(sha256, str)
+        and FINGERPRINT_RE.fullmatch(sha256) is not None
+        and _valid_identity(value.get("object_identity"))
+    )
 
 
 def _identity(path: Path) -> dict[str, int] | None:
@@ -352,7 +371,7 @@ def _load_manifest() -> dict[str, Any] | None:
 def _valid_record(value: object, reservation_id: str) -> bool:
     if type(value) is not dict:
         return False
-    required = {"reservation_id", "job_id", "job_fingerprint", "adapter_id", "state", "created_at", "max_output_count", "max_output_bytes", "root_identity", "allowed_paths", "allowed_directories"}
+    required = {"reservation_id", "job_id", "job_fingerprint", "adapter_id", "state", "created_at", "max_output_count", "max_output_bytes", "root_identity", "allowed_paths", "allowed_directories", "transaction_id", "prepared_artifacts"}
     if set(value) != required or value.get("reservation_id") != reservation_id:
         return False
     if _safe_job_id(value.get("job_id")) is None or not isinstance(value.get("job_fingerprint"), str) or FINGERPRINT_RE.fullmatch(value["job_fingerprint"]) is None:
@@ -369,6 +388,14 @@ def _valid_record(value: object, reservation_id: str) -> bool:
         return False
     if not _valid_identity(value.get("root_identity")):
         return False
+    transaction_id = value.get("transaction_id")
+    if transaction_id is not None and (not isinstance(transaction_id, str) or TRANSACTION_ID_RE.fullmatch(transaction_id) is None):
+        return False
+    prepared = value.get("prepared_artifacts")
+    if type(prepared) is not list or len(prepared) > MAX_OUTPUT_COUNT or any(not _valid_proof(item) for item in prepared) or len({item.get("artifact_id") for item in prepared if isinstance(item, dict)}) != len(prepared):
+        return False
+    if transaction_id is None and prepared:
+        return False
     paths = value.get("allowed_paths")
     directories = value.get("allowed_directories")
     if type(paths) is not dict or len(paths) > MAX_OUTPUT_COUNT or type(directories) is not dict or len(directories) > MAX_DIRECTORY_COUNT:
@@ -382,11 +409,10 @@ def _save_manifest(manifest: Mapping[str, Any]) -> bool:
     path = _manifest_path()
     temporary: Path | None = None
     temporary_identity: dict[str, int] | None = None
-    parent: Path | None = None
     parent_identity: dict[str, int] | None = None
     target_before: dict[str, int] | None = None
-    target_existed = False
     previous_bytes: bytes | None = None
+    installed = False
     try:
         payload = {"schema_version": RESERVATION_SCHEMA, "records": manifest.get("records", {})}
         encoded = (json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
@@ -401,9 +427,7 @@ def _save_manifest(manifest: Mapping[str, Any]) -> bool:
         target_existed = path.exists()
         if target_existed:
             target_before = _identity(path)
-            if target_before is None:
-                return False
-            if path.stat().st_size > MAX_MANIFEST_BYTES:
+            if target_before is None or path.stat().st_size > MAX_MANIFEST_BYTES:
                 return False
             previous_bytes = path.read_bytes()
         elif _reparse(path):
@@ -419,58 +443,52 @@ def _save_manifest(manifest: Mapping[str, Any]) -> bool:
             stream.flush()
             os.fsync(stream.fileno())
         if (
-            _directory_identity(parent) is None
-            or not _same_object(parent_identity, _directory_identity(parent))
+            not _same_object(parent_identity, _directory_identity(parent))
             or not _full_safe_chain(parent)
-            or _identity(temporary) is None
             or not _same_object(temporary_identity, _identity(temporary))
-            or (target_existed and (_identity(path) is None or not _same_object(target_before, _identity(path))))
+            or (target_existed and not _same_object(target_before, _identity(path)))
             or (not target_existed and (_reparse(path) or path.exists()))
         ):
             return False
         os.replace(temporary, path)
         temporary = None
         installed_identity = _identity(path)
-        installed_bytes = path.read_bytes() if installed_identity is not None and path.stat().st_size <= MAX_MANIFEST_BYTES else None
-        if (
-            installed_identity is None
-            or installed_bytes != encoded
-            or _reparse(path)
-            or not _full_safe_chain(parent)
-        ):
-            # If a previous manifest existed, make a best-effort atomic
-            # restoration before reporting refusal.  When the target was
-            # absent, leave an ambiguous foreign replacement untouched.
-            if previous_bytes is not None and _full_safe_chain(parent) and _same_object(parent_identity, _directory_identity(parent)):
-                restore_temp: Path | None = None
-                restore_identity: dict[str, int] | None = None
-                try:
-                    handle, name = tempfile.mkstemp(prefix=".job-output-reservation-restore-", suffix=".tmp", dir=parent)
-                    os.close(handle)
-                    restore_temp = Path(name)
-                    restore_identity = _identity(restore_temp)
-                    if restore_identity is None:
-                        return False
+        if installed_identity is None or _reparse(path) or not _full_safe_chain(parent):
+            return False
+        expected = (len(encoded), hashlib.sha256(encoded).hexdigest(), installed_identity)
+        # The held handle is the correctness boundary.  No pathname-dependent
+        # operation follows this verification before success is reported.
+        with _open_source_locked(path, expected) as installed_stream:
+            if installed_stream is None or not _stream_matches_expected(installed_stream, expected) or _identity(path) != installed_identity:
+                return False
+            installed = True
+            return True
+    except (OSError, TypeError, ValueError):
+        return False
+    finally:
+        if temporary is not None and temporary_identity is not None:
+            _delete_identity_attested(temporary, temporary_identity)
+        if not installed and previous_bytes is not None and parent_identity is not None and _full_safe_chain(path.parent) and _same_object(parent_identity, _directory_identity(path.parent)):
+            restore_temp: Path | None = None
+            restore_identity: dict[str, int] | None = None
+            try:
+                handle, name = tempfile.mkstemp(prefix=".job-output-reservation-restore-", suffix=".tmp", dir=path.parent)
+                os.close(handle)
+                restore_temp = Path(name)
+                restore_identity = _identity(restore_temp)
+                if restore_identity is not None:
                     with restore_temp.open("wb") as stream:
                         stream.write(previous_bytes)
                         stream.flush()
                         os.fsync(stream.fileno())
-                    if _identity(restore_temp) is not None and _same_object(restore_identity, _identity(restore_temp)) and _same_object(parent_identity, _directory_identity(parent)):
+                    if _same_object(restore_identity, _identity(restore_temp)) and _same_object(parent_identity, _directory_identity(path.parent)):
                         os.replace(restore_temp, path)
                         restore_temp = None
-                except OSError:
-                    pass
-                finally:
-                    if restore_temp is not None and restore_identity is not None:
-                        _delete_identity_attested(restore_temp, restore_identity)
-            return False
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
-    finally:
-        if temporary is not None:
-            if temporary_identity is not None:
-                _delete_identity_attested(temporary, temporary_identity)
+            except OSError:
+                pass
+            finally:
+                if restore_temp is not None and restore_identity is not None:
+                    _delete_identity_attested(restore_temp, restore_identity)
 
 
 def _copy_detached(value: object) -> object:
@@ -527,6 +545,8 @@ def create_reservation(job_id: str, job_fingerprint: str, adapter_id: str, *, ma
             "root_identity": root_identity,
             "allowed_paths": {},
             "allowed_directories": {},
+            "transaction_id": None,
+            "prepared_artifacts": [],
         }
         manifest["records"][reservation_id] = record
         if not _save_manifest(manifest):
@@ -758,13 +778,37 @@ def _copy_reserved_file(source: Path, reservation_id: str, relative: str, expect
 
 
 def commit_reservation(reservation_id: str, result: object, *, provenance: Mapping[str, Any], require_output: bool = False) -> dict[str, Any]:
-    """Commit only files allocated in the pre-created reservation scope."""
+    """Prepare, durably authorize, then perform one final public commit."""
 
     with _LOCK:
         manifest = _load_manifest()
         record = manifest.get("records", {}).get(reservation_id) if isinstance(manifest, dict) else None
-        if not isinstance(record, dict) or record.get("state") not in {"producing", "ready_to_commit"}:
+        if not isinstance(record, dict):
             return {"status": "unavailable", "code": "OUTPUT_RESERVATION_UNAVAILABLE"}
+        state = record.get("state")
+        if state not in {"producing", "ready_to_commit", "commit_authorized", "ready_to_publish"}:
+            return {"status": "unavailable", "code": "OUTPUT_RESERVATION_UNAVAILABLE"}
+        safe_provenance = dict(provenance)
+        if state in {"commit_authorized", "ready_to_publish"}:
+            transaction_id = record.get("transaction_id")
+            proofs = record.get("prepared_artifacts")
+            if not isinstance(transaction_id, str) or not isinstance(proofs, list):
+                return {"status": "manual_review", "code": "OUTPUT_AUTHORIZATION_INVALID"}
+            published = artifact_store.publish_prepared_transaction(
+                transaction_id,
+                reservation_id=reservation_id,
+                provenance=safe_provenance,
+                artifact_proofs=proofs,
+            )
+            if published is not None:
+                return {"status": "published", "artifacts": published}
+            if artifact_store.inspect_prepared_transaction(transaction_id) == "published":
+                recovered = [artifact_store.describe(item.get("artifact_id")) for item in proofs if isinstance(item, dict)]
+                if all(isinstance(item, dict) for item in recovered):
+                    return {"status": "published", "artifacts": recovered}
+            artifact_store.abort_prepared_transaction(transaction_id)
+            return {"status": "manual_review", "code": "OUTPUT_PUBLIC_COMMIT_FAILED"}
+
         root = _reservation_root(reservation_id)
         candidates = _candidate_paths(result)
         if not candidates:
@@ -775,14 +819,16 @@ def commit_reservation(reservation_id: str, result: object, *, provenance: Mappi
             record["state"] = "manual_review"
             _save_manifest(manifest)
             return {"status": "manual_review", "code": "OUTPUT_COUNT_LIMIT"}
-        copied: list[tuple[Path, tuple[int, str, dict[str, int]]]] = []
+        transaction_id = f"artifact_tx_{uuid.uuid4().hex}"
+        proofs: list[dict[str, Any]] = []
         seen: set[str] = set()
         total_bytes = 0
         for candidate in candidates:
             relative = _relative_candidate(root, candidate)
             allowed = isinstance(relative, str) and (relative in record["allowed_paths"] or any(relative == directory or relative.startswith(directory + "/") for directory in record["allowed_directories"]))
             stable = _hash_stable(candidate) if relative is not None and allowed else None
-            if relative is None or not allowed or stable is None or relative in seen:
+            allocated_identity = record["allowed_paths"].get(relative) if isinstance(relative, str) else None
+            if relative is None or not allowed or stable is None or relative in seen or (allocated_identity is not None and not _same_object(allocated_identity, stable[2])):
                 record["state"] = "manual_review"
                 _save_manifest(manifest)
                 return {"status": "manual_review", "code": "OUTPUT_OWNERSHIP_UNPROVEN"}
@@ -792,58 +838,60 @@ def commit_reservation(reservation_id: str, result: object, *, provenance: Mappi
                 record["state"] = "manual_review"
                 _save_manifest(manifest)
                 return {"status": "manual_review", "code": "OUTPUT_SIZE_LIMIT"}
-            staged = _copy_reserved_file(candidate, reservation_id, relative, stable)
-            if staged is None:
+            name = Path(relative).name
+            media_type = artifact_store.normalize_media_type(None, fallback_name=name)
+            with _open_source_locked(candidate, stable) as source_stream:
+                if source_stream is None or not _stream_matches_expected(source_stream, stable):
+                    artifact_store.abort_prepared_transaction(transaction_id)
+                    record["state"] = "manual_review"
+                    _save_manifest(manifest)
+                    return {"status": "manual_review", "code": "OUTPUT_OWNERSHIP_UNPROVEN"}
+                try:
+                    prepared = artifact_store.prepare_worker_artifact(
+                        candidate,
+                        transaction_id=transaction_id,
+                        name=name,
+                        media_type=media_type,
+                        size_bytes=stable[0],
+                        sha256=stable[1],
+                        source_identity=stable[2],
+                        provenance=safe_provenance,
+                    )
+                except (OSError, ValueError, TypeError):
+                    prepared = None
+            if prepared is None:
+                artifact_store.abort_prepared_transaction(transaction_id)
                 record["state"] = "manual_review"
                 _save_manifest(manifest)
-                return {"status": "manual_review", "code": "OUTPUT_OWNERSHIP_UNPROVEN"}
-            copied.append(staged)
-        registration_failure = False
-        artifacts: list[dict[str, Any]] | None = None
-        with ExitStack() as locks:
-            for staged_path, staged_expected in copied:
-                stream = locks.enter_context(_open_source_locked(staged_path, staged_expected))
-                if stream is None or not _stream_matches_expected(stream, staged_expected):
-                    registration_failure = True
-                    break
-            if not registration_failure:
-                try:
-                    expected_outputs = {
-                        str(path): {
-                            "size_bytes": expected[0],
-                            "sha256": expected[1],
-                            "file_id": expected[2].get("file_id"),
-                        }
-                        for path, expected in copied
-                    }
-                    artifacts = artifact_store.register_worker_outputs(
-                        [path for path, _expected in copied],
-                        provenance=dict(provenance),
-                        expected_outputs=expected_outputs,
-                    )
-                    if isinstance(artifacts, list):
-                        for staged_path, staged_expected in copied:
-                            if not _same_object(staged_expected[2], _identity(staged_path)):
-                                registration_failure = True
-                                break
-                except (OSError, ValueError, TypeError):
-                    registration_failure = True
-        if registration_failure:
-            for staged_path, staged_expected in copied:
-                _delete_identity_attested(staged_path, staged_expected[2])
-            record["state"] = "manual_review"
-            _save_manifest(manifest)
-            return {"status": "manual_review", "code": "OUTPUT_OWNERSHIP_UNPROVEN"}
-        if not isinstance(artifacts, list) or len(artifacts) != len(copied):
-            for staged_path, staged_expected in copied:
-                _delete_identity_attested(staged_path, staged_expected[2])
-            record["state"] = "manual_review"
-            _save_manifest(manifest)
-            return {"status": "manual_review", "code": "OUTPUT_OWNERSHIP_UNPROVEN"}
-        record["state"] = "published"
+                return {"status": "manual_review", "code": "OUTPUT_PREPARE_FAILED"}
+            proofs.append({
+                "artifact_id": prepared["artifact_id"],
+                "size_bytes": prepared["size_bytes"],
+                "sha256": prepared["sha256"],
+                "object_identity": prepared["object_identity"],
+            })
+        record["transaction_id"] = transaction_id
+        record["prepared_artifacts"] = proofs
+        record["state"] = "commit_authorized"
         if not _save_manifest(manifest):
-            return {"status": "unavailable", "code": "OUTPUT_RESERVATION_PERSISTENCE_FAILED"}
-        return {"status": "published", "artifacts": artifacts}
+            artifact_store.abort_prepared_transaction(transaction_id)
+            return {"status": "manual_review", "code": "OUTPUT_AUTHORIZATION_PERSISTENCE_FAILED"}
+        published = artifact_store.publish_prepared_transaction(
+            transaction_id,
+            reservation_id=reservation_id,
+            provenance=safe_provenance,
+            artifact_proofs=proofs,
+        )
+        if published is None:
+            if artifact_store.inspect_prepared_transaction(transaction_id) == "published":
+                recovered = [artifact_store.describe(item.get("artifact_id")) for item in proofs]
+                if all(isinstance(item, dict) for item in recovered):
+                    return {"status": "published", "artifacts": recovered}
+            artifact_store.abort_prepared_transaction(transaction_id)
+            return {"status": "manual_review", "code": "OUTPUT_PUBLIC_COMMIT_FAILED"}
+        # No reservation manifest write is required after this final public
+        # commit. Recovery can normalize commit_authorized later.
+        return {"status": "published", "artifacts": published}
 
 
 def abort_reservation(reservation_id: str, *, state: str = "failed") -> dict[str, Any]:
@@ -856,6 +904,11 @@ def abort_reservation(reservation_id: str, *, state: str = "failed") -> dict[str
         record = manifest.get("records", {}).get(reservation_id) if isinstance(manifest, dict) else None
         if not isinstance(record, dict):
             return {"status": "unavailable", "removed_count": 0}
+        transaction_id = record.get("transaction_id")
+        if isinstance(transaction_id, str) and TRANSACTION_ID_RE.fullmatch(transaction_id):
+            transaction_state = artifact_store.inspect_prepared_transaction(transaction_id)
+            if transaction_state == "staged":
+                artifact_store.abort_prepared_transaction(transaction_id)
         root = _reservation_root(reservation_id)
         removed = 0
         ambiguous = False
@@ -936,6 +989,15 @@ def reconcile_reservations(*, active_job_ids: set[str] | None = None) -> dict[st
                 continue
             if record.get("job_id") in active:
                 continue
+            if record.get("state") in {"commit_authorized", "ready_to_publish"}:
+                transaction_id = record.get("transaction_id")
+                transaction_state = artifact_store.inspect_prepared_transaction(transaction_id) if isinstance(transaction_id, str) else "unavailable"
+                if transaction_state == "published":
+                    record["state"] = "published"
+                    _save_manifest(manifest)  # normalization only; public commit already succeeded
+                    continue
+                if transaction_state == "staged":
+                    artifact_store.abort_prepared_transaction(transaction_id)
             result = abort_reservation(reservation_id, state="interrupted")
             if result.get("status") == "manual_review":
                 manual_review += 1

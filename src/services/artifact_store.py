@@ -54,6 +54,8 @@ _MANAGED_RECORD_KEYS = frozenset({
     "id", "path", "name", "size_bytes", "media_type", "created_at", "sha256",
     "provenance", "visibility", "transaction_id", "durable_linked",
 })
+_MANAGED_OPTIONAL_KEYS = frozenset({"kind", "object_identity"})
+_MANAGED_KIND_JOB_OUTPUT = "job_output"
 # Compatibility name for private callers; public v1 upload limits are read
 # from Hub configuration and default to this value.
 MAX_UPLOAD_BYTES = DEFAULT_MAX_UPLOAD_BYTES
@@ -246,7 +248,11 @@ def _hash_file(path: Path) -> tuple[int, str] | None:
 
 
 def _managed_metadata(record: dict[str, Any], artifact_id: str) -> dict[str, Any] | None:
-    if type(record) is not dict or set(record) != _MANAGED_RECORD_KEYS or record.get("id") != artifact_id:
+    if type(record) is not dict or not (
+        set(record) == _MANAGED_RECORD_KEYS
+        or set(record) == _MANAGED_RECORD_KEYS | _MANAGED_OPTIONAL_KEYS
+        or set(record) in {_MANAGED_RECORD_KEYS | {"kind"}, _MANAGED_RECORD_KEYS | {"object_identity"}}
+    ) or record.get("id") != artifact_id:
         return None
     visibility = record.get("visibility")
     transaction_id = _safe_transaction_id(record.get("transaction_id"))
@@ -264,7 +270,8 @@ def _managed_metadata(record: dict[str, Any], artifact_id: str) -> dict[str, Any
         safe_provenance = _safe_provenance(provenance)
     except ArtifactWriteError:
         return None
-    if safe_provenance["adapter_id"] != "media.video_grade.v1" or safe_provenance["status"] != "completed":
+    kind = record.get("kind") or "media_video_grade"
+    if safe_provenance["status"] != "completed":
         return None
     name = record.get("name")
     media_type = record.get("media_type")
@@ -273,10 +280,10 @@ def _managed_metadata(record: dict[str, Any], artifact_id: str) -> dict[str, Any
     created_at = record.get("created_at")
     if (
         not isinstance(name, str)
-        or name != MANAGED_OUTPUT_NAME
+        or not 1 <= len(name) <= 180
         or name != _safe_name(name)
         or not isinstance(media_type, str)
-        or media_type != MANAGED_OUTPUT_MEDIA_TYPE
+        or (kind == "media_video_grade" and media_type != MANAGED_OUTPUT_MEDIA_TYPE)
         or not re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", media_type)
         or isinstance(size_bytes, bool)
         or not isinstance(size_bytes, int)
@@ -286,6 +293,17 @@ def _managed_metadata(record: dict[str, Any], artifact_id: str) -> dict[str, Any
         or not isinstance(created_at, str)
         or not 1 <= len(created_at) <= 128
     ):
+        return None
+    if kind == "media_video_grade":
+        if name != MANAGED_OUTPUT_NAME or media_type != MANAGED_OUTPUT_MEDIA_TYPE or safe_provenance["adapter_id"] != "media.video_grade.v1":
+            return None
+    elif kind == _MANAGED_KIND_JOB_OUTPUT:
+        if record.get("object_identity") is None or _scope_identity(record.get("object_identity")) is None:
+            return None
+    else:
+        return None
+    object_identity = record.get("object_identity")
+    if object_identity is not None and _scope_identity(object_identity) is None:
         return None
     return {
         "id": artifact_id,
@@ -297,6 +315,8 @@ def _managed_metadata(record: dict[str, Any], artifact_id: str) -> dict[str, Any
         "size_bytes": size_bytes,
         "sha256": sha256,
         "provenance": safe_provenance,
+        "kind": kind,
+        "object_identity": object_identity,
         "path_valid": _managed_path(record) is not None,
     }
 
@@ -1252,6 +1272,264 @@ def publish_staged(
         return _public(record)
 
 
+def _remove_transaction_object(path: Path, expected: dict[str, int]) -> bool:
+    """Remove only a task-created managed object whose identity still matches."""
+
+    current = _scope_file_identity(path)
+    if current != expected:
+        return False
+    try:
+        from src.services.job_manager.output_reservations import _delete_identity_attested
+
+        return bool(_delete_identity_attested(path, expected))
+    except (ImportError, OSError):
+        return False
+
+
+def _job_output_record(
+    *,
+    artifact_id: str,
+    path: Path,
+    transaction_id: str,
+    name: str,
+    media_type: str,
+    size_bytes: int,
+    sha256: str,
+    object_identity: dict[str, int],
+    provenance: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "id": artifact_id,
+        "path": str(path),
+        "name": name,
+        "size_bytes": size_bytes,
+        "media_type": media_type,
+        "created_at": _now(),
+        "sha256": sha256,
+        "provenance": provenance,
+        "visibility": ARTIFACT_VISIBILITY_STAGED,
+        "transaction_id": transaction_id,
+        "durable_linked": False,
+        "kind": _MANAGED_KIND_JOB_OUTPUT,
+        "object_identity": object_identity,
+    }
+
+
+def prepare_worker_artifact(
+    source: str | Path,
+    *,
+    transaction_id: str,
+    name: str,
+    media_type: str,
+    size_bytes: int,
+    sha256: str,
+    source_identity: dict[str, int],
+    provenance: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Prepare one immutable Hub-owned, non-public transaction object."""
+
+    if (
+        not isinstance(source, (str, Path))
+        or not _safe_transaction_id(transaction_id)
+        or not isinstance(name, str)
+        or not 1 <= len(name) <= 180
+        or name != _safe_name(name)
+        or not isinstance(media_type, str)
+        or not re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", media_type)
+        or isinstance(size_bytes, bool)
+        or not isinstance(size_bytes, int)
+        or not 0 <= size_bytes <= MAX_JOB_OUTPUT_BYTES
+        or not isinstance(sha256, str)
+        or not _FINGERPRINT.fullmatch(sha256)
+        or _scope_identity(source_identity) is None
+    ):
+        return None
+    try:
+        safe_provenance = _safe_provenance(provenance)
+    except ArtifactWriteError:
+        return None
+    source_path = Path(source)
+    current = _scope_file_identity(source_path)
+    if _scope_reparse(source_path) or current is None or current.get("file_id") != source_identity.get("file_id") or current.get("size_bytes") != size_bytes:
+        return None
+    if _hash_file(source_path) != (size_bytes, sha256):
+        return None
+    temporary: Path | None = None
+    stage_path: Path | None = None
+    stage_identity: dict[str, int] | None = None
+    persisted_record = False
+    with _LOCK:
+        index = _load_managed_index()
+        if index is None:
+            return None
+        for existing_id, existing in index.items():
+            if isinstance(existing, dict) and existing.get("transaction_id") == transaction_id and existing.get("provenance") == safe_provenance:
+                metadata = _managed_metadata(existing, existing_id)
+                if metadata is not None and metadata["sha256"] == sha256 and metadata["size_bytes"] == size_bytes and metadata["name"] == _safe_name(name) and metadata["media_type"] == media_type:
+                    return {"artifact_id": existing_id, "transaction_id": transaction_id, "name": metadata["name"], "media_type": metadata["media_type"], "size_bytes": size_bytes, "sha256": sha256, "object_identity": metadata.get("object_identity")}
+        safe_name = _safe_name(name)
+        stage_path = OUTPUT_ROOT / f"{OWNED_STAGE_PREFIX}{transaction_id[11:]}-{uuid.uuid4().hex}-{safe_name}"
+        temporary = OUTPUT_ROOT / f".{stage_path.name}.{uuid.uuid4().hex}.part"
+        try:
+            OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+            with source_path.open("rb") as source_stream, temporary.open("xb") as destination_stream:
+                digest = hashlib.sha256()
+                copied = 0
+                while True:
+                    chunk = source_stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    copied += len(chunk)
+                    if copied > MAX_JOB_OUTPUT_BYTES:
+                        return None
+                    digest.update(chunk)
+                    destination_stream.write(chunk)
+                destination_stream.flush()
+                os.fsync(destination_stream.fileno())
+            if copied != size_bytes or digest.hexdigest() != sha256:
+                return None
+            temporary.replace(stage_path)
+            temporary = None
+            stage_identity = _scope_file_identity(stage_path)
+            if stage_identity is None or _scope_reparse(stage_path) or _hash_file(stage_path) != (size_bytes, sha256):
+                return None
+            artifact_id = f"artifact_{uuid.uuid4().hex}"
+            record = _job_output_record(
+                artifact_id=artifact_id,
+                path=stage_path,
+                transaction_id=transaction_id,
+                name=safe_name,
+                media_type=media_type,
+                size_bytes=size_bytes,
+                sha256=sha256,
+                object_identity=stage_identity,
+                provenance=safe_provenance,
+            )
+            index[artifact_id] = record
+            _save(index)
+            persisted_index = _load_managed_index()
+            if persisted_index is None or persisted_index.get(artifact_id) != record:
+                return None
+            persisted_record = True
+            return {"artifact_id": artifact_id, "transaction_id": transaction_id, "name": safe_name, "media_type": media_type, "size_bytes": size_bytes, "sha256": sha256, "object_identity": stage_identity}
+        except (OSError, ValueError, TypeError):
+            return None
+        finally:
+            if temporary is not None:
+                current_temp = _scope_file_identity(temporary)
+                if current_temp is not None:
+                    _remove_transaction_object(temporary, current_temp)
+            if not persisted_record and stage_path is not None and stage_identity is not None and _scope_file_identity(stage_path) == stage_identity:
+                # A prepared object that did not reach a persisted record is
+                # task-owned and can be removed by its identity only.
+                _remove_transaction_object(stage_path, stage_identity)
+
+
+def abort_prepared_transaction(transaction_id: str) -> bool:
+    """Abort only staged records and immutable objects owned by one transaction."""
+
+    if not _safe_transaction_id(transaction_id):
+        return False
+    with _LOCK:
+        index = _load_managed_index()
+        if index is None:
+            return False
+        removed: list[tuple[Path, dict[str, int]]] = []
+        updated = dict(index)
+        for artifact_id, record in index.items():
+            if not isinstance(record, dict) or record.get("transaction_id") != transaction_id or record.get("visibility") != ARTIFACT_VISIBILITY_STAGED:
+                continue
+            path = _managed_path(record)
+            identity = _scope_identity(record.get("object_identity"))
+            if path is not None and identity is not None:
+                removed.append((path, identity))
+            updated.pop(artifact_id, None)
+        if updated == index:
+            return True
+        try:
+            _save(updated)
+        except Exception:
+            return False
+        for path, identity in removed:
+            _remove_transaction_object(path, identity)
+        return True
+
+
+def inspect_prepared_transaction(transaction_id: str) -> str:
+    """Return only a bounded transaction state for recovery reconciliation."""
+
+    if not _safe_transaction_id(transaction_id):
+        return "unavailable"
+    with _LOCK:
+        index = _load_managed_index()
+        if index is None:
+            return "unavailable"
+        records = [record for record in index.values() if isinstance(record, dict) and record.get("transaction_id") == transaction_id]
+        if not records:
+            return "absent"
+        if all(record.get("visibility") == ARTIFACT_VISIBILITY_PUBLISHED for record in records):
+            return "published"
+        if all(record.get("visibility") == ARTIFACT_VISIBILITY_STAGED for record in records):
+            return "staged"
+        return "unavailable"
+
+
+def publish_prepared_transaction(
+    transaction_id: str,
+    *,
+    reservation_id: str,
+    provenance: dict[str, Any],
+    artifact_proofs: list[Mapping[str, Any]],
+) -> list[dict[str, Any]] | None:
+    """Atomically publish one fully prepared transaction as the final commit."""
+
+    if not _safe_transaction_id(transaction_id) or not isinstance(reservation_id, str) or not isinstance(artifact_proofs, list) or not artifact_proofs:
+        return None
+    try:
+        safe_provenance = _safe_provenance(provenance)
+    except ArtifactWriteError:
+        return None
+    with _LOCK:
+        index = _load_managed_index()
+        if index is None:
+            return None
+        proof_by_id = {item.get("artifact_id"): item for item in artifact_proofs if isinstance(item, Mapping)}
+        if len(proof_by_id) != len(artifact_proofs):
+            return None
+        selected: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+        for artifact_id, proof in proof_by_id.items():
+            record = index.get(artifact_id)
+            metadata = _managed_metadata(record, artifact_id) if isinstance(record, dict) else None
+            if (
+                metadata is None
+                or record.get("transaction_id") != transaction_id
+                or record.get("provenance") != safe_provenance
+                or record.get("visibility") != ARTIFACT_VISIBILITY_STAGED
+                or proof.get("size_bytes") != metadata["size_bytes"]
+                or proof.get("sha256") != metadata["sha256"]
+                or proof.get("object_identity") != metadata.get("object_identity")
+                or not metadata["path_valid"]
+            ):
+                return None
+            path = Path(record["path"])
+            if _scope_file_identity(path) != metadata.get("object_identity") or _hash_file(path) != (metadata["size_bytes"], metadata["sha256"]):
+                return None
+            selected.append((artifact_id, record, metadata))
+        updated = dict(index)
+        public: list[dict[str, Any]] = []
+        for artifact_id, record, _metadata in selected:
+            changed = dict(record)
+            changed["visibility"] = ARTIFACT_VISIBILITY_PUBLISHED
+            changed["durable_linked"] = True
+            updated[artifact_id] = changed
+            public.append(_public(changed))
+        try:
+            _save(updated)
+        except Exception:
+            return None
+        return public
+
+
 
 def _remove_owned_upload(path: Path | None) -> None:
     if path is None:
@@ -1491,7 +1769,12 @@ def resolve(artifact_id: str) -> Path | None:
         metadata = _managed_metadata(record, artifact_id)
         if metadata is None or not metadata["path_valid"] or candidate.is_symlink():
             return None
-        if _hash_file(candidate) != (metadata["size_bytes"], metadata["sha256"]):
+        expected_identity = metadata.get("object_identity")
+        if expected_identity is not None:
+            current_identity = _scope_file_identity(candidate)
+            if current_identity != expected_identity:
+                return None
+        elif _hash_file(candidate) != (metadata["size_bytes"], metadata["sha256"]):
             return None
     return candidate if candidate.is_file() and _allowed(candidate) else None
 

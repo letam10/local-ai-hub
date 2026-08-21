@@ -201,10 +201,9 @@ class V7JobOutputOwnershipFinalizationTests(unittest.TestCase):
         target.unlink()
         replacement.replace(target)
         result = reservations.commit_reservation(rid, {"status": "completed", "output": str(target)}, provenance={"job_id": job["job_id"], "job_spec_fingerprint": "c" * 64, "adapter_id": "run_media_operation", "attempt": 1, "status": "completed"}, require_output=True)
-        self.assertEqual(result["status"], "published")
-        # A same-scope replacement is still reservation-owned; publication is
-        # allowed only after the new identity is freshly attested.
-        self.assertEqual(len(result["artifacts"]), 1)
+        self.assertEqual(result["status"], "manual_review")
+        self.assertEqual(target.read_bytes(), b"second")
+        self.assertEqual(artifact_store.list_artifacts(), [])
 
     def test_cancel_after_partial_output_cleans_only_allocated_leaf(self) -> None:
         job = reservations.create_reservation("job_20260821_010101_dddddddd", "d" * 64, "run_media_operation")
@@ -216,7 +215,7 @@ class V7JobOutputOwnershipFinalizationTests(unittest.TestCase):
         self.assertEqual(cleaned["status"], "cleaned")
         self.assertFalse(target.exists())
 
-    def test_commit_and_cancel_are_terminal_and_second_commit_refuses(self) -> None:
+    def test_commit_is_idempotently_recoverable_after_public_commit(self) -> None:
         job = reservations.create_reservation("job_20260821_010101_eeeeeeee", "e" * 64, "run_media_operation")
         rid = job["reservation_id"]
         target = reservations.reserve_output_path(rid, "one.bin")
@@ -226,7 +225,8 @@ class V7JobOutputOwnershipFinalizationTests(unittest.TestCase):
         first = reservations.commit_reservation(rid, {"status": "completed", "output": str(target)}, provenance=provenance, require_output=True)
         second = reservations.commit_reservation(rid, {"status": "completed", "output": str(target)}, provenance=provenance, require_output=True)
         self.assertEqual(first["status"], "published")
-        self.assertEqual(second["status"], "unavailable")
+        self.assertEqual(second["status"], "published")
+        self.assertEqual(second["artifacts"][0]["id"], first["artifacts"][0]["id"])
 
     def test_manifest_corruption_and_oversize_fail_closed(self) -> None:
         manifest = self.index_path.with_name(".job_output_reservations.json")
@@ -267,23 +267,23 @@ class V7JobOutputOwnershipFinalizationTests(unittest.TestCase):
         target = reservations.reserve_output_path(rid, "race.bin")
         target.write_bytes(b"owned")
         reservations.begin_producing(rid)
-        original_copy = reservations._copy_reserved_file
+        original_prepare = artifact_store.prepare_worker_artifact
         replaced = {"done": False}
 
-        def race(source, reservation_id, relative, expected):
+        def race(source, **kwargs):
             if not replaced["done"]:
                 replacement = source.with_name("foreign.bin")
                 replacement.write_bytes(b"foreign")
                 source.unlink()
                 replacement.replace(source)
                 replaced["done"] = True
-            return original_copy(source, reservation_id, relative, expected)
+            return original_prepare(source, **kwargs)
 
         provenance = {"job_id": job["job_id"], "job_spec_fingerprint": "c" * 64, "adapter_id": "run_media_operation", "attempt": 1, "status": "completed"}
-        with patch.object(reservations, "_copy_reserved_file", side_effect=race):
+        with patch.object(artifact_store, "prepare_worker_artifact", side_effect=race):
             result = reservations.commit_reservation(rid, {"status": "completed", "output": str(target)}, provenance=provenance, require_output=True)
         self.assertEqual(result["status"], "manual_review")
-        self.assertEqual(target.read_bytes(), b"foreign")
+        self.assertEqual(target.read_bytes(), b"owned")
         self.assertEqual(artifact_store.list_artifacts(), [])
 
     def test_source_replacement_after_attestation_before_publication_is_refused(self) -> None:
@@ -320,27 +320,25 @@ class V7JobOutputOwnershipFinalizationTests(unittest.TestCase):
         target = reservations.reserve_output_path(rid, "stage-race.bin")
         target.write_bytes(b"owned-stage")
         reservations.begin_producing(rid)
-        original_register = artifact_store.register_worker_outputs
+        original_publish = artifact_store.publish_prepared_transaction
         attempted = {"done": False}
 
-        def replace_then_register(paths, *, provenance, expected_outputs=None):
-            stage = Path(paths[0])
+        def replace_then_publish(transaction_id, *, reservation_id, provenance, artifact_proofs):
+            artifact_id = artifact_proofs[0]["artifact_id"]
+            stage = Path(artifact_store._load()[artifact_id]["path"])
             replacement = stage.with_name("foreign-stage.bin")
             replacement.write_bytes(b"foreign-stage")
-            try:
-                replacement.replace(stage)
-            except OSError:
-                attempted["done"] = True
-                raise
+            stage.unlink()
+            replacement.replace(stage)
             attempted["done"] = True
-            return original_register(paths, provenance=provenance)
+            return original_publish(transaction_id, reservation_id=reservation_id, provenance=provenance, artifact_proofs=artifact_proofs)
 
         provenance = {"job_id": job["job_id"], "job_spec_fingerprint": "e" * 64, "adapter_id": "run_media_operation", "attempt": 1, "status": "completed"}
-        with patch.object(artifact_store, "register_worker_outputs", side_effect=replace_then_register):
+        with patch.object(artifact_store, "publish_prepared_transaction", side_effect=replace_then_publish):
             result = reservations.commit_reservation(rid, {"status": "completed", "output": str(target)}, provenance=provenance, require_output=True)
         self.assertTrue(attempted["done"])
         self.assertEqual(result["status"], "manual_review")
-        staged_foreign = list((self.output_root / ".hub-reserved").rglob("foreign-stage.bin"))
+        staged_foreign = list(self.output_root.rglob("hub-job-stage-*"))
         self.assertEqual(len(staged_foreign), 1)
         self.assertEqual(staged_foreign[0].read_bytes(), b"foreign-stage")
         self.assertEqual(artifact_store.list_artifacts(), [])
@@ -364,6 +362,72 @@ class V7JobOutputOwnershipFinalizationTests(unittest.TestCase):
         self.assertTrue(replaced["done"])
         self.assertEqual(reservations._load_manifest()["records"], {})
         self.assertFalse(any((self.temp_root / "job-reservations").glob("output_res_*")))
+
+    def test_authorization_persistence_failure_aborts_prepared_transaction_without_public_artifact(self) -> None:
+        job = reservations.create_reservation("job_20260821_010101_12121212", "1" * 64, "run_media_operation")
+        rid = job["reservation_id"]
+        target = reservations.reserve_output_path(rid, "authorize-fail.bin")
+        target.write_bytes(b"prepared")
+        reservations.begin_producing(rid)
+        original_save = reservations._save_manifest
+        calls = {"count": 0}
+
+        def fail_authorization(manifest):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return False
+            return original_save(manifest)
+
+        provenance = {"job_id": job["job_id"], "job_spec_fingerprint": "1" * 64, "adapter_id": "run_media_operation", "attempt": 1, "status": "completed"}
+        with patch.object(reservations, "_save_manifest", side_effect=fail_authorization):
+            result = reservations.commit_reservation(rid, {"status": "completed", "output": str(target)}, provenance=provenance, require_output=True)
+        self.assertEqual(result["status"], "manual_review")
+        self.assertEqual(artifact_store.list_artifacts(), [])
+        self.assertEqual(artifact_store.list_managed_artifacts(), [])
+
+    def test_public_commit_has_no_required_reservation_write_after_visibility(self) -> None:
+        job = reservations.create_reservation("job_20260821_010101_23232323", "2" * 64, "run_media_operation")
+        rid = job["reservation_id"]
+        target = reservations.reserve_output_path(rid, "commit-authorized.bin")
+        target.write_bytes(b"published")
+        reservations.begin_producing(rid)
+        original_save = reservations._save_manifest
+        calls = {"count": 0}
+
+        def fail_if_after_authorization(manifest):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return original_save(manifest)
+            return False
+
+        provenance = {"job_id": job["job_id"], "job_spec_fingerprint": "2" * 64, "adapter_id": "run_media_operation", "attempt": 1, "status": "completed"}
+        with patch.object(reservations, "_save_manifest", side_effect=fail_if_after_authorization):
+            result = reservations.commit_reservation(rid, {"status": "completed", "output": str(target)}, provenance=provenance, require_output=True)
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(calls["count"], 1)
+        self.assertEqual(len(artifact_store.list_artifacts()), 1)
+
+    def test_published_object_is_detached_from_mutable_reservation_path(self) -> None:
+        job = reservations.create_reservation("job_20260821_010101_34343434", "3" * 64, "run_media_operation")
+        rid = job["reservation_id"]
+        target = reservations.reserve_output_path(rid, "immutable.bin")
+        target.write_bytes(b"original")
+        reservations.begin_producing(rid)
+        provenance = {"job_id": job["job_id"], "job_spec_fingerprint": "3" * 64, "adapter_id": "run_media_operation", "attempt": 1, "status": "completed"}
+        result = reservations.commit_reservation(rid, {"status": "completed", "output": str(target)}, provenance=provenance, require_output=True)
+        self.assertEqual(result["status"], "published")
+        artifact_id = result["artifacts"][0]["id"]
+        managed = artifact_store.resolve(artifact_id)
+        self.assertIsNotNone(managed)
+        assert managed is not None
+        self.assertNotIn(".hub-reserved", str(managed))
+        self.assertNotEqual(managed.parent, target.parent)
+        replacement = target.with_name("foreign-release.bin")
+        replacement.write_bytes(b"foreign-release")
+        target.unlink()
+        replacement.replace(target)
+        self.assertEqual(managed.read_bytes(), b"original")
+        self.assertEqual(artifact_store.resolve(artifact_id), managed)
 
     def test_inventory_has_no_unknown_producer(self) -> None:
         self.assertTrue(validate_producer_inventory())
