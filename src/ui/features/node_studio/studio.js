@@ -882,7 +882,8 @@ class HubGraphEditor {
     this.editorElement = this.root.querySelector(".graph-editor");
     this.applyPanelState();
     this.liteGraph = new globalThis.LiteGraph.LGraph();
-    this.liteCanvas = new globalThis.LiteGraph.LGraphCanvas(this.canvasElement, this.liteGraph, { autoresize: false });
+    const pointereventsMethod = globalThis.LiteGraph.getPointerEventsMethod?.(this.canvasElement, "pointer") || "mouse";
+    this.liteCanvas = new globalThis.LiteGraph.LGraphCanvas(this.canvasElement, this.liteGraph, { autoresize: false, pointerevents_method: pointereventsMethod });
     this.liteCanvas.allow_dragcanvas = true;
     this.liteCanvas.allow_dragnodes = true;
     this.liteCanvas.allow_reconnect_links = true;
@@ -898,6 +899,7 @@ class HubGraphEditor {
     this.liteCanvas.onSelectionChange = () => { this.renderInspector(); this.drawMinimap(); };
     this.liteCanvas.onNodeMoved = () => this.drawMinimap();
     this.liteCanvas.onMouse = (event) => this.handleCanvasMouse(event);
+    this.liteCanvas.onPointerCancel = () => this.handleCanvasPointerCancel();
     this.liteGraph.onNodeConnectionChange = () => this.captureConnectionChange();
     this.bindConnectionPickerHook();
     this.bindCanvasShortcuts();
@@ -1040,6 +1042,22 @@ class HubGraphEditor {
     this.liteCanvas._highlight_output = null;
   }
 
+  handleCanvasPointerCancel() {
+    this.closeConnectionPicker(false);
+    this.cancelNativeConnection();
+    const before = this.beforeChange;
+    this.beforeChange = null;
+    if (!before || !this.liteGraph) return;
+    try {
+      const graph = JSON.parse(before);
+      if (graph && typeof graph === "object" && Array.isArray(graph.nodes) && Array.isArray(graph.edges)) {
+        this.hydrateLiteGraph(graph);
+      }
+    } catch {
+      // A malformed pre-change snapshot must not echo or create a second edit.
+    }
+  }
+
   bindConnectionPickerHook() {
     const canvas = this.liteCanvas;
     const LiteGraph = globalThis.LiteGraph;
@@ -1054,9 +1072,10 @@ class HubGraphEditor {
       this.openConnectionPicker(pending);
       return result;
     };
-    LiteGraph.pointerListenerRemove(canvas.canvas, "up", original, true);
-    LiteGraph.pointerListenerRemove(rootDocument, "up", original, true);
-    LiteGraph.pointerListenerAdd(canvas.canvas, "up", wrapper, true);
+    const pointereventsMethod = canvas.pointerevents_method || "mouse";
+    LiteGraph.pointerListenerRemove(canvas.canvas, "up", original, true, pointereventsMethod);
+    LiteGraph.pointerListenerRemove(rootDocument, "up", original, true, pointereventsMethod);
+    LiteGraph.pointerListenerAdd(canvas.canvas, "up", wrapper, true, pointereventsMethod);
     canvas._mouseup_callback = wrapper;
   }
 
