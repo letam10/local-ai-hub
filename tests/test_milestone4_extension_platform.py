@@ -387,6 +387,7 @@ class ExtensionPlatformTests(unittest.TestCase):
             result = generate_extension_scaffold("generated-catalog", root=root, display_name="Generated Catalog")
             self.assertEqual(result["status"], "created")
             self.assertEqual(set(result["files"]), {"README.md", "capability-pack.json", "extension.json"})
+            self.assertNotIn(str(root), json.dumps(result))
             (root / "extensions" / "generated-catalog" / "untrusted.py").write_text("raise RuntimeError('must not run')", encoding="utf-8")
             discovery = discover_extensions(root)
         self.assertEqual(discovery["extensions"][0]["status"], "planned")

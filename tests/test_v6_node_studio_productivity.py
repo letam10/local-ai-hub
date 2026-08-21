@@ -5,7 +5,9 @@ import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
+import src.services.project_manager.manager as project_manager_module
 from src.services.project_manager.manager import CreativeProjectManager
 from src.services.project_manager.schemas import (
     PROJECT_SCHEMA_VERSION,
@@ -13,6 +15,8 @@ from src.services.project_manager.schemas import (
     LOCAL_PATH_RE,
 )
 from src.services.node_studio.state import draft_persist, draft_load, draft_clear
+
+PROJECT_ID = "project_" + "a" * 32
 
 
 class TestProjectManagerAtomicSave(unittest.TestCase):
@@ -43,19 +47,22 @@ class TestProjectManagerAutosaveDraft(unittest.TestCase):
     def test_autosave_creates_draft_file(self):
         with TemporaryDirectory() as tmpdir:
             mgr = self._make_manager(tmpdir)
-            result = mgr.autosave_draft('project_abc', {'nodes': [], 'edges': []})
+            result = mgr.autosave_draft(PROJECT_ID, {'nodes': [], 'edges': []})
             self.assertTrue(result['accepted'])
-            draft_path = Path(result['draft_path'])
+            self.assertNotIn('draft_path', result)
+            self.assertEqual(result['draft_id'], f'draft_{PROJECT_ID}.json')
+            draft_path = Path(tmpdir) / result['draft_id']
             self.assertTrue(draft_path.exists())
 
     def test_clear_draft_removes_file(self):
         with TemporaryDirectory() as tmpdir:
             mgr = self._make_manager(tmpdir)
-            mgr.autosave_draft('project_def', {'nodes': []})
+            mgr.autosave_draft(PROJECT_ID, {'nodes': []})
             # draft should exist
             drafts = list(Path(tmpdir).glob('draft_*.json'))
             self.assertTrue(len(drafts) > 0)
-            mgr.clear_draft('project_def')
+            result = mgr.clear_draft(PROJECT_ID)
+            self.assertTrue(result['accepted'])
             # draft should be gone
             drafts_after = list(Path(tmpdir).glob('draft_*.json'))
             self.assertEqual(drafts_after, [])
@@ -63,8 +70,66 @@ class TestProjectManagerAutosaveDraft(unittest.TestCase):
     def test_invalid_project_id_rejected(self):
         with TemporaryDirectory() as tmpdir:
             mgr = self._make_manager(tmpdir)
-            result = mgr.autosave_draft('', {'nodes': []})
+            for project_id in ('', '../secret', r'C:\private\workspace'):
+                result = mgr.autosave_draft(project_id, {'nodes': []})
+                self.assertFalse(result['accepted'])
+                self.assertNotIn('draft_path', result)
+
+    def test_persistence_failure_is_bounded_and_does_not_echo_path(self):
+        with TemporaryDirectory() as tmpdir:
+            mgr = self._make_manager(tmpdir)
+            with patch('src.services.project_manager.manager.os.fsync', side_effect=OSError('private path marker')):
+                result = mgr.autosave_draft(PROJECT_ID, {'nodes': []})
             self.assertFalse(result['accepted'])
+            self.assertEqual(result['status'], 'manual_review')
+            self.assertNotIn('private path marker', json.dumps(result))
+            self.assertNotIn('draft_path', result)
+            self.assertEqual(list(Path(tmpdir).glob('.draft-*.tmp')), [])
+
+    def test_clear_draft_refuses_foreign_record_without_delete(self):
+        with TemporaryDirectory() as tmpdir:
+            mgr = self._make_manager(tmpdir)
+            result = mgr.autosave_draft(PROJECT_ID, {'nodes': []})
+            draft_path = Path(tmpdir) / result['draft_id']
+            foreign = {'schema_version': 1, 'project_id': 'project_' + 'b' * 32, 'graph': {'nodes': []}}
+            draft_path.write_text(json.dumps(foreign), encoding='utf-8')
+            before = draft_path.read_bytes()
+            cleared = mgr.clear_draft(PROJECT_ID)
+            self.assertFalse(cleared['accepted'])
+            self.assertEqual(cleared['status'], 'manual_review')
+            self.assertEqual(draft_path.read_bytes(), before)
+            self.assertNotIn(str(draft_path), json.dumps(cleared))
+
+    def test_clear_draft_refuses_directory_and_reparse_without_delete(self):
+        with TemporaryDirectory() as tmpdir:
+            mgr = self._make_manager(tmpdir)
+            result = mgr.autosave_draft(PROJECT_ID, {'nodes': []})
+            draft_path = Path(tmpdir) / result['draft_id']
+            draft_path.unlink()
+            draft_path.mkdir()
+            directory_result = mgr.clear_draft(PROJECT_ID)
+            self.assertFalse(directory_result['accepted'])
+            self.assertEqual(directory_result['status'], 'manual_review')
+            self.assertTrue(draft_path.is_dir())
+            draft_path.rmdir()
+            draft_path.write_text(json.dumps({'schema_version': 1, 'project_id': PROJECT_ID, 'graph': {}}), encoding='utf-8')
+            real_lstat = project_manager_module.os.lstat
+            original = real_lstat(draft_path)
+            reparse_values = {
+                name: getattr(original, name, 0)
+                for name in ('st_mode', 'st_ino', 'st_dev', 'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_file_attributes')
+            }
+            reparse_values['st_file_attributes'] = int(reparse_values.get('st_file_attributes', 0)) | project_manager_module._REPARSE_POINT
+            reparse_stat = type('ReparseStat', (), reparse_values)()
+
+            def fake_lstat(candidate):
+                return reparse_stat if Path(candidate) == draft_path else real_lstat(candidate)
+
+            with patch.object(project_manager_module.os, 'lstat', side_effect=fake_lstat):
+                reparse_result = mgr.clear_draft(PROJECT_ID)
+            self.assertFalse(reparse_result['accepted'])
+            self.assertEqual(reparse_result['status'], 'manual_review')
+            self.assertTrue(draft_path.exists())
 
 
 class TestProjectSchemas(unittest.TestCase):

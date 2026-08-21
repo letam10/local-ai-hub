@@ -338,6 +338,9 @@ class VideoRuntimeContractTests(unittest.TestCase):
             model_path.write_bytes(b"model")
             runtime = root / "runtime"
             runtime.mkdir()
+            script = runtime / "scripts" / "inference_animesr_video.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("# fixture", encoding="utf-8")
             environment = root / "Environments" / "animesr"
             python = environment / "Scripts" / "python.exe"
             python.parent.mkdir(parents=True)
@@ -388,6 +391,49 @@ class VideoRuntimeContractTests(unittest.TestCase):
         self.assertEqual(result["status"], "unavailable")
         self.assertEqual(result["component"], "animesr")
         launch.assert_not_called()
+
+    def test_animesr_capability_and_adapter_require_fixed_script_leaf(self) -> None:
+        from src.modules.animesr.backend import adapter
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / "runtime"
+            runtime.mkdir()
+            python = root / "Environments" / "animesr" / "Scripts" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.write_bytes(b"python")
+            model = root / "Models" / "Video" / "AnimeSR" / "AnimeSR_v2.pth"
+            model.parent.mkdir(parents=True)
+            model.write_bytes(b"model")
+            ffmpeg = root / "runtime" / "tools" / "ffmpeg.exe"
+            ffmpeg.parent.mkdir(parents=True)
+            ffmpeg.write_bytes(b"ffmpeg")
+            fixed = runtime / "scripts" / "inference_animesr_video.py"
+            with (
+                patch.object(adapter, "_runtime", return_value=(python, runtime)),
+                patch.object(adapter, "_selected_model", return_value=model),
+                patch.object(adapter, "_registry_path", return_value=ffmpeg),
+            ):
+                self.assertFalse(adapter.capability()["script_ready"])
+                with patch.object(adapter, "run_json_worker") as launch:
+                    result = adapter.run_animesr({"source_artifact_id": "artifact_" + "5" * 32})
+                self.assertEqual(result["status"], "unavailable")
+                launch.assert_not_called()
+
+                fixed.mkdir(parents=True)
+                self.assertFalse(adapter.capability()["script_ready"])
+                fixed.rmdir()
+                fixed.write_text("# fixture", encoding="utf-8")
+                self.assertTrue(adapter.capability()["script_ready"])
+
+                outside = root / "outside-animesr.py"
+                outside.write_text("# outside", encoding="utf-8")
+                fixed.unlink()
+                try:
+                    fixed.symlink_to(outside)
+                except OSError as exc:
+                    self.skipTest(f"symlink fixture unavailable: {exc}")
+                self.assertFalse(adapter.capability()["script_ready"])
 
     def test_video_adapters_bind_runtime_from_registry_not_ambient_environment(self) -> None:
         from src.modules.practical_rife.backend import adapter as rife
@@ -595,10 +641,11 @@ class VideoRuntimeContractTests(unittest.TestCase):
         with (
             patch("src.modules.animesr.backend.adapter.capability", return_value={
                 "runtime_ready": True, "environment_ready": True, "model_ready": True,
-                "ffmpeg_ready": True, "worker_ready": True,
+                "script_ready": True, "ffmpeg_ready": True, "worker_ready": True,
             }),
             patch("src.modules.practical_rife.backend.adapter.capability", return_value={
-                "runtime_ready": True, "environment_ready": True, "ffmpeg_ready": True, "worker_ready": True,
+                "runtime_ready": True, "environment_ready": True, "script_ready": True,
+                "ffmpeg_ready": True, "worker_ready": True,
             }),
             patch("src.modules.real_esrgan.backend.adapter.capability", return_value={
                 "runtime_ready": True, "environment_ready": True, "model_ready": True, "script_ready": True, "worker_ready": True,
@@ -610,6 +657,85 @@ class VideoRuntimeContractTests(unittest.TestCase):
             self.assertEqual(readiness[backend]["status"], "partial")
             self.assertTrue(readiness[backend]["queue_allowed"])
             self.assertNotEqual(readiness[backend]["status"], "operational")
+
+    def test_practical_rife_capability_and_adapter_require_fixed_script_leaf(self) -> None:
+        from src.modules.practical_rife.backend import adapter
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / "runtime"
+            model_dir = runtime / "train_log" / "RIFEv4.26_0921"
+            model_dir.mkdir(parents=True)
+            (model_dir / "flownet.pkl").write_bytes(b"model")
+            python = root / "Environments" / "practical_rife" / "Scripts" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.write_bytes(b"python")
+            tools = root / "runtime" / "tools" / "ffmpeg"
+            tools.mkdir(parents=True)
+            ffmpeg, ffprobe = tools / "ffmpeg.exe", tools / "ffprobe.exe"
+            ffmpeg.write_bytes(b"ffmpeg")
+            ffprobe.write_bytes(b"ffprobe")
+            fixed = runtime / "inference_video.py"
+            with (
+                patch.object(adapter, "_runtime", return_value=(python, runtime, model_dir)),
+                patch.object(adapter, "_configured_ffmpeg", return_value=(ffmpeg, ffprobe)),
+            ):
+                self.assertFalse(adapter.capability()["script_ready"])
+                with patch.object(adapter, "run_json_worker") as launch:
+                    result = adapter.run_practical_rife({"source_artifact_id": "artifact_" + "6" * 32})
+                self.assertEqual(result["status"], "unavailable")
+                launch.assert_not_called()
+
+                fixed.mkdir()
+                self.assertFalse(adapter.capability()["script_ready"])
+                fixed.rmdir()
+                fixed.write_text("# fixture", encoding="utf-8")
+                self.assertTrue(adapter.capability()["script_ready"])
+
+                outside = root / "outside-rife.py"
+                outside.write_text("# outside", encoding="utf-8")
+                fixed.unlink()
+                try:
+                    fixed.symlink_to(outside)
+                except OSError as exc:
+                    self.skipTest(f"symlink fixture unavailable: {exc}")
+                self.assertFalse(adapter.capability()["script_ready"])
+
+    def test_missing_fixed_video_script_blocks_queue_before_job_manager(self) -> None:
+        from src.services.api import core
+
+        cases = (
+            (
+                "animesr",
+                "upscale_anime_video",
+                "src.modules.animesr.backend.adapter.capability",
+                {"runtime_ready": True, "environment_ready": True, "model_ready": True, "script_ready": False, "ffmpeg_ready": True, "worker_ready": True},
+            ),
+            (
+                "practical_rife",
+                "frame_interpolate",
+                "src.modules.practical_rife.backend.adapter.capability",
+                {"runtime_ready": True, "environment_ready": True, "script_ready": False, "ffmpeg_ready": True, "worker_ready": True},
+            ),
+        )
+        for backend, operation, capability_path, observed in cases:
+            with self.subTest(backend=backend):
+                with (
+                    patch.object(core, "component_statuses", return_value=[{"id": "ffmpeg", "component_status": "installed"}]),
+                    patch(capability_path, return_value=observed),
+                    patch.object(core.job_manager, "submit") as submit,
+                ):
+                    readiness = core._media_backend_readiness(operation=operation, backend=backend)
+                    assert readiness is not None
+                    self.assertFalse(readiness["queue_allowed"])
+                    status, payload = core.submit_tool(
+                        "run_media_operation",
+                        {"operation": operation, "backend": backend, "source_artifact_id": "artifact_" + "7" * 32},
+                    )
+                self.assertEqual(status, 503)
+                self.assertEqual(payload["status"], "unavailable")
+                self.assertNotIn("path", json.dumps(payload, ensure_ascii=False))
+                submit.assert_not_called()
 
     def test_rife_reparse_output_parent_refuses_before_worker_launch(self) -> None:
         from src.modules.practical_rife.backend import worker
@@ -791,7 +917,6 @@ class VideoRuntimeContractTests(unittest.TestCase):
         index_path = root / "Config" / "artifacts.json"
         target = output_root / "AnimeSR" / "clip_AnimeSR_x2.mp4"
         target.parent.mkdir(parents=True)
-        target.write_bytes(b"bounded video output")
         manager = HubJobManager()
         try:
             with (
@@ -800,15 +925,19 @@ class VideoRuntimeContractTests(unittest.TestCase):
                 patch.object(artifact_store, "OUTPUT_ROOT", output_root),
                 patch.object(artifact_store, "INDEX_PATH", index_path),
             ):
-                record = manager.submit(
-                    "upscale_anime_video",
-                    {"source_artifact_id": "artifact_" + "a" * 32},
-                    lambda _payload, _context: {
+                def runner(_payload, _context):
+                    target.write_bytes(b"bounded video output")
+                    return {
                         "status": "completed",
                         "operation": "upscale_anime_video",
                         "backend": "animesr",
                         "output": str(target),
-                    },
+                    }
+
+                record = manager.submit(
+                    "upscale_anime_video",
+                    {"source_artifact_id": "artifact_" + "a" * 32},
+                    runner,
                 )
                 idle, remaining = manager.wait_for_idle(5)
                 self.assertTrue(idle, remaining)
@@ -981,6 +1110,8 @@ class VideoRuntimeContractTests(unittest.TestCase):
                 self.assertEqual(public["status"], "cancelled")
                 self.assertEqual(public["result"]["status"], "cancelled")
                 self.assertNotIn("artifacts", public["result"])
+                self.assertTrue(target.exists())
+                self.assertEqual(public["result"].get("cleanup_status"), "manual_review")
                 self.assertFalse((root / "Config" / "artifacts.json").exists())
         finally:
             release_runner.set()
@@ -996,7 +1127,6 @@ class VideoRuntimeContractTests(unittest.TestCase):
         output_root.mkdir()
         target = output_root / "RIFE" / "completed.mp4"
         target.parent.mkdir(parents=True)
-        target.write_bytes(b"completed output")
         publication_started = threading.Event()
         release_publication = threading.Event()
         cancel_result: list[tuple[bool, str]] = []
@@ -1015,11 +1145,15 @@ class VideoRuntimeContractTests(unittest.TestCase):
                     self.assertTrue(release_publication.wait(3))
                     return register(*args, **kwargs)
 
+                def runner(_payload, _context):
+                    target.write_bytes(b"completed output")
+                    return {"status": "completed", "output": str(target)}
+
                 with patch.object(artifact_store, "register_worker_outputs", side_effect=blocking_register):
                     record = manager.submit(
                         "frame_interpolate",
                         {"source_artifact_id": "artifact_" + "e" * 32},
-                        lambda _payload, _context: {"status": "completed", "output": str(target)},
+                        runner,
                     )
                     self.assertTrue(publication_started.wait(3))
                     cancel_thread = threading.Thread(target=lambda: cancel_result.append(manager.cancel(record["id"])), daemon=True)

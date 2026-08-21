@@ -6,6 +6,7 @@
 */
 
 const LANGUAGE_STORAGE_KEY = "local-ai-hub-language";
+export { I18N_NAMESPACES, namespaceKeys } from "./i18n/namespaces.js";
 
 export const LANGUAGE_OPTIONS = Object.freeze([
   { id: "vi", label: "Tiếng Việt" },
@@ -237,6 +238,32 @@ const PAGE_LABEL_DICTIONARIES = Object.freeze({
   }),
 });
 
+// Component Manager copy is template-owned UI text.  Keep it separate from
+// server projections so component names, ids, reasons and next actions never
+// become translation keys accidentally.
+const COMPONENT_LABEL_DICTIONARIES = Object.freeze({
+  vi: Object.freeze({
+    "Components / AI Setup": "Components / Thiết lập AI", "Quản lý runtime và model bằng kế hoạch server-owned. Không tự tải/cài khi mở Hub; chỉ xác nhận đúng kế hoạch đã xem.": "Quản lý runtime và model bằng kế hoạch do máy chủ sở hữu. Không tự tải/cài khi mở Hub; chỉ xác nhận kế hoạch đã xem.",
+    "Làm mới": "Làm mới", "Module state": "Trạng thái module", "Runtime state": "Trạng thái runtime", "Model state": "Trạng thái model", "Execution": "Thực thi", "Lập kế hoạch": "Lập kế hoạch", "Lập kế hoạch sửa": "Lập kế hoạch sửa", "Kế hoạch": "Kế hoạch", "Xác nhận kế hoạch": "Xác nhận kế hoạch", "Dependency graph": "Đồ thị phụ thuộc", "Chưa có component catalog": "Chưa có danh mục component", "Catalog sẽ hiển thị khi Core bootstrap đọc được metadata tracked.": "Danh mục sẽ hiển thị khi Core bootstrap đọc được siêu dữ liệu đã theo dõi.", "AI components là tuỳ chọn; trạng thái thiếu/partial được giữ trung thực.": "Component AI là tùy chọn; trạng thái thiếu/một phần được giữ trung thực.", "Kế hoạch do server quản lý; chưa thực thi.": "Kế hoạch do máy chủ quản lý; chưa thực thi.", "Xem kế hoạch server-owned.": "Xem kế hoạch do máy chủ sở hữu.", "Lập gói phụ thuộc": "Lập gói phụ thuộc", "Xác nhận gói": "Xác nhận gói", "Kiểm tra bản cài sẵn": "Kiểm tra bản cài sẵn", "Reuse bản cài sẵn": "Reuse bản cài sẵn", "Xác nhận đăng ký": "Xác nhận đăng ký", "Import từ máy này": "Import từ máy này", "Kế hoạch import": "Kế hoạch import", "Xác nhận import": "Xác nhận import",
+  }),
+  en: Object.freeze({
+    "Components / AI Setup": "Components / AI Setup", "Quản lý runtime và model bằng kế hoạch server-owned. Không tự tải/cài khi mở Hub; chỉ xác nhận đúng kế hoạch đã xem.": "Manage runtimes and models with server-owned plans. Nothing downloads or installs on Hub open; confirm only a reviewed plan.",
+    "Làm mới": "Refresh", "Module state": "Module state", "Runtime state": "Runtime state", "Model state": "Model state", "Execution": "Execution", "Lập kế hoạch": "Plan install", "Lập kế hoạch sửa": "Plan repair", "Kế hoạch": "Plan", "Xác nhận kế hoạch": "Confirm plan", "Dependency graph": "Dependency graph", "Chưa có component catalog": "No component catalog", "Catalog sẽ hiển thị khi Core bootstrap đọc được metadata tracked.": "The catalog appears when Core bootstrap can read tracked metadata.", "AI components là tuỳ chọn; trạng thái thiếu/partial được giữ trung thực.": "AI components are optional; missing/partial status remains truthful.", "Kế hoạch do server quản lý; chưa thực thi.": "Server-owned plan; not executed.", "Xem kế hoạch server-owned.": "Review the server-owned plan.", "Lập gói phụ thuộc": "Plan dependency bundle", "Xác nhận gói": "Confirm bundle", "Kiểm tra bản cài sẵn": "Check existing install", "Reuse bản cài sẵn": "Reuse existing install", "Xác nhận đăng ký": "Confirm registration", "Import từ máy này": "Import from this device", "Kế hoạch import": "Import plan", "Xác nhận import": "Confirm import",
+  }),
+  zh: Object.freeze({
+    "Components / AI Setup": "组件 / AI 设置", "Quản lý runtime và model bằng kế hoạch server-owned. Không tự tải/cài khi mở Hub; chỉ xác nhận đúng kế hoạch đã xem.": "使用服务器拥有的计划管理运行时和模型。打开 Hub 不会自动下载或安装；仅确认已审核的计划。",
+    "Làm mới": "刷新", "Module state": "模块状态", "Runtime state": "运行时状态", "Model state": "模型状态", "Execution": "执行", "Lập kế hoạch": "制定计划", "Lập kế hoạch sửa": "制定修复计划", "Kế hoạch": "计划", "Xác nhận kế hoạch": "确认计划", "Dependency graph": "依赖图", "Chưa có component catalog": "暂无组件目录", "Catalog sẽ hiển thị khi Core bootstrap đọc được metadata tracked.": "Core 启动程序读取已跟踪元数据后将显示目录。", "AI components là tuỳ chọn; trạng thái thiếu/partial được giữ trung thực.": "AI 组件为可选项；缺失/部分状态保持真实。", "Kế hoạch do server quản lý; chưa thực thi.": "服务器拥有的计划；尚未执行。", "Xem kế hoạch server-owned.": "查看服务器计划。", "Lập gói phụ thuộc": "制定依赖包计划", "Xác nhận gói": "确认依赖包", "Kiểm tra bản cài sẵn": "检查现有安装", "Reuse bản cài sẵn": "复用现有安装", "Xác nhận đăng ký": "确认注册", "Import từ máy này": "从此设备导入", "Kế hoạch import": "导入计划", "Xác nhận import": "确认导入",
+  }),
+  ja: Object.freeze({
+    "Components / AI Setup": "コンポーネント / AI セットアップ", "Quản lý runtime và model bằng kế hoạch server-owned. Không tự tải/cài khi mở Hub; chỉ xác nhận đúng kế hoạch đã xem.": "サーバー所有の計画でランタイムとモデルを管理します。Hub 起動時に自動ダウンロードやインストールは行わず、確認済みの計画だけを承認します。",
+    "Làm mới": "更新", "Module state": "モジュール状態", "Runtime state": "ランタイム状態", "Model state": "モデル状態", "Execution": "実行", "Lập kế hoạch": "インストール計画", "Lập kế hoạch sửa": "修復計画", "Kế hoạch": "計画", "Xác nhận kế hoạch": "計画を確認", "Dependency graph": "依存関係グラフ", "Chưa có component catalog": "コンポーネントカタログがありません", "Catalog sẽ hiển thị khi Core bootstrap đọc được metadata tracked.": "Core ブートストラップが追跡メタデータを読み取るとカタログが表示されます。", "AI components là tuỳ chọn; trạng thái thiếu/partial được giữ trung thực.": "AI コンポーネントは任意です。欠落/部分状態を正確に保持します。", "Kế hoạch do server quản lý; chưa thực thi.": "サーバー所有の計画。未実行です。", "Xem kế hoạch server-owned.": "サーバー所有の計画を確認します。", "Lập gói phụ thuộc": "依存関係バンドルを計画", "Xác nhận gói": "バンドルを確認", "Kiểm tra bản cài sẵn": "既存インストールを確認", "Reuse bản cài sẵn": "既存インストールを再利用", "Xác nhận đăng ký": "登録を確認", "Import từ máy này": "このデバイスからインポート", "Kế hoạch import": "インポート計画", "Xác nhận import": "インポートを確認",
+  }),
+  ko: Object.freeze({
+    "Components / AI Setup": "구성 요소 / AI 설정", "Quản lý runtime và model bằng kế hoạch server-owned. Không tự tải/cài khi mở Hub; chỉ xác nhận đúng kế hoạch đã xem.": "서버 소유 계획으로 런타임과 모델을 관리합니다. Hub를 열 때 자동 다운로드나 설치를 하지 않으며 검토된 계획만 확인합니다.",
+    "Làm mới": "새로 고침", "Module state": "모듈 상태", "Runtime state": "런타임 상태", "Model state": "모델 상태", "Execution": "실행", "Lập kế hoạch": "설치 계획", "Lập kế hoạch sửa": "복구 계획", "Kế hoạch": "계획", "Xác nhận kế hoạch": "계획 확인", "Dependency graph": "종속성 그래프", "Chưa có component catalog": "구성 요소 카탈로그가 없습니다", "Catalog sẽ hiển thị khi Core bootstrap đọc được metadata tracked.": "Core 부트스트랩이 추적 메타데이터를 읽으면 카탈로그가 표시됩니다.", "AI components là tuỳ chọn; trạng thái thiếu/partial được giữ trung thực.": "AI 구성 요소는 선택 사항이며 누락/부분 상태를 정확히 유지합니다.", "Kế hoạch do server quản lý; chưa thực thi.": "서버 소유 계획이며 실행되지 않았습니다.", "Xem kế hoạch server-owned.": "서버 소유 계획을 검토합니다.", "Lập gói phụ thuộc": "종속성 번들 계획", "Xác nhận gói": "번들 확인", "Kiểm tra bản cài sẵn": "기존 설치 확인", "Reuse bản cài sẵn": "기존 설치 재사용", "Xác nhận đăng ký": "등록 확인", "Import từ máy này": "이 장치에서 가져오기", "Kế hoạch import": "가져오기 계획", "Xác nhận import": "가져오기 확인",
+  }),
+});
+
 export const currentLanguage = () => {
   try {
     const value = window.localStorage?.getItem(LANGUAGE_STORAGE_KEY) || "vi";
@@ -255,7 +282,7 @@ export const setLanguage = (value) => {
 
 export const translateText = (value, language = currentLanguage()) => {
   let result = String(value ?? "");
-  const dictionary = { ...(DICTIONARIES[language] || DICTIONARIES.vi), ...(EXTRA_DICTIONARIES[language] || {}), ...(PAGE_LABEL_DICTIONARIES[language] || {}) };
+  const dictionary = { ...(DICTIONARIES[language] || DICTIONARIES.vi), ...(EXTRA_DICTIONARIES[language] || {}), ...(PAGE_LABEL_DICTIONARIES[language] || {}), ...(COMPONENT_LABEL_DICTIONARIES[language] || {}) };
   for (const [source, target] of Object.entries(dictionary).sort((a, b) => b[0].length - a[0].length)) {
     if (source.length < 8 && /^[A-Za-z ]+$/.test(source)) {
       const escaped = source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

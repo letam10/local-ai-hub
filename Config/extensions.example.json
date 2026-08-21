@@ -1,6 +1,6 @@
 {
   "schema_version": "extensions-config.v1",
-  "hub_version": "5.0.0",
+  "hub_version": "7.1.0",
   "platform": "windows",
   "enabled_extensions": [
     "metadata-catalog",

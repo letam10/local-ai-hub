@@ -90,7 +90,8 @@ Milestone 3 giữ nguyên các ownership trên và bổ sung một lớp UX/prod
   trực tiếp.
 - `src/ui/app.js` là state/event layer: bootstrap snapshot, navigation drawer, route
   data, API error/loading banner, preview modal và các thao tác cancel/retry an toàn.
-- `src/ui/node_studio.js` là editor layer: template discovery, Recent, rename/duplicate,
+- `src/ui/features/node_studio/studio.js` là editor layer: template discovery, Recent, rename/duplicate,
+  với `src/ui/node_studio.js` chỉ là compatibility facade cho các extension cũ.
   local autosave/recovery, import validation, export JSON, unsaved warning và typed
   canvas. `localStorage` là nơi duy nhất dành cho workflow cá nhân.
 - `src/services/api/core.py` công bố `reason` và `action` cùng `tool_status`; route
@@ -149,7 +150,7 @@ API loopback → UI state/event layer → Quick hoặc Hub Nodes editable state
 | `src/ui/api.js` | Thin loopback client | Shell/direct filesystem access |
 | `src/ui/pages.js` | Accessible states, contact sheet, Gallery/Compare/Recipe controls | Mutable backend state |
 | `src/ui/app.js` | Route data, events, browser download JSON và handoff editable UI | Job submission tự động từ recipe/template |
-| `src/ui/node_studio.js` | Clone/fill editable graph from Recipe; load tracked preset | Auto-run graph hoặc nâng availability |
+| `src/ui/features/node_studio/studio.js` | Clone/fill editable graph from Recipe; load tracked preset | Auto-run graph hoặc nâng availability |
 
 State thực tế là `Config/creative_workspace.json` và bị Git ignore. Chỉ
 `Config/creative_workspace.example.json` được track làm mẫu schema rỗng. State

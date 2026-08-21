@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from src.services.artifact_store import resolve
+from src.services.artifact_store import describe, resolve
 from src.shared.version import PRODUCT_VERSION
 from src.services.job_manager.manager import JobContext, job_manager
 from src.services.tool_smoke import (
@@ -195,15 +195,15 @@ _MEDIA_BACKEND_CONTRACTS = {
         "operation": "upscale_anime_video",
         "component": "animesr",
         "label": "AnimeSR",
-        "required": ("runtime_ready", "environment_ready", "model_ready", "ffmpeg_ready", "worker_ready"),
-        "action": "Khôi phục registry model, environment, runtime và FFmpeg canonical của AnimeSR rồi chạy smoke clip ngắn.",
+        "required": ("runtime_ready", "environment_ready", "model_ready", "script_ready", "ffmpeg_ready", "worker_ready"),
+        "action": "Khôi phục registry model, environment, runtime, fixed AnimeSR inference script và FFmpeg canonical rồi chạy smoke clip ngắn.",
     },
     "practical_rife": {
         "operation": "frame_interpolate",
         "component": "practical_rife",
         "label": "Practical-RIFE",
-        "required": ("runtime_ready", "environment_ready", "ffmpeg_ready", "worker_ready"),
-        "action": "Khôi phục đủ runtime, environment, model và cặp FFmpeg/FFprobe của Practical-RIFE rồi chạy smoke clip ngắn.",
+        "required": ("runtime_ready", "environment_ready", "script_ready", "ffmpeg_ready", "worker_ready"),
+        "action": "Khôi phục đủ runtime, environment, model, fixed Practical-RIFE inference script và cặp FFmpeg/FFprobe rồi chạy smoke clip ngắn.",
     },
     "real_esrgan": {
         "operation": "image_upscale",
@@ -640,6 +640,8 @@ def _opaque_media_request(tool: str, payload: dict[str, Any]) -> bool:
         "ground_objects",
         "segment_from_text",
         "ocr_document",
+        "transcribe_media",
+        "create_subtitled_video",
         "text_to_speech",
         "design_voice",
         "clone_voice",
@@ -675,6 +677,10 @@ def _resolve_assets(payload: dict[str, Any], *, tool: str = "") -> tuple[dict[st
         "runtime",
         "model",
         "model_id",
+        "manifest",
+        "callable",
+        "secret",
+        "local_path",
     }
     if any(field in payload and payload[field] not in (None, "", []) for field in raw_path_fields):
         return dict(payload), "Dùng artifact ID do Hub tạo thay vì gửi đường dẫn cục bộ."
@@ -798,13 +804,35 @@ def _run_operation(tool: str, payload: dict[str, Any], context: JobContext | Non
         from src.modules.whisper.backend.adapter import transcribe
         from src.modules.media_editor.backend.adapter import run_operation
 
+        source_id = payload.get("source_artifact_id")
+        try:
+            source = resolve(source_id) if isinstance(source_id, str) else None
+            metadata = describe(source_id) if isinstance(source_id, str) else None
+        except Exception:
+            source = None
+            metadata = None
+        media_type = str(metadata.get("media_type") or "").casefold() if isinstance(metadata, dict) else ""
+        if not isinstance(source, Path) or not source.is_file() or not media_type.startswith("video/"):
+            return {
+                "status": "error",
+                "code": "input_artifact_invalid",
+                "error": "Whisper yêu cầu video artifact Hub hợp lệ trước khi burn subtitle.",
+            }
         transcript = transcribe(payload, context)
         if transcript.get("status") != "completed":
             return transcript
-        srt = transcript.get("srt")
+        files = transcript.get("files")
+        srt = next(
+            (
+                item
+                for item in files
+                if isinstance(item, str) and item.casefold().endswith(".srt")
+            ),
+            None,
+        ) if isinstance(files, list) else None
         if not isinstance(srt, str) or not Path(srt).is_file():
             return {"status": "error", "error": "Whisper không tạo SRT để burn subtitle."}
-        return run_operation({"operation": "burn_subtitle", "path": payload.get("path"), "secondary_path": srt}, context)
+        return run_operation({"operation": "burn_subtitle", "path": str(source), "secondary_path": srt}, context)
     if tool in {"text_to_speech", "design_voice", "clone_voice"}:
         from src.modules.voice.backend.qwen3_tts_adapter import synthesize
 

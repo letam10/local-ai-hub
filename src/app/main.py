@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import os
 import subprocess
@@ -22,6 +23,8 @@ from pathlib import Path
 
 from src.services.process_manager.managed import terminate_owned_process
 from src.services.process_manager.windows import popen_hidden, startup_mutex
+from src.services.runtime_manager.core_resolver import CoreRuntimeResolver
+from src.platform.paths import get_paths
 
 from .desktop_lifecycle import DesktopCloseController
 from .tray import WindowsTray
@@ -37,9 +40,48 @@ _api_process_lock = threading.RLock()
 _shutdown_started = False
 
 
+def _configured_port() -> int:
+    """Read the machine-local API port, retaining 8765 as the safe default."""
+
+    candidate = os.environ.get("LOCALAIHUB_PORT")
+    if candidate is None:
+        try:
+            config_path = get_paths(app_root=ROOT).config_root / "hub_config.json"
+            value = json.loads(config_path.read_text(encoding="utf-8"))
+            candidate = value.get("api_port") if isinstance(value, dict) else None
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            candidate = None
+    try:
+        port = int(candidate)
+    except (TypeError, ValueError):
+        return PORT
+    return port if 1024 <= port <= 65535 else PORT
+
+
+def _api_base_url() -> str:
+    return f"http://{HOST}:{_configured_port()}"
+
+
+def _ui_url() -> str:
+    return f"{_api_base_url()}/ui/"
+
+
+def _scoped_mutex(base: str) -> str:
+    """Keep single-instance semantics per installation, not per Windows user."""
+
+    try:
+        paths = get_paths(app_root=ROOT)
+        if paths.legacy_single_root_mode:
+            return base
+        digest = hashlib.sha256(str(paths.data_root).casefold().encode("utf-8")).hexdigest()[:16]
+        return f"{base}.{digest}"
+    except OSError:
+        return base
+
+
 def _api_ready() -> bool:
     try:
-        with urllib.request.urlopen(f"http://{HOST}:{PORT}/health", timeout=0.35) as response:
+        with urllib.request.urlopen(f"{_api_base_url()}/health", timeout=0.35) as response:
             return response.status == 200
     except OSError:
         return False
@@ -59,27 +101,49 @@ def ensure_api(timeout_seconds: float = 20.0) -> subprocess.Popen[object] | None
     if _api_ready():
         return None
     deadline = time.monotonic() + timeout_seconds
-    with startup_mutex(API_STARTUP_MUTEX, max(0.0, deadline - time.monotonic())) as acquired:
+    with startup_mutex(_scoped_mutex(API_STARTUP_MUTEX), max(0.0, deadline - time.monotonic())) as acquired:
         if _api_ready():
             return None
         if not acquired:
             if _wait_for_api(deadline):
                 return None
-            raise RuntimeError(f"Local AI Hub API startup lock timed out at {HOST}:{PORT}.")
-        python = os.environ.get("LOCALAIHUB_PYTHON") or sys.executable
+            raise RuntimeError(f"Local AI Hub API startup lock timed out at {_api_base_url()}.")
+        # Resolve the same Core interpreter used by the desktop launcher.  An
+        # explicit environment override remains a development-only escape
+        # hatch, but is accepted only when it is a regular file under a
+        # bounded trusted root; arbitrary client paths never enter the API.
+        candidate = CoreRuntimeResolver(paths=get_paths(app_root=ROOT)).resolve_python()
+        override = os.environ.get("LOCALAIHUB_PYTHON")
+        if candidate is None and override:
+            override_path = Path(override).expanduser()
+            try:
+                if override_path.is_file() and not override_path.is_symlink():
+                    candidate = override_path.resolve()
+            except OSError:
+                candidate = None
+        if candidate is None:
+            raise RuntimeError("Local AI Hub Core Python is unavailable; run scripts/bootstrap_core.ps1 first.")
+        python = str(candidate)
         log_path = ROOT / "Logs" / "api_server.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        child_env = dict(os.environ)
+        child_env["PYTHONPATH"] = str(ROOT)
+        child_env["LOCALAIHUB_APP_ROOT"] = str(ROOT)
+        # Do not collapse a split installation back into legacy single-root
+        # mode.  The parent-selected LOCALAIHUB_DATA_ROOT is retained; an old
+        # LOCALAIHUB_ROOT override is removed from the child environment.
+        child_env.pop("LOCALAIHUB_ROOT", None)
         with log_path.open("a", encoding="utf-8") as log:
             process = popen_hidden(
                 [python, "-m", "src.services.api.api_server"],
                 cwd=ROOT,
-                env={**os.environ, "PYTHONPATH": str(ROOT), "LOCALAIHUB_ROOT": str(ROOT)},
+                env=child_env,
                 stdout=log,
                 stderr=subprocess.STDOUT,
             )
         if _wait_for_api(deadline):
             return process if process.poll() is None else None
-    raise RuntimeError(f"Local AI Hub API did not become ready at {HOST}:{PORT}.")
+    raise RuntimeError(f"Local AI Hub API did not become ready at {_api_base_url()}.")
 
 
 def _remember_owned_api(process: subprocess.Popen[object] | None) -> None:
@@ -120,7 +184,7 @@ def close_owned_idle_backends() -> None:
         # An API started by another shell/service owns its own lifecycle.  The
         # desktop must neither terminate it nor ask it to unload backends.
         return
-    request = urllib.request.Request(f"http://{HOST}:{PORT}/api/lifecycle/close", data=b"{}", method="POST", headers={"Content-Type": "application/json"})
+    request = urllib.request.Request(f"{_api_base_url()}/api/lifecycle/close", data=b"{}", method="POST", headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=4):
             pass
@@ -132,7 +196,7 @@ def close_owned_idle_backends() -> None:
 def _api_active_job_count() -> int:
     """Return the truthful loopback count; callers veto close on any failure."""
 
-    with urllib.request.urlopen(f"http://{HOST}:{PORT}/health", timeout=1.0) as response:
+    with urllib.request.urlopen(f"{_api_base_url()}/health", timeout=1.0) as response:
         value = json.loads(response.read().decode("utf-8"))
     if not isinstance(value, dict):
         raise RuntimeError("Phản hồi health của Hub không hợp lệ.")
@@ -145,7 +209,7 @@ def _prepare_owned_api_close() -> tuple[bool, int, str]:
     if not _owns_live_api():
         return True, 0, ""
     request = urllib.request.Request(
-        f"http://{HOST}:{PORT}/api/lifecycle/prepare-close",
+        f"{_api_base_url()}/api/lifecycle/prepare-close",
         data=b"{}",
         method="POST",
         headers={"Content-Type": "application/json"},
@@ -173,7 +237,7 @@ def _cancel_api_jobs_and_wait(timeout_seconds: float) -> tuple[bool, str]:
 
     body = json.dumps({"timeout_seconds": max(1, min(60, int(timeout_seconds)))}, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
-        f"http://{HOST}:{PORT}/api/lifecycle/jobs/cancel-and-wait",
+        f"{_api_base_url()}/api/lifecycle/jobs/cancel-and-wait",
         data=body,
         method="POST",
         headers={"Content-Type": "application/json; charset=utf-8"},
@@ -212,6 +276,9 @@ class DesktopBridge:
         self._controller: DesktopCloseController | None = None
         self._tray: WindowsTray | None = None
         self._close_prompt_fallback = False
+        # Keep the native component picker in a nested bridge namespace so
+        # the top-level close API remains the exact three-choice contract.
+        self.component_import = _ComponentSelectionBridge(self)
 
     def _bind(self, window: object) -> None:
         self._window = window
@@ -291,7 +358,7 @@ class DesktopBridge:
         if result.get("status") == "completed" and self._close_prompt_fallback:
             window = self._window
             try:
-                window.load_url(UI_URL)  # type: ignore[attr-defined]
+                window.load_url(_ui_url())  # type: ignore[attr-defined]
                 self._close_prompt_fallback = False
             except Exception:
                 result = {"status": "error", "message": "Không thể trở lại giao diện Hub; cửa sổ vẫn được giữ mở an toàn."}
@@ -316,10 +383,50 @@ class DesktopBridge:
 
         return self._controller.keep_running_in_background(background)
 
+    def _select_component_source(self, component_id: str) -> dict[str, object]:
+        """Open the native picker and return only a short-lived selection ID.
+
+        The browser never receives the selected path.  The desktop bridge is
+        the trusted owner of the native chooser and stores the opaque token in
+        the server-side ComponentInstaller selection table.
+        """
+
+        if not isinstance(component_id, str) or not component_id or len(component_id) > 96:
+            return {"status": "invalid", "code": "invalid_component_id", "execution": "not_run"}
+        window = self._window
+        if window is None:
+            return {"status": "unavailable", "code": "desktop_bridge_unavailable", "execution": "not_run"}
+        chooser = getattr(window, "create_file_dialog", None)
+        if not callable(chooser):
+            return {"status": "unavailable", "code": "native_picker_unavailable", "execution": "not_run"}
+        try:
+            import webview
+            dialog_type = getattr(webview, "FOLDER_DIALOG", getattr(webview, "OPEN_DIALOG", 0))
+            selected = chooser(dialog_type, allow_multiple=False)
+            if isinstance(selected, (list, tuple)):
+                selected = selected[0] if selected else None
+            if not isinstance(selected, (str, os.PathLike)) or not str(selected):
+                return {"status": "cancelled", "execution": "not_run"}
+            from src.services.api.components import component_installer
+            result = component_installer().issue_selection(component_id, Path(selected))
+            return {key: result[key] for key in ("status", "selection_id", "component_id", "location_class", "expires_in_seconds") if key in result}
+        except Exception:
+            return {"status": "unavailable", "code": "native_selection_rejected", "execution": "not_run"}
+
     def _request_window_close(self) -> bool:
         if not self._controller:
             return False
         return self._controller.request_window_close()
+
+
+class _ComponentSelectionBridge:
+    """Nested pywebview namespace for native, opaque component selection."""
+
+    def __init__(self, owner: DesktopBridge) -> None:
+        self._owner = owner
+
+    def select_source(self, component_id: str) -> dict[str, object]:
+        return self._owner._select_component_source(component_id)
 
 
 def _loading_html() -> str:
@@ -361,7 +468,7 @@ def _load_ui_when_ready(window: object) -> None:
             return
         return
     try:
-        window.load_url(UI_URL)  # type: ignore[attr-defined]
+        window.load_url(_ui_url())  # type: ignore[attr-defined]
     except Exception:
         # The user can still close the loading window normally if WebView2 fails.
         return
@@ -393,7 +500,7 @@ def main() -> int:
 
     min_w, min_h, start_maximized = _load_window_settings()
 
-    with startup_mutex(APP_INSTANCE_MUTEX, 0.5) as instance_acquired:
+    with startup_mutex(_scoped_mutex(APP_INSTANCE_MUTEX), 0.5) as instance_acquired:
         if not instance_acquired:
             print("Local AI Hub is already running in another instance.", file=sys.stderr)
             return 0

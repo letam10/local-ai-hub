@@ -5,10 +5,11 @@ rem - Liên kết trực tiếp: src/app/launcher.py, LocalAIHub.vbs
 rem - Vùng ảnh hưởng khi sửa: Khởi động ứng dụng từ cmd/PowerShell
 setlocal
 cd /d "%~dp0"
-if exist "%~dp0Environments\hub\Scripts\pythonw.exe" (
-    start "" "%~dp0Environments\hub\Scripts\pythonw.exe" -m src.app.launcher %*
-) else if exist "%~dp0runtime\bootstrap-python\pythonw.exe" (
-    start "" "%~dp0runtime\bootstrap-python\pythonw.exe" -m src.app.launcher %*
+set "PYTHONW="
+for /f "usebackq delims=" %%P in (`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\resolve_core_runtime.ps1" -Mode Pythonw`) do if not defined PYTHONW set "PYTHONW=%%P"
+if defined PYTHONW (
+    start "" "%PYTHONW%" -m src.app.launcher %*
 ) else (
-    start "" pythonw -m src.app.launcher %*
+    echo Local AI Hub Core runtime is unavailable. Run scripts\bootstrap_core.ps1 first.
+    exit /b 2
 )

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -40,6 +41,37 @@ _SECRET_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 
+DIAGNOSTIC_SUBSYSTEMS = (
+    "git_integrity",
+    "config_registry",
+    "jobs_store",
+    "artifact_store",
+    "workflow_store",
+    "models_inventory",
+    "environments_inventory",
+    "runtime_inventory",
+    "storage",
+    "gpu",
+    "latest_app_errors",
+    "recovery_forensic",
+)
+_PUBLIC_STATUSES = frozenset({HEALTHY, NEEDS_ATTENTION, UNAVAILABLE, UNKNOWN})
+_PUBLIC_STATUS_MESSAGES = {
+    HEALTHY: ("Diagnostics subsystem is healthy.", "No action required.", "diagnostics_healthy"),
+    NEEDS_ATTENTION: ("Diagnostics subsystem needs attention.", "Review the bounded diagnostic details.", "diagnostics_needs_attention"),
+    UNAVAILABLE: ("Diagnostics subsystem is unavailable.", "Review the managed subsystem state before retrying.", "diagnostics_unavailable"),
+    UNKNOWN: ("Diagnostics subsystem state is unknown.", "Review the managed diagnostic source manually.", "diagnostic_projection_unavailable"),
+}
+_PUBLIC_CONFIG_FILES = frozenset({"settings.json", "creative_workspace.json", "workflow_library.json"})
+_PUBLIC_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
+_PUBLIC_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_PUBLIC_UNSAFE_TEXT_RE = re.compile(
+    r"(?i)(?:[A-Z]:[\\/]|\\\\|/(?:users|home|tmp)/|https?://|bearer\b|api[_-]?key|token\b|password|secret|private[_-]?key|command|executable|callable|\[object object\])"
+)
+_MAX_PUBLIC_COUNT = 100000
+_MAX_PUBLIC_BYTES = 2**63 - 1
+_PUBLIC_CATEGORY_FLAGS = ("draft", "temp", "unknown")
+
 
 def _status(status: str, reason: str, next_action: str) -> dict[str, str]:
     return {"status": status, "reason": reason, "next_action": next_action}
@@ -48,6 +80,313 @@ def _status(status: str, reason: str, next_action: str) -> dict[str, str]:
 def _sanitize_log_line(line: str) -> str:
     """Scrub likely secret values from a log line."""
     return re.sub(r"(?i)(api[_-]?key|token|password|secret)\s*[=:]\s*\S+", r"\1=[REDACTED]", line)
+
+
+def _public_int(value: object, *, maximum: int = _MAX_PUBLIC_COUNT) -> int | None:
+    if type(value) is not int or value < 0 or value > maximum:
+        return None
+    return value
+
+
+def _public_bool(value: object) -> bool | None:
+    return value if type(value) is bool else None
+
+
+def _public_base(raw: object) -> dict[str, Any]:
+    status = raw.get("status") if type(raw) is dict else UNKNOWN
+    if type(raw) is dict:
+        for key in ("reason", "next_action"):
+            if key in raw and (type(raw[key]) is not str or len(raw[key]) > 256 or _PUBLIC_UNSAFE_TEXT_RE.search(raw[key])):
+                status = UNKNOWN
+                break
+    if type(status) is not str or status not in _PUBLIC_STATUSES:
+        status = UNKNOWN
+        reason, action, code = _PUBLIC_STATUS_MESSAGES[UNKNOWN]
+    else:
+        reason, action, code = _PUBLIC_STATUS_MESSAGES[status]
+    return {
+        "status": status,
+        "reason": reason,
+        "next_action": action,
+        "reason_code": code,
+        "execution": "not_run",
+        "dry_run": True,
+    }
+
+
+def _public_fallback() -> dict[str, Any]:
+    return _public_base({"status": UNKNOWN})
+
+
+def _valid_optional_text(raw: dict[str, Any], key: str) -> bool:
+    value = raw.get(key)
+    return key not in raw or (type(value) is str and len(value) <= 256 and not _PUBLIC_UNSAFE_TEXT_RE.search(value))
+
+
+def _public_git(raw: object) -> dict[str, Any]:
+    if type(raw) is not dict or not all(_valid_optional_text(raw, key) for key in ("reason", "next_action")):
+        return _public_fallback()
+    root_verified = raw.get("root_verified", False)
+    inside_work_tree = raw.get("inside_work_tree", False)
+    if type(root_verified) is not bool or type(inside_work_tree) is not bool:
+        return _public_fallback()
+    return {**_public_base(raw), "root_verified": root_verified, "inside_work_tree": inside_work_tree}
+
+
+def _public_config(raw: object) -> dict[str, Any]:
+    if type(raw) is not dict:
+        return _public_fallback()
+    schema_versions = raw.get("schema_versions", {})
+    if "schema_versions" not in raw and "file_count" in raw:
+        file_count = _public_int(raw.get("file_count"), maximum=len(_PUBLIC_CONFIG_FILES))
+        present_count = _public_int(raw.get("present_count", 0), maximum=len(_PUBLIC_CONFIG_FILES))
+        invalid_count = _public_int(raw.get("invalid_count", 0), maximum=len(_PUBLIC_CONFIG_FILES))
+        if file_count is None or present_count is None or invalid_count is None:
+            return _public_fallback()
+        return {
+            **_public_base(raw),
+            "file_count": file_count,
+            "present_count": present_count,
+            "invalid_count": invalid_count,
+        }
+    if "schema_versions" in raw and type(schema_versions) is not dict:
+        return _public_fallback()
+    present = 0
+    invalid = 0
+    for key, value in schema_versions.items():
+        if type(key) is not str or key not in _PUBLIC_CONFIG_FILES:
+            continue
+        if type(value) is int and type(value) is not bool:
+            if value < 0 or value > 100000:
+                return _public_fallback()
+        elif type(value) is not str or len(value) > 96 or not _PUBLIC_TOKEN_RE.fullmatch(value) or _PUBLIC_UNSAFE_TEXT_RE.search(value):
+            return _public_fallback()
+        if value not in {"absent", "unknown", "corrupt"}:
+            present += 1
+        if value in {"unknown", "corrupt"}:
+            invalid += 1
+    file_count = _public_int(raw.get("file_count", len(_PUBLIC_CONFIG_FILES)))
+    present_count = _public_int(raw.get("present_count", present))
+    invalid_count = _public_int(raw.get("invalid_count", invalid))
+    if file_count is None or present_count is None or invalid_count is None:
+        return _public_fallback()
+    return {**_public_base(raw), "file_count": min(file_count, len(_PUBLIC_CONFIG_FILES)), "present_count": min(present_count, len(_PUBLIC_CONFIG_FILES)), "invalid_count": min(invalid_count, len(_PUBLIC_CONFIG_FILES))}
+
+
+def _public_jobs(raw: object) -> dict[str, Any]:
+    if type(raw) is not dict:
+        return _public_fallback()
+    if "counts" not in raw and "record_count" in raw:
+        record_count = _public_int(raw.get("record_count"))
+        if record_count is None:
+            return _public_fallback()
+        return {**_public_base(raw), "record_count": record_count}
+    counts = raw.get("counts", {})
+    if "counts" in raw and type(counts) is not dict:
+        return _public_fallback()
+    total = 0
+    for key, value in counts.items():
+        if type(key) is not str or len(key) > 64 or not _PUBLIC_TOKEN_RE.fullmatch(key) or _PUBLIC_UNSAFE_TEXT_RE.search(key):
+            return _public_fallback()
+        count = _public_int(value)
+        if count is None:
+            return _public_fallback()
+        total += count
+    record_count = _public_int(raw.get("record_count", total))
+    if record_count is None:
+        return _public_fallback()
+    return {**_public_base(raw), "record_count": min(record_count, _MAX_PUBLIC_COUNT)}
+
+
+def _public_artifact(raw: object) -> dict[str, Any]:
+    if type(raw) is not dict:
+        return _public_fallback()
+    count = _public_int(raw.get("artifact_count", raw.get("total_artifacts", 0)))
+    if count is None:
+        return _public_fallback()
+    return {**_public_base(raw), "artifact_count": count}
+
+
+def _public_workflow(raw: object) -> dict[str, Any]:
+    if type(raw) is not dict:
+        return _public_fallback()
+    count = _public_int(raw.get("workflow_count", 0))
+    revision = raw.get("library_revision", 0)
+    if count is None or (type(revision) is not int or type(revision) is bool or revision < 0 or revision > _MAX_PUBLIC_COUNT):
+        return _public_fallback()
+    return {**_public_base(raw), "workflow_count": count, "library_revision": revision}
+
+
+def _public_inventory(raw: object, field: str) -> dict[str, Any]:
+    if type(raw) is not dict:
+        return _public_fallback()
+    if field not in raw and "present_count" in raw and "total_count" in raw:
+        present = _public_int(raw.get("present_count"))
+        total = _public_int(raw.get("total_count"))
+        if present is None or total is None or total < present:
+            return _public_fallback()
+        return {**_public_base(raw), "present_count": present, "total_count": total}
+    value = raw.get(field, {})
+    if field == "environments":
+        if type(value) is not list or len(value) > _MAX_PUBLIC_COUNT or any(type(item) is not str or len(item) > 256 or _PUBLIC_UNSAFE_TEXT_RE.search(item) for item in value):
+            return _public_fallback()
+        present = len(value)
+        total = _public_int(raw.get("total_count", present))
+    elif field == "runtimes":
+        if type(value) is not dict or any(type(key) is not str or len(key) > 96 or _PUBLIC_UNSAFE_TEXT_RE.search(key) or type(item) is not bool for key, item in value.items()):
+            return _public_fallback()
+        present = sum(1 for item in value.values() if item)
+        total = _public_int(raw.get("total_count", len(value)))
+    else:
+        if type(value) is not dict:
+            return _public_fallback()
+        present = 0
+        for key, item in value.items():
+            if type(key) is not str or len(key) > 96 or _PUBLIC_UNSAFE_TEXT_RE.search(key) or type(item) is not dict or type(item.get("present")) is not bool:
+                return _public_fallback()
+            if item["present"]:
+                present += 1
+        total = _public_int(raw.get("total_count", len(value)))
+    if total is None or total < present:
+        return _public_fallback()
+    return {**_public_base(raw), "present_count": present, "total_count": min(total, _MAX_PUBLIC_COUNT)}
+
+
+def _public_storage(raw: object) -> dict[str, Any]:
+    if type(raw) is not dict:
+        return _public_fallback()
+    if "drives" not in raw and "drive_count" in raw:
+        drive_count = _public_int(raw.get("drive_count"), maximum=16)
+        low_space = raw.get("low_space")
+        if drive_count is None or type(low_space) is not bool:
+            return _public_fallback()
+        return {**_public_base(raw), "drive_count": drive_count, "low_space": low_space}
+    drives = raw.get("drives", {})
+    if type(drives) is not dict:
+        return _public_fallback()
+    if len(drives) > 16:
+        return _public_fallback()
+    for key, value in drives.items():
+        if type(key) is not str or len(key) > 96 or _PUBLIC_UNSAFE_TEXT_RE.search(key):
+            return _public_fallback()
+        if type(value) is not dict:
+            return _public_fallback()
+        for key in ("total_bytes", "used_bytes", "free_bytes"):
+            if key in value and (type(value[key]) is not int or type(value[key]) is bool or value[key] < 0 or value[key] > _MAX_PUBLIC_BYTES):
+                return _public_fallback()
+    return {**_public_base(raw), "drive_count": min(len(drives), 16), "low_space": raw.get("status") == NEEDS_ATTENTION}
+
+
+def _public_gpu(raw: object) -> dict[str, Any]:
+    if type(raw) is not dict:
+        return _public_fallback()
+    if "gpus" not in raw and "gpu_count" in raw:
+        gpu_count = _public_int(raw.get("gpu_count"), maximum=16)
+        if gpu_count is None:
+            return _public_fallback()
+        return {**_public_base(raw), "gpu_count": gpu_count}
+    gpus = raw.get("gpus", [])
+    if type(gpus) is not list or len(gpus) > 16 or any(type(item) is not str or len(item) > 128 or _PUBLIC_UNSAFE_TEXT_RE.search(item) for item in gpus):
+        return _public_fallback()
+    return {**_public_base(raw), "gpu_count": len(gpus)}
+
+
+def _public_errors(raw: object) -> dict[str, Any]:
+    if type(raw) is not dict:
+        return _public_fallback()
+    if "lines" not in raw and "error_count" in raw and "has_errors" in raw:
+        error_count = _public_int(raw.get("error_count"), maximum=_MAX_LOG_LINES)
+        has_errors = raw.get("has_errors")
+        digest = raw.get("digest")
+        if error_count is None or type(has_errors) is not bool or (digest is not None and (type(digest) is not str or not _PUBLIC_DIGEST_RE.fullmatch(digest))):
+            return _public_fallback()
+        return {**_public_base(raw), "has_errors": has_errors, "error_count": error_count, "digest": digest}
+    lines = raw.get("lines", [])
+    if type(lines) is not list or len(lines) > _MAX_LOG_LINES or any(type(item) is not str or len(item) > 4096 or _PUBLIC_UNSAFE_TEXT_RE.search(item) for item in lines):
+        return _public_fallback()
+    digest = hashlib.sha256(json.dumps(lines, ensure_ascii=True, separators=(",", ":")).encode("utf-8")).hexdigest() if lines else None
+    return {**_public_base(raw), "has_errors": bool(lines), "error_count": len(lines), "digest": digest}
+
+
+def _public_recovery(raw: object) -> dict[str, Any]:
+    if type(raw) is not dict:
+        return _public_fallback()
+    if "files" not in raw and "recovery_count" in raw and "has_recovery_files" in raw and "category_flags" in raw:
+        recovery_count = _public_int(raw.get("recovery_count"))
+        has_files = raw.get("has_recovery_files")
+        category_flags = raw.get("category_flags")
+        if recovery_count is None or type(has_files) is not bool or type(category_flags) is not dict:
+            return _public_fallback()
+        if set(category_flags) != set(_PUBLIC_CATEGORY_FLAGS) or any(type(value) is not bool for value in category_flags.values()):
+            return _public_fallback()
+        return {
+            **_public_base(raw),
+            "has_recovery_files": has_files,
+            "recovery_count": recovery_count,
+            "category_flags": {key: category_flags[key] for key in _PUBLIC_CATEGORY_FLAGS},
+        }
+    files = raw.get("files", [])
+    if type(files) is not list or len(files) > _MAX_PUBLIC_COUNT or any(type(item) is not str or len(item) > 256 or _PUBLIC_UNSAFE_TEXT_RE.search(item) for item in files):
+        return _public_fallback()
+    flags = {key: False for key in _PUBLIC_CATEGORY_FLAGS}
+    for item in files:
+        if item.startswith("draft_") or item.startswith("node_studio_draft_"):
+            flags["draft"] = True
+        elif item.startswith(".") and item.endswith(".tmp"):
+            flags["temp"] = True
+        else:
+            flags["unknown"] = True
+    return {**_public_base(raw), "has_recovery_files": bool(files), "recovery_count": len(files), "category_flags": flags}
+
+
+def _public_subsystem(name: str, raw: object) -> dict[str, Any]:
+    if type(raw) is dict and raw.get("reason_code") == "diagnostic_projection_unavailable":
+        detail_keys = {
+            "schema_versions", "file_count", "counts", "record_count", "artifact_count", "total_artifacts",
+            "workflow_count", "library_revision", "models", "environments", "runtimes", "present_count",
+            "total_count", "drives", "drive_count", "low_space", "gpus", "gpu_count", "lines", "error_count",
+            "has_errors", "digest", "files", "recovery_count", "has_recovery_files", "category_flags",
+            "root_verified", "inside_work_tree",
+        }
+        if not any(key in raw for key in detail_keys):
+            return _public_fallback()
+    if name == "git_integrity":
+        return _public_git(raw)
+    if name == "config_registry":
+        return _public_config(raw)
+    if name == "jobs_store":
+        return _public_jobs(raw)
+    if name == "artifact_store":
+        return _public_artifact(raw)
+    if name == "workflow_store":
+        return _public_workflow(raw)
+    if name == "models_inventory":
+        return _public_inventory(raw, "models")
+    if name == "environments_inventory":
+        return _public_inventory(raw, "environments")
+    if name == "runtime_inventory":
+        return _public_inventory(raw, "runtimes")
+    if name == "storage":
+        return _public_storage(raw)
+    if name == "gpu":
+        return _public_gpu(raw)
+    if name == "latest_app_errors":
+        return _public_errors(raw)
+    if name == "recovery_forensic":
+        return _public_recovery(raw)
+    return _public_fallback()
+
+
+def public_snapshot_projection(raw: object) -> dict[str, dict[str, Any]]:
+    """Return the only public diagnostics shape; unknown input is ignored."""
+
+    source = raw if type(raw) is dict else {}
+    return {name: _public_subsystem(name, source.get(name)) for name in DIAGNOSTIC_SUBSYSTEMS}
+
+
+def public_export_projection(raw: object) -> dict[str, Any]:
+    source = raw.get("bundle") if type(raw) is dict and type(raw.get("bundle")) is dict else raw
+    return {"bundle": public_snapshot_projection(source), "sanitized": True}
 
 
 class DiagnosticsCenter:
@@ -379,8 +718,8 @@ class DiagnosticsCenter:
     # Full snapshot
     # ------------------------------------------------------------------
 
-    def snapshot(self) -> dict[str, Any]:
-        """Return a full diagnostics snapshot across all subsystems."""
+    def _raw_snapshot(self) -> dict[str, Any]:
+        """Collect internal diagnostics; callers must use ``snapshot`` for public data."""
         with self._lock:
             return {
                 "git_integrity": self.git_integrity_state(),
@@ -397,24 +736,13 @@ class DiagnosticsCenter:
                 "recovery_forensic": self.recovery_forensic_state(),
             }
 
+    def snapshot(self) -> dict[str, Any]:
+        """Return the bounded, path-free public diagnostics projection."""
+        return public_snapshot_projection(self._raw_snapshot())
+
     def export_diagnostics_bundle(self) -> dict[str, Any]:
         """Return a sanitised snapshot safe for sharing (no secrets, no raw paths)."""
-        raw = self.snapshot()
-        def _clean(obj: Any) -> Any:
-            if isinstance(obj, dict):
-                return {k: ("[REDACTED]" if _SECRET_KEY_RE.search(k) else _clean(v)) for k, v in obj.items()}
-            if isinstance(obj, list):
-                return [_clean(item) for item in obj]
-            if isinstance(obj, str):
-                s = obj
-                s = re.sub(r"(https?://)[^:@/\s]+:[^@/\s]+@", r"\1[REDACTED]@", s)
-                s = re.sub(r"(https?://)[^:@/\s]+@", r"\1[REDACTED]@", s)
-                s = re.sub(r"([A-Za-z]:)[\\/][^\s,;\"'<>|]+", r"\1:[PATH]", s)
-                s = re.sub(r"\\\\[^\s,;\"'<>|]+", r"\\[PATH]", s)
-                s = re.sub(r"/(Users|home|tmp)/[^\s,;\"'<>|]+", r"/\1/[PATH]", s)
-                return s
-            return obj
-        return {"bundle": _clean(raw), "sanitized": True}
+        return public_export_projection(self.snapshot())
 
 
 diagnostics_center = DiagnosticsCenter()

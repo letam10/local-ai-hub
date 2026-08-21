@@ -27,7 +27,7 @@ import sys
 
 root = pathlib.Path(sys.argv[1]).resolve()
 sys.path.insert(0, str(root))
-required = ("src.app.main", "uvicorn", "webview")
+required = ("src.app.main", "src.services.api.api_server", "webview")
 raise SystemExit(0 if all(importlib.util.find_spec(name) is not None for name in required) else 1)
 '@
     & $python -c $probe $HubRoot 2>$null

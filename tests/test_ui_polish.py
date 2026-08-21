@@ -23,6 +23,8 @@ class UiPolishTests(unittest.TestCase):
         cls.css = (UI / "styles.css").read_text(encoding="utf-8")
         cls.i18n = (UI / "i18n.js").read_text(encoding="utf-8")
         cls.pages = (UI / "pages.js").read_text(encoding="utf-8")
+        cls.shared_renderer = (UI / "shared" / "rendering.js").read_text(encoding="utf-8")
+        cls.renderers = "\n".join(path.read_text(encoding="utf-8") for path in (UI / "features").rglob("*.js"))
 
     def test_snapshot_refresh_is_explicit_and_main_is_not_a_live_region(self) -> None:
         self.assertIn('id="refresh-snapshot"', self.html)
@@ -65,23 +67,23 @@ class UiPolishTests(unittest.TestCase):
         self.assertIn("const escaped = source.replace", self.i18n)
 
     def test_rendered_page_templates_mark_fixed_copy_without_touching_snapshots(self) -> None:
-        self.assertIn('import { translateText } from "./i18n.js";', self.pages)
-        self.assertIn("const uiText = (value) => translateText", self.pages)
+        self.assertIn('import { translateText } from "../i18n.js";', self.shared_renderer)
+        self.assertIn("const uiText = (value) => translateText", self.shared_renderer)
         for phrase in ("Reason & next action", "Next action", "Recovery reason", "Module preflight", "Readiness & Module Plan", "Jobs recovery"):
-            self.assertIn(f'data-i18n="{phrase}"', self.pages)
-        self.assertIn("escapeHtml(jobRecovery.reason)", self.pages)
-        self.assertIn("escapeHtml(recovery.reason)", self.pages)
+            self.assertIn(f'data-i18n="{phrase}"', self.pages + self.shared_renderer + self.renderers)
+        self.assertIn("escapeHtml(jobRecovery.reason)", self.renderers)
+        self.assertIn("escapeHtml(recovery.reason)", self.renderers)
 
     def test_dynamic_snapshot_and_creative_values_never_enter_translation_markers(self) -> None:
-        self.assertIn("const metricSnapshot =", self.pages)
-        self.assertIn("<small>${escapeHtml(detail)}</small>", self.pages)
-        self.assertIn("const cardDynamic =", self.pages)
-        self.assertIn("const fieldDynamic =", self.pages)
-        self.assertIn("cardDynamic(`Asset của ${selected.title}`", self.pages)
-        self.assertIn("fieldDynamic(variable.label || variable.name", self.pages)
-        self.assertIn('data-i18n-container="Attention"', self.pages)
-        self.assertIn("const normalized = readinessStatus(status);", self.pages)
-        self.assertIn("READINESS_STATUS_LABELS.unknown", self.pages)
+        self.assertIn("const metricSnapshot =", self.renderers)
+        self.assertIn("<small>${escapeHtml(detail)}</small>", self.renderers)
+        self.assertIn("const cardDynamic =", self.shared_renderer)
+        self.assertIn("const fieldDynamic =", self.shared_renderer)
+        self.assertIn("cardDynamic(`Asset của ${selected.title}`", self.renderers)
+        self.assertIn("fieldDynamic(variable.label || variable.name", self.renderers)
+        self.assertIn('data-i18n-container="Attention"', self.pages + self.renderers)
+        self.assertIn("const normalized = readinessStatus(status);", self.shared_renderer)
+        self.assertIn("READINESS_STATUS_LABELS.unknown", self.shared_renderer)
         self.assertNotIn('nodes("[data-recovery-count]").forEach', self.i18n)
 
     def test_artifact_preview_close_restores_opener_or_main_landmark(self) -> None:
@@ -92,12 +94,13 @@ class UiPolishTests(unittest.TestCase):
         self.assertIn("focusMainContent();", self.app)
         self.assertIn("if (event.key === \"Escape\"", self.app)
         self.assertIn("closeArtifactPreview();", self.app)
+        self.assertEqual(self.app.count("let artifactPreviewOpener = null;"), 1)
 
     def test_desktop_shortcut_fallback_requires_eligible_gui_python(self) -> None:
         shortcut_script = (ROOT / "scripts" / "update_managed_shortcuts.ps1").read_text(encoding="utf-8")
         self.assertIn("Get-Command pythonw.exe", shortcut_script)
         self.assertIn("function Test-HubPythonwFallback", shortcut_script)
-        self.assertIn('"src.app.main", "uvicorn", "webview"', shortcut_script)
+        self.assertIn('"src.app.main", "src.services.api.api_server", "webview"', shortcut_script)
         self.assertIn("MISSING_RUNTIME", shortcut_script)
         self.assertIn("if ($missingRuntime)", shortcut_script)
         self.assertIn("if (Test-Path -LiteralPath $pythonw -PathType Leaf)", shortcut_script)

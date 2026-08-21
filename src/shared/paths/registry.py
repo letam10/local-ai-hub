@@ -10,17 +10,29 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from src.platform.paths import get_paths
 
-ROOT = Path(os.environ.get("LOCALAIHUB_ROOT", Path(__file__).resolve().parents[3])).resolve()
+# Compatibility aliases. New code should use ``src.platform.paths`` directly;
+# existing V5/V6 imports continue to resolve the same legacy single-root tree.
+_paths = get_paths(
+    app_root=os.environ.get("LOCALAIHUB_ROOT") or os.environ.get("LOCALAIHUB_APP_ROOT"),
+    data_root=os.environ.get("LOCALAIHUB_ROOT") or os.environ.get("LOCALAIHUB_DATA_ROOT"),
+)
+ROOT = _paths.data_root
+APP_ROOT = _paths.app_root
+DATA_ROOT = _paths.data_root
 # Config/Models/Cache/etc. are retained as the repository's canonical Windows
 # case. Do not create parallel `config`/`models` directories on Windows.
 CONFIG_ROOT = ROOT / "Config"
+ENVIRONMENTS_ROOT = ROOT / "Environments"
 RUNTIME_ROOT = ROOT / "runtime"
 MODEL_ROOT = ROOT / "Models"
 CACHE_ROOT = ROOT / "Cache"
 OUTPUT_ROOT = ROOT / "Output"
 TEMP_ROOT = ROOT / "Temp"
 LOG_ROOT = ROOT / "Logs"
+REPORT_ROOT = ROOT / "Reports"
+BACKUP_ROOT = ROOT / "Backups"
 
 RUNTIME_PATHS = {
     "vision.omniparser": RUNTIME_ROOT / "engines" / "vision" / "OmniParser",

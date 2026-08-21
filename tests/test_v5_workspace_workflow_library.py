@@ -4,6 +4,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -119,6 +120,176 @@ class WorkflowLibrarySchemaTests(unittest.TestCase):
 
 
 class WorkflowLibraryStoreTests(unittest.TestCase):
+    def _symlink(self, link: Path, target: Path, *, directory: bool = False) -> None:
+        try:
+            link.symlink_to(target, target_is_directory=directory)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlink fixture unavailable: {type(exc).__name__}")
+
+    @staticmethod
+    def _rendered(value: object) -> str:
+        return json.dumps(value, ensure_ascii=False, default=repr)
+
+    def test_first_use_missing_leaf_requires_safe_existing_parent(self) -> None:
+        from src.services.workflow_library import WorkflowLibraryStore
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "safe-root"
+            root.mkdir()
+            path = root / "workflow_library.json"
+            store = WorkflowLibraryStore(path, root=root)
+            self.assertEqual(store.snapshot()["recovery"]["status"], "clean")
+            self.assertTrue(store.save_workflow(entry(), expected_revision=0)["accepted"])
+            self.assertTrue(path.is_file())
+
+            missing_parent = root / "missing" / "workflow_library.json"
+            refused = WorkflowLibraryStore(missing_parent, root=root).snapshot()
+            self.assertEqual(refused["recovery"]["status"], "recovery_required")
+            self.assertFalse((root / "missing").exists())
+
+    def test_root_ancestor_parent_and_leaf_reparse_refuse_without_echo(self) -> None:
+        from src.services.workflow_library import WorkflowLibraryStore
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            root.mkdir()
+            outside = Path(temporary) / "outside"
+            outside.mkdir()
+
+            root_link = Path(temporary) / "root-link"
+            self._symlink(root_link, root, directory=True)
+            root_result = WorkflowLibraryStore(root_link / "workflow_library.json", root=root_link).snapshot()
+            self.assertEqual(root_result["recovery"]["status"], "recovery_required")
+
+            ancestor_link = Path(temporary) / "ancestor-link"
+            self._symlink(ancestor_link, Path(temporary), directory=True)
+            real_ancestor_root = Path(temporary) / "ancestor-root"
+            real_ancestor_root.mkdir()
+            ancestor_root = ancestor_link / "ancestor-root"
+            ancestor_result = WorkflowLibraryStore(ancestor_root / "workflow_library.json", root=ancestor_root).snapshot()
+            self.assertEqual(ancestor_result["recovery"]["status"], "recovery_required")
+
+            parent_link = root / "nested"
+            self._symlink(parent_link, outside, directory=True)
+            parent_result = WorkflowLibraryStore(parent_link / "workflow_library.json", root=root).snapshot()
+            self.assertEqual(parent_result["recovery"]["status"], "recovery_required")
+
+            outside_file = outside / "outside.json"
+            outside_file.write_bytes(b"outside-bytes")
+            leaf_link = root / "workflow_library.json"
+            self._symlink(leaf_link, outside_file)
+            leaf_result = WorkflowLibraryStore(leaf_link, root=root).snapshot()
+            self.assertEqual(leaf_result["recovery"]["status"], "recovery_required")
+            self.assertEqual(outside_file.read_bytes(), b"outside-bytes")
+            rendered = self._rendered((root_result, ancestor_result, parent_result, leaf_result))
+            self.assertNotIn(str(outside), rendered)
+
+    def test_lexical_escape_directory_and_lstat_fail_closed_without_echo(self) -> None:
+        from src.services.workflow_library import WorkflowLibraryStore
+        import src.services.workflow_library.library as library_module
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            root.mkdir()
+            escaped = root / ".." / "outside" / "workflow_library.json"
+            result = WorkflowLibraryStore(escaped, root=root).snapshot()
+            self.assertEqual(result["recovery"]["status"], "recovery_required")
+            self.assertFalse((Path(temporary) / "outside").exists())
+
+            directory_target = root / "workflow_library.json"
+            directory_target.mkdir()
+            directory_result = WorkflowLibraryStore(directory_target, root=root).snapshot()
+            self.assertEqual(directory_result["recovery"]["status"], "recovery_required")
+
+            marker = "C:\\private\\workflow-secret-marker"
+            with patch.object(library_module.os, "lstat", side_effect=OSError(marker)):
+                lstat_result = WorkflowLibraryStore(root / "other.json", root=root).snapshot()
+            self.assertEqual(lstat_result["recovery"]["status"], "recovery_required")
+            self.assertNotIn(marker, self._rendered(lstat_result))
+
+    def test_invalid_utf8_and_read_failure_preserve_existing_bytes(self) -> None:
+        from src.services.workflow_library import WorkflowLibraryStore
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "workflow_library.json"
+            path.write_bytes(b"\xff\xfe")
+            store = WorkflowLibraryStore(path, root=path.parent)
+            before = path.read_bytes()
+            snapshot = store.snapshot()
+            self.assertEqual(snapshot["recovery"]["status"], "recovery_required")
+            self.assertFalse(store.save_workflow(entry(), expected_revision=0)["accepted"])
+            self.assertEqual(path.read_bytes(), before)
+
+            with patch.object(Path, "read_bytes", side_effect=OSError("raw-read-marker")):
+                failed = store.snapshot()
+            self.assertEqual(failed["recovery"]["status"], "recovery_required")
+            self.assertNotIn("raw-read-marker", self._rendered(failed))
+
+    def test_same_byte_and_changed_target_replacement_after_read_refuse(self) -> None:
+        from src.services.workflow_library import WorkflowLibraryStore
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "workflow_library.json"
+            store = WorkflowLibraryStore(path, root=path.parent)
+            self.assertTrue(store.save_workflow(entry(), expected_revision=0)["accepted"])
+            before = path.read_bytes()
+            original_read = Path.read_bytes
+
+            for replacement_bytes in (before, b"replacement-bytes"):
+                with self.subTest(replacement_bytes=replacement_bytes), patch.object(Path, "read_bytes") as read_bytes:
+                    calls = 0
+
+                    def swap_after_initial() -> bytes:
+                        nonlocal calls
+                        calls += 1
+                        if calls == 2:
+                            replacement = path.with_name(".replacement.json")
+                            replacement.write_bytes(replacement_bytes)
+                            os.replace(replacement, path)
+                        return original_read(path)
+
+                    read_bytes.side_effect = swap_after_initial
+                    result = store.save_workflow(entry("changed"), expected_revision=1)
+                    self.assertFalse(result["accepted"])
+                    self.assertEqual(result["status"], "recovery_required")
+                    self.assertEqual(path.read_bytes(), replacement_bytes)
+
+    def test_temp_identity_drift_refuses_before_replace(self) -> None:
+        from src.services.workflow_library import WorkflowLibraryStore
+        import src.services.workflow_library.library as library_module
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "workflow_library.json"
+            store = WorkflowLibraryStore(path, root=path.parent)
+            self.assertTrue(store.save_workflow(entry(), expected_revision=0)["accepted"])
+            before = path.read_bytes()
+            original_temp_guard = library_module._temp_guard
+            calls = 0
+
+            def drift_after_create(temp: Path, location: object) -> object:
+                nonlocal calls
+                calls += 1
+                if calls >= 2:
+                    return None
+                return original_temp_guard(temp, location)
+
+            with patch.object(library_module, "_temp_guard", side_effect=drift_after_create), patch.object(
+                library_module.os, "replace", side_effect=AssertionError("replace must not run after temp drift")
+            ):
+                result = store.save_workflow(entry("temp-drift"), expected_revision=1)
+            self.assertFalse(result["accepted"])
+            self.assertEqual(result["status"], "recovery_required")
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_storage_authority_does_not_use_path_resolve(self) -> None:
+        from src.services.workflow_library import library as library_module
+
+        source = Path(library_module.__file__).read_text(encoding="utf-8")
+        self.assertNotIn(".resolve(", source)
+        self.assertIn("os.lstat", source)
+        self.assertIn("os.replace", source)
+        self.assertIn("os.fsync", source)
+
     def test_two_store_save_interleaving_conflicts_without_lost_update(self) -> None:
         from src.services.workflow_library import WorkflowLibraryStore
 
@@ -130,12 +301,12 @@ class WorkflowLibraryStoreTests(unittest.TestCase):
             interleaved = False
             original_atomic = first._atomic_write
 
-            def interleave(value: dict[str, object], *, expected_bytes: bytes | None = None) -> str:
+            def interleave(value: dict[str, object], *, expected_bytes: bytes | None = None, expected_guard: object | None = None) -> str:
                 nonlocal interleaved
                 if not interleaved:
                     interleaved = True
                     concurrent_result["result"] = second.save_workflow(entry("concurrent"), expected_revision=0)
-                return original_atomic(value, expected_bytes=expected_bytes)
+                return original_atomic(value, expected_bytes=expected_bytes, expected_guard=expected_guard)
 
             with patch.object(first, "_atomic_write", side_effect=interleave):
                 stale = first.save_workflow(entry("stale"), expected_revision=0)
@@ -159,12 +330,12 @@ class WorkflowLibraryStoreTests(unittest.TestCase):
                 original_atomic = first._atomic_write
                 interleaved = False
 
-                def interleave(value: dict[str, object], *, expected_bytes: bytes | None = None) -> str:
+                def interleave(value: dict[str, object], *, expected_bytes: bytes | None = None, expected_guard: object | None = None) -> str:
                     nonlocal interleaved
                     if not interleaved:
                         interleaved = True
                         self.assertTrue(second.save_workflow(entry("concurrent"), expected_revision=1)["accepted"])
-                    return original_atomic(value, expected_bytes=expected_bytes)
+                    return original_atomic(value, expected_bytes=expected_bytes, expected_guard=expected_guard)
 
                 with patch.object(first, "_atomic_write", side_effect=interleave):
                     if operation == "delete":
@@ -188,12 +359,12 @@ class WorkflowLibraryStoreTests(unittest.TestCase):
             original_atomic = first._atomic_write
             interleaved = False
 
-            def interleave(value: dict[str, object], *, expected_bytes: bytes | None = None) -> str:
+            def interleave(value: dict[str, object], *, expected_bytes: bytes | None = None, expected_guard: object | None = None) -> str:
                 nonlocal interleaved
                 if not interleaved:
                     interleaved = True
                     self.assertTrue(second.save_workflow(entry("concurrent"), expected_revision=1)["accepted"])
-                return original_atomic(value, expected_bytes=expected_bytes)
+                return original_atomic(value, expected_bytes=expected_bytes, expected_guard=expected_guard)
 
             with patch.object(first, "_atomic_write", side_effect=interleave):
                 result = first.confirm_migration([entry("migrated")], expected_revision=1)

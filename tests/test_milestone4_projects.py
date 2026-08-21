@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -8,8 +9,10 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.request import Request, urlopen
+from unittest.mock import patch
 
 from src.services.api import api_server
+import src.services.project_manager.manager as project_manager_module
 from src.services.project_manager.manager import CreativeProjectManager
 
 
@@ -78,13 +81,13 @@ class CreativeProjectManagerTests(unittest.TestCase):
             self.assertNotIn("C:\\", serialized)
             self.assertNotIn("path", serialized.lower())
 
-            imported = self.make_manager(temporary + "-import").import_project({"manifest": manifest, "conflict": "copy"})
-            self.assertTrue(imported["imported"])
-            self.assertEqual(imported["project"]["asset_count"], 2)
+            with TemporaryDirectory() as imported_temporary:
+                imported = self.make_manager(imported_temporary).import_project({"manifest": manifest, "conflict": "copy"})
+                self.assertTrue(imported["imported"])
+                self.assertEqual(imported["project"]["asset_count"], 2)
 
             skipped = manager.import_project({"manifest": manifest, "conflict": "skip"})
             self.assertFalse(skipped["imported"])
-
     def test_project_recent_archive_and_recipe_versions_are_bounded(self) -> None:
         with TemporaryDirectory() as temporary:
             manager = self.make_manager(temporary)
@@ -149,7 +152,7 @@ class CreativeProjectManagerTests(unittest.TestCase):
 
     def test_recipe_application_updates_editable_graph_only(self) -> None:
         script = """
-import { applyRecipeToGraph } from './src/ui/node_studio.js';
+import { applyRecipeToGraph } from './src/ui/features/node_studio/studio.js';
 const source = {nodes:[
   {id:'prompt',type:'prompt_text',data:{text:'old'}},
   {id:'generate',type:'flux_generate',data:{width:512,height:512,steps:4,seed:1}},
@@ -209,6 +212,161 @@ console.log('ok');
             self.assertNotIn("C:\\", serialized)
             self.assertNotIn("input_path", serialized)
             self.assertNotIn("resume_data", serialized)
+
+
+class ProjectWorkspaceStorageSafetyTests(unittest.TestCase):
+    @staticmethod
+    def _manager(path: Path) -> CreativeProjectManager:
+        return CreativeProjectManager(path)
+
+    @staticmethod
+    def _reparse_stat(path: Path, lstat_fn=os.lstat):
+        original = lstat_fn(path)
+        values = {
+            name: getattr(original, name, 0)
+            for name in ("st_mode", "st_ino", "st_dev", "st_size", "st_mtime_ns", "st_ctime_ns", "st_file_attributes")
+        }
+        values["st_file_attributes"] = int(values.get("st_file_attributes", 0)) | project_manager_module._REPARSE_POINT
+        return type("ReparseStat", (), values)()
+
+    def test_reparse_target_refuses_before_read_and_preserves_bytes(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "creative_workspace.json"
+            original = b'{"contract_version":"creative-workspace.v1","schema_version":1,"projects":{}}\n'
+            path.write_bytes(original)
+            manager = self._manager(path)
+            real_lstat = project_manager_module.os.lstat
+
+            def fake_lstat(candidate):
+                return self._reparse_stat(Path(candidate), real_lstat) if Path(candidate) == path else real_lstat(candidate)
+
+            with patch.object(project_manager_module.os, "lstat", side_effect=fake_lstat), patch.object(Path, "read_bytes", side_effect=AssertionError("unsafe leaf was read")):
+                overview = manager.overview()
+            self.assertEqual(overview["recovery"]["status"], "recovery_required")
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_reparse_parent_refuses_mutation_without_creating_state(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "creative_workspace.json"
+            manager = self._manager(path)
+            real_lstat = project_manager_module.os.lstat
+
+            def fake_lstat(candidate):
+                return self._reparse_stat(root, real_lstat) if Path(candidate) == root else real_lstat(candidate)
+
+            with patch.object(project_manager_module.os, "lstat", side_effect=fake_lstat):
+                with self.assertRaisesRegex(ValueError, "manual review"):
+                    manager.create_project({"title": "Must not write"})
+            self.assertFalse(path.exists())
+
+    def test_duplicate_nonfinite_and_oversized_json_require_recovery_without_overwrite(self) -> None:
+        cases = (
+            b'{"contract_version":"creative-workspace.v1","schema_version":1,"projects":{},"projects":{}}',
+            b'{"contract_version":"creative-workspace.v1","schema_version":1,"projects":{},"recent_project_ids":NaN}',
+            b"{" + b"x" * (8 * 1024 * 1024 + 1) + b"}",
+        )
+        for original in cases:
+            with self.subTest(size=len(original)):
+                with TemporaryDirectory() as temporary:
+                    path = Path(temporary) / "creative_workspace.json"
+                    path.write_bytes(original)
+                    manager = self._manager(path)
+                    overview = manager.overview()
+                    self.assertEqual(overview["recovery"]["status"], "recovery_required")
+                    self.assertEqual(path.read_bytes(), original)
+                    rendered = json.dumps(overview, ensure_ascii=False)
+                    self.assertNotIn(str(path), rendered)
+
+    def test_lstat_failure_is_fixed_recovery_without_write(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "creative_workspace.json"
+            manager = self._manager(path)
+            real_lstat = project_manager_module.os.lstat
+
+            def failing_lstat(candidate):
+                if Path(candidate) == path.parent:
+                    raise OSError("private path marker")
+                return real_lstat(candidate)
+
+            with patch.object(project_manager_module.os, "lstat", side_effect=failing_lstat):
+                overview = manager.overview()
+            self.assertEqual(overview["recovery"]["status"], "recovery_required")
+            self.assertNotIn("private path marker", json.dumps(overview))
+            self.assertFalse(path.exists())
+
+    def test_parent_identity_drift_before_replace_preserves_existing_bytes(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "creative_workspace.json"
+            manager = self._manager(path)
+            manager.create_project({"title": "before"})
+            original = path.read_bytes()
+            baseline = manager._context(path, allow_missing=True)
+            drifted = project_manager_module._StorageContext(
+                parent_chain=((999, 998, 997, 996),),
+                target=baseline.target,
+            )
+            drift = False
+            real_context = manager._context
+            real_fsync = project_manager_module.os.fsync
+
+            def fake_context(target, *, allow_missing):
+                return drifted if drift else real_context(target, allow_missing=allow_missing)
+
+            def fake_fsync(handle):
+                nonlocal drift
+                real_fsync(handle)
+                drift = True
+
+            with patch.object(manager, "_context", side_effect=fake_context), patch.object(project_manager_module.os, "fsync", side_effect=fake_fsync):
+                with self.assertRaisesRegex(ValueError, "changed"):
+                    manager._mutate(lambda state: state.update({"recent_project_ids": []}))
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(list(Path(temporary).glob(".workspace-*.tmp")), [])
+
+    def test_replace_failure_preserves_target_and_cleans_owned_temp(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "creative_workspace.json"
+            manager = self._manager(path)
+            manager.create_project({"title": "before"})
+            original = path.read_bytes()
+            with patch.object(project_manager_module.os, "replace", side_effect=OSError("private path marker")):
+                with self.assertRaisesRegex(ValueError, "could not be written"):
+                    manager._mutate(lambda state: state.update({"recent_project_ids": []}))
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(list(Path(temporary).glob(".workspace-*.tmp")), [])
+
+    def test_two_manager_instances_refuse_stale_writer_and_preserve_newer_bytes(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "creative_workspace.json"
+            first = self._manager(path)
+            first.create_project({"title": "first"})
+            second = self._manager(path)
+
+            def concurrent_write(state):
+                first.create_project({"title": "newer"})
+                state["recent_project_ids"] = list(state.get("recent_project_ids", []))
+
+            with self.assertRaisesRegex(ValueError, "changed"):
+                second._mutate(concurrent_write)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual([item["title"] for item in payload["projects"].values()], ["first", "newer"])
+
+    def test_same_byte_target_replacement_is_a_conflict(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "creative_workspace.json"
+            manager = self._manager(path)
+            manager.create_project({"title": "before"})
+            replacement = path.with_name("replacement.json")
+
+            def replace_with_same_bytes(state):
+                replacement.write_bytes(path.read_bytes())
+                os.replace(replacement, path)
+                state["recent_project_ids"] = list(state.get("recent_project_ids", []))
+
+            with self.assertRaisesRegex(ValueError, "changed"):
+                manager._mutate(replace_with_same_bytes)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["projects"] != {}, True)
 
 
 if __name__ == "__main__":

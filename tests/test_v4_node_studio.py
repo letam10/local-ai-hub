@@ -211,7 +211,7 @@ class ComfyBridgeWorkflowTests(unittest.TestCase):
                 self.assertIn("đường dẫn", error_payload["error"])
 
     def test_advanced_frontend_is_loopback_only_and_not_a_browser_popup(self) -> None:
-        pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
+        pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8") + (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8") + (ROOT / "src" / "ui" / "features" / "image_mask" / "render.js").read_text(encoding="utf-8")
         app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
         self.assertIn('data-workspace-tab="image:advanced"', pages)
         self.assertIn('sandbox="allow-scripts allow-same-origin allow-forms allow-downloads"', pages)
@@ -457,7 +457,7 @@ class NodeStudioContractTests(unittest.TestCase):
         self.assertEqual(snapshot["next_action"], "Kiểm tra preview.")
 
     def test_ui_and_api_keep_node_studio_offline_and_bounded(self) -> None:
-        ui = (ROOT / "src" / "ui" / "node_studio.js").read_text(encoding="utf-8")
+        ui = (ROOT / "src" / "ui" / "features" / "node_studio" / "studio.js").read_text(encoding="utf-8")
         api = (ROOT / "src" / "services" / "api" / "api_server.py").read_text(encoding="utf-8")
         schema = (ROOT / "src" / "services" / "node_studio" / "schema.py").read_text(encoding="utf-8")
         self.assertIn("Auto Preview", ui)

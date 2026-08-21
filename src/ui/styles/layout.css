@@ -1,0 +1,7 @@
+.hub-shell { min-width: 0; }
+.main-panel { min-width: 0; }
+.main-panel > #module-view { min-width: 0; max-width: 100%; }
+.table-wrap { max-width: 100%; overflow-x: auto; }
+@media (min-width: 1440px) {
+  .main-panel > #module-view { width: min(100%, 1600px); margin-inline: auto; }
+}

@@ -42,6 +42,17 @@ import {
   confirmWorkflowLibraryMigration,
   getLifecycle,
   getModels,
+  getComponents,
+  createComponentPlan,
+  confirmComponentPlan,
+  createComponentImportPlan,
+  confirmComponentImport,
+  createComponentBundlePlan,
+  confirmComponentBundle,
+  createComponentReusePlan,
+  confirmComponentReuse,
+  createComponentMaintenancePlan,
+  confirmComponentMaintenance,
   getStorage,
   getProject,
   getSettings,
@@ -87,18 +98,29 @@ import {
   linkImageMaskProject,
   uploadFile,
   escapeHtml,
+  getUpdateSettings,
+  setUpdateSchedule,
+  checkComponentUpdate,
+  checkAllUpdates,
+  planComponentUpdate,
+  confirmComponentUpdate,
+  rollbackComponentUpdate,
 } from "./api.js";
-import { disposeNodeStudios, mountNodeStudios } from "./node_studio.js";
+import { disposeNodeStudios, mountNodeStudios } from "./features/node_studio/studio.js";
 import { mountImageMaskCanvases } from "./image_mask_studio.js";
 import { createWorkflowLibraryAdapter } from "./workflow_library.js";
 import { NAVIGATION, jobRecoverySnapshot, renderPage } from "./pages.js";
 import { currentLanguage, localizeDocument, setLanguage, translateText } from "./i18n.js";
+import { FEATURE_REGISTRY } from "./core/feature_registry.js";
+import { confirmComponentInstall, getProductionCatalog, planComponentInstall } from "./shared/api/catalog.js";
 
 const state = {
-  health: {}, capabilities: {}, productization: {}, components: [], tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", apiStatus: "loading", apiError: "",
+  health: {}, capabilities: {}, productization: {}, components: [], componentManager: {}, componentPlans: {}, tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", apiStatus: "loading", apiError: "",
   creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
   workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trong V5-D trước khi đồng bộ." },
+  productionCatalog: { status: "partial", models: [], runtimes: [] }, updateCenter: { settings: { policy: "manual" }, records: [] }, modelFilters: { query: "", category: "", installed: "all" },
+  featureRegistry: FEATURE_REGISTRY,
 };
 const view = document.querySelector("#module-view");
 const nav = document.querySelector("#sidebar-nav");
@@ -365,7 +387,6 @@ const showToast = (message, kind = "") => {
   window.setTimeout(() => toast.remove(), 5200);
 };
 
-let artifactPreviewOpener = null;
 const closeArtifactPreview = ({ restoreFocus = true } = {}) => {
   const opener = artifactPreviewOpener;
   artifactPreviewLayer?.replaceChildren();
@@ -631,6 +652,7 @@ const applyBootstrap = (payload) => {
   state.applications = payload.applications || [];
   state.jobs = payload.jobs || [];
   state.durableJobs = payload.durable_jobs?.records || [];
+  state.productionCatalog = payload.production_catalog || state.productionCatalog;
   state.tools = payload.tools || [];
   state.settings = payload.settings || {};
   state.lifecycle = payload.lifecycle || {};
@@ -713,11 +735,25 @@ const loadRouteData = async ({ scan = false } = {}) => {
   const route = routeId();
   if (route === "models") {
     if (routeLoad) return routeLoad;
-    routeLoad = Promise.allSettled([getModels(), scan ? scanStorage() : getStorage()]).then((results) => {
+    routeLoad = Promise.allSettled([getModels(), scan ? scanStorage() : getStorage(), getProductionCatalog(), getUpdateSettings()]).then((results) => {
       if (results[0].status === "fulfilled") state.models = results[0].value.models || [];
       if (results[1].status === "fulfilled") state.storage = results[1].value || {};
+      if (results[2].status === "fulfilled") state.productionCatalog = results[2].value || state.productionCatalog;
+      if (results[3].status === "fulfilled") state.updateCenter = { ...state.updateCenter, settings: results[3].value || state.updateCenter.settings };
       render();
     }).catch(() => {}).finally(() => { routeLoad = null; });
+    return routeLoad;
+  }
+  if (route === "components") {
+    if (routeLoad) return routeLoad;
+    routeLoad = Promise.allSettled([getComponents(), getProductionCatalog()]).then((results) => {
+      const payload = results[0].status === "fulfilled" ? results[0].value : {};
+      state.componentManager = payload || {};
+      if (results[1].status === "fulfilled") state.productionCatalog = results[1].value || state.productionCatalog;
+      render();
+    }).catch((error) => {
+      showToast(error.message || "Không thể tải Component Manager.", "error");
+    }).finally(() => { routeLoad = null; });
     return routeLoad;
   }
   if (route === "image") {
@@ -1023,6 +1059,12 @@ const handleImageMaskForm = async (form) => {
 };
 
 document.addEventListener("change", (event) => {
+  const modelSearch = event.target.closest("[data-model-search]");
+  if (modelSearch) { state.modelFilters.query = String(modelSearch.value || "").slice(0, 80); render(); return; }
+  const modelCategory = event.target.closest("[data-model-category]");
+  if (modelCategory) { state.modelFilters.category = String(modelCategory.value || "").slice(0, 48); render(); return; }
+  const modelInstalled = event.target.closest("[data-model-installed]");
+  if (modelInstalled) { state.modelFilters.installed = ["all", "installed", "uninstalled"].includes(modelInstalled.value) ? modelInstalled.value : "all"; render(); return; }
   const language = event.target.closest("#language-select");
   if (language) {
     setLanguage(language.value);
@@ -1088,6 +1130,155 @@ document.addEventListener("click", async (event) => {
   const preview = event.target.closest("[data-preview-artifact]");
   if (preview) { showArtifactPreview(preview); return; }
   if (event.target.closest("[data-refresh-api]")) { await initialize(); return; }
+  const refreshComponents = event.target.closest("[data-refresh-components]");
+  if (refreshComponents) {
+    refreshComponents.disabled = true;
+    try { state.componentManager = await getComponents(); render(); showToast("Đã làm mới Component Manager.", "success"); }
+    catch (error) { showToast(error.message || "Không thể làm mới Component Manager.", "error"); }
+    finally { refreshComponents.disabled = false; }
+    return;
+  }
+  const componentPlanButton = event.target.closest("[data-component-plan]");
+  if (componentPlanButton) {
+    componentPlanButton.disabled = true;
+    try {
+      const id = componentPlanButton.dataset.componentPlan || "";
+      const type = componentPlanButton.dataset.componentType || "";
+      const plan = await createComponentPlan(id, type);
+      state.componentPlans[`${type}:${id}`] = plan;
+      render();
+      showToast("Đã tạo kế hoạch cài đặt server-owned.", "success");
+    } catch (error) { showToast(error.message || "Không thể lập kế hoạch component.", "error"); }
+    finally { componentPlanButton.disabled = false; }
+    return;
+  }
+  const nativeImportButton = event.target.closest("[data-component-native-import]");
+  if (nativeImportButton) {
+    nativeImportButton.disabled = true;
+    try {
+      const bridge = globalThis.pywebview?.api;
+      if (!bridge?.component_import || typeof bridge.component_import.select_source !== "function") throw new Error("Desktop bridge chưa sẵn sàng; hãy mở Hub bằng ứng dụng desktop.");
+      const selected = await bridge.component_import.select_source(nativeImportButton.dataset.componentNativeImport || "");
+      if (selected?.status !== "ready" || !selected.selection_id) throw new Error(selected?.code || "Không nhận được lựa chọn hợp lệ.");
+      const plan = await createComponentImportPlan(selected.selection_id, "COPY_INTO_MANAGED_MODELS");
+      state.componentPlans[`import:model:${plan.component?.component_id || nativeImportButton.dataset.componentNativeImport}`] = plan;
+      render();
+      showToast("Đã nhận lựa chọn native; hãy xem và xác nhận kế hoạch import.", "success");
+    } catch (error) { showToast(error.message || "Không thể chọn model để import.", "error"); }
+    finally { nativeImportButton.disabled = false; }
+    return;
+  }
+  const componentBundleButton = event.target.closest("[data-component-bundle]");
+  if (componentBundleButton) {
+    componentBundleButton.disabled = true;
+    try {
+      const id = componentBundleButton.dataset.componentBundle || "";
+      const type = componentBundleButton.dataset.componentType || "model";
+      const plan = await createComponentBundlePlan(id, type);
+      state.componentPlans[`bundle:${type}:${id}`] = plan;
+      render();
+      showToast("Đã lập gói dependency theo thứ tự server-owned; chưa có download.", "success");
+    } catch (error) { showToast(error.message || "Không thể lập gói dependency.", "error"); }
+    finally { componentBundleButton.disabled = false; }
+    return;
+  }
+  const componentBundleConfirm = event.target.closest("[data-component-bundle-confirm]");
+  if (componentBundleConfirm) {
+    componentBundleConfirm.disabled = true;
+    try {
+      const result = await confirmComponentBundle(componentBundleConfirm.dataset.componentBundleConfirm || "", true);
+      showToast(result.next_action || result.reason || "Gói dependency đã được xử lý.", result.status === "completed" ? "success" : "warning");
+      state.componentManager = await getComponents(); render();
+    } catch (error) { showToast(error.message || "Không thể xác nhận gói dependency.", "error"); }
+    finally { componentBundleConfirm.disabled = false; }
+    return;
+  }
+  const componentReuseButton = event.target.closest("[data-component-reuse]");
+  if (componentReuseButton) {
+    componentReuseButton.disabled = true;
+    try {
+      const id = componentReuseButton.dataset.componentReuse || "";
+      const type = componentReuseButton.dataset.componentType || "model";
+      const plan = await createComponentReusePlan(id, type);
+      state.componentPlans[`reuse:${type}:${id}`] = plan;
+      render();
+      showToast("Đã kiểm tra bản cài sẵn; chưa sao chép hoặc tải lại dữ liệu.", "success");
+    } catch (error) { showToast(error.message || "Không thể kiểm tra bản cài sẵn.", "error"); }
+    finally { componentReuseButton.disabled = false; }
+    return;
+  }
+  const componentReuseConfirm = event.target.closest("[data-component-reuse-confirm]");
+  if (componentReuseConfirm) {
+    componentReuseConfirm.disabled = true;
+    try {
+      const result = await confirmComponentReuse(componentReuseConfirm.dataset.componentReuseConfirm || "", true);
+      showToast(result.next_action || result.reason || "Đã xử lý reuse bản cài sẵn.", result.status === "completed" ? "success" : "warning");
+      state.componentManager = await getComponents(); render();
+    } catch (error) { showToast(error.message || "Không thể xác nhận reuse.", "error"); }
+    finally { componentReuseConfirm.disabled = false; }
+    return;
+  }
+  const componentConfirm = event.target.closest("[data-component-confirm]");
+  if (componentConfirm) {
+    componentConfirm.disabled = true;
+    try {
+      const result = await confirmComponentPlan(componentConfirm.dataset.componentConfirm || "", true);
+      showToast(result.next_action || result.reason || "Kế hoạch đã được xử lý theo policy.", result.status === "unavailable" ? "warning" : "success");
+      state.componentManager = await getComponents(); render();
+    } catch (error) { showToast(error.message || "Không thể xác nhận kế hoạch.", "error"); }
+    finally { componentConfirm.disabled = false; }
+    return;
+  }
+  const componentImportConfirm = event.target.closest("[data-component-import-confirm]");
+  if (componentImportConfirm) {
+    componentImportConfirm.disabled = true;
+    try {
+      const result = await confirmComponentImport(componentImportConfirm.dataset.componentImportConfirm || "", true);
+      showToast(result.next_action || result.reason || "Kế hoạch import đã được xử lý.", result.status === "completed" ? "success" : "warning");
+      state.componentManager = await getComponents(); render();
+    } catch (error) { showToast(error.message || "Không thể xác nhận import.", "error"); }
+    finally { componentImportConfirm.disabled = false; }
+    return;
+  }
+  const maintenanceConfirm = event.target.closest("[data-component-maintenance-confirm]");
+  if (maintenanceConfirm) {
+    maintenanceConfirm.disabled = true;
+    try {
+      const result = await confirmComponentMaintenance(maintenanceConfirm.dataset.componentMaintenanceConfirm || "", true);
+      showToast(result.next_action || result.reason || "Kế hoạch bảo trì đã được xử lý.", result.status === "completed" ? "success" : "warning");
+      state.componentManager = await getComponents(); render();
+    } catch (error) { showToast(error.message || "Không thể xác nhận bảo trì.", "error"); }
+    finally { maintenanceConfirm.disabled = false; }
+    return;
+  }
+  const productPlanButton = event.target.closest("[data-product-plan]");
+  if (productPlanButton) {
+    productPlanButton.disabled = true;
+    try {
+      const plan = await planComponentInstall(productPlanButton.dataset.productPlan || "");
+      if (plan?.plan_id) {
+        const result = await confirmComponentInstall(plan.plan_id, false);
+        showToast(result?.reason || plan.reason || "Đã tạo kế hoạch catalog.", result?.status === "unavailable" ? "warning" : "success");
+      } else showToast(plan?.reason || "Không thể lập kế hoạch catalog.", "warning");
+    } catch (error) { showToast(error.message || "Không thể lập kế hoạch catalog.", "error"); }
+    finally { productPlanButton.disabled = false; }
+    return;
+  }
+  const maintenanceButton = event.target.closest("[data-component-maintenance]");
+  if (maintenanceButton) {
+    maintenanceButton.disabled = true;
+    try {
+      const id = maintenanceButton.dataset.componentMaintenance || "";
+      const type = maintenanceButton.dataset.componentType || "";
+      const action = maintenanceButton.dataset.maintenanceAction || "repair";
+      const plan = await createComponentMaintenancePlan(id, action);
+      state.componentPlans[`${type}:${id}`] = plan;
+      render();
+      showToast("Đã tạo kế hoạch bảo trì server-owned.", "success");
+    } catch (error) { showToast(error.message || "Không thể lập kế hoạch bảo trì.", "error"); }
+    finally { maintenanceButton.disabled = false; }
+    return;
+  }
   if (event.target.closest("#refresh-snapshot")) {
     const button = event.target.closest("#refresh-snapshot");
     button.disabled = true;
@@ -1549,6 +1740,77 @@ document.addEventListener("click", async (event) => {
   if (event.target.closest("#theme-toggle") || event.target.closest("[data-cycle-theme]")) { cycleTheme(); return; }
   const refreshButton = event.target.closest("[data-refresh-storage]");
   if (refreshButton) { refreshButton.disabled = true; await loadRouteData({ scan: true }); refreshButton.disabled = false; showToast("Đã quét lại storage theo yêu cầu."); return; }
+  const checkAllUpdatesButton = event.target.closest("[data-check-all-updates]");
+  if (checkAllUpdatesButton) {
+    checkAllUpdatesButton.disabled = true;
+    try {
+      const result = await checkAllUpdates(true);
+      state.updateCenter = { ...state.updateCenter, records: result.records || [], last_checked: Date.now() };
+      render();
+      showToast("Đã kiểm tra metadata update; không có component nào tự cài.", "success");
+    } catch (error) { showToast(error.message || "Không thể kiểm tra update.", "error"); }
+    finally { checkAllUpdatesButton.disabled = false; }
+    return;
+  }
+  const checkUpdateButton = event.target.closest("[data-check-update]");
+  if (checkUpdateButton) {
+    checkUpdateButton.disabled = true;
+    try {
+      const result = await checkComponentUpdate(checkUpdateButton.dataset.checkUpdate || "", true);
+      const records = [...(state.updateCenter.records || []).filter((item) => item.component_id !== result.component_id), result];
+      state.updateCenter = { ...state.updateCenter, records, last_checked: Date.now() };
+      render();
+      showToast(`Đã kiểm tra update cho ${result.component_id || "component"}.`, "success");
+    } catch (error) { showToast(error.message || "Không thể kiểm tra update.", "error"); }
+    finally { checkUpdateButton.disabled = false; }
+    return;
+  }
+  const planUpdateButton = event.target.closest("[data-plan-update]");
+  if (planUpdateButton) {
+    planUpdateButton.disabled = true;
+    try {
+      const plan = await planComponentUpdate(planUpdateButton.dataset.planUpdate || "");
+      state.updateCenter = { ...state.updateCenter, pendingPlan: plan };
+      render();
+      showToast(plan.status === "planned" ? "Đã lập kế hoạch update; chưa tải/cài." : (plan.code || "Update chưa khả dụng."), plan.status === "planned" ? "success" : "warning");
+    } catch (error) { showToast(error.message || "Không thể lập kế hoạch update.", "error"); }
+    finally { planUpdateButton.disabled = false; }
+    return;
+  }
+  const confirmUpdateButton = event.target.closest("[data-confirm-update]");
+  if (confirmUpdateButton) {
+    confirmUpdateButton.disabled = true;
+    try {
+      const result = await confirmComponentUpdate(confirmUpdateButton.dataset.confirmUpdate || "", true);
+      showToast(result.next_action || result.reason || "Update đã được xử lý.", result.status === "completed" ? "success" : "warning");
+      state.updateCenter = { ...state.updateCenter, pendingPlan: null };
+      render();
+    } catch (error) { showToast(error.message || "Không thể xác nhận update.", "error"); }
+    finally { confirmUpdateButton.disabled = false; }
+    return;
+  }
+  const rollbackButton = event.target.closest("[data-rollback-update]");
+  if (rollbackButton) {
+    rollbackButton.disabled = true;
+    try {
+      const result = await rollbackComponentUpdate(rollbackButton.dataset.rollbackUpdate || "");
+      showToast(result.next_action || result.reason || "Rollback đã được xử lý.", result.status === "completed" ? "success" : "warning");
+    } catch (error) { showToast(error.message || "Không thể rollback.", "error"); }
+    finally { rollbackButton.disabled = false; }
+    return;
+  }
+  const saveUpdateScheduleButton = event.target.closest("[data-save-update-schedule]");
+  if (saveUpdateScheduleButton) {
+    const policy = view.querySelector("[data-update-schedule]")?.value || "manual";
+    saveUpdateScheduleButton.disabled = true;
+    try {
+      const result = await setUpdateSchedule(policy);
+      if (result.status === "saved") { state.updateCenter = { ...state.updateCenter, settings: result }; render(); showToast("Đã lưu lịch kiểm tra update; không tự cài đặt.", "success"); }
+      else showToast(result.code || "Lịch update không hợp lệ.", "warning");
+    } catch (error) { showToast(error.message || "Không thể lưu lịch update.", "error"); }
+    finally { saveUpdateScheduleButton.disabled = false; }
+    return;
+  }
   const launchButton = event.target.closest("[data-launch]");
   if (launchButton) {
     launchButton.disabled = true;

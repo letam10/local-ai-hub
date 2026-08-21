@@ -1,12 +1,14 @@
-; Inno Setup Script for Local AI Hub V6 Win64 Desktop Release
+; Inno Setup Script for Local AI Hub V7 Win64 Desktop Release
 ; Generated for deterministic, safe Windows desktop installation
 ; Preserves machine-local data (Models, Environments, runtime, Output, Config, Backups, Reports)
 
 #define MyAppName "Local AI Hub"
-#define MyAppVersion "6.0.0"
+#ifndef MyAppVersion
+#define MyAppVersion "7.1.0"
+#endif
 #define MyAppPublisher "Local AI Hub Project"
 #define MyAppURL "https://github.com/letam10/local-ai-hub"
-#define DefaultInstallDir "D:\LocalAIHub"
+#define DefaultInstallDir "{autopf}\Local AI Hub"
 
 [Setup]
 AppId={{D37E84B1-2F16-4E89-9B21-085781E738C4}
@@ -22,7 +24,7 @@ DirExistsWarning=no
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist
-OutputBaseFilename=LocalAIHub-Setup-Win64-v6.0.0
+OutputBaseFilename=LocalAIHub-Setup-Win64-v{#MyAppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -40,14 +42,17 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 ; Core application source and distribution files (NEVER includes Models, Environments, runtime, or Output)
-Source: "..\src\*"; DestDir: "{app}\src"; Flags: recursesubdirs createallsubdirs ignoreversion
-Source: "..\scripts\*"; DestDir: "{app}\scripts"; Flags: recursesubdirs createallsubdirs ignoreversion
-Source: "..\distribution\*"; DestDir: "{app}\distribution"; Flags: recursesubdirs createallsubdirs ignoreversion
-Source: "..\docs\*"; DestDir: "{app}\docs"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "..\src\*"; Excludes: "__pycache__;*.pyc"; DestDir: "{app}\src"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "..\scripts\*"; Excludes: "__pycache__;*.pyc"; DestDir: "{app}\scripts"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "..\distribution\*"; Excludes: "__pycache__;*.pyc;release_manifest.json"; DestDir: "{app}\distribution"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "..\docs\*"; Excludes: "__pycache__;*.pyc"; DestDir: "{app}\docs"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "..\workflows\*"; Excludes: "__pycache__;*.pyc"; DestDir: "{app}\workflows"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "..\architecture\*"; Excludes: "__pycache__;*.pyc"; DestDir: "{app}\architecture"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "..\requirements-hub.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dependencies.lock.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\AGENTS.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\Config\*.example.json"; DestDir: "{app}\Config"; Flags: ignoreversion
 Source: "..\LocalAIHub.vbs"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LocalAIHub.cmd"; DestDir: "{app}"; Flags: ignoreversion

@@ -13,7 +13,9 @@ class UnifiedUiTests(unittest.TestCase):
     def test_frontend_contains_every_required_workspace(self) -> None:
         index = (ROOT / "src" / "ui" / "index.html").read_text(encoding="utf-8")
         pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
-        frontend = index + pages
+        shared = (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
+        features = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src" / "ui" / "features").rglob("*.js"))
+        frontend = index + pages + shared + features
         app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
         api_client = (ROOT / "src" / "ui" / "api.js").read_text(encoding="utf-8")
         for label in (

@@ -1,0 +1,77 @@
+schema_version: functional-parity.v1
+principle: owner_and_fresh_user_share_one_execution_architecture
+surfaces:
+  - id: dashboard
+    owner: src/ui/features/dashboard/
+    adapter: src/services/api/routes/bootstrap.py
+    status: structural
+  - id: projects
+    owner: src/ui/features/projects/
+    adapter: src/services/project_manager/
+    status: structural
+  - id: workflow_library
+    owner: src/ui/features/workflow_library/
+    adapter: src/services/api/routes/workflows.py
+    status: structural
+  - id: jobs
+    owner: src/ui/features/jobs/
+    adapter: src/services/job_manager/
+    status: structural
+  - id: artifacts
+    owner: src/ui/features/artifacts/
+    adapter: src/services/artifact_store.py
+    status: structural
+  - id: models
+    owner: src/ui/features/models/
+    adapter: src/services/productization/catalog.py
+    status: structural
+  - id: runtimes
+    owner: src/ui/features/runtimes/
+    adapter: src/services/runtime_manager/
+    status: structural
+  - id: components
+    owner: src/ui/features/components/
+    adapter: src/services/productization/lifecycle.py
+    status: structural
+  - id: image_mask
+    owner: src/ui/features/image_mask/
+    adapter: src/services/image_mask_studio/
+    status: structural
+  - id: node_studio
+    owner: src/ui/features/node_studio/
+    adapter: src/services/node_studio/
+    status: structural
+  - id: optional_ai
+    owner: src/modules/
+    adapter: src/services/job_manager/
+    status: partial_until_bounded_smoke
+rules:
+  - owner_and_fresh_user_use_same_adapter
+  - no_clone_mode_backend
+  - no_demo_backend
+  - missing_optional_models_remain_visible
+  - operational_requires_matching_runtime_evidence
+component_operational_contract:
+  source_state: [AVAILABLE, DEGRADED, AUTH_REQUIRED, LICENSE_REQUIRED, RATE_LIMITED, UNAVAILABLE, UNKNOWN]
+  install_methods: [AUTO_INSTALL_READY, MANUAL_IMPORT_ONLY, AUTH_REQUIRED, LICENSE_REQUIRED, REFERENCE_EXISTING, UNSUPPORTED]
+  fallback_policy: identity_matched_trusted_source_or_native_import
+  update_policy: manual_check_manual_apply_optional_metadata_schedule
+  update_parts: [backend, runtime, dependencies, model]
+  same_adapter_path: api_to_job_manager_to_module_adapter_to_artifact_store
+  no_chat_model_download: true
+  records:
+    animesr-v2: {install: MANUAL_IMPORT_ONLY, source: official_metadata_review, fallback: native_import, latest_supported: v2, update: manual}
+    sam2.1-hiera-small: {install: MANUAL_IMPORT_ONLY, source: pinned_official_checkpoint, fallback: native_import, latest_supported: sam2.1-092824, update: manual}
+    faster-whisper-large-v3: {install: MANUAL_IMPORT_ONLY, source: official_metadata_review, fallback: native_import, latest_supported: large-v3, update: manual}
+    flux-2-klein-base-4b-fp8: {install: AUTH_REQUIRED, source: gated_provider, fallback: native_import, latest_supported: review_required, update: manual}
+    qwen-image-2512-fp8: {install: MANUAL_IMPORT_ONLY, source: official_metadata_review, fallback: native_import, latest_supported: 2512, update: manual}
+    practical-rife-v4: {install: MANUAL_IMPORT_ONLY, source: official_metadata_review, fallback: native_import, latest_supported: v4, update: manual}
+    realesrgan-x4plus: {install: MANUAL_IMPORT_ONLY, source: official_metadata_review, fallback: native_import, latest_supported: x4plus, update: manual}
+    omniparser-v2: {install: MANUAL_IMPORT_ONLY, source: official_metadata_review, fallback: native_import, latest_supported: v2, update: manual}
+    rfdetr-base: {install: MANUAL_IMPORT_ONLY, source: official_metadata_review, fallback: native_import, latest_supported: base, update: manual}
+    grounding-dino-base: {install: MANUAL_IMPORT_ONLY, source: official_metadata_review, fallback: native_import, latest_supported: base, update: manual}
+    paddleocr-vl-0.9b: {install: MANUAL_IMPORT_ONLY, source: official_metadata_review, fallback: native_import, latest_supported: 0.9b, update: manual}
+    qwen3-tts-1.7b: {install: MANUAL_IMPORT_ONLY, source: official_metadata_review, fallback: native_import, latest_supported: 1.7b, update: manual}
+    seed-vc-1: {install: MANUAL_IMPORT_ONLY, source: official_metadata_review, fallback: native_import, latest_supported: 1, update: manual}
+    comfyui-workflow-assets: {install: MANUAL_IMPORT_ONLY, source: official_metadata_review, fallback: native_import, latest_supported: review-required, update: manual}
+    ffmpeg: {install: AUTO_INSTALL_READY, source: pinned_gyan_archive, fallback: none, latest_supported: 9.0.1, update: manual}

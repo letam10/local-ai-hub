@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -19,11 +20,25 @@ from src.shared.schemas.extension_manifest import (
 )
 
 from .capability_pack import CapabilityPackValidationError, validate_capability_pack
-from .config import project_root
+from .config import (
+    ExtensionStorageError,
+    _lexical_path,
+    bounded_directory_entries,
+    guard_is_current,
+    guarded_location,
+    guarded_read_bytes,
+    guarded_read_json,
+    project_root,
+)
 
 
 DISCOVERY_VERSION = "extension-discovery.v1"
 _MAX_DESCRIPTOR_BYTES = 1_000_000
+_MAX_DESCRIPTOR_PARTS = 8
+_UNSAFE_PUBLIC_TEXT = re.compile(
+    r"(?i)(?:[A-Z]:[\\/]|\\\\|/(?:users|home|tmp|var)/|https?://|ftp://|"
+    r"api[_-]?key|token|password|secret|credential|private[_-]?key|command|executable|callable|object object)"
+)
 
 
 def _issue(code: str, message: str, *, extension_id: str | None = None) -> dict[str, str | None]:
@@ -32,26 +47,55 @@ def _issue(code: str, message: str, *, extension_id: str | None = None) -> dict[
     return {"extension_id": extension_id, "code": code, "message": message}
 
 
-def _read_json_descriptor(path: Path) -> Any:
+def _safe_public_text(value: Any, fallback: str) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > 500 or _UNSAFE_PUBLIC_TEXT.search(value):
+        return fallback
+    return value
+
+
+def _public_static_value(value: Any, *, key: str | None = None) -> Any:
+    if isinstance(value, Mapping):
+        return {str(item_key): _public_static_value(item_value, key=str(item_key)) for item_key, item_value in value.items()}
+    if isinstance(value, list):
+        return [_public_static_value(item) for item in value]
+    if isinstance(value, str):
+        if key == "source":
+            return value
+        return _safe_public_text(value, "redacted")
+    return value
+
+
+def _public_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    projected = _public_static_value(manifest)
+    return projected if isinstance(projected, dict) else {}
+
+
+def _read_json_descriptor(root: Path, path: Path) -> Any:
     try:
-        if path.is_symlink() or not path.is_file() or path.stat().st_size > _MAX_DESCRIPTOR_BYTES:
-            raise ValueError("descriptor_not_readable")
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return guarded_read_json(root, path, maximum=_MAX_DESCRIPTOR_BYTES)
+    except ExtensionStorageError as exc:
         raise ValueError("descriptor_not_json") from exc
 
 
-def _resolve_descriptor(extension_dir: Path, relative_path: str) -> Path | None:
+def _resolve_descriptor(root: Path, extension_dir: Path, relative_path: str) -> Path | None:
     try:
-        unresolved = extension_dir / relative_path
-        current = extension_dir
-        for part in Path(relative_path).parts:
-            current = current / part
-            if current.is_symlink():
-                return None
-        candidate = unresolved.resolve()
-        candidate.relative_to(extension_dir.resolve())
-    except (OSError, ValueError):
+        if not isinstance(relative_path, str) or not relative_path or "\x00" in relative_path:
+            return None
+        parts = Path(relative_path).parts
+        if (
+            not parts
+            or len(parts) > _MAX_DESCRIPTOR_PARTS
+            or Path(relative_path).is_absolute()
+            or any(part in {"", ".", ".."} for part in parts)
+            or any(":" in part for part in parts)
+        ):
+            return None
+        guarded_location(root, extension_dir, kind="directory")
+        candidate = _lexical_path(extension_dir.joinpath(*parts))
+        guarded = guarded_location(root, candidate, kind="file", allow_missing=True)
+        if guarded.target is None:
+            return None
+    except ExtensionStorageError:
         return None
     return candidate
 
@@ -67,22 +111,21 @@ def _descriptor_error(kind: str) -> tuple[str, str]:
     return "invalid_descriptor", f"The {label} is missing, unsafe, or outside its static schema allowlist."
 
 
-def _load_descriptor(extension_dir: Path, entrypoint: Mapping[str, str]) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+def _load_descriptor(root: Path, extension_dir: Path, entrypoint: Mapping[str, str]) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
     kind = entrypoint["kind"]
-    candidate = _resolve_descriptor(extension_dir, entrypoint["path"])
+    candidate = _resolve_descriptor(root, extension_dir, entrypoint["path"])
     if candidate is None:
         code, message = _descriptor_error(kind)
         return None, {"code": code, "message": message}
     if kind == "documentation":
         try:
-            if candidate.is_symlink() or not candidate.is_file() or candidate.stat().st_size > _MAX_DESCRIPTOR_BYTES:
-                raise OSError
-        except OSError:
+            guarded_read_bytes(root, candidate, maximum=_MAX_DESCRIPTOR_BYTES)
+        except ExtensionStorageError:
             code, message = _descriptor_error(kind)
             return None, {"code": code, "message": message}
         return {"kind": kind, "documentation": True}, None
     try:
-        raw = _read_json_descriptor(candidate)
+        raw = _read_json_descriptor(root, candidate)
         if kind == "capability_pack":
             return {"kind": kind, "value": validate_capability_pack(raw)}, None
         if kind == "model_cards":
@@ -110,7 +153,11 @@ def _honest_status(manifest: Mapping[str, Any], descriptor_errors: list[dict[str
         )
     availability = manifest["availability"]
     if availability["status"] != "operational":
-        return availability["status"], availability["reason"], availability["action"]
+        return (
+            availability["status"],
+            _safe_public_text(availability["reason"], "The extension availability requires review."),
+            _safe_public_text(availability["action"], "Review the managed static metadata before continuing."),
+        )
     if _runtime_required(manifest):
         return (
             "partial",
@@ -152,11 +199,11 @@ def _validate_descriptor_relationships(
     return errors
 
 
-def _discover_extension(extension_dir: Path) -> tuple[dict[str, Any], list[dict[str, str | None]]]:
+def _discover_extension(root: Path, extension_dir: Path) -> tuple[dict[str, Any], list[dict[str, str | None]]]:
     issues: list[dict[str, str | None]] = []
     manifest_path = extension_dir / "extension.json"
     try:
-        raw_manifest = _read_json_descriptor(manifest_path)
+        raw_manifest = _read_json_descriptor(root, manifest_path)
         manifest = validate_extension_manifest(raw_manifest)
     except (ValueError, ManifestValidationError):
         return (
@@ -181,7 +228,7 @@ def _discover_extension(extension_dir: Path) -> tuple[dict[str, Any], list[dict[
         return (
             {
                 "extension_id": manifest["id"],
-                "display_name": manifest["display_name"],
+                "display_name": _safe_public_text(manifest["display_name"], "Managed extension"),
                 "status": "unavailable",
                 "reason": "The managed directory identifier does not match the extension manifest identifier.",
                 "action": "Rename the managed extension directory to match its manifest id.",
@@ -191,7 +238,7 @@ def _discover_extension(extension_dir: Path) -> tuple[dict[str, Any], list[dict[
                 "required_components": list(manifest["required_components"]),
                 "required_models": list(manifest["required_models"]),
                 "resource_profile": manifest["resource_profile"],
-                "manifest": manifest,
+                "manifest": _public_manifest(manifest),
                 "descriptors": {"capability_packs": [], "model_cards": [], "runtime_cards": [], "documentation": 0},
             },
             [_issue("directory_id_mismatch", "A managed extension directory does not match its declared id.", extension_id=manifest["id"])],
@@ -203,7 +250,7 @@ def _discover_extension(extension_dir: Path) -> tuple[dict[str, Any], list[dict[
     runtime_cards: list[dict[str, Any]] = []
     documentation = 0
     for entrypoint in manifest["entrypoints"]:
-        descriptor, error = _load_descriptor(extension_dir, entrypoint)
+        descriptor, error = _load_descriptor(root, extension_dir, entrypoint)
         if error is not None:
             descriptor_errors.append(error)
             continue
@@ -223,7 +270,7 @@ def _discover_extension(extension_dir: Path) -> tuple[dict[str, Any], list[dict[
     return (
         {
             "extension_id": manifest["id"],
-            "display_name": manifest["display_name"],
+            "display_name": _safe_public_text(manifest["display_name"], "Managed extension"),
             "status": status,
             "reason": reason,
             "action": action,
@@ -233,11 +280,11 @@ def _discover_extension(extension_dir: Path) -> tuple[dict[str, Any], list[dict[
             "required_components": list(manifest["required_components"]),
             "required_models": list(manifest["required_models"]),
             "resource_profile": manifest["resource_profile"],
-            "manifest": manifest,
+            "manifest": _public_manifest(manifest),
             "descriptors": {
-                "capability_packs": capability_packs,
-                "model_cards": model_cards,
-                "runtime_cards": runtime_cards,
+                "capability_packs": [_public_static_value(item) for item in capability_packs],
+                "model_cards": [_public_static_value(item) for item in model_cards],
+                "runtime_cards": [_public_static_value(item) for item in runtime_cards],
                 "documentation": documentation,
             },
         },
@@ -254,10 +301,26 @@ def discover_extensions(root: Path | None = None) -> dict[str, Any]:
     arbitrary discovery directory.
     """
 
-    managed_root = (root or project_root()).resolve() / "extensions"
+    repository_root = _lexical_path(root or project_root())
+    managed_root = repository_root / "extensions"
     records: list[dict[str, Any]] = []
     issues: list[dict[str, str | None]] = []
-    if not managed_root.exists() or not managed_root.is_dir() or managed_root.is_symlink():
+    try:
+        repository_guard = guarded_location(repository_root, repository_root, kind="directory")
+        managed_guard = guarded_location(repository_root, managed_root, kind="directory", allow_missing=True)
+    except ExtensionStorageError as exc:
+        public_code = {
+            "managed_location_reparse": "managed_root_reparse",
+            "managed_directory_oversized": "managed_root_oversized",
+        }.get(str(exc), "managed_root_unavailable")
+        return {
+            "contract_version": DISCOVERY_VERSION,
+            "managed_root": "extensions",
+            "extensions": records,
+            "issues": [_issue(public_code, "The repository-managed extensions directory is unavailable or unsafe.")],
+            "counts": {status: 0 for status in ("operational", "partial", "unavailable", "planned")},
+        }
+    if managed_guard.target is None:
         return {
             "contract_version": DISCOVERY_VERSION,
             "managed_root": "extensions",
@@ -266,27 +329,45 @@ def discover_extensions(root: Path | None = None) -> dict[str, Any]:
             "counts": {status: 0 for status in ("operational", "partial", "unavailable", "planned")},
         }
     seen_ids: set[str] = set()
-    for entry in sorted(managed_root.iterdir(), key=lambda item: item.name.casefold()):
-        if entry.is_symlink():
-            issues.append(_issue("symlink_ignored", "A linked entry was ignored; extensions must be repository-managed directories."))
-            continue
-        if not entry.is_dir():
-            issues.append(_issue("non_directory_ignored", "A non-directory entry was ignored under the managed extensions root."))
-            continue
-        if not EXTENSION_ID_PATTERN.fullmatch(entry.name):
-            issues.append(_issue("unsafe_directory_ignored", "A managed extension directory has an unsafe identifier and was ignored."))
-            continue
-        record, record_issues = _discover_extension(entry)
-        extension_id = record["extension_id"]
-        if extension_id is not None and extension_id in seen_ids:
-            record["status"] = "unavailable"
-            record["reason"] = "More than one managed descriptor declares the same extension identifier."
-            record["action"] = "Keep one descriptor for each extension identifier."
-            record_issues.append(_issue("duplicate_extension_id", "Duplicate extension identifiers are not discoverable.", extension_id=extension_id))
-        elif extension_id is not None:
-            seen_ids.add(extension_id)
-        records.append(record)
-        issues.extend(record_issues)
+    try:
+        entries = bounded_directory_entries(managed_guard)
+        for entry, kind, _entry_signature in sorted(entries, key=lambda item: item[0].name.casefold()):
+            if kind != "directory":
+                issues.append(_issue("non_directory_ignored", "A non-directory entry was ignored under the managed extensions root."))
+                continue
+            if not EXTENSION_ID_PATTERN.fullmatch(entry.name):
+                issues.append(_issue("unsafe_directory_ignored", "A managed extension directory has an unsafe identifier and was ignored."))
+                continue
+            extension_guard = guarded_location(repository_root, entry, kind="directory")
+            if not guard_is_current(extension_guard):
+                raise ExtensionStorageError("managed_extension_changed")
+            record, record_issues = _discover_extension(repository_root, entry)
+            extension_id = record["extension_id"]
+            if extension_id is not None and extension_id in seen_ids:
+                record["status"] = "unavailable"
+                record["reason"] = "More than one managed descriptor declares the same extension identifier."
+                record["action"] = "Keep one descriptor for each extension identifier."
+                record_issues.append(_issue("duplicate_extension_id", "Duplicate extension identifiers are not discoverable.", extension_id=extension_id))
+            elif extension_id is not None:
+                seen_ids.add(extension_id)
+            records.append(record)
+            issues.extend(record_issues)
+        if not guard_is_current(repository_guard) or not guard_is_current(managed_guard):
+            raise ExtensionStorageError("managed_root_changed")
+    except ExtensionStorageError as exc:
+        public_code = {
+            "managed_location_reparse": "managed_root_reparse",
+            "managed_directory_oversized": "managed_root_oversized",
+            "managed_directory_changed": "managed_root_changed",
+            "managed_root_changed": "managed_root_changed",
+        }.get(str(exc), "managed_root_unavailable")
+        return {
+            "contract_version": DISCOVERY_VERSION,
+            "managed_root": "extensions",
+            "extensions": [],
+            "issues": [_issue(public_code, "The repository-managed extensions directory could not be inspected safely.")],
+            "counts": {status: 0 for status in ("operational", "partial", "unavailable", "planned")},
+        }
     counts = {status: sum(1 for record in records if record["status"] == status) for status in ("operational", "partial", "unavailable", "planned")}
     return {
         "contract_version": DISCOVERY_VERSION,

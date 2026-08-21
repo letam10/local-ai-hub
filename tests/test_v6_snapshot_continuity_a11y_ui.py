@@ -22,6 +22,8 @@ class V6SnapshotContinuityA11yUiTests(unittest.TestCase):
         cls.html = (ROOT / "src" / "ui" / "index.html").read_text(encoding="utf-8")
         cls.app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
         cls.pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
+        cls.shared_renderer = (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
+        cls.renderers = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src" / "ui" / "features").rglob("*.js"))
         cls.styles = (ROOT / "src" / "ui" / "styles.css").read_text(encoding="utf-8")
 
     def setUp(self) -> None:
@@ -137,8 +139,8 @@ process.stdout.write(html);
         self.assertIn('data-focus-key="job-filter-all"', jobs)
         self.assertIn('data-focus-key="job-filter-attention"', jobs)
         self.assertIn('data-focus-key="job-filter-completed"', jobs)
-        self.assertIn('data-focus-key="job-action-resume-durable"', self.pages)
-        self.assertIn('data-focus-key="artifact-preview-opener"', self.pages)
+        self.assertIn('data-focus-key="job-action-resume-durable"', self.renderers)
+        self.assertIn('data-focus-key="artifact-preview-opener"', self.shared_renderer + self.pages + self.renderers)
 
     def test_preview_close_restores_opener_or_main_fallback(self) -> None:
         self.assertIn("let artifactPreviewOpener = null", self.app)

@@ -35,7 +35,7 @@ class V3IntegrationContractTests(unittest.TestCase):
         )
 
     def test_primary_ui_only_launches_airi_externally(self) -> None:
-        pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
+        pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8") + (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8") + "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src" / "ui" / "features").rglob("*.js"))
         app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
         api = (ROOT / "src" / "ui" / "api.js").read_text(encoding="utf-8")
         self.assertEqual(set(re.findall(r'data-launch="([^"]+)"', pages)), {"airi"})
@@ -47,7 +47,7 @@ class V3IntegrationContractTests(unittest.TestCase):
         self.assertIn('tool(state, "segment_from_points")', pages)
 
     def test_media_workspace_covers_multifile_and_image_operations(self) -> None:
-        pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
+        pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8") + (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8") + "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src" / "ui" / "features").rglob("*.js"))
         adapter = (ROOT / "src" / "modules" / "media_editor" / "backend" / "adapter.py").read_text(encoding="utf-8")
         for operation in (
             "concat",

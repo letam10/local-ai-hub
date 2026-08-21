@@ -10,13 +10,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 APP_PATH = ROOT / "src" / "ui" / "app.js"
 PAGES_PATH = ROOT / "src" / "ui" / "pages.js"
+SHARED_RENDERING_PATH = ROOT / "src" / "ui" / "shared" / "rendering.js"
 
 
 class NavigationUxTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = APP_PATH.read_text(encoding="utf-8")
-        cls.pages = PAGES_PATH.read_text(encoding="utf-8")
+        cls.pages = PAGES_PATH.read_text(encoding="utf-8") + "\n" + SHARED_RENDERING_PATH.read_text(encoding="utf-8")
 
     def test_navigation_renders_semantic_groups_and_named_controls(self) -> None:
         self.assertIn('nav.setAttribute("aria-label", "Module navigation")', self.app)

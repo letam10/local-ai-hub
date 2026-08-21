@@ -1,0 +1,10 @@
+{
+  "schema_version": "api-aliases.v1",
+  "aliases": [
+    {"method": "GET", "path": "/models", "canonical": {"method": "GET", "path": "/api/models"}, "status": "supported", "reason": "V5/V6 client compatibility"},
+    {"method": "GET", "path": "/jobs", "canonical": {"method": "GET", "path": "/api/jobs"}, "status": "supported", "reason": "Legacy desktop shell compatibility"},
+    {"method": "POST", "path": "/probe_media", "canonical": {"method": "POST", "path": "/media/probe"}, "status": "supported", "reason": "Historical tool alias"},
+    {"method": "GET", "path": "/components", "canonical": {"method": "GET", "path": "/api/components"}, "status": "supported", "reason": "Historical component snapshot alias"},
+    {"method": "GET", "path": "/health", "canonical": {"method": "GET", "path": "/"}, "status": "supported", "reason": "Health check compatibility"}
+  ]
+}

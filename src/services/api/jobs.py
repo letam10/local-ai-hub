@@ -162,6 +162,13 @@ def _publish_result(result: object, record: dict[str, Any]) -> tuple[dict[str, A
     if status != "completed":
         return safe, None
 
+    if record.get("tool") == "transcribe_media":
+        if "srt" in result or not isinstance(result.get("files"), list):
+            return {
+                "status": "failed",
+                "error": "Whisper transcript phải trả về batch JSON và SRT opaque.",
+            }, "whisper_output_contract"
+
     for output_field in ("files", "outputs"):
         declared = result.get(output_field)
         if isinstance(declared, list) and len(declared) > 64:
@@ -169,6 +176,13 @@ def _publish_result(result: object, record: dict[str, Any]) -> tuple[dict[str, A
     candidates = _output_candidates(result)
     if len(candidates) > 64:
         return {"status": "failed", "error": "Worker tạo quá nhiều output cho một job."}, "output_count"
+    if record.get("tool") == "transcribe_media":
+        suffixes = sorted(candidate.suffix.casefold() for candidate in candidates)
+        if len(candidates) != 2 or suffixes != [".json", ".srt"]:
+            return {
+                "status": "failed",
+                "error": "Whisper transcript phải publish đủ JSON và SRT opaque.",
+            }, "whisper_output_contract"
     if not candidates:
         # Metadata-only operations such as probe are valid completions.
         return safe, None
