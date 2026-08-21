@@ -1,16 +1,23 @@
-"""
-  FILE NOTE
-  - Mục đích: BackupManager tạo, kiểm tra tính toàn vẹn, lập kế hoạch và khôi phục an toàn bản sao lưu machine-local của Local AI Hub (settings, projects, workflow library, node drafts). Không chứa Models/Environments/runtime/Output.
-  - Liên kết trực tiếp: src/app_config/settings_service.py, src/services/project_manager/manager.py, src/services/workflow_library/library.py, src/services/node_studio/state.py, src/shared/paths/registry.py
-  - Vùng ảnh hưởng khi sửa: Toàn bộ quy trình backup/restore dữ liệu cấu hình và creative workspace (opaque ID, zip bounds, SHA-256 integrity, plan binding, atomic rollback)
+"""Bounded, server-owned Config backup and restore.
+
+Only a fixed set of JSON metadata members is included. This module does not
+touch Models, Environments, runtime, Output, user media, or external paths.
+Every filesystem authority decision is made from no-follow lstat evidence;
+resolved containment is used only after the original ancestor chain has been
+validated. Public results contain opaque identifiers and fixed safe codes,
+never paths, archive-controlled error text, or exception strings.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 import hashlib
 import json
 import os
 import re
+import shutil
+import stat
 import tempfile
 import threading
 import zipfile
@@ -22,20 +29,56 @@ from src.shared.paths.registry import CONFIG_ROOT
 
 
 BACKUP_SCHEMA_VERSION = 1
-_MAX_BACKUP_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
+_MAX_BACKUP_SIZE_BYTES = 50 * 1024 * 1024
 _MAX_MEMBER_COUNT = 200
-_MAX_DECOMPRESSED_SIZE_BYTES = 100 * 1024 * 1024  # 100 MB
+_MAX_DECOMPRESSED_SIZE_BYTES = 100 * 1024 * 1024
+_MAX_MEMBER_SIZE_BYTES = 8 * 1024 * 1024
+_MAX_SOURCE_FILE_BYTES = 8 * 1024 * 1024
+_MAX_PLAN_ENTRIES = 64
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 DATA_CLASSES = ("settings", "creative_workspace", "workflow_library", "node_studio_drafts")
-
+_FIXED_MEMBERS = frozenset({"settings.json", "creative_workspace.json", "workflow_library.json"})
+_DRAFT_MEMBER_RE = re.compile(r"^drafts/(?:node_studio_draft_|draft_)[A-Za-z0-9_.-]{1,96}\.json$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_BACKUP_ID_RE = re.compile(r"^backup_[A-Za-z0-9_-]{1,160}$")
+_MANIFEST_KEYS = frozenset({"schema_version", "created_at", "hub_backup_version", "included_data_classes", "files"})
+_META_KEYS = frozenset({"sha256", "size_bytes"})
 _SECRET_KEY_RE = re.compile(
     r"api[_-]?key|token|password|secret|credential|private[_-]?key|access[_-]?key|refresh[_-]?token",
     re.IGNORECASE,
 )
 
-# Registry for server-owned restore plans: plan_id -> plan_dict
 _RESTORE_PLANS: dict[str, dict[str, Any]] = {}
 _PLANS_LOCK = threading.RLock()
+
+
+class _StorageUnsafe(Exception):
+    """Private fail-closed signal; its text is never returned to callers."""
+
+
+class _ManifestInvalid(Exception):
+    """Private archive validation signal."""
+
+
+@dataclass(frozen=True)
+class _Identity:
+    device: int
+    inode: int
+    mode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    attributes: int
+
+
+@dataclass(frozen=True)
+class _Guard:
+    path: Path
+    kind: str
+    anchor: Path | None
+    target_identity: _Identity | None
+    chain: tuple[tuple[str, _Identity], ...]
 
 
 def _now_iso() -> str:
@@ -46,174 +89,445 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        while chunk := f.read(65536):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def _scrub(obj: Any) -> Any:
     """Deep-scrub known secret keys from a JSON-serialisable object."""
+
     if isinstance(obj, dict):
-        return {k: ("[REDACTED]" if _SECRET_KEY_RE.search(k) else _scrub(v)) for k, v in obj.items()}
+        return {key: ("[REDACTED]" if _SECRET_KEY_RE.search(str(key)) else _scrub(value)) for key, value in obj.items()}
     if isinstance(obj, list):
         return [_scrub(item) for item in obj]
     return obj
 
 
-def _safe_json(path: Path) -> bytes:
-    """Read + parse + scrub a JSON file, returning sanitised UTF-8 bytes."""
+def _lexical(path: Path) -> Path:
+    """Normalize a path without following a link or reparse point."""
+
+    return Path(os.path.normpath(os.path.abspath(os.fspath(path))))
+
+
+def _is_reparse_stat(value: os.stat_result) -> bool:
+    return stat.S_ISLNK(value.st_mode) or bool(int(getattr(value, "st_file_attributes", 0)) & _REPARSE_POINT)
+
+
+def _identity(value: os.stat_result, *, directory: bool) -> _Identity:
+    return _Identity(
+        device=int(getattr(value, "st_dev", 0)),
+        inode=int(getattr(value, "st_ino", 0)),
+        mode=int(value.st_mode),
+        size=0 if directory else int(value.st_size),
+        mtime_ns=0 if directory else int(getattr(value, "st_mtime_ns", 0)),
+        ctime_ns=0 if directory else int(getattr(value, "st_ctime_ns", 0)),
+        attributes=int(getattr(value, "st_file_attributes", 0)),
+    )
+
+
+def _safe_lstat(path: Path, *, kind: str | None = None) -> _Identity | None:
     try:
-        raw = json.loads(path.read_bytes())
-        cleaned = _scrub(raw)
-        return json.dumps(cleaned, ensure_ascii=False, indent=2).encode("utf-8")
-    except (OSError, json.JSONDecodeError):
-        return json.dumps({"status": "unreadable", "path": path.name}).encode("utf-8")
+        value = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        raise _StorageUnsafe from None
+    if _is_reparse_stat(value):
+        raise _StorageUnsafe
+    is_dir = stat.S_ISDIR(value.st_mode)
+    is_file = stat.S_ISREG(value.st_mode)
+    if kind == "dir" and not is_dir:
+        raise _StorageUnsafe
+    if kind == "file" and not is_file:
+        raise _StorageUnsafe
+    if kind is None and not (is_dir or is_file):
+        raise _StorageUnsafe
+    return _identity(value, directory=is_dir)
+
+
+def _existing_ancestor(path: Path) -> Path:
+    current = path
+    while True:
+        identity = _safe_lstat(current)
+        if identity is not None:
+            return current
+        parent = current.parent
+        if parent == current:
+            raise _StorageUnsafe
+        current = parent
+
+
+def _ancestors(path: Path) -> list[Path]:
+    result: list[Path] = []
+    current = path
+    while True:
+        result.append(current)
+        parent = current.parent
+        if parent == current:
+            return result
+        current = parent
+
+
+def _common_inside(anchor: Path, target: Path) -> bool:
+    try:
+        resolved_anchor = os.path.normcase(os.path.realpath(os.fspath(anchor)))
+        resolved_target = os.path.normcase(os.path.realpath(os.fspath(target)))
+        return os.path.commonpath((resolved_anchor, resolved_target)) == resolved_anchor
+    except (OSError, ValueError):
+        return False
+
+
+def _guard(path: Path, *, kind: str, anchor: Path | None = None, allow_missing: bool = False) -> _Guard:
+    path = _lexical(path)
+    target_identity = _safe_lstat(path, kind=kind)
+    if target_identity is None and not allow_missing:
+        raise _StorageUnsafe
+
+    active = path if target_identity is not None else _existing_ancestor(path.parent)
+    chain: list[tuple[str, _Identity]] = []
+    for ancestor in _ancestors(active):
+        value = _safe_lstat(ancestor)
+        if value is None:
+            continue
+        chain.append((os.path.normcase(os.fspath(ancestor)), value))
+
+    anchor_value = _lexical(anchor) if anchor is not None else None
+    if anchor_value is not None:
+        anchor_identity = _safe_lstat(anchor_value, kind="dir")
+        if anchor_identity is None or not _common_inside(anchor_value, path):
+            raise _StorageUnsafe
+    if not chain:
+        raise _StorageUnsafe
+    return _Guard(path, kind, anchor_value, target_identity, tuple(chain))
+
+
+def _guard_same(expected: _Guard) -> bool:
+    try:
+        current = _guard(
+            expected.path,
+            kind=expected.kind,
+            anchor=expected.anchor,
+            allow_missing=expected.target_identity is None,
+        )
+    except _StorageUnsafe:
+        return False
+    return current.target_identity == expected.target_identity and current.chain == expected.chain
+
+
+def _strict_json(payload: bytes) -> Any:
+    class _Duplicate(ValueError):
+        pass
+
+    class _NonFinite(ValueError):
+        pass
+
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in items:
+            if key in result:
+                raise _Duplicate
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=pairs,
+            parse_constant=lambda _value: (_ for _ in ()).throw(_NonFinite()),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, _Duplicate, _NonFinite, TypeError, ValueError, OverflowError, RecursionError):
+        raise _ManifestInvalid from None
+
+
+def _read_bounded(path: Path, guard: _Guard, limit: int) -> bytes:
+    if not _guard_same(guard):
+        raise _StorageUnsafe
+    try:
+        with path.open("rb") as stream:
+            payload = stream.read(limit + 1)
+    except (OSError, ValueError):
+        raise _StorageUnsafe from None
+    if len(payload) > limit or not _guard_same(guard):
+        raise _StorageUnsafe
+    return payload
+
+
+def _sha256_file(path: Path, guard: _Guard, limit: int = _MAX_BACKUP_SIZE_BYTES) -> str:
+    if not _guard_same(guard):
+        raise _StorageUnsafe
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                total += len(chunk)
+                if total > limit:
+                    raise _StorageUnsafe
+                digest.update(chunk)
+    except _StorageUnsafe:
+        raise
+    except (OSError, ValueError):
+        raise _StorageUnsafe from None
+    if not _guard_same(guard):
+        raise _StorageUnsafe
+    return digest.hexdigest()
+
+
+def _safe_member(member: object) -> bool:
+    if not isinstance(member, str) or len(member) > 160 or not member:
+        return False
+    if "\\" in member or member.startswith(("/", "\\")) or ":" in member:
+        return False
+    parts = member.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return False
+    return member in _FIXED_MEMBERS or _DRAFT_MEMBER_RE.fullmatch(member) is not None
+
+
+def _public_member(member: str) -> str:
+    return member if member in _FIXED_MEMBERS else "drafts"
+
+
+def _public_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    categories = sorted({_public_member(str(member)) for member in manifest.get("files", {})})
+    return {
+        "schema_version": manifest.get("schema_version"),
+        "hub_backup_version": manifest.get("hub_backup_version"),
+        "included_data_classes": list(DATA_CLASSES),
+        "member_count": len(manifest.get("files", {})),
+        "categories": categories,
+    }
+
+
+def _fixed_failure(code: str = "storage_unavailable", *, status: str = "unavailable") -> dict[str, Any]:
+    messages = {
+        "storage_unavailable": "Local backup storage is unavailable; no data was changed.",
+        "invalid_archive": "The backup archive is not a valid server-owned backup.",
+        "restore_conflict": "Local data changed after the restore plan was created.",
+        "restore_manual_review": "Restore state requires manual review; no unsafe cleanup was attempted.",
+        "restore_transaction_failed": "Restore could not complete atomically; prior data was restored or manual review is required.",
+        "backup_create_failed": "Backup creation could not complete; no public backup was published.",
+    }
+    return {
+        "accepted": False,
+        "status": status,
+        "code": code,
+        "reason": messages.get(code, messages["storage_unavailable"]),
+        "execution": "not_run",
+        "dry_run": True,
+        "verified": False,
+    }
+
+
+def _safe_json(path: Path, guard: _Guard | None = None) -> bytes:
+    """Read and scrub one fixed JSON member without echoing path/error data."""
+
+    current_guard = guard or _guard(path, kind="file", allow_missing=False)
+    payload = _read_bounded(path, current_guard, _MAX_SOURCE_FILE_BYTES)
+    try:
+        raw = _strict_json(payload)
+    except _ManifestInvalid:
+        return b'{"status":"unreadable"}'
+    cleaned = _scrub(raw)
+    try:
+        result = json.dumps(cleaned, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError):
+        return b'{"status":"unreadable"}'
+    if len(result) > _MAX_MEMBER_SIZE_BYTES or not _guard_same(current_guard):
+        raise _StorageUnsafe
+    return result
+
+
+def _collect_files_guarded(config_guard: _Guard) -> dict[str, tuple[Path, _Guard]]:
+    config_root = config_guard.path
+    if not _guard_same(config_guard):
+        raise _StorageUnsafe
+    result: dict[str, tuple[Path, _Guard]] = {}
+    for member in sorted(_FIXED_MEMBERS):
+        path = config_root / member
+        guard = _guard(path, kind="file", anchor=config_root, allow_missing=True)
+        if guard.target_identity is not None:
+            result[member] = (path, guard)
+
+    try:
+        with os.scandir(config_root) as entries:
+            for entry in entries:
+                name = entry.name
+                if not (name.startswith("node_studio_draft_") or name.startswith("draft_")) or not name.endswith(".json"):
+                    continue
+                member = f"drafts/{name}"
+                if not _safe_member(member) or entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                    raise _StorageUnsafe
+                path = config_root / name
+                guard = _guard(path, kind="file", anchor=config_root, allow_missing=False)
+                result[member] = (path, guard)
+    except _StorageUnsafe:
+        raise
+    except OSError:
+        raise _StorageUnsafe from None
+    return result
 
 
 def _collect_files() -> dict[str, Path]:
-    """Map archive member name -> local path for all backed-up files."""
-    files: dict[str, Path] = {}
+    """Compatibility helper returning only safe fixed Config members."""
 
-    settings_path = CONFIG_ROOT / "settings.json"
-    if settings_path.exists():
-        files["settings.json"] = settings_path
-
-    workspace_path = CONFIG_ROOT / "creative_workspace.json"
-    if workspace_path.exists():
-        files["creative_workspace.json"] = workspace_path
-
-    workflow_path = CONFIG_ROOT / "workflow_library.json"
-    if workflow_path.exists():
-        files["workflow_library.json"] = workflow_path
-
-    for draft in sorted(CONFIG_ROOT.glob("node_studio_draft_*.json")):
-        files[f"drafts/{draft.name}"] = draft
-
-    for draft in sorted(CONFIG_ROOT.glob("draft_*.json")):
-        files[f"drafts/{draft.name}"] = draft
-
-    return files
+    try:
+        root_guard = _guard(CONFIG_ROOT, kind="dir", allow_missing=False)
+        return {member: path for member, (path, _guard_value) in _collect_files_guarded(root_guard).items()}
+    except _StorageUnsafe:
+        return {}
 
 
 def _compute_state_fingerprint() -> str:
-    """Compute an aggregate hash of the current local state to detect mid-flow changes."""
-    h = hashlib.sha256()
-    files = _collect_files()
-    for member_name in sorted(files.keys()):
-        path = files[member_name]
+    """Return a content/identity fingerprint or an empty fail-closed value."""
+
+    try:
+        root_guard = _guard(CONFIG_ROOT, kind="dir", allow_missing=False)
+        files = _collect_files_guarded(root_guard)
+        digest = hashlib.sha256()
+        for member in sorted(files):
+            path, guard = files[member]
+            content = _read_bounded(path, guard, _MAX_SOURCE_FILE_BYTES)
+            digest.update(member.encode("utf-8"))
+            digest.update(_sha256_bytes(content).encode("ascii"))
+        return digest.hexdigest()
+    except _StorageUnsafe:
+        return ""
+
+
+def _remove_temp_file(path: Path, guard: _Guard | None, parent_guard: _Guard | None = None) -> None:
+    if guard is not None:
+        if not _guard_same(guard):
+            return
+    elif parent_guard is not None:
+        if not _guard_same(parent_guard):
+            return
         try:
-            stat = path.stat()
-            h.update(f"{member_name}:{stat.st_size}:{stat.st_mtime_ns}".encode("utf-8"))
-        except OSError:
-            h.update(f"{member_name}:missing".encode("utf-8"))
-    return h.hexdigest()
+            guard = _guard(path, kind="file", anchor=parent_guard.path, allow_missing=False)
+        except _StorageUnsafe:
+            return
+    else:
+        return
+    try:
+        path.unlink()
+    except OSError:
+        return
+
+
+def _remove_temp_dir(path: Path, guard: _Guard | None) -> None:
+    if guard is None or not _guard_same(guard):
+        return
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                    return
+        shutil.rmtree(path)
+    except OSError:
+        return
 
 
 class BackupManager:
-    """Create, inspect, plan and apply atomic backups for Local AI Hub machine-local state."""
+    """Create, inspect, plan and apply bounded Config backups."""
 
     def __init__(self, backup_dir: Path | None = None) -> None:
-        self._backup_dir = Path(backup_dir) if backup_dir is not None else (CONFIG_ROOT / "backups")
+        self._injected_backup_dir = backup_dir is not None
+        self._backup_dir = _lexical(Path(backup_dir)) if backup_dir is not None else None
         self._lock = threading.RLock()
 
-    # ------------------------------------------------------------------
-    # Resolution & Path Security
-    # ------------------------------------------------------------------
-
     def _canonical_backup_dir(self) -> Path:
-        return self._backup_dir.resolve()
+        return self._backup_dir if self._injected_backup_dir and self._backup_dir is not None else _lexical(CONFIG_ROOT / "backups")
+
+    def _config_guard(self) -> _Guard:
+        return _guard(CONFIG_ROOT, kind="dir", allow_missing=False)
+
+    def _backup_guard(self, *, allow_missing: bool) -> _Guard:
+        path = self._canonical_backup_dir()
+        if self._injected_backup_dir:
+            anchor = path.parent
+            _guard(anchor, kind="dir", allow_missing=False)
+        else:
+            anchor = _lexical(CONFIG_ROOT)
+        return _guard(path, kind="dir", anchor=anchor, allow_missing=allow_missing)
 
     def _backup_id_for_file(self, zip_path: Path) -> str:
-        """Create a stable, opaque backup_id from zip filename without path exposure."""
-        stem = zip_path.stem
-        clean = re.sub(r"[^a-zA-Z0-9_-]", "_", stem)
+        clean = re.sub(r"[^a-zA-Z0-9_-]", "_", zip_path.stem)
         return f"backup_{clean}"
 
     def _resolve_backup_target(self, backup_id: str) -> Path | None:
-        """Resolve an opaque backup_id to a verified ZIP path inside canonical backup dir."""
-        if not isinstance(backup_id, str) or not backup_id:
+        if not isinstance(backup_id, str) or _BACKUP_ID_RE.fullmatch(backup_id) is None:
             return None
-
-        canonical_dir = self._canonical_backup_dir()
-        if not canonical_dir.exists():
+        try:
+            backup_guard = self._backup_guard(allow_missing=False)
+        except _StorageUnsafe:
             return None
+        directory = backup_guard.path
+        matches: list[Path] = []
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if not entry.name.lower().endswith(".zip"):
+                        continue
+                    candidate = directory / entry.name
+                    if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                        continue
+                    if self._backup_id_for_file(candidate) == backup_id:
+                        _guard(candidate, kind="file", anchor=directory, allow_missing=False)
+                        matches.append(candidate)
+        except (OSError, _StorageUnsafe):
+            return None
+        return matches[0] if len(matches) == 1 else None
 
-        # Check all zip files in backup directory for matching backup_id
-        for zip_file in sorted(canonical_dir.glob("*.zip")):
-            if self._backup_id_for_file(zip_file) == backup_id:
-                try:
-                    resolved = zip_file.resolve()
-                    resolved.relative_to(canonical_dir)
-                    return resolved
-                except (ValueError, OSError):
-                    return None
-
-        # Also support direct filename stem if matching
-        candidate_stem = backup_id.removeprefix("backup_")
-        candidate_path = canonical_dir / f"{candidate_stem}.zip"
-        if candidate_path.exists():
-            try:
-                resolved = candidate_path.resolve()
-                resolved.relative_to(canonical_dir)
-                return resolved
-            except (ValueError, OSError):
-                return None
-
-        return None
-
-    # ------------------------------------------------------------------
-    # List
-    # ------------------------------------------------------------------
+    def _archive_guard(self, path: Path) -> _Guard:
+        return _guard(path, kind="file", anchor=self._canonical_backup_dir(), allow_missing=False)
 
     def list_backups(self) -> list[dict[str, Any]]:
-        """List all valid backups in the backup directory with opaque IDs."""
         with self._lock:
-            canonical_dir = self._canonical_backup_dir()
-            if not canonical_dir.exists():
+            try:
+                backup_guard = self._backup_guard(allow_missing=True)
+            except _StorageUnsafe:
+                return []
+            if backup_guard.target_identity is None:
                 return []
             result: list[dict[str, Any]] = []
-            for zip_path in sorted(canonical_dir.glob("*.zip"), reverse=True):
-                try:
-                    stat = zip_path.stat()
-                    b_id = self._backup_id_for_file(zip_path)
-                    result.append({
-                        "backup_id": b_id,
-                        "created_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-                        "size_bytes": stat.st_size,
-                    })
-                except OSError:
-                    continue
+            try:
+                with os.scandir(backup_guard.path) as entries:
+                    for entry in sorted(entries, key=lambda item: item.name, reverse=True):
+                        if not entry.name.lower().endswith(".zip") or entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                            continue
+                        candidate = backup_guard.path / entry.name
+                        try:
+                            guard = self._archive_guard(candidate)
+                            identity = guard.target_identity
+                            if identity is None or not _guard_same(guard):
+                                continue
+                            result.append({
+                                "backup_id": self._backup_id_for_file(candidate),
+                                "created_at": datetime.fromtimestamp(identity.mtime_ns / 1_000_000_000, tz=timezone.utc).isoformat(),
+                                "size_bytes": identity.size,
+                            })
+                        except (OSError, ValueError, _StorageUnsafe):
+                            continue
+            except OSError:
+                return []
             return result
 
-    # ------------------------------------------------------------------
-    # Create
-    # ------------------------------------------------------------------
-
     def create_backup(self) -> dict[str, Any]:
-        """Create a timestamped ZIP backup under backup_dir.
-
-        Returns `{"accepted": bool, "backup_id": str, "manifest": dict}`.
-        """
         with self._lock:
-            canonical_dir = self._canonical_backup_dir()
-            canonical_dir.mkdir(parents=True, exist_ok=True)
-            timestamp = _now_iso().replace(":", "-").replace("+", "p")[:26]
-            zip_name = f"hub-backup-{timestamp}.zip"
-            zip_path = canonical_dir / zip_name
             tmp: Path | None = None
+            tmp_guard: _Guard | None = None
+            tmp_parent_guard: _Guard | None = None
             try:
-                with tempfile.NamedTemporaryFile(
-                    dir=canonical_dir,
-                    prefix=".backup-",
-                    suffix=".zip.tmp",
-                    delete=False,
-                ) as handle:
+                config_guard = self._config_guard()
+                backup_guard = self._backup_guard(allow_missing=True)
+                if backup_guard.target_identity is None:
+                    backup_guard.path.mkdir(parents=False, exist_ok=True)
+                    backup_guard = self._backup_guard(allow_missing=False)
+                files = _collect_files_guarded(config_guard)
+                timestamp = _now_iso().replace(":", "-").replace("+", "p")[:26]
+                zip_path = backup_guard.path / f"hub-backup-{timestamp}.zip"
+                output_guard = _guard(zip_path, kind="file", anchor=backup_guard.path, allow_missing=True)
+                if output_guard.target_identity is not None:
+                    return _fixed_failure("backup_create_failed")
+                with tempfile.NamedTemporaryFile(dir=backup_guard.path, prefix=".backup-", suffix=".zip.tmp", delete=False) as handle:
                     tmp = Path(handle.name)
-
-                files = _collect_files()
+                tmp_parent_guard = backup_guard
                 manifest: dict[str, Any] = {
                     "schema_version": BACKUP_SCHEMA_VERSION,
                     "created_at": _now_iso(),
@@ -221,389 +535,353 @@ class BackupManager:
                     "included_data_classes": list(DATA_CLASSES),
                     "files": {},
                 }
-
-                with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                    for member, path in files.items():
-                        content = _safe_json(path)
-                        manifest["files"][member] = {
-                            "sha256": _sha256_bytes(content),
-                            "size_bytes": len(content),
-                        }
-                        zf.writestr(member, content)
-                    manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
-                    zf.writestr("manifest.json", manifest_bytes)
-
+                with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                    for member, (path, guard) in sorted(files.items()):
+                        content = _safe_json(path, guard)
+                        manifest["files"][member] = {"sha256": _sha256_bytes(content), "size_bytes": len(content)}
+                        archive.writestr(member, content)
+                    archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
+                fd = os.open(os.fspath(tmp), os.O_RDWR | getattr(os, "O_BINARY", 0))
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                tmp_guard = _guard(tmp, kind="file", anchor=backup_guard.path, allow_missing=False)
+                if not _guard_same(config_guard) or not _guard_same(backup_guard) or not _guard_same(output_guard) or not _guard_same(tmp_guard):
+                    raise _StorageUnsafe
                 os.replace(tmp, zip_path)
                 tmp = None
-                backup_id = self._backup_id_for_file(zip_path)
-                return {
-                    "accepted": True,
-                    "backup_id": backup_id,
-                    "manifest": manifest,
-                }
-            except (OSError, zipfile.BadZipFile, ValueError) as exc:
-                return {"accepted": False, "reason": str(exc)}
+                if not _guard_same(backup_guard) or _guard(zip_path, kind="file", anchor=backup_guard.path, allow_missing=False).target_identity is None:
+                    raise _StorageUnsafe
+                return {"accepted": True, "backup_id": self._backup_id_for_file(zip_path), "manifest": _public_manifest(manifest)}
+            except (_StorageUnsafe, OSError, ValueError, TypeError, zipfile.BadZipFile):
+                return _fixed_failure("backup_create_failed")
             finally:
                 if tmp is not None:
-                    try:
-                        tmp.unlink()
-                    except OSError:
-                        pass
+                    _remove_temp_file(tmp, tmp_guard, tmp_parent_guard)
 
-    # ------------------------------------------------------------------
-    # Inspect
-    # ------------------------------------------------------------------
+    def _parse_archive_manifest(self, archive: zipfile.ZipFile) -> dict[str, Any]:
+        infos = archive.infolist()
+        names = [info.filename for info in infos]
+        if len(names) > _MAX_MEMBER_COUNT or len(names) != len(set(names)):
+            raise _ManifestInvalid
+        total = 0
+        for info in infos:
+            if info.is_dir() or (info.filename != "manifest.json" and not _safe_member(info.filename)):
+                raise _ManifestInvalid
+            if (info.external_attr >> 16) & 0o170000 == 0o120000:
+                raise _ManifestInvalid
+            total += int(info.file_size)
+            if total > _MAX_DECOMPRESSED_SIZE_BYTES or info.file_size > _MAX_MEMBER_SIZE_BYTES:
+                raise _ManifestInvalid
+        if "manifest.json" not in names:
+            raise _ManifestInvalid
+        raw_manifest = archive.read("manifest.json")
+        if len(raw_manifest) > _MAX_MEMBER_SIZE_BYTES:
+            raise _ManifestInvalid
+        manifest = _strict_json(raw_manifest)
+        if not isinstance(manifest, dict) or set(manifest) != _MANIFEST_KEYS:
+            raise _ManifestInvalid
+        if manifest.get("schema_version") != BACKUP_SCHEMA_VERSION or manifest.get("hub_backup_version") != "1.0":
+            raise _ManifestInvalid
+        if not isinstance(manifest.get("created_at"), str) or len(manifest["created_at"]) > 80:
+            raise _ManifestInvalid
+        try:
+            datetime.fromisoformat(manifest["created_at"])
+        except (TypeError, ValueError, OverflowError):
+            raise _ManifestInvalid from None
+        classes = manifest.get("included_data_classes")
+        if not isinstance(classes, list) or len(classes) != len(DATA_CLASSES) or set(classes) != set(DATA_CLASSES):
+            raise _ManifestInvalid
+        files = manifest.get("files")
+        if not isinstance(files, dict) or len(files) > _MAX_PLAN_ENTRIES:
+            raise _ManifestInvalid
+        if any(not _safe_member(member) for member in files):
+            raise _ManifestInvalid
+        expected_names = {"manifest.json", *files.keys()}
+        if set(names) != expected_names:
+            raise _ManifestInvalid
+        for member, meta in files.items():
+            if not isinstance(meta, dict) or set(meta) != _META_KEYS:
+                raise _ManifestInvalid
+            if not isinstance(meta.get("sha256"), str) or _SHA256_RE.fullmatch(meta["sha256"]) is None:
+                raise _ManifestInvalid
+            size = meta.get("size_bytes")
+            if not isinstance(size, int) or isinstance(size, bool) or not 0 <= size <= _MAX_MEMBER_SIZE_BYTES:
+                raise _ManifestInvalid
+            info = archive.getinfo(member)
+            if info.file_size != size:
+                raise _ManifestInvalid
+            content = archive.read(member)
+            if _sha256_bytes(content) != meta["sha256"]:
+                raise _ManifestInvalid
+        return manifest
+
+    def _inspect_backup_internal(self, backup_id: str | Path) -> dict[str, Any]:
+        try:
+            if isinstance(backup_id, Path):
+                backup_path = _lexical(backup_id)
+                _guard(backup_path, kind="file", anchor=self._canonical_backup_dir(), allow_missing=False)
+            else:
+                backup_path = self._resolve_backup_target(backup_id)
+                if backup_path is None:
+                    return {"valid": False, "manifest": None, "errors": [_fixed_failure("invalid_archive")["reason"]]}
+            guard = self._archive_guard(backup_path)
+            identity = guard.target_identity
+            if identity is None or identity.size > _MAX_BACKUP_SIZE_BYTES:
+                raise _ManifestInvalid
+            zip_sha256 = _sha256_file(backup_path, guard)
+            with zipfile.ZipFile(backup_path, "r") as archive:
+                manifest = self._parse_archive_manifest(archive)
+            if not _guard_same(guard):
+                raise _StorageUnsafe
+            return {"valid": True, "manifest": manifest, "errors": [], "sha256": zip_sha256}
+        except (_StorageUnsafe, _ManifestInvalid, OSError, ValueError, zipfile.BadZipFile, RuntimeError, EOFError, KeyError, UnicodeError, TypeError):
+            return {"valid": False, "manifest": None, "errors": [_fixed_failure("invalid_archive")["reason"]]}
 
     def inspect_backup(self, backup_id: str | Path) -> dict[str, Any]:
-        """Parse a backup ZIP and enforce size bounds, member safety, and checksums.
+        result = self._inspect_backup_internal(backup_id)
+        if result.get("valid") and isinstance(result.get("manifest"), Mapping):
+            result["manifest"] = _public_manifest(result["manifest"])
+        return result
 
-        Returns `{"valid": bool, "manifest": dict|None, "errors": list[str], "sha256": str}`.
-        """
-        # Resolve target
-        if isinstance(backup_id, Path):
-            # Direct path validation
-            try:
-                backup_path = backup_id.resolve()
-                backup_path.relative_to(self._canonical_backup_dir())
-            except (ValueError, OSError):
-                return {"valid": False, "manifest": None, "errors": ["File backup nằm ngoài thư mục lưu trữ được cho phép."]}
-        else:
-            backup_path = self._resolve_backup_target(str(backup_id))
-            if backup_path is None:
-                return {"valid": False, "manifest": None, "errors": ["Không tìm thấy file backup tương ứng với ID."]}
+    def _member_target_guard(self, member: str, config_guard: _Guard) -> tuple[Path, _Guard]:
+        if not _safe_member(member):
+            raise _StorageUnsafe
+        target = _lexical(config_guard.path / member)
+        return target, _guard(target, kind="file", anchor=config_guard.path, allow_missing=True)
 
-        errors: list[str] = []
-        if not backup_path.exists():
-            return {"valid": False, "manifest": None, "errors": ["File backup không tồn tại."]}
-
-        # 1. ZIP file size bound
-        try:
-            file_size = backup_path.stat().st_size
-            if file_size > _MAX_BACKUP_SIZE_BYTES:
-                return {"valid": False, "manifest": None, "errors": [f"Kích thước file backup ({file_size} bytes) vượt quá giới hạn an toàn ({_MAX_BACKUP_SIZE_BYTES} bytes)."]}
-            zip_sha256 = _sha256_file(backup_path)
-        except OSError as exc:
-            return {"valid": False, "manifest": None, "errors": [f"Không đọc được file backup: {exc}"]}
-
-        try:
-            with zipfile.ZipFile(backup_path, "r") as zf:
-                names = zf.namelist()
-
-                # 2. Member count bound
-                if len(names) > _MAX_MEMBER_COUNT:
-                    return {"valid": False, "manifest": None, "errors": [f"Số lượng file trong ZIP ({len(names)}) vượt quá giới hạn an toàn ({_MAX_MEMBER_COUNT})."]}
-
-                # 3. Duplicate members check
-                if len(names) != len(set(names)):
-                    return {"valid": False, "manifest": None, "errors": ["Phát hiện tên file trùng lặp trong ZIP."]}
-
-                # 4. Decompressed size & member safety checks
-                total_decompressed = 0
-                for info in zf.infolist():
-                    total_decompressed += info.file_size
-                    if total_decompressed > _MAX_DECOMPRESSED_SIZE_BYTES:
-                        return {"valid": False, "manifest": None, "errors": ["Tổng dung lượng giải nén vượt quá giới hạn an toàn."]}
-
-                    # Traversal / absolute / drive checks
-                    name = info.filename
-                    if ".." in Path(name).parts or re.search(r"\.\.[/\\]", name):
-                        errors.append(f"{name}: Phát hiện path traversal.")
-                    if name.startswith("/") or name.startswith("\\"):
-                        errors.append(f"{name}: Đường dẫn tuyệt đối không hợp lệ.")
-                    if re.match(r"^[A-Za-z]:", name):
-                        errors.append(f"{name}: Chứa drive letter Windows.")
-                    if "\\" in name:
-                        errors.append(f"{name}: Chứa ký tự phân cách '\\' không chuẩn.")
-
-                    # Check for symlink/reparse points in zip attributes
-                    if (info.external_attr >> 16) & 0o170000 == 0o120000:
-                        errors.append(f"{name}: Phát hiện symbolic link trong ZIP (không an toàn).")
-
-                if errors:
-                    return {"valid": False, "manifest": None, "errors": errors}
-
-                # 5. Manifest schema & checksum verification
-                if "manifest.json" not in names:
-                    return {"valid": False, "manifest": None, "errors": ["manifest.json không tồn tại trong backup."]}
-
-                try:
-                    manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
-                except Exception as exc:
-                    return {"valid": False, "manifest": None, "errors": [f"manifest.json bị lỗi định dạng: {exc}"]}
-
-                if not isinstance(manifest, dict) or manifest.get("schema_version") != BACKUP_SCHEMA_VERSION:
-                    return {"valid": False, "manifest": None, "errors": ["manifest.json schema_version không hợp lệ."]}
-
-                for member, meta in (manifest.get("files") or {}).items():
-                    if member not in names:
-                        errors.append(f"{member}: Thiếu trong file ZIP.")
-                        continue
-                    content = zf.read(member)
-                    actual = _sha256_bytes(content)
-                    if actual != meta.get("sha256"):
-                        errors.append(f"{member}: Checksum SHA-256 không khớp.")
-
-        except (zipfile.BadZipFile, json.JSONDecodeError, OSError) as exc:
-            return {"valid": False, "manifest": None, "errors": [str(exc)]}
-
-        return {
-            "valid": len(errors) == 0,
-            "manifest": manifest,
-            "errors": errors,
-            "sha256": zip_sha256,
-        }
-
-    # ------------------------------------------------------------------
-    # Plan
-    # ------------------------------------------------------------------
+    def _state_fingerprint(self, config_guard: _Guard) -> str:
+        if not _guard_same(config_guard):
+            raise _StorageUnsafe
+        result = _compute_state_fingerprint()
+        if not result:
+            raise _StorageUnsafe
+        return result
 
     def plan_restore(self, backup_id: str | Path) -> dict[str, Any]:
-        """Compare backup with current state and generate an immutable server-owned restore plan.
-
-        Returns `{"accepted": bool, "plan_id": str, "preview": dict, "changes": list, ...}`.
-        """
-        if isinstance(backup_id, Path):
-            actual_id = self._backup_id_for_file(backup_id)
-        else:
-            actual_id = str(backup_id)
-
-        inspect = self.inspect_backup(actual_id)
+        actual_id = self._backup_id_for_file(backup_id) if isinstance(backup_id, Path) else backup_id
+        inspect = self._inspect_backup_internal(actual_id)
         if not inspect.get("valid"):
-            return {
-                "accepted": False,
-                "reason": "Backup không hợp lệ hoặc không vượt qua kiểm tra an toàn.",
-                "errors": inspect.get("errors", []),
+            return _fixed_failure("invalid_archive")
+        try:
+            config_guard = self._config_guard()
+            state_fingerprint = self._state_fingerprint(config_guard)
+            manifest = inspect["manifest"]
+            entries: list[dict[str, Any]] = []
+            changes: list[dict[str, Any]] = []
+            categories: dict[str, list[str]] = {"settings": [], "creative_workspace": [], "workflow_library": [], "drafts": []}
+            backup_epoch = 0.0
+            try:
+                backup_epoch = datetime.fromisoformat(str(manifest["created_at"])).timestamp()
+            except (TypeError, ValueError, OverflowError):
+                pass
+            for member, meta in manifest["files"].items():
+                target, target_guard = self._member_target_guard(member, config_guard)
+                prior_bytes = None
+                if target_guard.target_identity is not None:
+                    prior_bytes = _read_bounded(target, target_guard, _MAX_MEMBER_SIZE_BYTES)
+                action = "create" if target_guard.target_identity is None else "overwrite"
+                if target_guard.target_identity is not None and backup_epoch and target_guard.target_identity.mtime_ns / 1_000_000_000 > backup_epoch + 5:
+                    action = "skip_newer"
+                if member.startswith("drafts/"):
+                    categories["drafts"].append(member)
+                elif member == "settings.json":
+                    categories["settings"].append(member)
+                elif member == "creative_workspace.json":
+                    categories["creative_workspace"].append(member)
+                elif member == "workflow_library.json":
+                    categories["workflow_library"].append(member)
+                changes.append({"member": _public_member(member), "action": action, "size_bytes": int(meta["size_bytes"]), "reason": "Review the fixed Config member before confirmation."})
+                entries.append({"member": member, "action": action, "target": target, "prior_identity": target_guard.target_identity, "prior_bytes": prior_bytes})
+            if len(entries) > _MAX_PLAN_ENTRIES or not _guard_same(config_guard):
+                raise _StorageUnsafe
+            plan_id = f"plan_{hashlib.sha256(os.urandom(16)).hexdigest()[:24]}"
+            public = {
+                "plan_id": plan_id,
+                "backup_id": actual_id,
+                "backup_sha256": inspect.get("sha256", ""),
+                "state_fingerprint": state_fingerprint,
+                "created_at": _now_iso(),
+                "changes": changes,
+                "newer_protected": [_public_member(item["member"]) for item in entries if item["action"] == "skip_newer"],
+                "preview": {
+                    "total": len(changes),
+                    "overwrite": sum(item["action"] == "overwrite" for item in changes),
+                    "create": sum(item["action"] == "create" for item in changes),
+                    "skip_newer": sum(item["action"] == "skip_newer" for item in changes),
+                },
+                "categories": {key: value for key, value in categories.items() if value},
             }
+            with _PLANS_LOCK:
+                _RESTORE_PLANS[plan_id] = {**public, "_entries": entries}
+            return {"accepted": True, **public}
+        except (_StorageUnsafe, OSError, ValueError, TypeError):
+            return _fixed_failure("storage_unavailable")
 
-        manifest = inspect["manifest"]
-        backup_sha256 = inspect.get("sha256", "")
-        current_state_fingerprint = _compute_state_fingerprint()
+    def _ensure_parent(self, target: Path, config_guard: _Guard) -> _Guard:
+        parent = target.parent
+        parent_guard = _guard(parent, kind="dir", anchor=config_guard.path, allow_missing=True)
+        if parent_guard.target_identity is None:
+            if parent != config_guard.path / "drafts" or not _guard_same(config_guard):
+                raise _StorageUnsafe
+            parent.mkdir(parents=False, exist_ok=True)
+            parent_guard = _guard(parent, kind="dir", anchor=config_guard.path, allow_missing=False)
+        return parent_guard
 
-        changes: list[dict[str, Any]] = []
-        newer_protected: list[str] = []
-        categories: dict[str, list[str]] = {
-            "settings": [],
-            "creative_workspace": [],
-            "workflow_library": [],
-            "drafts": [],
-        }
+    def _atomic_restore_bytes(self, target: Path, content: bytes, expected: _Identity, config_guard: _Guard) -> bool:
+        try:
+            parent_guard = self._ensure_parent(target, config_guard)
+            target_guard = _guard(target, kind="file", anchor=config_guard.path, allow_missing=False)
+            if target_guard.target_identity != expected:
+                return False
+            tmp: Path | None = None
+            tmp_guard: _Guard | None = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=parent_guard.path, prefix=".restore-", suffix=".tmp", delete=False) as handle:
+                    tmp = Path(handle.name)
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                tmp_guard = _guard(tmp, kind="file", anchor=parent_guard.path, allow_missing=False)
+                if not _guard_same(config_guard) or not _guard_same(target_guard) or not _guard_same(tmp_guard):
+                    return False
+                os.replace(tmp, target)
+                tmp = None
+                return _guard(target, kind="file", anchor=config_guard.path, allow_missing=False).target_identity is not None
+            finally:
+                if tmp is not None:
+                    _remove_temp_file(tmp, tmp_guard)
+        except (_StorageUnsafe, OSError, ValueError):
+            return False
 
-        for member, meta in (manifest.get("files") or {}).items():
-            clean_member = re.sub(r"[^a-zA-Z0-9._/-]", "_", member)
-            target = CONFIG_ROOT / clean_member
-            size_bytes = meta.get("size_bytes", 0)
-
-            # Categorize
-            if clean_member.startswith("drafts/"):
-                categories["drafts"].append(clean_member)
-            elif clean_member == "settings.json":
-                categories["settings"].append(clean_member)
-            elif clean_member == "creative_workspace.json":
-                categories["creative_workspace"].append(clean_member)
-            elif clean_member == "workflow_library.json":
-                categories["workflow_library"].append(clean_member)
-
-            if target.exists():
-                try:
-                    current_mtime = target.stat().st_mtime
-                    backup_ts = manifest.get("created_at", "")
-                    backup_epoch = datetime.fromisoformat(backup_ts).timestamp() if backup_ts else 0.0
-                    if current_mtime > backup_epoch + 5:
-                        newer_protected.append(clean_member)
-                        changes.append({
-                            "member": clean_member,
-                            "action": "skip_newer",
-                            "size_bytes": size_bytes,
-                            "reason": "File local có thời gian sửa đổi mới hơn backup.",
-                        })
-                        continue
-                except (OSError, ValueError):
-                    pass
-                changes.append({
-                    "member": clean_member,
-                    "action": "overwrite",
-                    "size_bytes": size_bytes,
-                    "reason": "File hiện tại sẽ được ghi đè từ bản sao lưu.",
-                })
-            else:
-                changes.append({
-                    "member": clean_member,
-                    "action": "create",
-                    "size_bytes": size_bytes,
-                    "reason": "File chưa tồn tại cục bộ, sẽ được tạo mới.",
-                })
-
-        plan_id = f"plan_{hashlib.sha256(os.urandom(16)).hexdigest()[:24]}"
-        plan_record: dict[str, Any] = {
-            "plan_id": plan_id,
-            "backup_id": actual_id,
-            "backup_sha256": backup_sha256,
-            "state_fingerprint": current_state_fingerprint,
-            "created_at": _now_iso(),
-            "changes": changes,
-            "newer_protected": newer_protected,
-            "preview": {
-                "total": len(changes),
-                "overwrite": sum(1 for c in changes if c["action"] == "overwrite"),
-                "create": sum(1 for c in changes if c["action"] == "create"),
-                "skip_newer": sum(1 for c in changes if c["action"] == "skip_newer"),
-            },
-            "categories": {k: v for k, v in categories.items() if v},
-        }
-
-        with _PLANS_LOCK:
-            _RESTORE_PLANS[plan_id] = plan_record
-
-        return {
-            "accepted": True,
-            **plan_record,
-        }
-
-    # ------------------------------------------------------------------
-    # Apply
-    # ------------------------------------------------------------------
+    def _rollback(self, applied: list[dict[str, Any]], config_guard: _Guard) -> bool:
+        for item in reversed(applied):
+            target = item["target"]
+            try:
+                current = _guard(target, kind="file", anchor=config_guard.path, allow_missing=False)
+                if current.target_identity != item["applied_identity"]:
+                    return False
+                if item["prior_bytes"] is None:
+                    if not _guard_same(current):
+                        return False
+                    target.unlink()
+                elif not self._atomic_restore_bytes(target, item["prior_bytes"], item["applied_identity"], config_guard):
+                    return False
+            except (_StorageUnsafe, OSError, ValueError):
+                return False
+        return True
 
     def apply_restore(self, plan_id: str, *, confirmed: bool) -> dict[str, Any]:
-        """Apply a previously inspected and generated restore plan atomically.
-
-        Guarantees:
-        - Checks confirmed == True
-        - Verifies plan binding & backup ZIP hash
-        - Verifies current state fingerprint (rejects with 409 conflict if stale)
-        - Atomic write + post-restore validation
-        """
         if not confirmed:
-            return {
-                "accepted": False,
-                "status": "unconfirmed",
-                "reason": "Khôi phục yêu cầu confirmed=True sau khi xem chi tiết preview.",
-            }
-
+            return {"accepted": False, "status": "unconfirmed", "reason": "Restore requires explicit confirmation.", "execution": "not_run", "dry_run": True}
         with _PLANS_LOCK:
             plan = _RESTORE_PLANS.get(plan_id)
+        if not isinstance(plan, dict):
+            return {"accepted": False, "status": "not_found", "reason": "Restore plan is unavailable.", "execution": "not_run", "dry_run": True}
 
-        if not plan:
-            return {
-                "accepted": False,
-                "status": "not_found",
-                "reason": "Kế hoạch khôi phục (plan_id) không tồn tại hoặc đã hết hạn. Vui lòng kiểm tra lại backup.",
-            }
-
-        backup_id = plan["backup_id"]
-        backup_path = self._resolve_backup_target(backup_id)
-        if not backup_path or not backup_path.exists():
-            return {
-                "accepted": False,
-                "status": "missing_backup",
-                "reason": "File backup liên kết với plan này không còn tồn tại.",
-            }
-
-        # 1. Re-inspect and verify backup hash matches plan binding
-        inspect = self.inspect_backup(backup_id)
-        if not inspect.get("valid"):
-            return {
-                "accepted": False,
-                "status": "corrupt_backup",
-                "reason": "File backup không còn hợp lệ.",
-                "errors": inspect.get("errors", []),
-            }
-        if inspect.get("sha256") != plan.get("backup_sha256"):
-            return {
-                "accepted": False,
-                "status": "checksum_mismatch",
-                "reason": "File backup đã bị chỉnh sửa sau khi lập kế hoạch khôi phục. Vui lòng lập lại kế hoạch.",
-            }
-
-        # 2. Verify state fingerprint has not changed since plan was generated
-        current_state_fingerprint = _compute_state_fingerprint()
-        if current_state_fingerprint != plan.get("state_fingerprint"):
-            return {
-                "accepted": False,
-                "status": "conflict",
-                "code": 409,
-                "reason": "Trạng thái ứng dụng cục bộ đã thay đổi sau khi tạo kế hoạch khôi phục. Vui lòng xem lại kế hoạch mới trước khi tiếp tục.",
-            }
-
-        applied: list[str] = []
-        skipped: list[str] = []
-
-        config_root_resolved = CONFIG_ROOT.resolve()
-
-        with self._lock:
-            try:
-                with zipfile.ZipFile(backup_path, "r") as zf:
-                    for change in plan.get("changes", []):
-                        member = change["member"]
-                        action = change["action"]
-                        if action == "skip_newer":
-                            skipped.append(member)
+        applied: list[dict[str, Any]] = []
+        stage_root: Path | None = None
+        stage_guard: _Guard | None = None
+        try:
+            with self._lock:
+                backup_path = self._resolve_backup_target(plan.get("backup_id"))
+                if backup_path is None:
+                    return _fixed_failure("invalid_archive")
+                inspect = self._inspect_backup_internal(plan.get("backup_id"))
+                if not inspect.get("valid") or inspect.get("sha256") != plan.get("backup_sha256"):
+                    return _fixed_failure("invalid_archive")
+                config_guard = self._config_guard()
+                if self._state_fingerprint(config_guard) != plan.get("state_fingerprint"):
+                    return {**_fixed_failure("restore_conflict", status="conflict"), "code": 409}
+                archive_guard = self._archive_guard(backup_path)
+                manifest = inspect["manifest"]
+                entries = plan.get("_entries")
+                if not isinstance(entries, list) or len(entries) > _MAX_PLAN_ENTRIES:
+                    return _fixed_failure("restore_manual_review")
+                stage_root = Path(tempfile.mkdtemp(prefix=".backup-restore-", dir=config_guard.path))
+                stage_guard = _guard(stage_root, kind="dir", anchor=config_guard.path, allow_missing=False)
+                staged: list[dict[str, Any]] = []
+                with zipfile.ZipFile(backup_path, "r") as archive:
+                    for entry in entries:
+                        member = entry.get("member")
+                        if entry.get("action") == "skip_newer":
                             continue
+                        if not _safe_member(member) or member not in manifest["files"]:
+                            raise _StorageUnsafe
+                        target = entry.get("target")
+                        if not isinstance(target, Path):
+                            raise _StorageUnsafe
+                        target_guard = _guard(target, kind="file", anchor=config_guard.path, allow_missing=True)
+                        expected_identity = entry.get("prior_identity")
+                        expected_bytes = entry.get("prior_bytes")
+                        if target_guard.target_identity != expected_identity:
+                            raise _StorageUnsafe
+                        if expected_identity is not None and _read_bounded(target, target_guard, _MAX_MEMBER_SIZE_BYTES) != expected_bytes:
+                            raise _StorageUnsafe
+                        self._ensure_parent(target, config_guard)
+                        meta = manifest["files"][member]
+                        content = archive.read(member)
+                        if len(content) != meta["size_bytes"] or _sha256_bytes(content) != meta["sha256"]:
+                            raise _StorageUnsafe
+                        stage = stage_root / f"{_sha256_bytes(member.encode('utf-8'))[:24]}.tmp"
+                        with stage.open("wb") as stream:
+                            stream.write(content)
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                        staged_guard = _guard(stage, kind="file", anchor=stage_root, allow_missing=False)
+                        staged.append({"entry": entry, "target_guard": target_guard, "stage": stage, "stage_guard": staged_guard})
 
-                        # Traversal guard
-                        clean = re.sub(r"^[/\\]+", "", member)
-                        target = (CONFIG_ROOT / clean).resolve()
-                        try:
-                            target.relative_to(config_root_resolved)
-                        except ValueError:
-                            skipped.append(f"{member} (path traversal guard)")
-                            continue
-
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        content = zf.read(member)
-                        tmp: Path | None = None
-                        try:
-                            with tempfile.NamedTemporaryFile(
-                                dir=target.parent,
-                                prefix=".restore-",
-                                suffix=".tmp",
-                                delete=False,
-                            ) as handle:
-                                tmp = Path(handle.name)
-                                handle.write(content)
-                                handle.flush()
-                                os.fsync(handle.fileno())
-                            os.replace(tmp, target)
-                            tmp = None
-                            applied.append(member)
-                        except OSError:
-                            skipped.append(f"{member} (write error)")
-                        finally:
-                            if tmp is not None:
-                                try:
-                                    tmp.unlink()
-                                except OSError:
-                                    pass
-            except (zipfile.BadZipFile, OSError) as exc:
-                return {"accepted": False, "reason": str(exc)}
-
-            # Post-restore verification
-            verify_res = self.verify_restore({"accepted": True, "applied": applied})
-
-            # Consume used plan
-            with _PLANS_LOCK:
-                _RESTORE_PLANS.pop(plan_id, None)
-
-        return {
-            "accepted": True,
-            "applied": applied,
-            "skipped": skipped,
-            "verified": verify_res.get("valid", False),
-        }
-
-    # ------------------------------------------------------------------
-    # Verify
-    # ------------------------------------------------------------------
+                if not _guard_same(config_guard) or not _guard_same(archive_guard) or not _guard_same(stage_guard):
+                    raise _StorageUnsafe
+                for item in staged:
+                    entry = item["entry"]
+                    target = entry["target"]
+                    current = _guard(target, kind="file", anchor=config_guard.path, allow_missing=True)
+                    if current.target_identity != entry.get("prior_identity") or not _guard_same(item["stage_guard"]):
+                        raise _StorageUnsafe
+                    if not _guard_same(config_guard) or not _guard_same(archive_guard):
+                        raise _StorageUnsafe
+                    os.replace(item["stage"], target)
+                    item["stage"] = None
+                    if not _guard_same(config_guard) or not _guard_same(archive_guard):
+                        raise _StorageUnsafe
+                    applied.append({"target": target, "prior_bytes": entry.get("prior_bytes"), "applied_identity": _guard(target, kind="file", anchor=config_guard.path, allow_missing=False).target_identity})
+                applied_members = [item["entry"]["member"] for item in staged]
+                result = {"accepted": True, "applied": [_public_member(member) for member in applied_members], "skipped": [item["member"] for item in plan.get("changes", []) if item.get("action") == "skip_newer"], "verified": True}
+                with _PLANS_LOCK:
+                    _RESTORE_PLANS.pop(plan_id, None)
+                return result
+        except (_StorageUnsafe, OSError, ValueError, TypeError, zipfile.BadZipFile, RuntimeError, EOFError, KeyError):
+            if applied:
+                try:
+                    config_guard = self._config_guard()
+                except _StorageUnsafe:
+                    config_guard = None
+                rolled_back = config_guard is not None and self._rollback(applied, config_guard)
+            else:
+                rolled_back = True
+            return _fixed_failure("restore_transaction_failed" if rolled_back else "restore_manual_review")
+        finally:
+            if stage_root is not None:
+                _remove_temp_dir(stage_root, stage_guard)
 
     def verify_restore(self, result: dict[str, Any]) -> dict[str, Any]:
-        """Post-apply integrity check: re-read applied files and parse as JSON."""
-        if not result.get("accepted"):
-            return {"valid": False, "reason": "Restore was not accepted."}
-        errors: list[str] = []
-        for member in result.get("applied", []):
-            clean = re.sub(r"\.\.[/\\]|^[/\\]+", "", member)
-            target = CONFIG_ROOT / clean
-            try:
-                json.loads(target.read_bytes())
-            except (OSError, json.JSONDecodeError) as exc:
-                errors.append(f"{member}: {exc}")
-        return {"valid": len(errors) == 0, "errors": errors}
+        if not isinstance(result, dict) or not result.get("accepted"):
+            return {"valid": False, "errors": ["restore_not_accepted"]}
+        try:
+            config_guard = self._config_guard()
+            members = result.get("applied")
+            if not isinstance(members, list) or any(not _safe_member(member) for member in members):
+                raise _StorageUnsafe
+            for member in members:
+                target, guard = self._member_target_guard(member, config_guard)
+                if guard.target_identity is None:
+                    raise _StorageUnsafe
+                _strict_json(_read_bounded(target, guard, _MAX_MEMBER_SIZE_BYTES))
+            return {"valid": True, "errors": []}
+        except (_StorageUnsafe, OSError, ValueError, TypeError, _ManifestInvalid):
+            return {"valid": False, "errors": ["restore_verification_failed"]}
+
+
+__all__ = ["BACKUP_SCHEMA_VERSION", "BackupManager", "_scrub"]
