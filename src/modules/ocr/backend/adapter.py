@@ -12,6 +12,8 @@ from src.shared.utils.adapter_common import (
     registered_model,
     registered_runtime,
     resolve_artifact_input,
+    requires_server_output_namespace,
+    server_output_namespace,
     unavailable,
 )
 
@@ -33,9 +35,12 @@ def parse(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[
     if not runtime[0].is_file() or not runtime[1].is_file() or not model[1].exists():
         return unavailable("paddleocr_vl", "PaddleOCR-VL runtime/model leaf không còn tồn tại sau khi registry được đọc.", code="runtime_leaf_missing")
     python, helper, service = runtime
+    namespace = server_output_namespace(context, "paddleocr")
+    if requires_server_output_namespace(context) and namespace is None:
+        return unavailable("paddleocr_vl", "Hub không tạo được output namespace an toàn cho PaddleOCR-VL.", code="output_scope_unavailable")
     result = run_json_worker(
         [str(python), str(helper)],
-        {"path": str(source), "model_id": model[0], "output_format": str(payload.get("output_format") or "all")[:20]},
+        {"path": str(source), "model_id": model[0], "output_format": str(payload.get("output_format") or "all")[:20], "output_namespace": str(namespace) if namespace is not None else None},
         label="paddleocr",
         cwd=service,
         env={**os.environ, "LOCALAIHUB_ROOT": str(local_root()), "PADDLEOCR_HOME": str(service), "PADDLE_PDX_CACHE_HOME": str(local_cache_root() / "PaddleX"), "FLAGS_use_cuda": "1", "PYTHONIOENCODING": "utf-8"},

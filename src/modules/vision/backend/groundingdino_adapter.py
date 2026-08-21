@@ -11,6 +11,8 @@ from src.shared.utils.adapter_common import (
     registered_model,
     registered_runtime,
     resolve_artifact_input,
+    requires_server_output_namespace,
+    server_output_namespace,
     unavailable,
 )
 
@@ -43,9 +45,12 @@ def ground(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict
         text_threshold = max(0.0, min(1.0, float(payload.get("text_threshold", 0.25))))
     except (TypeError, ValueError):
         text_threshold = 0.25
+    namespace = server_output_namespace(context, "groundingdino")
+    if requires_server_output_namespace(context) and namespace is None:
+        return unavailable("groundingdino", "Hub không tạo được output namespace an toàn cho Grounding DINO.", code="output_scope_unavailable")
     result = run_json_worker(
         [str(python), str(helper)],
-        {"path": str(source), "prompt": prompt, "box_threshold": box_threshold, "text_threshold": text_threshold, "model_id": model[0]},
+        {"path": str(source), "prompt": prompt, "box_threshold": box_threshold, "text_threshold": text_threshold, "model_id": model[0], "output_namespace": str(namespace) if namespace is not None else None},
         label="groundingdino",
         cwd=service,
         env={**os.environ, "LOCALAIHUB_ROOT": str(local_root()), "GROUNDINGDINO_HOME": str(service), "PYTHONIOENCODING": "utf-8"},

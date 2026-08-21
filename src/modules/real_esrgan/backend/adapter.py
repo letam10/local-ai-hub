@@ -12,7 +12,7 @@ from src.services.api.config import component, models
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
 from src.services.artifact_store import describe, resolve
 from src.shared.paths.registry import MODEL_ROOT, OUTPUT_ROOT, TEMP_ROOT
-from src.shared.utils.adapter_common import local_root, unavailable
+from src.shared.utils.adapter_common import local_root, requires_server_output_namespace, server_output_namespace, unavailable
 
 
 WORKER = Path(__file__).with_name("worker.py")
@@ -120,6 +120,9 @@ def run_realesrgan(payload: dict[str, Any], context: ProcessOwner | None = None)
     source = _image_artifact(payload)
     if source is None or source.suffix.casefold() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
         return {"status": "error", "error": "Real-ESRGAN chỉ nhận IMAGE artifact hợp lệ của Hub."}
+    namespace = server_output_namespace(context, "real-esrgan")
+    if requires_server_output_namespace(context) and namespace is None:
+        return unavailable("real_esrgan", "Hub không tạo được output namespace an toàn cho job Real-ESRGAN.", code="output_scope_unavailable")
     try:
         scale = max(1, min(4, int(payload.get("scale", 2))))
         tile = max(0, min(2048, int(payload.get("tile", 0))))
@@ -131,7 +134,8 @@ def run_realesrgan(payload: dict[str, Any], context: ProcessOwner | None = None)
         "runtime": str(runtime),
         "model_path": str(model),
         "model_id": _MODEL_ID,
-        "output_root": str(OUTPUT_ROOT / "Real-ESRGAN"),
+        "output_root": str(namespace or (OUTPUT_ROOT / "Real-ESRGAN")),
+        "output_namespace": str(namespace) if namespace is not None else None,
         "temp_root": str(TEMP_ROOT / "jobs" / f"realesrgan_{stamp}"),
         "scale": scale,
         "tile": tile,

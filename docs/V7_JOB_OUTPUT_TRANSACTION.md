@@ -2,17 +2,30 @@
 
 The job manager creates a private, bounded `job-output-scope.v1` manifest for
 output-producing jobs before the worker starts. The manifest contains only an
-opaque job fingerprint, safe relative `Output` leaves, bounded file identity
-metadata, ownership (`owned` or `ambiguous`), and a finite terminal state. It
-never enters the public job projection and never stores an absolute path,
-command, log, stderr, client value, or secret.
+opaque job fingerprint, safe relative `Output` leaves, exact claims, claimed
+per-job namespaces, bounded file identity metadata, ownership (`owned` or
+`ambiguous`), and a finite terminal state. It never enters the public job
+projection and never stores an absolute path, command, log, stderr, client
+value, or secret.
+
+HubJobManager exposes two server-owned producer seams through `JobContext`:
+`claim_output(path)` for a known leaf and `claim_output_namespace(label)` for
+dynamic batches. A namespace is created under the private
+`.job-output-scopes` directory before the producer starts; the producer
+receives its path only in the internal worker request. AnimeSR,
+Practical-RIFE, Real-ESRGAN, SAM2, Whisper, media/FFmpeg, ComfyUI, vision,
+OCR, and voice adapters use this seam when they run under a Hub job. Direct
+adapter calls without a JobContext remain compatibility/test-only paths.
 
 When a worker returns output candidates, the artifact store validates every
 candidate as a regular file under the server-owned `Output` root, rejects
 traversal, external paths, reparse points, directories, duplicates, and size
-overflow, then records the candidate identity in the manifest. A path that was
-already present in the pre-worker bounded snapshot, or whose ownership cannot
-be proven, is preserved and marked `manual_review`.
+overflow, then records the candidate identity in the manifest. A candidate is
+`owned` only when it is an explicitly claimed leaf or is inside an explicitly
+claimed namespace and was absent from the complete pre-worker snapshot. A path
+that appeared after the snapshot but before a claim, or whose ownership cannot
+be proven, is preserved and marked `manual_review`; baseline absence alone is
+never an ownership grant.
 
 Cancellation and publication failure resolve the manifest under the job
 context lock. Only an identity-matching candidate explicitly marked `owned`
@@ -22,8 +35,11 @@ existing opaque artifact registry. The existing artifact registration remains
 the publication boundary, so no public artifact/index entry is created for a
 failed or cancelled job.
 
-Persisted open/failed/cancelled scopes can be reconciled in a bounded,
-idempotent pass. Reconciliation handles only the explicit manifest candidates
-and never scans arbitrary `Output` files for deletion. Existing staged
-artifact transactions, opaque IDs, native preview/Range transport, and legacy
-worker output behavior remain unchanged.
+If a required scope is missing, malformed, unreadable, or a producer cannot
+obtain a manager-issued claim, publication stops with a fixed path-free
+unavailable/not-run result and ambiguous files are preserved. Persisted
+open/failed/cancelled scopes can be reconciled in a bounded, idempotent pass.
+Reconciliation handles only the explicit manifest candidates and claimed
+namespaces; it never scans arbitrary `Output` files for deletion. Existing
+staged artifact transactions, opaque IDs, native preview/Range transport, and
+legacy worker output behavior remain unchanged.

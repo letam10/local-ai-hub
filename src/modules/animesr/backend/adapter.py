@@ -12,7 +12,7 @@ from src.services.api.config import component, models
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
 from src.services.artifact_store import describe, resolve
 from src.shared.paths.registry import MODEL_ROOT, OUTPUT_ROOT
-from src.shared.utils.adapter_common import local_root, unavailable
+from src.shared.utils.adapter_common import local_root, requires_server_output_namespace, server_output_namespace, unavailable
 
 
 WORKER = Path(__file__).with_name("worker.py")
@@ -194,6 +194,9 @@ def run_animesr(payload: dict[str, Any], context: ProcessOwner | None = None) ->
     source = _video_artifact(payload)
     if source is None:
         return {"status": "error", "error": "AnimeSR cần VIDEO artifact do Hub quản lý."}
+    namespace = server_output_namespace(context, "animesr")
+    if requires_server_output_namespace(context) and namespace is None:
+        return unavailable("animesr", "Hub không tạo được output namespace an toàn cho job AnimeSR.", code="output_scope_unavailable")
     ffmpeg = _registry_path("ffmpeg", "executable")
     if ffmpeg is None:
         home = _registry_path("ffmpeg", "path")
@@ -207,7 +210,8 @@ def run_animesr(payload: dict[str, Any], context: ProcessOwner | None = None) ->
     request = {
         "path": str(source),
         "runtime": str(runtime),
-        "output_root": str(OUTPUT_ROOT / "AnimeSR"),
+        "output_root": str(namespace or (OUTPUT_ROOT / "AnimeSR")),
+        "output_namespace": str(namespace) if namespace is not None else None,
         "scale": scale,
         "model_id": _MODEL_ID,
         "model": _MODEL_SPEC["model"],

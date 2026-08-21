@@ -43,6 +43,7 @@ class V7JobOutputTransactionTests(unittest.TestCase):
             with patches[0], patches[1], patches[2]:
                 def runner(_payload: dict[str, object], _context: object) -> dict[str, object]:
                     target.parent.mkdir(parents=True)
+                    self.assertEqual(_context.claim_output(target)["status"], "claimed")
                     target.write_bytes(b"owned output")
                     ready.set()
                     self.assertTrue(release.wait(3))
@@ -111,6 +112,7 @@ class V7JobOutputTransactionTests(unittest.TestCase):
         try:
             with patches[0], patches[1], patches[2], patch.object(artifact_store, "register_worker_outputs", return_value=None):
                 def runner(_payload: dict[str, object], _context: object) -> dict[str, object]:
+                    self.assertEqual(_context.claim_output(target)["status"], "claimed")
                     target.write_bytes(b"publication failure")
                     return {"status": "completed", "output": str(target)}
 
@@ -160,6 +162,10 @@ class V7JobOutputTransactionTests(unittest.TestCase):
         with patch.object(artifact_store, "OUTPUT_ROOT", self.output_root), patch.object(artifact_store, "INDEX_PATH", self.index_path):
             self.assertIsNotNone(artifact_store.begin_job_output_scope(job_id))
             owned.write_bytes(b"owned")
+            self.assertEqual(artifact_store.claim_job_output_path(job_id, owned)["status"], "manual_review")
+            owned.unlink()
+            self.assertEqual(artifact_store.claim_job_output_path(job_id, owned)["status"], "claimed")
+            owned.write_bytes(b"owned")
             self.assertEqual(artifact_store.prepare_job_output_scope(job_id, {"status": "completed", "output": str(owned)})["status"], "owned")
             result = artifact_store.reconcile_job_output_scopes(active_job_ids=set())
             self.assertEqual(result["manual_review"], 0)
@@ -173,6 +179,8 @@ class V7JobOutputTransactionTests(unittest.TestCase):
         with patch.object(artifact_store, "OUTPUT_ROOT", self.output_root), patch.object(artifact_store, "INDEX_PATH", self.index_path):
             self.assertIsNotNone(artifact_store.begin_job_output_scope(job_id))
             second.parent.mkdir(parents=True)
+            self.assertEqual(artifact_store.claim_job_output_path(job_id, first)["status"], "claimed")
+            self.assertEqual(artifact_store.claim_job_output_path(job_id, second)["status"], "claimed")
             first.write_bytes(b"first")
             second.write_bytes(b"second")
             prepared = artifact_store.prepare_job_output_scope(job_id, {"status": "completed", "files": [str(first), str(second)]})
@@ -196,11 +204,82 @@ class V7JobOutputTransactionTests(unittest.TestCase):
                     "state": [],
                     "snapshot_complete": True,
                     "baseline": {},
+                    "claims": [],
+                    "namespaces": [],
                     "candidates": {},
                 }},
             }), encoding="utf-8")
             self.assertIsNone(artifact_store.inspect_job_output_scope(job_id))
             self.assertEqual(artifact_store.reconcile_job_output_scopes(active_job_ids=set()), {"cleaned": 0, "manual_review": 0})
+
+    def test_late_file_without_server_claim_is_manual_review_and_preserved(self) -> None:
+        job_id = "jobv5_" + "e" * 32
+        late = self.output_root / "late.bin"
+        with patch.object(artifact_store, "OUTPUT_ROOT", self.output_root), patch.object(artifact_store, "INDEX_PATH", self.index_path):
+            self.assertIsNotNone(artifact_store.begin_job_output_scope(job_id))
+            late.write_bytes(b"created by another actor after baseline")
+            self.assertEqual(artifact_store.claim_job_output_path(job_id, late)["status"], "manual_review")
+            prepared = artifact_store.prepare_job_output_scope(job_id, {"status": "completed", "output": str(late)})
+            self.assertEqual(prepared["status"], "manual_review")
+            finalized = artifact_store.finalize_job_output_scope(job_id, terminal_state="cancelled")
+            self.assertEqual(finalized["status"], "manual_review")
+            self.assertEqual(late.read_bytes(), b"created by another actor after baseline")
+
+    def test_claimed_namespace_owns_children_and_cleans_only_that_namespace(self) -> None:
+        job_id = "jobv5_" + "f" * 32
+        with patch.object(artifact_store, "OUTPUT_ROOT", self.output_root), patch.object(artifact_store, "INDEX_PATH", self.index_path):
+            self.assertIsNotNone(artifact_store.begin_job_output_scope(job_id))
+            namespace = artifact_store.claim_job_output_namespace(job_id, "synthetic")
+            self.assertIsNotNone(namespace)
+            assert namespace is not None
+            child = namespace / "mask.png"
+            child.write_bytes(b"claimed child")
+            prepared = artifact_store.prepare_job_output_scope(job_id, {"status": "completed", "outputs": [str(child)]})
+            self.assertEqual(prepared["status"], "owned")
+            self.assertEqual(prepared["owned_count"], 1)
+            finalized = artifact_store.finalize_job_output_scope(job_id, terminal_state="cancelled")
+            self.assertEqual(finalized["status"], "cleaned")
+            self.assertFalse(child.exists())
+            self.assertFalse(namespace.exists())
+
+    def test_missing_or_malformed_required_scope_blocks_publication(self) -> None:
+        manager = HubJobManager()
+        patches = self._patch_store()
+        try:
+            with (
+                patches[0],
+                patches[1],
+                patches[2],
+                patch("src.services.job_manager.manager._publish_result", side_effect=AssertionError("publication must be blocked")),
+                patch.object(artifact_store, "register_worker_outputs", side_effect=AssertionError("index mutation must be blocked")),
+            ):
+                for mode in ("missing", "malformed"):
+                    target = self.output_root / f"scope-{mode}.mp4"
+
+                    def runner(_payload: dict[str, object], _context: object, *, target: Path = target, mode: str = mode) -> dict[str, object]:
+                        target.write_bytes(b"ambiguous output")
+                        manifest = self.index_path.with_name(".job_output_scopes.json")
+                        if mode == "missing":
+                            manifest.unlink(missing_ok=True)
+                        else:
+                            manifest.write_text("{", encoding="utf-8")
+                        return {"status": "completed", "output": str(target)}
+
+                    record = manager.submit("upscale_anime_video", {}, runner, heavy=False)
+                    idle, remaining = manager.wait_for_idle(5)
+                    self.assertTrue(idle, remaining)
+                    public = api_jobs.get_job(record["id"])
+                    self.assertIsNotNone(public)
+                    assert public is not None
+                    self.assertEqual(public["status"], "failed")
+                    self.assertEqual(public["result"]["failure_code"], "OUTPUT_SCOPE_UNAVAILABLE")
+                    self.assertEqual(public["result"]["execution"], "not_run")
+                    self.assertTrue(public["result"]["dry_run"])
+                    self.assertNotIn(str(target), json.dumps(public, ensure_ascii=False))
+                    self.assertTrue(target.exists())
+                    self.assertFalse(self.index_path.exists())
+        finally:
+            manager.cancel_all_and_wait(3)
 
 
 if __name__ == "__main__":

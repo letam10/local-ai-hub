@@ -12,7 +12,7 @@ from src.services.api.config import component
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
 from src.services.artifact_store import describe, resolve
 from src.shared.paths.registry import OUTPUT_ROOT, TEMP_ROOT
-from src.shared.utils.adapter_common import local_root, unavailable
+from src.shared.utils.adapter_common import local_root, requires_server_output_namespace, server_output_namespace, unavailable
 
 
 WORKER = Path(__file__).with_name("worker.py")
@@ -139,6 +139,9 @@ def run_practical_rife(payload: dict[str, Any], context: ProcessOwner | None = N
     source = _video_artifact(payload)
     if source is None:
         return {"status": "error", "error": "Practical-RIFE cần VIDEO artifact do Hub quản lý."}
+    namespace = server_output_namespace(context, "practical-rife")
+    if requires_server_output_namespace(context) and namespace is None:
+        return unavailable("practical_rife", "Hub không tạo được output namespace an toàn cho job Practical-RIFE.", code="output_scope_unavailable")
     try:
         target_fps = max(2, min(120, int(payload.get("target_fps", 48))))
     except (TypeError, ValueError):
@@ -150,7 +153,8 @@ def run_practical_rife(payload: dict[str, Any], context: ProcessOwner | None = N
         "model_dir": str(model_dir),
         "ffmpeg": str(ffmpeg),
         "ffprobe": str(ffprobe),
-        "output_root": str(OUTPUT_ROOT / "Practical-RIFE"),
+        "output_root": str(namespace or (OUTPUT_ROOT / "Practical-RIFE")),
+        "output_namespace": str(namespace) if namespace is not None else None,
         "temp_root": str(TEMP_ROOT / "jobs" / f"rife_{stamp}"),
         "target_fps": target_fps,
         "half": bool(payload.get("half", True)),

@@ -926,6 +926,7 @@ class VideoRuntimeContractTests(unittest.TestCase):
                 patch.object(artifact_store, "INDEX_PATH", index_path),
             ):
                 def runner(_payload, _context):
+                    self.assertEqual(_context.claim_output(target)["status"], "claimed")
                     target.write_bytes(b"bounded video output")
                     return {
                         "status": "completed",
@@ -1146,6 +1147,7 @@ class VideoRuntimeContractTests(unittest.TestCase):
                     return register(*args, **kwargs)
 
                 def runner(_payload, _context):
+                    self.assertEqual(_context.claim_output(target)["status"], "claimed")
                     target.write_bytes(b"completed output")
                     return {"status": "completed", "output": str(target)}
 

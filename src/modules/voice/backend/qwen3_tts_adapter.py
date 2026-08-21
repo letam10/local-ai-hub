@@ -13,6 +13,8 @@ from src.shared.utils.adapter_common import (
     registered_runtime,
     reject_raw_worker_fields,
     resolve_artifact_input,
+    requires_server_output_namespace,
+    server_output_namespace,
     unavailable,
 )
 
@@ -47,6 +49,10 @@ def synthesize(payload: dict[str, Any], context: ProcessOwner | None = None) -> 
         if input_error:
             return {"status": "error", "component": "qwen3_tts", "code": input_error, "error": "Voice Clone cần reference artifact Hub hợp lệ."}
         request["reference_audio"] = str(reference)
+    namespace = server_output_namespace(context, "qwen3-tts")
+    if requires_server_output_namespace(context) and namespace is None:
+        return unavailable("qwen3_tts", "Hub không tạo được output namespace an toàn cho Qwen3-TTS.", code="output_scope_unavailable")
+    request["output_namespace"] = str(namespace) if namespace is not None else None
     result = run_json_worker(
         [str(python), str(helper)],
         request,

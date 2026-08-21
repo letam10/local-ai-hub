@@ -11,6 +11,8 @@ from src.shared.utils.adapter_common import (
     registered_model,
     registered_runtime,
     resolve_artifact_input,
+    requires_server_output_namespace,
+    server_output_namespace,
     unavailable,
 )
 
@@ -32,13 +34,16 @@ def detect(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict
     if not runtime[0].is_file() or not runtime[1].is_file() or not model[1].exists():
         return unavailable("rfdetr", "RF-DETR runtime/model leaf không còn tồn tại sau khi registry được đọc.", code="runtime_leaf_missing")
     python, helper, service = runtime
+    namespace = server_output_namespace(context, "rfdetr")
+    if requires_server_output_namespace(context) and namespace is None:
+        return unavailable("rfdetr", "Hub không tạo được output namespace an toàn cho RF-DETR.", code="output_scope_unavailable")
     try:
         threshold = max(0.0, min(1.0, float(payload.get("threshold", 0.5))))
     except (TypeError, ValueError):
         threshold = 0.5
     result = run_json_worker(
         [str(python), str(helper)],
-        {"path": str(source), "threshold": threshold, "model_id": model[0]},
+        {"path": str(source), "threshold": threshold, "model_id": model[0], "output_namespace": str(namespace) if namespace is not None else None},
         label="rfdetr",
         cwd=service,
         env={**os.environ, "LOCALAIHUB_ROOT": str(local_root()), "RF_HOME": str(local_root() / "Models" / "Vision" / "RF-DETR"), "PYTHONIOENCODING": "utf-8"},

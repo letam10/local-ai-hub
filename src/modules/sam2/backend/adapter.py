@@ -19,6 +19,8 @@ from src.shared.utils.adapter_common import (
     local_root,
     normalize_worker_result,
     resolve_artifact_input,
+    requires_server_output_namespace,
+    server_output_namespace,
     unavailable,
 )
 
@@ -134,6 +136,11 @@ def _run(operation: str, payload: dict[str, Any], context: ProcessOwner | None =
         # Public callers can never supply ``path`` because the artifact input
         # resolver rejects every raw path-shaped field above.
         request["path"] = str(source)
+    namespace = server_output_namespace(context, "sam2")
+    if requires_server_output_namespace(context) and namespace is None:
+        return unavailable("sam2", "Hub không tạo được output namespace an toàn cho job SAM2.", code="output_scope_unavailable")
+    if namespace is not None:
+        request["output_namespace"] = str(namespace)
     result = run_json_worker(
         [str(python), str(WORKER)],
         request,

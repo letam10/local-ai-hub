@@ -11,6 +11,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from src.shared.utils.adapter_common import safe_output_namespace
+
 
 _MODEL_ID = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
 _LANGUAGE = re.compile(r"(?:auto|[a-z]{2,8}(?:-[a-z]{2,8})?)\Z")
@@ -79,6 +81,7 @@ def _request(value: object) -> tuple[dict[str, object] | None, str | None]:
         "device": requested_device.lower(),
         "language": language.lower(),
         "timeout": int(timeout),
+        "output_namespace": value.get("output_namespace"),
     }, None
 
 
@@ -127,12 +130,18 @@ def handle_request(value: object) -> dict[str, object]:
     if not python.is_file() or _is_reparse(python):
         return _response("error", code="runtime_unavailable")
     token = uuid.uuid4().hex
-    transcript = root / "Output" / "Speech" / f"whisper_{token}.json"
+    namespace_value = request.get("output_namespace")
+    namespace = safe_output_namespace(root, namespace_value) if namespace_value else None
+    if namespace_value and namespace is None:
+        return _response("error", code="output_unavailable")
+    transcript = (namespace or (root / "Output" / "Speech")) / f"whisper_{token}.json"
     srt = transcript.with_suffix(".srt")
     command = [
         str(python), str(worker), str(request["source"]), token, str(request["start"]), str(request["end"]),
         str(request["device"]), model_id, str(request["language"]),
     ]
+    if namespace is not None:
+        command.append(str(namespace))
     try:
         result = subprocess.run(
             command,

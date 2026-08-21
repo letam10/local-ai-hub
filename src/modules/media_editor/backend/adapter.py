@@ -17,7 +17,7 @@ from src.services.process_manager.managed import ProcessOwner, run_command
 from src.services.process_manager.windows import run_hidden
 from src.services.artifact_store import describe, resolve
 from src.shared.paths.registry import OUTPUT_ROOT, TEMP_ROOT
-from src.shared.utils.adapter_common import configured_path, unavailable
+from src.shared.utils.adapter_common import configured_path, requires_server_output_namespace, server_output_namespace, unavailable
 
 
 VIDEO_OPS = {
@@ -299,8 +299,8 @@ def _multi_input_command(operation: str, manifest: Path, target: Path, payload: 
     return None
 
 
-def _output(source: Path, operation: str, extension: str | None = None) -> Path:
-    root = OUTPUT_ROOT / "Media"
+def _output(source: Path, operation: str, extension: str | None = None, output_root: Path | None = None) -> Path:
+    root = output_root or (OUTPUT_ROOT / "Media")
     root.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     suffix = extension or source.suffix or ".mp4"
@@ -639,6 +639,9 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
         from src.modules.real_esrgan.backend.adapter import run_realesrgan
 
         return run_realesrgan({"source_artifact_id": payload.get("source_artifact_id"), "scale": payload.get("scale"), "tile": payload.get("tile")}, context)
+    namespace = server_output_namespace(context, "media")
+    if requires_server_output_namespace(context) and namespace is None:
+        return unavailable("ffmpeg", "Hub không tạo được output namespace an toàn cho media operation.", code="output_scope_unavailable")
     if operation in {"concat", "image_sequence_video"}:
         sources = [source, *_additional_sources(payload)]
         unique_sources: list[Path] = []
@@ -652,7 +655,7 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
             return {"status": "error", "error": "Concat hoặc image sequence cần ít nhất hai artifact input trong Hub."}
         if operation == "image_sequence_video" and any(item.suffix.casefold() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"} for item in unique_sources):
             return {"status": "error", "error": "Image sequence chỉ nhận ảnh PNG/JPG/WEBP/BMP đã tải lên Hub."}
-        target = _output(source, operation, ".mp4" if operation == "image_sequence_video" else source.suffix or ".mp4")
+        target = _output(source, operation, ".mp4" if operation == "image_sequence_video" else source.suffix or ".mp4", namespace)
         manifest = _concat_manifest(unique_sources, fps=max(1, min(120, float(payload.get("fps", 24)))) if operation == "image_sequence_video" else None)
         try:
             command = _multi_input_command(operation, manifest, target, payload)
@@ -675,7 +678,7 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
         container = str(payload.get("container") or "mp4").strip().lower().lstrip(".")
         if container not in {"mp4", "mkv", "webm"}:
             return {"status": "error", "error": "Encode container chỉ hỗ trợ MP4, MKV hoặc WebM."}
-        target = _output(source, operation, f".{container}")
+        target = _output(source, operation, f".{container}", namespace)
         cleanup_prefixes: list[Path] = []
         try:
             commands, cleanup_prefixes = _encode_commands(payload, source, target)
@@ -701,11 +704,12 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
     image_extension = "." + ({"jpeg": "jpg", "jpg": "jpg", "png": "png", "webp": "webp", "bmp": "bmp"}.get(requested_format, "png"))
     extension = ".m4a" if operation == "extract_audio" else (image_extension if operation.startswith("image_") else source.suffix or ".mp4")
     if operation == "extract_frames":
-        output_dir = OUTPUT_ROOT / "Media" / f"frames_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
-        output_dir.mkdir(parents=True, exist_ok=False)
+        output_dir = namespace or (OUTPUT_ROOT / "Media" / f"frames_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}")
+        if namespace is None:
+            output_dir.mkdir(parents=True, exist_ok=False)
         target = output_dir / "frame_%06d.png"
     else:
-        target = _output(source, operation, extension)
+        target = _output(source, operation, extension, namespace)
     try:
         command = _command(payload, source, target, resolved_overlay=resolved_overlay)
     except (TypeError, ValueError) as exc:

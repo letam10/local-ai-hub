@@ -24,7 +24,7 @@ from src.services.api.config import component, hub_config
 from src.services.job_manager.manager import JobContext
 from src.services.process_manager.managed import background_processes
 from src.shared.paths.registry import OUTPUT_ROOT, ROOT, TEMP_ROOT
-from src.shared.utils.adapter_common import configured_path, local_root, unavailable
+from src.shared.utils.adapter_common import configured_path, local_root, requires_server_output_namespace, server_output_namespace, unavailable
 
 
 BRIDGE_SCHEMA_VERSION = 1
@@ -591,7 +591,7 @@ def _upload_input_image(path: Path) -> tuple[str | None, str | None]:
     return (str(name), None) if isinstance(name, str) and name else (None, "ComfyUI không trả tên input image.")
 
 
-def _copy_history_outputs(history: dict[str, Any], prompt_id: str, engine: str) -> list[str]:
+def _copy_history_outputs(history: dict[str, Any], prompt_id: str, engine: str, target_root: Path | None = None) -> list[str]:
     entry = history.get(prompt_id, {}) if isinstance(history, dict) else {}
     outputs = entry.get("outputs", {}) if isinstance(entry, dict) else {}
     _python, main = _runtime()
@@ -599,7 +599,7 @@ def _copy_history_outputs(history: dict[str, Any], prompt_id: str, engine: str) 
     copied: list[str] = []
     if output_root is None:
         return copied
-    target_root = OUTPUT_ROOT / "Image" / engine
+    target_root = target_root or (OUTPUT_ROOT / "Image" / engine)
     target_root.mkdir(parents=True, exist_ok=True)
     for node in outputs.values() if isinstance(outputs, dict) else []:
         for item in node.get("images", []) if isinstance(node, dict) else []:
@@ -625,6 +625,10 @@ def _copy_history_outputs(history: dict[str, Any], prompt_id: str, engine: str) 
 def _submit_workflow(workflow: dict[str, Any], engine: str, request: dict[str, Any], context: JobContext | None = None) -> dict[str, Any]:
     """Queue one already-sanitized Comfy API graph and collect image outputs."""
 
+    namespace = server_output_namespace(context, "comfyui")
+    if requires_server_output_namespace(context) and namespace is None:
+        return unavailable("comfyui", "Hub không tạo được output namespace an toàn cho ComfyUI.", code="output_scope_unavailable")
+
     response = _json_request("/prompt", method="POST", payload={"prompt": workflow, "client_id": f"local-ai-hub-{uuid.uuid4().hex}"}, timeout=30)
     prompt_id = response.get("prompt_id") if isinstance(response, dict) else None
     if not isinstance(prompt_id, str) or not prompt_id:
@@ -636,7 +640,7 @@ def _submit_workflow(workflow: dict[str, Any], engine: str, request: dict[str, A
             return {"status": "cancelled", "reason": "Đã yêu cầu ComfyUI hủy prompt do Hub tạo."}
         history = _json_request(f"/history/{prompt_id}", timeout=10)
         if history and prompt_id in history:
-            outputs = _copy_history_outputs(history, prompt_id, engine)
+            outputs = _copy_history_outputs(history, prompt_id, engine, namespace)
             if outputs:
                 return {"status": "completed", "operation": "generate_image", "engine": engine, "outputs": outputs, "seed": request.get("seed"), "prompt": request.get("prompt")}
             return {"status": "error", "error": "ComfyUI hoàn tất nhưng không tìm thấy image output hợp lệ."}

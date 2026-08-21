@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from src.shared.utils.adapter_common import safe_output_namespace
+
 
 _MODEL_ID = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
 _TOKEN = re.compile(r"[a-f0-9]{32}\Z")
@@ -45,13 +47,15 @@ def _inside(candidate: Path, root: Path) -> bool:
         return False
 
 
-def _output_target(root: Path, token: str) -> tuple[Path, Path] | None:
+def _output_target(root: Path, token: str, namespace_value: object = None) -> tuple[Path, Path] | None:
     """Validate the complete Hub-owned output chain without following a reparse."""
 
     if not _TOKEN.fullmatch(token):
         return None
     output_base = root / "Output"
-    output_root = output_base / "Speech"
+    output_root = safe_output_namespace(root, namespace_value) if namespace_value else (output_base / "Speech")
+    if output_root is None:
+        return None
     output = output_root / f"whisper_{token}.json"
     try:
         root_resolved = root.resolve(strict=True)
@@ -63,7 +67,9 @@ def _output_target(root: Path, token: str) -> tuple[Path, Path] | None:
         output_parent.relative_to(root_resolved)
     except (OSError, RuntimeError, ValueError):
         return None
-    if output_base.parent.resolve(strict=False) != root_resolved or output_root.parent.resolve(strict=False) != base_resolved:
+    if output_base.parent.resolve(strict=False) != root_resolved:
+        return None
+    if not namespace_value and output_root.parent.resolve(strict=False) != base_resolved:
         return None
     for item in (root, output_base, output_root, output):
         if (item.exists() or item.is_symlink()) and _is_reparse(item):
@@ -155,11 +161,12 @@ def _segments(source: Any, *, start: float, end: float) -> list[dict[str, object
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 8:
+    if len(argv) not in {8, 9}:
         return _result("error", code="invalid_request")
     root = _local_root()
     source = Path(argv[1])
     token, model_id, language = argv[2], argv[6], argv[7].lower()
+    namespace_value = argv[8] if len(argv) == 9 else None
     if root is None or not _TOKEN.fullmatch(token) or not _MODEL_ID.fullmatch(model_id) or not _LANGUAGE.fullmatch(language):
         return _result("error", code="invalid_request")
     try:
@@ -175,7 +182,7 @@ def main(argv: list[str]) -> int:
     model_path = _model_snapshot(root, model_id)
     if model_path is None:
         return _result("error", code="tool_model_unavailable")
-    targets = _output_target(root, token)
+    targets = _output_target(root, token, namespace_value)
     if targets is None:
         return _result("error", code="output_unavailable")
     output_root, output = targets
@@ -193,7 +200,7 @@ def main(argv: list[str]) -> int:
         if segments is None:
             return _result("error", code="transcript_invalid")
         output_root.mkdir(parents=True, exist_ok=True)
-        targets = _output_target(root, token)
+        targets = _output_target(root, token, namespace_value)
         if targets is None:
             return _result("error", code="output_unavailable")
         _output_root, output = targets

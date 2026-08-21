@@ -13,6 +13,8 @@ from src.shared.utils.adapter_common import (
     registered_runtime,
     reject_raw_worker_fields,
     resolve_artifact_input,
+    requires_server_output_namespace,
+    server_output_namespace,
     unavailable,
 )
 
@@ -40,6 +42,10 @@ def convert(payload: dict[str, Any], context: ProcessOwner | None = None) -> dic
     python, helper, service = runtime
     request = {key: value for key, value in payload.items() if key in {"diffusion_steps", "f0_condition", "auto_f0_adjust"}}
     request.update({"source": str(source), "target": str(target), "model_id": model[0]})
+    namespace = server_output_namespace(context, "seed-vc")
+    if requires_server_output_namespace(context) and namespace is None:
+        return unavailable("seed_vc", "Hub không tạo được output namespace an toàn cho Seed-VC.", code="output_scope_unavailable")
+    request["output_namespace"] = str(namespace) if namespace is not None else None
     result = run_json_worker(
         [str(python), str(helper)],
         request,

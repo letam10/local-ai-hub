@@ -31,7 +31,7 @@ from src.services.tool_smoke import (
 
 Runner = Callable[[dict[str, Any], "JobContext"], dict[str, Any]]
 MAX_RUNNER_SPECS = 64
-JOB_OUTPUT_SCOPE_TOOLS = frozenset({"frame_interpolate", "run_media_operation"})
+JOB_OUTPUT_SCOPE_TOOLS = frozenset({"frame_interpolate", "run_media_operation", "node_graph"})
 _JOB_OUTPUT_SCOPE_ID = re.compile(r"^(?:jobv5_[a-f0-9]{32}|job_[0-9]{8}_[0-9]{6}_[a-f0-9]{8})$")
 
 
@@ -67,6 +67,16 @@ class JobContext:
 
     def progress(self, value: int, message: str | None = None) -> None:
         update_job(self.job_id, progress=max(0, min(100, int(value))), message=message)
+
+    def claim_output(self, path: object) -> dict[str, Any]:
+        """Reserve one server-owned Output leaf before a producer creates it."""
+
+        return artifact_store.claim_job_output_path(self.job_id, path)
+
+    def claim_output_namespace(self, label: str) -> object | None:
+        """Create one server-owned per-job Output namespace for a producer."""
+
+        return artifact_store.claim_job_output_namespace(self.job_id, label)
 
 
 @dataclass(frozen=True)
@@ -129,7 +139,14 @@ class HubJobManager:
                     status="failed",
                     progress=0,
                     finished_at=_now(),
-                    result={"status": "failed", "failure_code": "OUTPUT_SCOPE_UNAVAILABLE"},
+                    result={
+                        "status": "failed",
+                        "failure_code": "OUTPUT_SCOPE_UNAVAILABLE",
+                        "error": "Output scope is unavailable; no artifact was published.",
+                        "next_action": "Create a new job after output ownership is restored.",
+                        "execution": "not_run",
+                        "dry_run": True,
+                    },
                     error="Hub không thể tạo phạm vi output an toàn cho job.",
                     message="Không thể bắt đầu output scope an toàn.",
                     next_action="Kiểm tra quyền Output/Config rồi tạo lại job.",
@@ -196,14 +213,38 @@ class HubJobManager:
                         result["cleanup_status"] = "manual_review"
                     publish_error = None
                 else:
-                    scope_result = artifact_store.prepare_job_output_scope(job_id, raw_result) if scope_state is not None else {"status": "no_scope"}
-                    if scope_result.get("status") in {"manual_review", "invalid", "unavailable"}:
+                    scope_required = tool in JOB_OUTPUT_SCOPE_TOOLS or requires_published_artifact(tool)
+                    scope_failure = False
+                    if scope_required and scope_state is None:
                         result, publish_error = {
                             "status": "failed",
+                            "failure_code": "OUTPUT_SCOPE_UNAVAILABLE",
+                            "error": "Output scope is unavailable; no artifact was published.",
+                            "next_action": "Create a new job after output ownership is restored.",
+                            "execution": "not_run",
+                            "dry_run": True,
+                        }, "OUTPUT_SCOPE_UNAVAILABLE"
+                        scope_result = {"status": "unavailable"}
+                        scope_failure = True
+                    else:
+                        try:
+                            scope_result = artifact_store.prepare_job_output_scope(job_id, raw_result) if scope_required else {"status": "no_scope"}
+                        except Exception:
+                            scope_result = {"status": "unavailable"}
+                    allowed_scope_statuses = {"owned", "no_output"} if scope_required else {"no_scope"}
+                    if not scope_failure and (
+                        not isinstance(scope_result, dict)
+                        or scope_result.get("status") not in allowed_scope_statuses
+                    ):
+                        result, publish_error = {
+                            "status": "failed",
+                            "failure_code": "OUTPUT_OWNERSHIP_AMBIGUOUS",
                             "error": "Output ownership could not be proven; no artifact was published.",
                             "next_action": "Review output ownership and create a new job.",
+                            "execution": "not_run",
+                            "dry_run": True,
                         }, "OUTPUT_OWNERSHIP_AMBIGUOUS"
-                    else:
+                    elif not scope_failure:
                         result, publish_error = _publish_result(raw_result, record)
                 if context.cancelled or result.get("status") == "cancelled":
                     if not context.cancelled:

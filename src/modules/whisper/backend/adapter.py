@@ -11,7 +11,7 @@ from typing import Any
 from src.services.artifact_store import describe, resolve
 from src.services.api.config import models
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
-from src.shared.utils.adapter_common import configured_path, local_root, unavailable
+from src.shared.utils.adapter_common import configured_path, local_root, requires_server_output_namespace, server_output_namespace, unavailable
 
 
 _MODEL_ID = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
@@ -81,11 +81,11 @@ def _timeout(value: object) -> float:
     return min(timeout, float(_MAX_TIMEOUT_SECONDS))
 
 
-def _outputs(root: Path, token: str) -> tuple[Path, Path] | None:
+def _outputs(root: Path, token: str, namespace: Path | None = None) -> tuple[Path, Path] | None:
     if not _TOKEN.fullmatch(token):
         return None
     output_base = root / "Output"
-    output_root = output_base / "Speech"
+    output_root = namespace or (output_base / "Speech")
     transcript = output_root / f"whisper_{token}.json"
     srt = transcript.with_suffix(".srt")
     try:
@@ -100,7 +100,9 @@ def _outputs(root: Path, token: str) -> tuple[Path, Path] | None:
         srt_resolved.relative_to(resolved_root)
     except (OSError, RuntimeError, ValueError):
         return None
-    if output_base.parent.resolve(strict=False) != root_resolved or output_root.parent.resolve(strict=False) != base_resolved:
+    if output_base.parent.resolve(strict=False) != root_resolved:
+        return None
+    if namespace is None and output_root.parent.resolve(strict=False) != base_resolved:
         return None
     if any(_is_reparse(item) for item in (root, output_base, output_root, transcript, srt)) or not transcript.is_file() or not srt.is_file():
         return None
@@ -150,6 +152,9 @@ def transcribe(payload: dict[str, Any], context: ProcessOwner | None = None) -> 
     source = _source_artifact(payload)
     if source is None:
         return _invalid_source_artifact()
+    namespace = server_output_namespace(context, "whisper")
+    if requires_server_output_namespace(context) and namespace is None:
+        return unavailable("whisper", "Hub không tạo được output namespace an toàn cho transcript.", code="output_scope_unavailable")
     python, wrapper, root = _runtime()
     model_id = _model_id()
     if python is None or not python.is_file() or _is_reparse(python) or not wrapper.is_file() or _is_reparse(wrapper) or model_id is None:
@@ -162,6 +167,7 @@ def transcribe(payload: dict[str, Any], context: ProcessOwner | None = None) -> 
         "device": payload.get("device", "cpu"),
         "language": payload.get("language", "auto"),
         "timeout_seconds": _timeout(payload.get("timeout_seconds", _MAX_TIMEOUT_SECONDS)),
+        "output_namespace": str(namespace) if namespace is not None else None,
     }
     result = run_json_worker(
         [str(python), str(wrapper)],
@@ -173,6 +179,7 @@ def transcribe(payload: dict[str, Any], context: ProcessOwner | None = None) -> 
             "LOCALAIHUB_ROOT": str(root),
             "WHISPER_PYTHON": str(python),
             "WHISPER_MODEL_ID": model_id,
+            "PYTHONPATH": str(local_root()),
             "PYTHONIOENCODING": "utf-8",
         },
         owner=context,
@@ -185,7 +192,7 @@ def transcribe(payload: dict[str, Any], context: ProcessOwner | None = None) -> 
             "error": "Faster-Whisper không hoàn tất transcript Hub.",
             "next_action": "Kiểm tra local model registry, environment Faster-Whisper và thử lại bằng một job mới.",
         }
-    outputs = _outputs(root, str(result.get("transcript_token") or ""))
+    outputs = _outputs(root, str(result.get("transcript_token") or ""), namespace)
     if outputs is None:
         return {
             "status": "error",

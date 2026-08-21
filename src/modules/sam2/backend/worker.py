@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from src.shared.utils.adapter_common import safe_output_namespace
+
 
 def _emit(payload: dict[str, Any], code: int | None = None) -> int:
     print(json.dumps(payload, ensure_ascii=False))
@@ -60,8 +62,12 @@ def _safe_existing_under(root: Path, candidate: Path, *, kind: str) -> Path | No
         return None
 
 
-def _task_output_root(hub_root: Path) -> Path | None:
+def _task_output_root(hub_root: Path, request: dict[str, Any] | None = None) -> Path | None:
     """Create only a Hub-owned SAM2 child after non-reparse containment checks."""
+
+    namespace_value = request.get("output_namespace") if isinstance(request, dict) else None
+    if namespace_value:
+        return safe_output_namespace(hub_root, namespace_value)
 
     output_parent = _safe_existing_under(hub_root, hub_root / "Output", kind="dir")
     if output_parent is None:
@@ -112,6 +118,9 @@ def _preflight(request: dict[str, Any]) -> tuple[Path, Path, Path, Path] | None:
         safe_checkpoint = _safe_existing_under(safe_runtime, checkpoint, kind="file") if safe_runtime else None
         output_parent = _safe_existing_under(hub_root, hub_root / "Output", kind="dir")
         output_base = output_parent / "SAM2" if output_parent is not None else None
+        namespace = safe_output_namespace(hub_root, request.get("output_namespace")) if request.get("output_namespace") else None
+        if request.get("output_namespace") and namespace is None:
+            return None
         if output_base is not None and output_base.exists() and _safe_existing_under(output_parent, output_base, kind="dir") is None:
             return None
         source_roots = (hub_root / "Temp" / "uploads", hub_root / "Output", hub_root / "Archive")
@@ -213,7 +222,7 @@ def _segment(request: dict[str, Any]) -> dict[str, Any]:
             points, labels = _points(request, width, height)
             masks, scores, _ = predictor.predict(point_coords=points, point_labels=labels, multimask_output=True)
         index = int(scores.argmax())
-        output = _task_output_root(hub_root)
+        output = _task_output_root(hub_root, request)
         if output is None:
             return {"status": "error", "code": "output_contract_invalid", "error": "SAM2 không thể tạo output Hub an toàn."}
         mask_path, overlay_path = _save_mask(image, masks[index], output)
@@ -234,7 +243,7 @@ def _track(request: dict[str, Any]) -> dict[str, Any]:
     import cv2
     import numpy as np
     import torch
-    output: Path | None = _task_output_root(hub_root)
+    output: Path | None = _task_output_root(hub_root, request)
     if output is None:
         return {"status": "error", "code": "output_contract_invalid", "error": "SAM2 không thể tạo output Hub an toàn."}
     capture = None

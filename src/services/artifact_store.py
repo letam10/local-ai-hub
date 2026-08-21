@@ -41,6 +41,8 @@ JOB_OUTPUT_SCOPE_MAX_BYTES = 128 * 1024
 JOB_OUTPUT_SCOPE_MAX_JOBS = 128
 JOB_OUTPUT_SCOPE_MAX_ENTRIES = 256
 JOB_OUTPUT_SCOPE_MAX_CANDIDATES = 64
+JOB_OUTPUT_SCOPE_NAMESPACE_ROOT = ".job-output-scopes"
+JOB_OUTPUT_SCOPE_MAX_NAMESPACES = 16
 ARTIFACT_VISIBILITY_STAGED = "staged"
 ARTIFACT_VISIBILITY_PUBLISHED = "published"
 MANAGED_OUTPUT_NAME = "video_grade.mp4"
@@ -79,9 +81,10 @@ _PATH_FIELDS = {
 _JOB_OUTPUT_SCOPE_STATES = frozenset({"open", "completed", "failed", "cancelled", "unavailable", "interrupted", "manual_review"})
 _JOB_OUTPUT_SCOPE_OWNERSHIP = frozenset({"owned", "ambiguous"})
 _JOB_OUTPUT_SCOPE_ROOT_KEYS = frozenset({"schema_version", "records"})
-_JOB_OUTPUT_SCOPE_RECORD_KEYS = frozenset({"job_id", "job_fingerprint", "state", "snapshot_complete", "baseline", "candidates"})
+_JOB_OUTPUT_SCOPE_RECORD_KEYS = frozenset({"job_id", "job_fingerprint", "state", "snapshot_complete", "baseline", "claims", "namespaces", "candidates"})
 _JOB_OUTPUT_SCOPE_ENTRY_KEYS = frozenset({"relative_path", "ownership", "before", "current"})
 _JOB_OUTPUT_SCOPE_IDENTITY_KEYS = frozenset({"size_bytes", "mtime_ns", "file_id"})
+_JOB_OUTPUT_SCOPE_NAMESPACE_LABEL = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 
 
 class UploadError(ValueError):
@@ -391,6 +394,8 @@ def _scope_record(value: object, job_id: str | None = None) -> dict[str, Any] | 
     state = value.get("state")
     snapshot_complete = value.get("snapshot_complete")
     baseline = value.get("baseline")
+    claims = value.get("claims")
+    namespaces = value.get("namespaces")
     candidates = value.get("candidates")
     if (
         not isinstance(record_job_id, str)
@@ -402,8 +407,12 @@ def _scope_record(value: object, job_id: str | None = None) -> dict[str, Any] | 
         or state not in _JOB_OUTPUT_SCOPE_STATES
         or type(snapshot_complete) is not bool
         or type(baseline) is not dict
+        or type(claims) is not list
+        or type(namespaces) is not list
         or type(candidates) is not dict
         or len(baseline) > JOB_OUTPUT_SCOPE_MAX_ENTRIES
+        or len(claims) > JOB_OUTPUT_SCOPE_MAX_CANDIDATES
+        or len(namespaces) > JOB_OUTPUT_SCOPE_MAX_NAMESPACES
         or len(candidates) > JOB_OUTPUT_SCOPE_MAX_CANDIDATES
     ):
         return None
@@ -414,6 +423,26 @@ def _scope_record(value: object, job_id: str | None = None) -> dict[str, Any] | 
         if safe_relative is None or safe_identity is None:
             return None
         normalized_baseline[safe_relative] = safe_identity
+    normalized_claims: list[str] = []
+    for relative in claims:
+        safe_relative = _scope_relative(relative)
+        if safe_relative is None or safe_relative in normalized_claims or safe_relative in normalized_baseline:
+            return None
+        normalized_claims.append(safe_relative)
+    normalized_namespaces: list[str] = []
+    for relative in namespaces:
+        safe_relative = _scope_relative(relative)
+        if (
+            safe_relative is None
+            or safe_relative == JOB_OUTPUT_SCOPE_NAMESPACE_ROOT
+            or safe_relative in normalized_namespaces
+            or any(
+                safe_relative.startswith(item + "/") or item.startswith(safe_relative + "/")
+                for item in normalized_namespaces
+            )
+        ):
+            return None
+        normalized_namespaces.append(safe_relative)
     normalized_candidates: dict[str, Any] = {}
     for relative, entry in candidates.items():
         safe_entry = _scope_entry(entry)
@@ -426,6 +455,8 @@ def _scope_record(value: object, job_id: str | None = None) -> dict[str, Any] | 
         "state": state,
         "snapshot_complete": snapshot_complete,
         "baseline": normalized_baseline,
+        "claims": normalized_claims,
+        "namespaces": normalized_namespaces,
         "candidates": normalized_candidates,
     }
 
@@ -603,6 +634,8 @@ def begin_job_output_scope(job_id: str) -> dict[str, Any] | None:
             "state": "open",
             "snapshot_complete": complete,
             "baseline": baseline,
+            "claims": [],
+            "namespaces": [],
             "candidates": {},
         }
         terminal_ids = [key for key, value in scopes["records"].items() if value.get("state") != "open"]
@@ -630,7 +663,8 @@ def _claim_job_output_scope_locked(scopes: dict[str, Any], job_id: str, result: 
             invalid_count += 1
             continue
         before = record["baseline"].get(relative)
-        ownership = "ambiguous" if before is not None or not record["snapshot_complete"] else "owned"
+        in_namespace = any(relative.startswith(namespace + "/") for namespace in record["namespaces"])
+        ownership = "owned" if (relative in record["claims"] or in_namespace) and before is None and record["snapshot_complete"] else "ambiguous"
         entries[relative] = {
             "relative_path": relative,
             "ownership": ownership,
@@ -642,6 +676,132 @@ def _claim_job_output_scope_locked(scopes: dict[str, Any], job_id: str, result: 
     ambiguous_count = sum(entry["ownership"] == "ambiguous" for entry in entries.values())
     status = "invalid" if invalid_count else "manual_review" if ambiguous_count else "owned"
     return {"status": status, "owned_count": owned_count, "ambiguous_count": ambiguous_count, "invalid_count": invalid_count}
+
+
+def _scope_output_target(value: object) -> tuple[Path, str, bool] | None:
+    """Validate an exact claim target without treating baseline absence as proof."""
+
+    if not isinstance(value, (str, Path)) or not str(value):
+        return None
+    raw = Path(value).expanduser()
+    try:
+        root = OUTPUT_ROOT.resolve()
+        absolute = raw.absolute()
+        relative = _scope_relative(absolute.relative_to(root).as_posix())
+        if relative is None:
+            return None
+        parent = absolute.parent
+        if not parent.exists() or not parent.is_dir():
+            return None
+        cursor = parent
+        while True:
+            if _scope_reparse(cursor):
+                return None
+            if cursor == root:
+                break
+            if cursor.parent == cursor:
+                return None
+            cursor = cursor.parent
+        if absolute.is_symlink():
+            return None
+        exists = absolute.exists()
+        if exists and (_scope_reparse(absolute) or not absolute.is_file()):
+            return None
+    except (OSError, ValueError):
+        return None
+    return absolute, relative, exists
+
+
+def claim_job_output_path(job_id: str, path: object) -> dict[str, int | str]:
+    """Persist a server-owned exact-leaf claim before the producer writes it."""
+
+    empty = {"status": "unavailable", "claim_count": 0}
+    if not isinstance(job_id, str) or _JOB_ID.fullmatch(job_id) is None:
+        return empty
+    with _LOCK:
+        scopes = _load_job_output_scopes()
+        record = scopes.get("records", {}).get(job_id) if isinstance(scopes, dict) else None
+        if not isinstance(record, dict) or record.get("state") != "open":
+            return empty
+        target = _scope_output_target(path)
+        if target is None:
+            return {"status": "invalid", "claim_count": 0}
+        _absolute, relative, exists = target
+        claims = record["claims"]
+        if relative in claims:
+            return {"status": "claimed", "claim_count": len(claims)}
+        if not record["snapshot_complete"] or relative in record["baseline"] or exists:
+            return {"status": "manual_review", "claim_count": len(claims)}
+        if len(claims) >= JOB_OUTPUT_SCOPE_MAX_CANDIDATES:
+            return {"status": "unavailable", "claim_count": len(claims)}
+        claims.append(relative)
+        if not _save_job_output_scopes(scopes):
+            claims.pop()
+            return empty
+        return {"status": "claimed", "claim_count": len(claims)}
+
+
+def _scope_namespace_path(relative: str) -> Path | None:
+    try:
+        root = OUTPUT_ROOT.resolve()
+        candidate = (root / relative).resolve(strict=False)
+        candidate.relative_to(root)
+        return candidate
+    except (OSError, ValueError):
+        return None
+
+
+def claim_job_output_namespace(job_id: str, label: str) -> Path | None:
+    """Create one server-owned per-job Output namespace before a producer runs."""
+
+    if (
+        not isinstance(job_id, str)
+        or _JOB_ID.fullmatch(job_id) is None
+        or not isinstance(label, str)
+        or _JOB_OUTPUT_SCOPE_NAMESPACE_LABEL.fullmatch(label) is None
+    ):
+        return None
+    with _LOCK:
+        scopes = _load_job_output_scopes()
+        record = scopes.get("records", {}).get(job_id) if isinstance(scopes, dict) else None
+        if not isinstance(record, dict) or record.get("state") != "open" or not record.get("snapshot_complete"):
+            return None
+        relative = f"{JOB_OUTPUT_SCOPE_NAMESPACE_ROOT}/{job_id[-8:]}-{label}"
+        namespace = _scope_namespace_path(relative)
+        if namespace is None:
+            return None
+        if relative in record["namespaces"]:
+            try:
+                return namespace if namespace.is_dir() and not _scope_reparse(namespace) else None
+            except OSError:
+                return None
+        if relative in record["baseline"] or namespace.exists() or namespace.is_symlink():
+            return None
+        root = OUTPUT_ROOT.resolve()
+        parent = root / JOB_OUTPUT_SCOPE_NAMESPACE_ROOT
+        try:
+            if parent.exists() and _scope_reparse(parent):
+                return None
+            parent.mkdir(parents=True, exist_ok=True)
+            if _scope_reparse(parent):
+                return None
+            namespace.mkdir(exist_ok=False)
+            if _scope_reparse(namespace):
+                namespace.rmdir()
+                return None
+            record["namespaces"].append(relative)
+            if not _save_job_output_scopes(scopes):
+                record["namespaces"].pop()
+                namespace.rmdir()
+                return None
+            return namespace
+        except OSError:
+            try:
+                if namespace.is_dir() and not _scope_reparse(namespace):
+                    namespace.rmdir()
+            except OSError:
+                pass
+            return None
 
 
 def prepare_job_output_scope(job_id: str, result: object) -> dict[str, Any]:
@@ -688,6 +848,18 @@ def _cleanup_scope_candidates_locked(record: dict[str, Any]) -> tuple[int, int]:
             removed += 1
         except OSError:
             entry["ownership"] = "ambiguous"
+            ambiguous += 1
+    for relative in record["namespaces"]:
+        namespace = _scope_namespace_path(relative)
+        if namespace is None:
+            ambiguous += 1
+            continue
+        try:
+            if namespace.is_symlink() or not namespace.is_dir() or _scope_reparse(namespace):
+                ambiguous += 1
+                continue
+            namespace.rmdir()
+        except OSError:
             ambiguous += 1
     return removed, ambiguous
 
@@ -765,6 +937,7 @@ def inspect_job_output_scope(job_id: str) -> dict[str, Any] | None:
             "job_id": job_id,
             "state": record["state"],
             "snapshot_complete": record["snapshot_complete"],
+            "namespace_count": len(record["namespaces"]),
             "candidate_count": len(record["candidates"]),
             "owned_count": sum(entry["ownership"] == "owned" for entry in record["candidates"].values()),
             "ambiguous_count": sum(entry["ownership"] == "ambiguous" for entry in record["candidates"].values()),

@@ -331,6 +331,52 @@ def local_root() -> Path:
     return Path(os.path.expandvars(value)).expanduser() if value else BASE_DIR
 
 
+def server_output_namespace(context: object | None, label: str) -> Path | None:
+    """Return a manager-issued private output namespace, if this is a Hub job."""
+
+    if context is None:
+        return None
+    claim = getattr(context, "claim_output_namespace", None)
+    if not callable(claim):
+        return None
+    try:
+        value = claim(label)
+    except Exception:
+        return None
+    return Path(value) if isinstance(value, (str, Path)) and str(value) else None
+
+
+def requires_server_output_namespace(context: object | None) -> bool:
+    """Identify the real HubJobManager claim contract without guessing for direct tests."""
+
+    return context is not None and callable(getattr(context, "claim_output_namespace", None))
+
+
+def safe_output_namespace(root: Path, candidate: object) -> Path | None:
+    """Revalidate one manager-issued namespace inside the canonical Output root."""
+
+    if not isinstance(candidate, (str, Path)) or not str(candidate):
+        return None
+    try:
+        output_root = (Path(root) / "Output").resolve(strict=True)
+        lexical = Path(candidate).expanduser().absolute()
+        relative = lexical.relative_to(output_root)
+        if not relative.parts or relative.parts[0] != ".job-output-scopes":
+            return None
+        resolved = lexical.resolve(strict=True)
+        resolved.relative_to(output_root)
+        if not resolved.is_dir() or _is_reparse(lexical) or _is_reparse(resolved):
+            return None
+        current = output_root
+        for part in relative.parts:
+            current = current / part
+            if _is_reparse(current):
+                return None
+        return resolved
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
 def local_cache_root() -> Path:
     value = os.environ.get("LOCAL_AI_CACHE")
     return Path(os.path.expandvars(value)).expanduser() if value else local_root() / "Cache"
