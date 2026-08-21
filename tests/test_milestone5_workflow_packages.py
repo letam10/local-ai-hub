@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -305,6 +306,106 @@ class WorkflowPackageServiceTests(unittest.TestCase):
             with mock.patch("src.services.workflow_packages.catalog.MANAGED_PACKAGE_ROOT", root), mock.patch.object(Path, "read_bytes", side_effect=AssertionError("oversized descriptor was read")):
                 catalog = discover_managed_packages()
             self.assertIn("managed_descriptor_size", {item["code"] for item in catalog["errors"]})
+
+    def test_catalog_walk_refuses_leaf_parent_root_reparse_and_descriptor_directories(self) -> None:
+        from src.services.workflow_packages import discover_managed_packages
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            outside = base / "outside"
+            outside.mkdir()
+            outside_file = outside / "outside.workflow-package.json"
+            outside_file.write_text(json.dumps(package_sample()), encoding="utf-8")
+
+            root = base / "root-leaf"
+            root.mkdir()
+            leaf = root / "linked.workflow-package.json"
+            try:
+                leaf.symlink_to(outside_file)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink fixture unavailable: {exc}")
+            with mock.patch("src.services.workflow_packages.catalog.MANAGED_PACKAGE_ROOT", root):
+                catalog = discover_managed_packages()
+            self.assertEqual(catalog["records"], [])
+            self.assertIn("managed_reparse_refused", {item["code"] for item in catalog["errors"]})
+            self.assertNotIn(str(outside), json.dumps(catalog, ensure_ascii=False))
+
+            root = base / "root-parent"
+            root.mkdir()
+            parent_link = root / "linked-directory"
+            try:
+                parent_link.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"directory symlink fixture unavailable: {exc}")
+            with mock.patch("src.services.workflow_packages.catalog.MANAGED_PACKAGE_ROOT", root):
+                catalog = discover_managed_packages()
+            self.assertEqual(catalog["records"], [])
+            self.assertIn("managed_reparse_refused", {item["code"] for item in catalog["errors"]})
+
+            real_root = base / "real-root"
+            real_root.mkdir()
+            root_link = base / "root-link"
+            try:
+                root_link.symlink_to(real_root, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"root symlink fixture unavailable: {exc}")
+            with mock.patch("src.services.workflow_packages.catalog.MANAGED_PACKAGE_ROOT", root_link):
+                catalog = discover_managed_packages()
+            self.assertEqual(catalog["status"], "unavailable")
+            self.assertNotIn(str(real_root), json.dumps(catalog, ensure_ascii=False))
+
+            root = base / "root-directory"
+            root.mkdir()
+            (root / "directory.workflow-package.json").mkdir()
+            with mock.patch("src.services.workflow_packages.catalog.MANAGED_PACKAGE_ROOT", root):
+                catalog = discover_managed_packages()
+            self.assertEqual(catalog["records"], [])
+            self.assertIn("managed_descriptor_refused", {item["code"] for item in catalog["errors"]})
+
+    def test_descriptor_identity_drift_after_read_refuses_same_byte_replacement(self) -> None:
+        from src.services.workflow_packages import catalog as catalog_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "packages"
+            root.mkdir()
+            descriptor = root / "swap.workflow-package.json"
+            descriptor.write_text(json.dumps(package_sample()), encoding="utf-8")
+            real_read_bytes = Path.read_bytes
+
+            def replace_after_read(path: Path) -> bytes:
+                payload = real_read_bytes(path)
+                if Path(path) == descriptor:
+                    replacement = root / ".replacement.tmp"
+                    replacement.write_bytes(payload)
+                    os.replace(replacement, descriptor)
+                return payload
+
+            with mock.patch.object(catalog_module, "MANAGED_PACKAGE_ROOT", root), mock.patch.object(Path, "read_bytes", side_effect=replace_after_read):
+                payload, error = catalog_module._read_managed_json(descriptor)
+            self.assertIsNone(payload)
+            self.assertEqual(error, "managed_descriptor_refused")
+            self.assertNotIn(str(root), json.dumps({"error": error}))
+
+    def test_outside_descriptor_and_source_contract_are_fail_closed(self) -> None:
+        from src.services.workflow_packages import catalog as catalog_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "root"
+            root.mkdir()
+            outside = base / "outside.workflow-package.json"
+            outside.write_text(json.dumps(package_sample()), encoding="utf-8")
+            with mock.patch.object(catalog_module, "MANAGED_PACKAGE_ROOT", root):
+                payload, error = catalog_module._read_managed_json(outside)
+            self.assertIsNone(payload)
+            self.assertEqual(error, "managed_descriptor_refused")
+
+        source = (ROOT / "src" / "services" / "workflow_packages" / "catalog.py").read_text(encoding="utf-8")
+        self.assertIn("os.scandir", source)
+        self.assertIn("os.lstat", source)
+        self.assertIn("_directory_chain", source)
+        self.assertNotIn(".rglob(", source)
+        self.assertNotIn(".resolve()", source)
 
     def test_diff_marks_hub_contract_changes_for_manual_review_and_orders_prereleases(self) -> None:
         from src.services.workflow_packages import diff_workflow_packages, plan_workflow_migration
