@@ -663,8 +663,7 @@ def _claim_job_output_scope_locked(scopes: dict[str, Any], job_id: str, result: 
             invalid_count += 1
             continue
         before = record["baseline"].get(relative)
-        in_namespace = any(relative.startswith(namespace + "/") for namespace in record["namespaces"])
-        ownership = "owned" if (relative in record["claims"] or in_namespace) and before is None and record["snapshot_complete"] else "ambiguous"
+        ownership = "owned" if relative in record["claims"] and before is None and record["snapshot_complete"] else "ambiguous"
         entries[relative] = {
             "relative_path": relative,
             "ownership": ownership,
@@ -739,6 +738,36 @@ def claim_job_output_path(job_id: str, path: object) -> dict[str, int | str]:
             claims.pop()
             return empty
         return {"status": "claimed", "claim_count": len(claims)}
+
+
+def attest_job_output_path(job_id: str, path: object) -> dict[str, int | str]:
+    """Attest one existing producer child inside a claimed namespace."""
+
+    empty = {"status": "unavailable", "claim_count": 0}
+    if not isinstance(job_id, str) or _JOB_ID.fullmatch(job_id) is None:
+        return empty
+    with _LOCK:
+        scopes = _load_job_output_scopes()
+        record = scopes.get("records", {}).get(job_id) if isinstance(scopes, dict) else None
+        if not isinstance(record, dict) or record.get("state") != "open":
+            return empty
+        item = _scope_output_file(path)
+        if item is None:
+            return {"status": "invalid", "claim_count": len(record["claims"])}
+        _resolved, relative, _current = item
+        if not any(relative.startswith(namespace + "/") for namespace in record["namespaces"]):
+            return {"status": "manual_review", "claim_count": len(record["claims"])}
+        if record["baseline"].get(relative) is not None:
+            return {"status": "manual_review", "claim_count": len(record["claims"])}
+        if relative in record["claims"]:
+            return {"status": "attested", "claim_count": len(record["claims"])}
+        if len(record["claims"]) >= JOB_OUTPUT_SCOPE_MAX_CANDIDATES:
+            return {"status": "unavailable", "claim_count": len(record["claims"])}
+        record["claims"].append(relative)
+        if not _save_job_output_scopes(scopes):
+            record["claims"].pop()
+            return empty
+        return {"status": "attested", "claim_count": len(record["claims"])}
 
 
 def _scope_namespace_path(relative: str) -> Path | None:

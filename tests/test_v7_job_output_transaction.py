@@ -233,6 +233,7 @@ class V7JobOutputTransactionTests(unittest.TestCase):
             self.assertIsNotNone(namespace)
             assert namespace is not None
             child = namespace / "mask.png"
+            self.assertEqual(artifact_store.claim_job_output_path(job_id, child)["status"], "claimed")
             child.write_bytes(b"claimed child")
             prepared = artifact_store.prepare_job_output_scope(job_id, {"status": "completed", "outputs": [str(child)]})
             self.assertEqual(prepared["status"], "owned")

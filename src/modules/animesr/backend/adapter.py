@@ -12,7 +12,7 @@ from src.services.api.config import component, models
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
 from src.services.artifact_store import describe, resolve
 from src.shared.paths.registry import MODEL_ROOT, OUTPUT_ROOT
-from src.shared.utils.adapter_common import local_root, requires_server_output_namespace, server_output_namespace, unavailable
+from src.shared.utils.adapter_common import attest_worker_output_paths, local_root, requires_server_output_namespace, server_output_namespace, unavailable
 
 
 WORKER = Path(__file__).with_name("worker.py")
@@ -223,7 +223,7 @@ def run_animesr(payload: dict[str, Any], context: ProcessOwner | None = None) ->
         # lookup without modifying the installed runtime.
         "ffmpeg": str(ffmpeg),
     }
-    return run_json_worker(
+    result = run_json_worker(
         [str(python), str(WORKER)],
         request,
         label="animesr_upscale",
@@ -232,6 +232,7 @@ def run_animesr(payload: dict[str, Any], context: ProcessOwner | None = None) ->
         owner=context,
         timeout_seconds=3600,
     )
+    return result if attest_worker_output_paths(result, context, ("output", "files", "outputs")) else unavailable("animesr", "Producer output ownership could not be attested.", code="output_scope_unavailable")
 
 
 def run_optional_rife(payload: dict[str, Any], _context: ProcessOwner | None = None) -> dict[str, Any]:

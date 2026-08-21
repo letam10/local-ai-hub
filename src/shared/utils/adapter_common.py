@@ -279,6 +279,29 @@ def _safe_metadata(value: object, *, depth: int = 0) -> object | None:
     return None
 
 
+def attest_worker_output_paths(value: object, context: object | None, output_fields: tuple[str, ...]) -> bool:
+    """Have a real Hub job attest each returned child before publication."""
+
+    if not isinstance(value, dict) or value.get("status") != "completed":
+        return True
+    attest = getattr(context, "attest_output", None) if context is not None else None
+    if not callable(attest):
+        return True
+    for field in output_fields:
+        candidate = value.get(field)
+        values = [candidate] if isinstance(candidate, str) and candidate else candidate if isinstance(candidate, list) else []
+        for item in values:
+            if not isinstance(item, str) or not item:
+                return False
+            try:
+                status = attest(item).get("status")
+            except Exception:
+                return False
+            if status not in {"attested", "claimed"}:
+                return False
+    return True
+
+
 def normalize_worker_result(
     value: object,
     *,
@@ -291,6 +314,15 @@ def normalize_worker_result(
     if not isinstance(value, dict) or value.get("status") not in {"completed", "failed", "unavailable", "cancelled", "error"}:
         return {"status": "error", "component": component_id, "code": "invalid_worker_result"}
     status = str(value.get("status"))
+    if status == "completed" and not attest_worker_output_paths(value, context, output_fields):
+        return {
+            "status": "unavailable",
+            "component": component_id,
+            "code": "output_scope_unavailable",
+            "execution": "not_run",
+            "dry_run": True,
+            "reason": "Producer output ownership could not be attested.",
+        }
     safe: dict[str, Any] = {"status": status, "component": component_id}
     for key in _WORKER_COMMON_FIELDS:
         if key in value:

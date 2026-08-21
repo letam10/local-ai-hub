@@ -12,7 +12,7 @@ from src.services.api.config import component, models
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
 from src.services.artifact_store import describe, resolve
 from src.shared.paths.registry import MODEL_ROOT, OUTPUT_ROOT, TEMP_ROOT
-from src.shared.utils.adapter_common import local_root, requires_server_output_namespace, server_output_namespace, unavailable
+from src.shared.utils.adapter_common import attest_worker_output_paths, local_root, requires_server_output_namespace, server_output_namespace, unavailable
 
 
 WORKER = Path(__file__).with_name("worker.py")
@@ -140,7 +140,7 @@ def run_realesrgan(payload: dict[str, Any], context: ProcessOwner | None = None)
         "scale": scale,
         "tile": tile,
     }
-    return run_json_worker(
+    result = run_json_worker(
         [str(python), str(WORKER)],
         request,
         label="real_esrgan_upscale",
@@ -149,6 +149,7 @@ def run_realesrgan(payload: dict[str, Any], context: ProcessOwner | None = None)
         owner=context,
         timeout_seconds=float(payload.get("timeout_seconds", 1200)),
     )
+    return result if attest_worker_output_paths(result, context, ("output", "files", "outputs")) else unavailable("real_esrgan", "Producer output ownership could not be attested.", code="output_scope_unavailable")
 
 
 def capability() -> dict[str, Any]:

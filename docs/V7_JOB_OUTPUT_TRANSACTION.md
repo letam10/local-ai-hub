@@ -8,9 +8,10 @@ per-job namespaces, bounded file identity metadata, ownership (`owned` or
 projection and never stores an absolute path, command, log, stderr, client
 value, or secret.
 
-HubJobManager exposes two server-owned producer seams through `JobContext`:
-`claim_output(path)` for a known leaf and `claim_output_namespace(label)` for
-dynamic batches. A namespace is created under the private
+HubJobManager exposes three server-owned producer seams through `JobContext`:
+`claim_output(path)` for a known leaf, `claim_output_namespace(label)` for
+dynamic batches, and `attest_output(path)` for a returned child whose producer
+has completed its internal write. A namespace is created under the private
 `.job-output-scopes` directory before the producer starts; the producer
 receives its path only in the internal worker request. AnimeSR,
 Practical-RIFE, Real-ESRGAN, SAM2, Whisper, media/FFmpeg, ComfyUI, vision,
@@ -20,12 +21,14 @@ adapter calls without a JobContext remain compatibility/test-only paths.
 When a worker returns output candidates, the artifact store validates every
 candidate as a regular file under the server-owned `Output` root, rejects
 traversal, external paths, reparse points, directories, duplicates, and size
-overflow, then records the candidate identity in the manifest. A candidate is
-`owned` only when it is an explicitly claimed leaf or is inside an explicitly
-claimed namespace and was absent from the complete pre-worker snapshot. A path
-that appeared after the snapshot but before a claim, or whose ownership cannot
-be proven, is preserved and marked `manual_review`; baseline absence alone is
-never an ownership grant.
+overflow, then records the candidate identity in the manifest. Namespace
+membership is containment only; it is never ownership proof. A candidate is
+`owned` only when it is an explicitly pre-create claimed leaf or has an
+explicit server-owned producer attestation recorded as an exact child claim,
+and it was absent from the complete pre-worker snapshot. A path that appeared
+after the snapshot without a claim, or whose ownership cannot be proven, is
+preserved and marked `manual_review`; baseline absence alone is never an
+ownership grant.
 
 Cancellation and publication failure resolve the manifest under the job
 context lock. Only an identity-matching candidate explicitly marked `owned`

@@ -24,7 +24,7 @@ from src.services.api.config import component, hub_config
 from src.services.job_manager.manager import JobContext
 from src.services.process_manager.managed import background_processes
 from src.shared.paths.registry import OUTPUT_ROOT, ROOT, TEMP_ROOT
-from src.shared.utils.adapter_common import configured_path, local_root, requires_server_output_namespace, server_output_namespace, unavailable
+from src.shared.utils.adapter_common import attest_worker_output_paths, configured_path, local_root, requires_server_output_namespace, server_output_namespace, unavailable
 
 
 BRIDGE_SCHEMA_VERSION = 1
@@ -642,7 +642,8 @@ def _submit_workflow(workflow: dict[str, Any], engine: str, request: dict[str, A
         if history and prompt_id in history:
             outputs = _copy_history_outputs(history, prompt_id, engine, namespace)
             if outputs:
-                return {"status": "completed", "operation": "generate_image", "engine": engine, "outputs": outputs, "seed": request.get("seed"), "prompt": request.get("prompt")}
+                output_result = {"status": "completed", "operation": "generate_image", "engine": engine, "outputs": outputs, "seed": request.get("seed"), "prompt": request.get("prompt")}
+                return output_result if attest_worker_output_paths(output_result, context, ("outputs",)) else unavailable("comfyui", "Producer output ownership could not be attested.", code="output_scope_unavailable")
             return {"status": "error", "error": "ComfyUI hoàn tất nhưng không tìm thấy image output hợp lệ."}
         if context:
             context.progress(20, "ComfyUI đang xử lý prompt image trong nền.")

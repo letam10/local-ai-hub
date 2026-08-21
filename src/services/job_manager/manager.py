@@ -73,6 +73,11 @@ class JobContext:
 
         return artifact_store.claim_job_output_path(self.job_id, path)
 
+    def attest_output(self, path: object) -> dict[str, Any]:
+        """Attest one producer-created child inside this job's namespace."""
+
+        return artifact_store.attest_job_output_path(self.job_id, path)
+
     def claim_output_namespace(self, label: str) -> object | None:
         """Create one server-owned per-job Output namespace for a producer."""
 

@@ -64,6 +64,8 @@ class V7JobOutputProducerClaimsTests(unittest.TestCase):
 
             json_path = namespace / "transcript.json"
             srt_path = namespace / "transcript.srt"
+            self.assertEqual(artifact_store.claim_job_output_path(job_id, json_path)["status"], "claimed")
+            self.assertEqual(artifact_store.claim_job_output_path(job_id, srt_path)["status"], "claimed")
             json_path.write_text("{}", encoding="utf-8")
             srt_path.write_text("1\n", encoding="utf-8")
             prepared = artifact_store.prepare_job_output_scope(
@@ -73,31 +75,29 @@ class V7JobOutputProducerClaimsTests(unittest.TestCase):
             self.assertEqual(prepared["status"], "owned")
             self.assertEqual(prepared["owned_count"], 2)
 
-    def test_namespace_children_cover_batches_and_foreign_child_is_manual_review(self) -> None:
+    def test_namespace_requires_child_attestation_and_preserves_foreign_child(self) -> None:
         job_id = "jobv5_" + "2" * 32
         with self._patch_store()[0], self._patch_store()[1]:
             self.assertIsNotNone(artifact_store.begin_job_output_scope(job_id))
             namespace = artifact_store.claim_job_output_namespace(job_id, "sam2")
             self.assertIsNotNone(namespace)
             assert namespace is not None
-            owned = [namespace / name for name in ("mask.png", "overlay.png", "frames" / Path("000001.jpg"), "audio.wav")]
-            owned[2].parent.mkdir()
-            for item in owned:
-                item.write_bytes(b"synthetic")
-            foreign = self.output_root / "foreign" / "unclaimed.png"
-            foreign.parent.mkdir()
-            foreign.write_bytes(b"preserve")
+            owned = namespace / "mask.png"
+            foreign = namespace / "foreign.png"
+            owned.write_bytes(b"attested producer child")
+            self.assertEqual(JobContext(job_id).attest_output(owned)["status"], "attested")
+            foreign.write_bytes(b"foreign child preserve")
             prepared = artifact_store.prepare_job_output_scope(
                 job_id,
-                {"status": "completed", "outputs": [str(item) for item in [*owned, foreign]]},
+                {"status": "completed", "outputs": [str(owned), str(foreign)]},
             )
             self.assertEqual(prepared["status"], "manual_review")
-            self.assertEqual(prepared["owned_count"], len(owned))
+            self.assertEqual(prepared["owned_count"], 1)
             self.assertEqual(prepared["ambiguous_count"], 1)
             finalized = artifact_store.finalize_job_output_scope(job_id, terminal_state="failed")
             self.assertEqual(finalized["status"], "manual_review")
-            self.assertFalse(any(item.exists() for item in owned))
-            self.assertEqual(foreign.read_bytes(), b"preserve")
+            self.assertFalse(owned.exists())
+            self.assertEqual(foreign.read_bytes(), b"foreign child preserve")
 
     def test_namespace_claim_save_failure_has_no_usable_namespace(self) -> None:
         job_id = "jobv5_" + "3" * 32

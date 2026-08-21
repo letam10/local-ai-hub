@@ -17,7 +17,7 @@ from src.services.process_manager.managed import ProcessOwner, run_command
 from src.services.process_manager.windows import run_hidden
 from src.services.artifact_store import describe, resolve
 from src.shared.paths.registry import OUTPUT_ROOT, TEMP_ROOT
-from src.shared.utils.adapter_common import configured_path, requires_server_output_namespace, server_output_namespace, unavailable
+from src.shared.utils.adapter_common import attest_worker_output_paths, configured_path, requires_server_output_namespace, server_output_namespace, unavailable
 
 
 VIDEO_OPS = {
@@ -305,6 +305,10 @@ def _output(source: Path, operation: str, extension: str | None = None, output_r
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     suffix = extension or source.suffix or ".mp4"
     return root / f"{source.stem}_{operation}_{stamp}{suffix}"
+
+
+def _attest_completed_output(result: dict[str, Any], context: ProcessOwner | None) -> dict[str, Any]:
+    return result if attest_worker_output_paths(result, context, ("output", "files", "outputs")) else unavailable("ffmpeg", "Producer output ownership could not be attested.", code="output_scope_unavailable")
 
 
 def probe(path: str) -> dict[str, Any]:
@@ -673,7 +677,7 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
             return {"status": "error", "error": output or f"FFmpeg kết thúc với mã {code}."}
         if not target.is_file():
             return {"status": "error", "error": "FFmpeg không tạo output mong đợi."}
-        return {"status": "completed", "operation": operation, "output": str(target), "input_count": len(unique_sources)}
+        return _attest_completed_output({"status": "completed", "operation": operation, "output": str(target), "input_count": len(unique_sources)}, context)
     if operation == "encode":
         container = str(payload.get("container") or "mp4").strip().lower().lstrip(".")
         if container not in {"mp4", "mkv", "webm"}:
@@ -699,7 +703,7 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
                     continue
         if not target.is_file():
             return {"status": "error", "error": "FFmpeg không tạo output encode mong đợi."}
-        return {"status": "completed", "operation": operation, "output": str(target), "container": container, "rate_control": str(payload.get("rate_control") or "quality")}
+        return _attest_completed_output({"status": "completed", "operation": operation, "output": str(target), "container": container, "rate_control": str(payload.get("rate_control") or "quality")}, context)
     requested_format = str(payload.get("format") or "png").strip().lower().lstrip(".")
     image_extension = "." + ({"jpeg": "jpg", "jpg": "jpg", "png": "png", "webp": "webp", "bmp": "bmp"}.get(requested_format, "png"))
     extension = ".m4a" if operation == "extract_audio" else (image_extension if operation.startswith("image_") else source.suffix or ".mp4")
@@ -725,7 +729,7 @@ def run_operation(payload: dict[str, Any], context: ProcessOwner | None = None) 
         return {"status": "error", "error": output or f"FFmpeg kết thúc với mã {code}."}
     if operation == "extract_frames":
         files = sorted(target.parent.glob("*.png"))
-        return {"status": "completed", "operation": operation, "frame_count": len(files), "files": [str(item) for item in files[:100]]}
+        return _attest_completed_output({"status": "completed", "operation": operation, "frame_count": len(files), "files": [str(item) for item in files[:100]]}, context)
     if not target.is_file():
         return {"status": "error", "error": "FFmpeg không tạo output mong đợi."}
-    return {"status": "completed", "operation": operation, "output": str(target)}
+    return _attest_completed_output({"status": "completed", "operation": operation, "output": str(target)}, context)
