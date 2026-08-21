@@ -79,7 +79,7 @@ _PATH_FIELDS = {
 _JOB_OUTPUT_SCOPE_STATES = frozenset({"open", "completed", "failed", "cancelled", "unavailable", "interrupted", "manual_review"})
 _JOB_OUTPUT_SCOPE_OWNERSHIP = frozenset({"owned", "ambiguous"})
 _JOB_OUTPUT_SCOPE_ROOT_KEYS = frozenset({"schema_version", "records"})
-_JOB_OUTPUT_SCOPE_RECORD_KEYS = frozenset({"job_id", "job_fingerprint", "state", "snapshot_complete", "baseline", "candidates"})
+_JOB_OUTPUT_SCOPE_RECORD_KEYS = frozenset({"job_id", "job_fingerprint", "state", "snapshot_complete", "baseline", "claims", "candidates"})
 _JOB_OUTPUT_SCOPE_ENTRY_KEYS = frozenset({"relative_path", "ownership", "before", "current"})
 _JOB_OUTPUT_SCOPE_IDENTITY_KEYS = frozenset({"size_bytes", "mtime_ns", "file_id"})
 
@@ -391,6 +391,7 @@ def _scope_record(value: object, job_id: str | None = None) -> dict[str, Any] | 
     state = value.get("state")
     snapshot_complete = value.get("snapshot_complete")
     baseline = value.get("baseline")
+    claims = value.get("claims")
     candidates = value.get("candidates")
     if (
         not isinstance(record_job_id, str)
@@ -402,8 +403,10 @@ def _scope_record(value: object, job_id: str | None = None) -> dict[str, Any] | 
         or state not in _JOB_OUTPUT_SCOPE_STATES
         or type(snapshot_complete) is not bool
         or type(baseline) is not dict
+        or type(claims) is not list
         or type(candidates) is not dict
         or len(baseline) > JOB_OUTPUT_SCOPE_MAX_ENTRIES
+        or len(claims) > JOB_OUTPUT_SCOPE_MAX_CANDIDATES
         or len(candidates) > JOB_OUTPUT_SCOPE_MAX_CANDIDATES
     ):
         return None
@@ -414,6 +417,12 @@ def _scope_record(value: object, job_id: str | None = None) -> dict[str, Any] | 
         if safe_relative is None or safe_identity is None:
             return None
         normalized_baseline[safe_relative] = safe_identity
+    normalized_claims: list[str] = []
+    for relative in claims:
+        safe_relative = _scope_relative(relative)
+        if safe_relative is None or safe_relative in normalized_claims or safe_relative in normalized_baseline:
+            return None
+        normalized_claims.append(safe_relative)
     normalized_candidates: dict[str, Any] = {}
     for relative, entry in candidates.items():
         safe_entry = _scope_entry(entry)
@@ -426,6 +435,7 @@ def _scope_record(value: object, job_id: str | None = None) -> dict[str, Any] | 
         "state": state,
         "snapshot_complete": snapshot_complete,
         "baseline": normalized_baseline,
+        "claims": normalized_claims,
         "candidates": normalized_candidates,
     }
 
@@ -603,6 +613,7 @@ def begin_job_output_scope(job_id: str) -> dict[str, Any] | None:
             "state": "open",
             "snapshot_complete": complete,
             "baseline": baseline,
+            "claims": [],
             "candidates": {},
         }
         terminal_ids = [key for key, value in scopes["records"].items() if value.get("state") != "open"]
@@ -630,7 +641,7 @@ def _claim_job_output_scope_locked(scopes: dict[str, Any], job_id: str, result: 
             invalid_count += 1
             continue
         before = record["baseline"].get(relative)
-        ownership = "ambiguous" if before is not None or not record["snapshot_complete"] else "owned"
+        ownership = "owned" if relative in record["claims"] and before is None and record["snapshot_complete"] else "ambiguous"
         entries[relative] = {
             "relative_path": relative,
             "ownership": ownership,
@@ -642,6 +653,69 @@ def _claim_job_output_scope_locked(scopes: dict[str, Any], job_id: str, result: 
     ambiguous_count = sum(entry["ownership"] == "ambiguous" for entry in entries.values())
     status = "invalid" if invalid_count else "manual_review" if ambiguous_count else "owned"
     return {"status": status, "owned_count": owned_count, "ambiguous_count": ambiguous_count, "invalid_count": invalid_count}
+
+
+def _scope_output_target(value: object) -> tuple[Path, str, bool] | None:
+    """Validate a claim target without treating absence as ownership proof."""
+
+    if not isinstance(value, (str, Path)) or not str(value):
+        return None
+    raw = Path(value).expanduser()
+    try:
+        root = OUTPUT_ROOT.resolve()
+        absolute = raw.absolute()
+        relative = _scope_relative(absolute.relative_to(root).as_posix())
+        if relative is None:
+            return None
+        parent = absolute.parent
+        if not parent.exists() or not parent.is_dir():
+            return None
+        cursor = parent
+        while True:
+            if _scope_reparse(cursor):
+                return None
+            if cursor == root:
+                break
+            if cursor.parent == cursor:
+                return None
+            cursor = cursor.parent
+        if absolute.is_symlink():
+            return None
+        exists = absolute.exists()
+        if exists and (_scope_reparse(absolute) or not absolute.is_file()):
+            return None
+    except (OSError, ValueError):
+        return None
+    return absolute, relative, exists
+
+
+def claim_job_output_path(job_id: str, path: object) -> dict[str, int | str]:
+    """Record a server-owned worker claim before a new Output leaf is written."""
+
+    empty = {"status": "unavailable", "claim_count": 0}
+    if not isinstance(job_id, str) or _JOB_ID.fullmatch(job_id) is None:
+        return empty
+    with _LOCK:
+        scopes = _load_job_output_scopes()
+        record = scopes.get("records", {}).get(job_id) if isinstance(scopes, dict) else None
+        if not isinstance(record, dict) or record.get("state") != "open":
+            return empty
+        target = _scope_output_target(path)
+        if target is None:
+            return {"status": "invalid", "claim_count": 0}
+        _absolute, relative, exists = target
+        claims = record["claims"]
+        if relative in claims:
+            return {"status": "claimed", "claim_count": len(claims)}
+        if not record["snapshot_complete"] or relative in record["baseline"] or exists:
+            return {"status": "manual_review", "claim_count": len(claims)}
+        if len(claims) >= JOB_OUTPUT_SCOPE_MAX_CANDIDATES:
+            return {"status": "unavailable", "claim_count": len(claims)}
+        claims.append(relative)
+        if not _save_job_output_scopes(scopes):
+            claims.pop()
+            return empty
+        return {"status": "claimed", "claim_count": len(claims)}
 
 
 def prepare_job_output_scope(job_id: str, result: object) -> dict[str, Any]:
