@@ -134,6 +134,47 @@ python scripts/v8_acceptance_gate.py --strict-release --evidence <acceptance-roo
 
 Không sửa gate/script/report chỉ để biến BLOCKED thành PASS.
 
+### 7A. Kết quả chạy local Windows 2026-08-22 — evidence chưa đủ để release
+
+Đã chạy trên Windows với dữ liệu thử nghiệm cô lập và không chạm `Config`,
+`Output`, model, runtime hay forensic bundle của máy:
+
+- Source fix `b8ebceddae037c0678d4c84875f06ef30320ff28`
+  (`fix(v8): encode NTFS identities for SQLite`) sửa overflow khi Windows
+  `st_ino` vượt SQLite signed INTEGER. Full `test_v8_*.py` chạy 41 test PASS,
+  `ci_validate.py` PASS với 732 tracked files, source-only V8 policy hợp lệ.
+- Các kiểm tra filesystem/transaction V8 đang có chạy 11 test PASS trên root
+  thử nghiệm, gồm output-root reparse refusal, reservation/job binding,
+  staged-not-public, detached managed object, replacement fail-closed và
+  reconciliation. Đây là coverage hữu ích nhưng chưa bao phủ toàn bộ ma trận
+  adversarial ở mục 3, nên `windows_filesystem` chưa được đánh dấu PASS.
+- Inventory trực tiếp dùng đủ 13 biểu thức bắt buộc ở mục 4. `DurableWorkEngine`
+  production export là `V8DurableWorkEngine`; test V8 migration pass. Năm test
+  write-path V6 cũ vẫn fail khi không inject `V8OutputBridge` riêng vào fixture;
+  `v8_engine.py` là base-identical với V8 remote và không bị source fix này sửa.
+  Vì chứng minh full producer compatibility chưa hoàn tất, gate inventory chưa PASS.
+- Controlled `HubHTTPServer` thật trên `127.0.0.1:8765` đã phục vụ V8 operation
+  list/detail/confirm/cancel và source-acceptance qua HTTP, payload path-free,
+  sau shutdown listener được giải phóng. Artifact GET/HEAD/range V8 + historical
+  V7, restart và concurrency đầy đủ chưa có evidence cùng gate.
+- Component/bundle/receipt/restart static-fixture matrix 38 test PASS; backup
+  and recovery supporting matrix 32 test PASS; durable recovery supporting
+  matrix 29 test PASS. Đây không thay thế lifecycle có component thật, backup
+  V8 SQLite live, crash-kill hay rollback bundle multi-component.
+- Real pywebview lifecycle smoke đã chạy: close/reopen, tray roundtrip,
+  cooperative owned-worker cancel và listener release pass; second-instance
+  probe fail. Vì vậy `webview2_product_ux` vẫn BLOCKED.
+- Package/release source tests cho V8 policy pass, nhưng legacy package-builder
+  refusal `SOURCE_BRANCH_MISMATCH` trên V8 là đúng boundary. Candidate version/tag
+  vẫn null; không build package, không tag, không merge.
+- Runtime/model/GPU smoke chưa chạy: Hub Python environment không hiện diện ở
+  `Environments/hub`, `ffmpeg` không có trên PATH; hơn nữa model/GPU inference
+  cần phê duyệt riêng theo mục 11.
+
+Kết luận hiện tại: local evidence phải ghi đúng PASS/BLOCKED theo source commit
+cuối cùng; strict release vẫn BLOCKED. Không coi source/static fixture pass là
+Windows production, desktop product, model-runtime hay release readiness.
+
 ## 8. Real component lifecycle — CHƯA LÀM
 
 Từng vertical slice trên controlled Windows root:
@@ -215,6 +256,11 @@ Ba temp branch phải verify không có unique work rồi mới delete:
 - `feature/local-ai-hub-v8-wave0-temp3`
 
 Không force-push/rewrite history để cleanup. `PLAN.md` không tái tạo; handoff chính là `Plan_Miss.md`.
+
+Ngày 2026-08-22 đã kiểm tra cả ba remote ref cùng trỏ
+`964cacc445d612026cdd9123995d56f9bb367631`, mỗi ref có 0 commit riêng so với
+V8, rồi xóa đúng ba ref tạm bằng non-force deletion. Không xóa branch V8,
+`main`, tag, PR hay local evidence.
 
 ## 15. Release gate hiện tại
 
