@@ -87,10 +87,11 @@ waves:
       - committed_does_not_imply_operational
   wave4:
     name: windows_real_lifecycle_and_product_ux
-    status: source_product_ux_implemented_windows_real_lifecycle_pending
+    status: source_product_ux_reaudited_windows_real_lifecycle_pending
     source_owners:
       api_context: src/services/api/context.py
       component_routes: src/services/api/routes/component_v8.py
+      component_feature: src/ui/features/components/index.js
       component_renderer: src/ui/features/components/render.js
       component_control_plane: src/ui/features/components/v8_control_plane.js
       ui_mount: src/ui/index.html
@@ -99,25 +100,52 @@ waves:
       - opaque_operation_ids_only
       - bounded_operation_list
       - planned_operation_requires_explicit_confirm_or_cancel
+      - public_component_type_and_action_are_finite
+      - invalid_public_component_metadata_fails_closed
+      - component_control_plane_mount_is_idempotent
       - source_acceptance_is_truthful_and_path_free
+      - truthful_reference_existing_and_manual_install_labels
       - no_product_ux_polling
       - no_page_load_download_or_install
       - reference_existing_is_non_installing
-    source_validation:
-      github_actions_run: 667
-      v8_tests: 27
-      result: pass
     windows_acceptance: deferred
-next_wave:
-  name: acceptance_and_release
-  blocked_until:
-    - wave4_windows_real_lifecycle_acceptance
-  requirements:
-    - clean_windows_lifecycle_matrix
-    - upgrade_preservation
-    - crash_recovery
-    - packaging_and_installer_acceptance
-    - release_provenance_review
+  wave5:
+    name: acceptance_and_release
+    status: source_preflight_implemented_release_execution_blocked
+    source_owners:
+      gate_contract: architecture/v8_acceptance_gates.json
+      preflight: scripts/v8_acceptance_gate.py
+      tests: tests/test_v8_wave5_acceptance_gate.py
+      documentation: docs/V8_WAVE5_ACCEPTANCE_RELEASE.md
+      handoff: Plan_Miss.md
+    source_invariants:
+      - linux_ci_never_claims_windows_acceptance
+      - local_evidence_must_bind_exact_source_commit
+      - local_evidence_schema_is_bounded_and_path_free
+      - every_pass_gate_requires_report_sha256
+      - version_tag_and_main_merge_are_user_approved_only
+      - historical_v7_release_manifest_is_not_rewritten_as_v8
+      - v8_release_provenance_must_be_separately_reviewed
+      - source_preflight_is_read_only
+    required_local_gates: 12
+    release_execution: blocked
+    blocked_until:
+      - wave4_windows_real_lifecycle_acceptance
+      - v8_release_provenance_review
+source_validation:
+  github_actions_run: 699
+  tracked_files: 728
+  v8_tests: 33
+  acceptance_source_preflight: pass_with_expected_release_blockers
+  javascript_syntax: pass
+  diff_check: pass
+release_blockers:
+  - local_windows_evidence_required
+  - product_version_still_v7_1_0
+  - release_branch_still_feature_v7_operational_closure
+  - intended_tag_still_v7_series
+  - historical_release_manifest_still_v7
+  - v8_release_provenance_not_reviewed
 deferred_local_acceptance:
   - windows_reparse_junction_and_handle_race_acceptance
   - full_local_artifact_callsite_inventory
@@ -129,6 +157,7 @@ deferred_local_acceptance:
   - real_component_download_install_repair_update_rollback_uninstall
   - webview2_operation_ui_interaction_and_accessibility
   - installer_shortcut_upgrade_preservation
+  - crash_recovery
   - runtime_smoke
   - model_inference
   - v8_control_database_backup_restore
