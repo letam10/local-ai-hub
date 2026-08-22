@@ -1,16 +1,19 @@
 """Read-only V8 Acceptance & Release preflight.
 
-This module never upgrades a version, creates/moves a tag, builds an installer,
-starts the desktop app, downloads a component or treats CI as Windows evidence.
-It validates the tracked gate contract and, when explicitly supplied, a bounded
-path-free local Windows evidence manifest. Release remains blocked until every
-required local gate passes on the exact source commit and the V8 release
-provenance contract is separately reviewed.
+The preflight separates tracked source validity from machine-local Windows
+acceptance and release identity approval. It never upgrades a version,
+creates/moves a tag, builds an installer, starts the desktop app, downloads a
+component, or treats Linux CI as Windows evidence.
+
+A PASS local gate is accepted only when its deterministic local report exists,
+is bound to the same source commit/gate/platform, and its actual SHA-256 equals
+the digest declared in the evidence manifest.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -22,30 +25,37 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.shared.version import PRODUCT_VERSION
-from scripts.verify_release_provenance import RELEASE_BRANCH, REVIEWED_INTENDED_TAG, REVIEWED_RELEASE_VERSION
+from scripts.v8_release_provenance import ReleasePolicyError, release_policy_snapshot
 
 GATES_PATH = ROOT / "architecture" / "v8_acceptance_gates.json"
 EVIDENCE_SCHEMA_VERSION = "v8-local-acceptance-evidence.v1"
+REPORT_SCHEMA_VERSION = "v8-local-gate-report.v1"
+REPORTS_DIR_NAME = "reports"
 MAX_JSON_BYTES = 256 * 1024
+MAX_REPORT_BYTES = 512 * 1024
 OID = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 GATE_ID = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
+CHECK_ID = re.compile(r"^[a-z][a-z0-9_.-]{1,95}$")
 EVIDENCE_STATUSES = frozenset({"PASS", "FAIL", "BLOCKED", "NOT_RUN"})
 REQUIRED_SOURCE_FILES = (
     "Plan_Miss.md",
     "architecture/v8_foundation.yaml",
     "architecture/v8_acceptance_gates.json",
+    "architecture/v8_release_policy.json",
     "docs/architecture/V8_MIGRATION_PLAN.md",
     "docs/V8_WAVE4_WINDOWS_LIFECYCLE_PRODUCT_UX.md",
     "docs/V8_WAVE5_ACCEPTANCE_RELEASE.md",
+    "docs/V8_WAVE6_RELEASE_PROVENANCE_PREPARATION.md",
     "scripts/v8_acceptance_gate.py",
+    "scripts/v8_release_provenance.py",
     "src/services/api/routes/component_v8.py",
     "src/services/component_enablement_v8.py",
     "src/ui/features/components/index.js",
     "src/ui/features/components/v8_control_plane.js",
     "tests/test_v8_wave4_product_ux.py",
     "tests/test_v8_wave5_acceptance_gate.py",
+    "tests/test_v8_wave6_release_provenance.py",
 )
 
 
@@ -55,17 +65,28 @@ class AcceptanceGateError(ValueError):
         self.code = code
 
 
-def _load_json(path: Path) -> Any:
+def _read_bytes(path: Path, *, max_bytes: int, unreadable_code: str, too_large_code: str) -> bytes:
     try:
         raw = path.read_bytes()
     except (OSError, ValueError):
-        raise AcceptanceGateError("JSON_UNREADABLE") from None
-    if len(raw) > MAX_JSON_BYTES:
-        raise AcceptanceGateError("JSON_TOO_LARGE")
+        raise AcceptanceGateError(unreadable_code) from None
+    if len(raw) > max_bytes:
+        raise AcceptanceGateError(too_large_code)
+    return raw
+
+
+def _parse_json(raw: bytes, *, invalid_code: str) -> Any:
     try:
         return json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
-        raise AcceptanceGateError("JSON_INVALID") from None
+        raise AcceptanceGateError(invalid_code) from None
+
+
+def _load_json(path: Path) -> Any:
+    return _parse_json(
+        _read_bytes(path, max_bytes=MAX_JSON_BYTES, unreadable_code="JSON_UNREADABLE", too_large_code="JSON_TOO_LARGE"),
+        invalid_code="JSON_INVALID",
+    )
 
 
 def load_gate_contract(path: Path = GATES_PATH) -> dict[str, Any]:
@@ -122,12 +143,7 @@ def load_gate_contract(path: Path = GATES_PATH) -> dict[str, Any]:
 
 def current_head(repo_root: Path = ROOT) -> str:
     try:
-        result = subprocess.run(
-            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
-            check=False,
-            capture_output=True,
-            timeout=10,
-        )
+        result = subprocess.run(["git", "-C", str(repo_root), "rev-parse", "HEAD"], check=False, capture_output=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         raise AcceptanceGateError("GIT_HEAD_UNAVAILABLE") from None
     try:
@@ -139,31 +155,21 @@ def current_head(repo_root: Path = ROOT) -> str:
     return value
 
 
-def release_provenance_snapshot() -> dict[str, Any]:
-    generation_ready = (
-        isinstance(PRODUCT_VERSION, str)
-        and PRODUCT_VERSION.startswith("8.")
-        and RELEASE_BRANCH == "feature/local-ai-hub-v8"
-        and isinstance(REVIEWED_INTENDED_TAG, str)
-        and REVIEWED_INTENDED_TAG.startswith("v8.")
-        and REVIEWED_RELEASE_VERSION == PRODUCT_VERSION
-    )
-    return {
-        "generation_ready": generation_ready,
-        "product_version": PRODUCT_VERSION,
-        "release_branch": RELEASE_BRANCH,
-        "intended_tag": REVIEWED_INTENDED_TAG,
-        "reviewed_release_version": REVIEWED_RELEASE_VERSION,
-    }
+def release_provenance_snapshot(repo_root: Path = ROOT) -> dict[str, Any]:
+    """Compatibility name for the V8 release-policy snapshot."""
+    try:
+        return release_policy_snapshot(repo_root)
+    except ReleasePolicyError as exc:
+        raise AcceptanceGateError("V8_RELEASE_PROVENANCE_CONTRACT_INVALID") from exc
 
 
 def source_preflight(repo_root: Path = ROOT) -> dict[str, Any]:
     contract = load_gate_contract(repo_root / "architecture" / "v8_acceptance_gates.json")
     missing = [name for name in REQUIRED_SOURCE_FILES if not (repo_root / name).is_file()]
-    provenance = release_provenance_snapshot()
+    provenance = release_provenance_snapshot(repo_root)
     return {
         "status": "completed",
-        "valid": not missing,
+        "valid": not missing and provenance.get("contract_valid") is True,
         "required_source_files": len(REQUIRED_SOURCE_FILES),
         "missing_source_files": missing,
         "required_local_gates": sum(item["required"] is True for item in contract["gates"]),
@@ -209,6 +215,39 @@ def _validate_evidence(value: Any, contract: Mapping[str, Any]) -> dict[str, Any
     }
 
 
+def _validate_pass_report(path: Path, *, gate_id: str, source_commit: str, platform: str, expected_sha256: str) -> None:
+    raw = _read_bytes(path, max_bytes=MAX_REPORT_BYTES, unreadable_code="EVIDENCE_REPORT_MISSING", too_large_code="EVIDENCE_REPORT_TOO_LARGE")
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise AcceptanceGateError("EVIDENCE_REPORT_DIGEST_MISMATCH")
+    value = _parse_json(raw, invalid_code="EVIDENCE_REPORT_INVALID")
+    if not isinstance(value, dict) or set(value) != {"schema_version", "gate_id", "status", "platform", "source_commit", "checks"}:
+        raise AcceptanceGateError("EVIDENCE_REPORT_INVALID")
+    if value.get("schema_version") != REPORT_SCHEMA_VERSION or value.get("gate_id") != gate_id or value.get("status") != "PASS":
+        raise AcceptanceGateError("EVIDENCE_REPORT_BINDING_INVALID")
+    if value.get("platform") != platform or value.get("source_commit") != source_commit:
+        raise AcceptanceGateError("EVIDENCE_REPORT_BINDING_INVALID")
+    checks = value.get("checks")
+    if not isinstance(checks, dict) or not 1 <= len(checks) <= 128:
+        raise AcceptanceGateError("EVIDENCE_REPORT_CHECKS_INVALID")
+    for check_id, passed in checks.items():
+        if not isinstance(check_id, str) or CHECK_ID.fullmatch(check_id) is None or passed is not True:
+            raise AcceptanceGateError("EVIDENCE_REPORT_CHECKS_INVALID")
+
+
+def _verify_pass_reports(evidence: Mapping[str, Any], evidence_path: Path) -> None:
+    reports_dir = evidence_path.parent / REPORTS_DIR_NAME
+    for gate_id, item in evidence["gates"].items():
+        if item["status"] != "PASS":
+            continue
+        _validate_pass_report(
+            reports_dir / f"{gate_id}.json",
+            gate_id=gate_id,
+            source_commit=str(evidence["source_commit"]),
+            platform=str(evidence["platform"]),
+            expected_sha256=str(item["report_sha256"]),
+        )
+
+
 def evaluate(*, evidence_path: Path | None = None, repo_root: Path = ROOT) -> dict[str, Any]:
     contract = load_gate_contract(repo_root / "architecture" / "v8_acceptance_gates.json")
     source = source_preflight(repo_root)
@@ -217,12 +256,12 @@ def evaluate(*, evidence_path: Path | None = None, repo_root: Path = ROOT) -> di
     if source["valid"] is not True:
         blockers.append("SOURCE_PREFLIGHT_FAILED")
     provenance = source["release_provenance"]
-    if provenance["generation_ready"] is not True:
-        blockers.append("V8_RELEASE_PROVENANCE_NOT_REVIEWED")
+    blockers.extend(str(item) for item in provenance.get("blockers", []) if isinstance(item, str))
 
     evidence_summary: dict[str, Any] = {
         "present": evidence_path is not None,
         "valid": False,
+        "reports_verified": False,
         "source_commit_matches": None,
         "required": source["required_local_gates"],
         "passed": 0,
@@ -233,10 +272,12 @@ def evaluate(*, evidence_path: Path | None = None, repo_root: Path = ROOT) -> di
     else:
         try:
             evidence = _validate_evidence(_load_json(evidence_path), contract)
+            _verify_pass_reports(evidence, evidence_path)
             pending = [gate_id for gate_id, item in evidence["gates"].items() if item["status"] != "PASS"]
             source_matches = evidence["source_commit"] == head
             evidence_summary.update({
                 "valid": True,
+                "reports_verified": True,
                 "source_commit_matches": source_matches,
                 "passed": len(evidence["gates"]) - len(pending),
                 "pending_gates": pending,
@@ -248,9 +289,10 @@ def evaluate(*, evidence_path: Path | None = None, repo_root: Path = ROOT) -> di
         except AcceptanceGateError as exc:
             blockers.append(exc.code)
 
+    blockers = list(dict.fromkeys(blockers))
     release_ready = not blockers
     return {
-        "schema_version": "v8-acceptance-preflight.v1",
+        "schema_version": "v8-acceptance-preflight.v2",
         "status": "release_ready" if release_ready else "blocked",
         "execution": "not_run",
         "dry_run": True,
@@ -264,7 +306,7 @@ def evaluate(*, evidence_path: Path | None = None, repo_root: Path = ROOT) -> di
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate the read-only V8 acceptance/release gate.")
-    parser.add_argument("--evidence", type=Path, default=None, help="Optional local Windows evidence manifest; its path is never emitted.")
+    parser.add_argument("--evidence", type=Path, default=None, help="Local evidence.json; PASS reports are read from sibling reports/<gate_id>.json and no path is emitted.")
     parser.add_argument("--source-only", action="store_true", help="Validate tracked source contracts without claiming release readiness.")
     parser.add_argument("--strict-release", action="store_true", help="Return success only when every release gate is satisfied.")
     args = parser.parse_args()
@@ -290,6 +332,7 @@ __all__ = [
     "AcceptanceGateError",
     "EVIDENCE_SCHEMA_VERSION",
     "GATES_PATH",
+    "REPORT_SCHEMA_VERSION",
     "ROOT",
     "current_head",
     "evaluate",
