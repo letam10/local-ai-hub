@@ -6,6 +6,7 @@ component downloads, model runtimes, FFmpeg workloads or GPU inference.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -49,6 +50,9 @@ class V8Wave4ProductUxTests(unittest.TestCase):
         self.assertTrue(value["auto_install_eligible"])
         self.assertEqual(value["execution"], "not_run")
         self.assertTrue(value["dry_run"])
+        record = catalog.runtimes["ffmpeg"]
+        self.assertEqual(record["required_leaves"], ["v8/ffmpeg/ffmpeg.exe", "v8/ffmpeg/ffprobe.exe"])
+        self.assertNotIn("tools/ffmpeg/", json.dumps(record, ensure_ascii=True))
 
     def test_operation_route_uses_injected_context_with_bounded_limit(self) -> None:
         observed: list[int] = []

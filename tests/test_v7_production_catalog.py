@@ -157,7 +157,7 @@ class V7ProductionCatalogTests(unittest.TestCase):
 
         unsafe = self._raw()
         ffmpeg = next(item for item in unsafe["runtimes"] if item["runtime_id"] == "ffmpeg")
-        ffmpeg["archive_leaves"]["tools/ffmpeg/ffprobe.exe"] = "../ffmpeg.exe"
+        ffmpeg["archive_leaves"]["v8/ffmpeg/ffprobe.exe"] = "../ffmpeg.exe"
         self._assert_rejected(unsafe, "unsafe_catalog_leaf")
 
     def test_unknown_schema_does_not_silently_load_as_v2_and_v1_stays_explicit(self) -> None:
