@@ -233,20 +233,32 @@ class OutputAuthority:
         job_id: str,
         candidates: Iterable[Path | str],
         provenance: dict[str, Any],
+        names: Iterable[str] | None = None,
+        media_types: Iterable[str | None] | None = None,
     ) -> list[dict[str, Any]] | None:
-        """Prepare, authorize and finally publish one exact reservation-bound batch."""
+        """Prepare, authorize and publish one exact reservation-bound batch.
+
+        Public artifact name/media metadata are independent from private
+        producer filenames. This prevents temporary server-owned producer names
+        from leaking into the product surface while keeping the filesystem
+        candidate itself subject to the same identity checks.
+        """
 
         job_id = self._require_job_id(job_id)
         safe_provenance = _safe_provenance(provenance, job_id)
         values = list(candidates)
         if not 1 <= len(values) <= MAX_ARTIFACTS_PER_TRANSACTION:
             return None
+        requested_names = list(names) if names is not None else [None] * len(values)
+        requested_media = list(media_types) if media_types is not None else [None] * len(values)
+        if len(requested_names) != len(values) or len(requested_media) != len(values):
+            return None
         lease = self._output_lease(create=True)
-        producer_records: list[tuple[Path, Path, FileIdentity]] = []
+        producer_records: list[tuple[Path, Path, FileIdentity, str, str]] = []
         total = 0
         seen: set[Path] = set()
         try:
-            for value in values:
+            for index, value in enumerate(values):
                 path, relative, identity = self._producer_file(lease, value)
                 if path in seen:
                     raise OutputAuthorityError("duplicate_producer_output")
@@ -254,26 +266,27 @@ class OutputAuthority:
                 total += identity.size_bytes
                 if total > MAX_TRANSACTION_BYTES:
                     raise OutputAuthorityError("transaction_size_out_of_bounds")
-                producer_records.append((path, relative, identity))
+                public_name = _safe_name(requested_names[index] if requested_names[index] is not None else path.name)
+                public_media = _safe_media_type(requested_media[index], public_name)
+                producer_records.append((path, relative, identity, public_name, public_media))
             transaction_id = self.store.create_output_transaction(reservation_id, job_id)
         except (OutputAuthorityError, StorageAuthorityError, TransactionStoreError):
             return None
 
         prepared: list[tuple[str, Path, FileIdentity]] = []
         try:
-            for source_path, _relative, source_identity in producer_records:
+            for source_path, _relative, source_identity, public_name, public_media in producer_records:
                 object_id, object_key, size_bytes, digest, object_identity = self._copy_managed_object(
                     lease, source_path, source_identity
                 )
-                name = _safe_name(source_path.name)
                 artifact_id = self.store.stage_artifact(
                     transaction_id=transaction_id,
                     reservation_id=reservation_id,
                     job_id=job_id,
                     object_id=object_id,
                     object_key=object_key,
-                    name=name,
-                    media_type=_safe_media_type(None, name),
+                    name=public_name,
+                    media_type=public_media,
                     size_bytes=size_bytes,
                     sha256=digest,
                     file_device=object_identity.device,
