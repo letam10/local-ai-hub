@@ -119,6 +119,21 @@ class ComponentEnablementService:
             and disk > 0
         )
 
+    @staticmethod
+    def _next_action(state: str, eligible: bool) -> str:
+        if eligible:
+            return "Create an explicit server-owned install plan; this assessment does not download anything."
+        return {
+            "REFERENCE_EXISTING": "Inspect the existing managed runtime; do not download or replace it from this acceptance view.",
+            "AUTH_REQUIRED": "Complete the separately reviewed provider authorization flow before creating an install plan.",
+            "LICENSE_REVIEW_REQUIRED": "Review the tracked license contract before any install action is enabled.",
+            "SOURCE_UNAVAILABLE": "Keep installation disabled until a tracked official source is available.",
+            "SOURCE_UNVERIFIED": "Verify the tracked source identity and HTTPS revision before enabling installation.",
+            "INTEGRITY_INCOMPLETE": "Pin the expected size and SHA-256 before enabling automatic installation.",
+            "SIZE_UNKNOWN": "Record bounded download and final disk estimates before enabling automatic installation.",
+            "UNSUPPORTED_SOURCE": "No automated installation action is allowed for this catalog disposition.",
+        }.get(state, "Keep the component non-automatic until every failed requirement and catalog disposition are explicitly reviewed.")
+
     def assess(self, component_id: str) -> dict[str, Any]:
         component_type, record = self._record(component_id)
         disposition = str(record.get("disposition") or "UNSUPPORTED_SOURCE")
@@ -131,9 +146,14 @@ class ComponentEnablementService:
         catalog_auto = disposition == "AUTO_INSTALL_READY"
         eligible = bool(catalog_auto and source_verified and auth_ready and license_ready and integrity_ready and size_ready)
 
+        # Disposition is authoritative. REFERENCE_EXISTING deliberately bypasses
+        # download/source/license/integrity gates because this endpoint must not
+        # imply that an externally managed runtime should be installed by Hub.
         if disposition in {"UNSUPPORTED_SOURCE", "UNSUPPORTED"}:
             state = "UNSUPPORTED_SOURCE"
-        elif not auth_ready or disposition == "AUTH_REQUIRED":
+        elif disposition == "REFERENCE_EXISTING":
+            state = "REFERENCE_EXISTING"
+        elif disposition == "AUTH_REQUIRED" or not auth_ready:
             state = "AUTH_REQUIRED"
         elif not license_ready:
             state = "LICENSE_REVIEW_REQUIRED"
@@ -147,8 +167,6 @@ class ComponentEnablementService:
             state = "SIZE_UNKNOWN"
         elif eligible:
             state = "AUTO_INSTALL_READY"
-        elif disposition == "REFERENCE_EXISTING":
-            state = "REFERENCE_EXISTING"
         else:
             state = "MANUAL_REVIEW_REQUIRED"
         if state not in _STATES:  # pragma: no cover - finite-state guard
@@ -175,11 +193,7 @@ class ComponentEnablementService:
                 "size_ready": size_ready,
             },
             "source_identity": record.get("source_identity") if isinstance(record.get("source_identity"), str) else None,
-            "next_action": (
-                "Create an explicit server-owned install plan; this assessment does not download anything."
-                if eligible
-                else "Keep the component non-automatic until every failed requirement and catalog disposition are explicitly reviewed."
-            ),
+            "next_action": self._next_action(state, eligible),
         }
 
     def snapshot(self) -> dict[str, Any]:
