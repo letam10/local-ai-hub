@@ -12,17 +12,17 @@ Audit Wave 2 xác nhận fixed-root/reparse/reservation/transaction/copy-once/pu
 
 ## Wave 1 — Durable Component Lifecycle
 
-Status: **SERVICE FOUNDATION REVIEWED; COMPONENT API MIGRATED IN WAVE 2**.
+Status: **SERVICE FOUNDATION REVIEWED; EXTENDED THROUGH WAVE 3**.
 
 Owner: `src/services/component_lifecycle_v8.py`; production Component API façade: `src/services/api/components.py`.
 
-Giữ existing `ComponentInstaller`, `ModelManager`, `RuntimeManager`, receipts và verification. Install/verify/reuse/repair/update/uninstall tạo opaque durable operation trước confirmation; `committed` không tự nâng `INSTALLED_UNVERIFIED` thành `OPERATIONAL`.
+Giữ existing `ComponentInstaller`, `ModelManager`, `RuntimeManager`, receipts và verification. Install/verify/reuse/repair/update/uninstall tạo opaque durable operation trước confirmation; Wave 3 journal hóa thêm manual-import plan và composite-bundle plan. `committed` không tự nâng `INSTALLED_UNVERIFIED` thành `OPERATIONAL`.
 
-Native manual import và composite bundle chưa journal hóa V8; xem `Plan_Miss.md`.
+Native selected-path capability vẫn process-local; bundle chưa có atomic multi-component rollback. Các giới hạn này được theo dõi trong `Plan_Miss.md`.
 
 ## Wave 2 — Production Callsite Migration
 
-Status: **SOURCE MIGRATION IMPLEMENTED; WINDOWS ACCEPTANCE PENDING**.
+Status: **RE-AUDITED; PUBLICATION BOUNDARY HARDENED; WINDOWS ACCEPTANCE PENDING**.
 
 Owners:
 - `src/services/artifact_access_v8.py`
@@ -32,17 +32,33 @@ Owners:
 - `src/services/job_manager/v8_engine.py`
 - `src/services/api/components.py`
 
-New worker outputs dùng V7 ownership scope chỉ như pre-publication safety check, sau đó publish duy nhất qua V8 reservation-bound Output Authority. Historical V7 artifacts/uploads vẫn có read fallback. Package `src.services.job_manager` export `V8DurableWorkEngine` làm production `DurableWorkEngine`, đồng thời giữ `LegacyDurableWorkEngine` cho compatibility/forensic review.
+New worker outputs dùng V7 ownership scope như pre-publication safety proof, sau đó publish duy nhất qua V8 reservation-bound Output Authority. Wave 3 re-audit khóa thêm invariant: V8 reservation tự nó không chứng minh filesystem ownership; `register_worker_outputs()` phải re-check bounded ownership và chỉ nhận `owned`. Historical V7 artifacts/uploads vẫn có read fallback. Package `src.services.job_manager` export `V8DurableWorkEngine` làm production `DurableWorkEngine`, đồng thời giữ `LegacyDurableWorkEngine` cho compatibility/forensic review.
 
 Không tuyên bố Wave 2 production-accepted trước Windows adversarial QA, full local callsite grep và real loopback/desktop acceptance trong `Plan_Miss.md`.
 
-## Wave 3 — Real Component Enablement
+## Wave 3 — Component Enablement Control Plane
 
-Đối chiếu production catalog, source/license/auth/hash/size/runtime graph. Bật từng component theo vertical slice: runtime/dependency → model → adapter → bounded smoke → receipt/evidence → UI state. Không bật hàng loạt model cùng lúc.
+Status: **SOURCE/CONTROL-PLANE IMPLEMENTED; REAL LIFECYCLE PENDING**.
 
-## Wave 4 — API & Product UX
+Owners:
+- `src/services/component_lifecycle_v8.py`
+- `src/services/api/components.py`
+- `src/services/api/routes/component_v8.py`
+- `src/services/component_enablement_v8.py`
 
-Hoàn thiện direct V8 operation endpoints và desktop UI cho Components/Models/Runtimes/Jobs/Artifacts/Update Center theo truthful state. Public boundary chỉ dùng opaque IDs.
+Wave 3 hoàn thành ba phần source-level:
+
+1. import và bundle plan được bind vào opaque V8 `operation_id`, explicit confirmation, finite CAS states và terminal no-reexecution;
+2. direct operation routes cho list/inspect/confirm/planned-cancel;
+3. trusted-source acceptance phân loại production catalog theo disposition/source verification/auth/license/integrity/download+disk size mà không gọi provider.
+
+Không bật model AUTO_INSTALL_READY bằng suy diễn. `auto_install_eligible` chỉ true nếu catalog đã explicit cho auto và toàn bộ gate source/license/auth/hash/size đều đạt. Production V2 validator vẫn cố ý cấm model AUTO_INSTALL_READY ở thời điểm này.
+
+GitHub Actions source gate sau Wave 3: `ci_validate` PASS, 22/22 V8 tests PASS, `git diff --check` PASS. Đây không thay thế Windows acceptance.
+
+## Wave 4 — Windows Real Lifecycle & Product UX
+
+Wave kế tiếp phải dùng máy Windows thật để xử lý `Plan_Miss.md`: NTFS/reparse/TOCTOU, native picker, full artifact consumer inventory, real component install/reuse/verify/repair/update/rollback/uninstall, bundle failure/rollback, loopback API, WebView2/Desktop operation UI và `v8_control.sqlite3` backup/restore. Mọi real download lớn hoặc GPU inference vẫn cần scope/phê duyệt riêng.
 
 ## Wave 5 — Acceptance & Release
 
