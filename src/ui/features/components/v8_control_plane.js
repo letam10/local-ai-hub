@@ -172,8 +172,11 @@ const actOnOperation = async (button, action) => {
     return;
   }
   if (action === "confirm") {
-    const accepted = globalThis.confirm?.("Xác nhận thực thi đúng V8 operation đã hiển thị? Hành động vẫn tuân theo server-owned plan.");
-    if (accepted === false) return;
+    if (typeof globalThis.confirm !== "function") {
+      statusText("Confirmation UI không khả dụng; operation không được gửi.", "error");
+      return;
+    }
+    if (globalThis.confirm("Xác nhận thực thi đúng V8 operation đã hiển thị? Hành động vẫn tuân theo server-owned plan.") !== true) return;
   }
   button.disabled = true;
   try {
