@@ -1,0 +1,28 @@
+{
+  "schema_version": "v8-acceptance-gates.v1",
+  "generation": "V8",
+  "required_platform": "windows-x64",
+  "required_evidence_class": "local_windows",
+  "release_provenance_generation": "V8",
+  "gates": [
+    {"gate_id": "windows_filesystem", "required": true},
+    {"gate_id": "artifact_callsite_inventory", "required": true},
+    {"gate_id": "native_picker_restart", "required": true},
+    {"gate_id": "executing_operation_cancel", "required": true},
+    {"gate_id": "bundle_atomic_rollback", "required": true},
+    {"gate_id": "real_component_lifecycle", "required": true},
+    {"gate_id": "loopback_api", "required": true},
+    {"gate_id": "webview2_product_ux", "required": true},
+    {"gate_id": "sqlite_backup_restore", "required": true},
+    {"gate_id": "packaging_upgrade", "required": true},
+    {"gate_id": "crash_recovery", "required": true},
+    {"gate_id": "runtime_smoke", "required": true}
+  ],
+  "release_policy": {
+    "main_merge": "user_approved_only",
+    "version_change": "user_approved_only",
+    "tag_change": "user_approved_only",
+    "release_artifact_build": "after_required_local_gates",
+    "machine_local_evidence_committed_to_git": false
+  }
+}
