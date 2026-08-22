@@ -176,6 +176,70 @@ class ComponentBundleService:
             if key in plan
         }
 
+    def _rollback_new_steps(self, installed: list[tuple[str, str]]) -> tuple[bool, list[dict[str, Any]]]:
+        """Compensate only components installed by this confirmation attempt.
+
+        Existing/shared dependencies are represented as ``reused`` and never
+        enter this list.  Rollback is best-effort but explicit: callers receive
+        ``manual_review`` if any owned newly-installed component cannot be
+        returned to its prior absence state.
+        """
+
+        results: list[dict[str, Any]] = []
+        complete = True
+        for node_type, node_id in reversed(installed):
+            try:
+                plan = self.installer.plan_maintenance(node_id, action="uninstall")
+                result = self.installer.confirm_maintenance(plan["plan_id"], confirmed=True)
+            except Exception:
+                result = {"status": "failed", "code": "bundle_rollback_exception", "execution": "not_run"}
+            succeeded = isinstance(result, Mapping) and result.get("status") == "completed"
+            complete = complete and succeeded
+            results.append(
+                {
+                    "component_id": node_id,
+                    "component_type": node_type,
+                    "status": "rolled_back" if succeeded else "manual_review",
+                    "code": result.get("code") if isinstance(result, Mapping) else "bundle_rollback_exception",
+                    "execution": result.get("execution", "not_run") if isinstance(result, Mapping) else "not_run",
+                }
+            )
+        return complete, results
+
+    def _failure_with_rollback(
+        self,
+        *,
+        plan_id: str,
+        component_id: str,
+        status: object,
+        code: object,
+        execution: object,
+        steps: list[dict[str, Any]],
+        installed: list[tuple[str, str]],
+    ) -> dict[str, Any]:
+        rolled_back, rollback_steps = self._rollback_new_steps(installed)
+        if not rolled_back:
+            return {
+                "status": "manual_review",
+                "code": "bundle_rollback_incomplete",
+                "plan_id": plan_id,
+                "component_id": component_id,
+                "steps": steps,
+                "rollback": rollback_steps,
+                "execution": "not_run",
+                "next_action": "Review the bounded rollback record before creating another component bundle plan.",
+            }
+        return {
+            "status": status if isinstance(status, str) and status else "failed",
+            "code": code if isinstance(code, str) and code else "bundle_step_failed",
+            "plan_id": plan_id,
+            "component_id": component_id,
+            "steps": steps,
+            "rollback": rollback_steps,
+            "execution": execution if isinstance(execution, str) else "not_run",
+            "next_action": "The newly installed bundle steps were rolled back; resolve the failed dependency and create a fresh bundle plan.",
+        }
+
     def confirm(self, plan_id: str, *, confirmed: bool = False) -> dict[str, Any]:
         plan = self._plans.get(plan_id)
         if not isinstance(plan, Mapping):
@@ -183,6 +247,7 @@ class ComponentBundleService:
         if not confirmed:
             return {"status": "waiting_confirmation", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
         results: list[dict[str, Any]] = []
+        newly_installed: list[tuple[str, str]] = []
         for node_type, node_id in plan.get("nodes", []):
             current = self.installer._inspect(node_id, node_type)
             step = next((item for item in plan.get("steps", []) if item.get("component_id") == node_id and item.get("component_type") == node_type), None)
@@ -194,12 +259,40 @@ class ComponentBundleService:
                 results.append({"component_id": node_id, "component_type": node_type, "status": "reused", "state": current.get("status"), "execution": "completed"})
                 continue
             if not step.get("auto_install_supported"):
-                return {"status": "unavailable", "code": "bundle_step_requires_review", "plan_id": plan_id, "component_id": node_id, "component_type": node_type, "execution": "not_run", "steps": results, "next_action": "Use the listed Manual Import, authorization or license flow for this dependency."}
-            child = self.installer.plan_install(node_id, component_type=node_type, variant=str(plan.get("variant") or "default"))
-            applied = self.installer.confirm_plan(child["plan_id"], confirmed=True)
+                return self._failure_with_rollback(
+                    plan_id=plan_id,
+                    component_id=node_id,
+                    status="unavailable",
+                    code="bundle_step_requires_review",
+                    execution="not_run",
+                    steps=results,
+                    installed=newly_installed,
+                )
+            try:
+                child = self.installer.plan_install(node_id, component_type=node_type, variant=str(plan.get("variant") or "default"))
+                applied = self.installer.confirm_plan(child["plan_id"], confirmed=True)
+            except Exception:
+                return self._failure_with_rollback(
+                    plan_id=plan_id,
+                    component_id=node_id,
+                    status="failed",
+                    code="bundle_step_exception",
+                    execution="not_run",
+                    steps=results,
+                    installed=newly_installed,
+                )
             results.append({"component_id": node_id, "component_type": node_type, "status": applied.get("status"), "state": applied.get("state"), "code": applied.get("code"), "execution": applied.get("execution", "not_run")})
             if applied.get("status") != "completed":
-                return {"status": applied.get("status") or "failed", "code": applied.get("code") or "bundle_step_failed", "plan_id": plan_id, "component_id": node_id, "steps": results, "execution": applied.get("execution", "not_run"), "next_action": "Resolve the failed dependency step and create a fresh bundle plan."}
+                return self._failure_with_rollback(
+                    plan_id=plan_id,
+                    component_id=node_id,
+                    status=applied.get("status"),
+                    code=applied.get("code"),
+                    execution=applied.get("execution", "not_run"),
+                    steps=results,
+                    installed=newly_installed,
+                )
+            newly_installed.append((node_type, node_id))
         return {"status": "completed", "plan_id": plan_id, "component_id": plan["component_id"], "state": "INSTALLED_UNVERIFIED", "execution": "completed", "dry_run": False, "steps": results, "next_action": "Refresh the component snapshot and run the bounded adapter verification."}
 
 
