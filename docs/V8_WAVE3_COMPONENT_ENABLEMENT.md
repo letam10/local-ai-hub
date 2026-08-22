@@ -13,6 +13,8 @@ Wave 3 không tuyên bố model/runtime đã cài được trên máy thật. M�
 
 Reservation không còn được hiểu nhầm là ownership proof. Candidate đã tồn tại trước snapshot, snapshot không đầy đủ hoặc candidate không hợp lệ đều bị từ chối publication; ambiguous file không bị xóa.
 
+Re-audit cũng sửa compatibility byte/atomic publication: public artifact giữ đúng caller-facing `name` và explicit `media_type`; private producer filename chỉ là implementation detail và không đi vào public metadata.
+
 ## Durable import and bundle operations
 
 `ComponentLifecycleCoordinator` journal hóa thêm hai action:
@@ -62,15 +64,16 @@ Routes:
 
 ## Validation
 
-GitHub Actions Repository validation run #631:
+GitHub Actions Repository validation run #647:
 
-- `python scripts/ci_validate.py`: PASS; 720 tracked files; không forbidden artifact/unmasked secret.
-- `python -m unittest discover -s tests -p "test_v8_*.py"`: 22/22 PASS.
+- `python scripts/ci_validate.py`: PASS; 721 tracked files; không forbidden artifact/unmasked secret.
+- `python -m unittest discover -s tests -p "test_v8_*.py"`: 23/23 PASS.
 - `git diff --check` với PR base: PASS.
 
 Các test mới bao phủ:
 
 - Wave 2 publication boundary từ chối candidate tồn tại trước reservation/snapshot;
+- Wave 2 atomic byte publication giữ đúng public name/media type;
 - durable import operation + no double execution;
 - durable bundle operation;
 - planned operation cancellation;
