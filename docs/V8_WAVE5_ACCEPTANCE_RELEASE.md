@@ -1,8 +1,8 @@
-# V8 Wave 5 — Acceptance & Release
+# V8 Wave 5 — Acceptance Gate
 
-Status: **SOURCE PREFLIGHT IMPLEMENTED; WINDOWS ACCEPTANCE AND RELEASE EXECUTION BLOCKED**.
+Status: **SOURCE PREFLIGHT RE-AUDITED/HARDENED; WINDOWS ACCEPTANCE BLOCKED**.
 
-Wave 5 không được hiểu là đã release. Phần source trong wave này chỉ tạo fail-closed acceptance gate để Codex/local QA có một contract duy nhất trước khi tiến tới packaging, installer, provenance, version/tag và main merge. Linux GitHub Actions không thay thế Windows acceptance.
+Wave 5 không đồng nghĩa release. Nó tạo fail-closed acceptance gate để Codex/local QA chứng minh Windows evidence trước release activation. Linux GitHub Actions không thay thế Windows acceptance.
 
 ## Source owners
 
@@ -12,11 +12,7 @@ Wave 5 không được hiểu là đã release. Phần source trong wave này ch
 - `Plan_Miss.md`
 - `docs/architecture/V8_MIGRATION_PLAN.md`
 
-## Gate model
-
-Tracked contract yêu cầu evidence `local_windows`, platform `windows-x64`, bind vào đúng `source_commit`. Mỗi required gate phải có finite status và report SHA-256. Evidence manifest không nhận raw path, command, executable, credential hoặc free-form machine detail.
-
-Required local gates:
+## Required local gates
 
 1. `windows_filesystem`
 2. `artifact_callsite_inventory`
@@ -31,67 +27,65 @@ Required local gates:
 11. `crash_recovery`
 12. `runtime_smoke`
 
+## Evidence bundle
+
+Tracked source chỉ định schema, còn evidence/report thật phải nằm local và **không commit Git**.
+
+Cấu trúc local:
+
+```text
+<acceptance-root>/
+  evidence.json
+  reports/
+    windows_filesystem.json
+    artifact_callsite_inventory.json
+    ...
+```
+
+`evidence.json` dùng schema `v8-local-acceptance-evidence.v1`, class `local_windows`, platform `windows-x64`, bind exact `source_commit`, chứa đúng toàn bộ required gate IDs.
+
+Mỗi gate `PASS` phải có `report_sha256` và file deterministic `reports/<gate_id>.json`.
+
+PASS report dùng schema `v8-local-gate-report.v1` và phải bind:
+
+- exact `gate_id`;
+- status `PASS`;
+- platform `windows-x64`;
+- exact `source_commit`;
+- finite `checks` object, ít nhất một check và mọi check = `true`.
+
+Preflight tự đọc bytes report, giới hạn kích thước, tính SHA-256 và so với digest trong evidence. Chỉ khai một digest string không còn đủ để PASS.
+
 ## Read-only preflight
 
-Source-only validation:
+Source-only:
 
 ```powershell
 python scripts/v8_acceptance_gate.py --source-only
 ```
 
-Lệnh trên phải exit `0` khi tracked contract hợp lệ, nhưng `release_ready` vẫn phải `false` nếu thiếu local Windows evidence hoặc V8 release provenance chưa được review.
-
-Strict local release check sau này:
+Strict local acceptance:
 
 ```powershell
-python scripts/v8_acceptance_gate.py --strict-release --evidence <LOCAL_EVIDENCE_JSON>
+python scripts/v8_acceptance_gate.py --strict-release --evidence <acceptance-root>\evidence.json
 ```
 
-Evidence JSON phải có schema:
+Source-only có thể exit 0 khi source contract hợp lệ nhưng `release_ready=false`; đó là trạng thái đúng nếu Windows evidence hoặc release identity còn thiếu.
 
-```json
-{
-  "schema_version": "v8-local-acceptance-evidence.v1",
-  "evidence_class": "local_windows",
-  "platform": "windows-x64",
-  "source_commit": "<exact git commit>",
-  "gates": {
-    "windows_filesystem": {"status": "PASS", "report_sha256": "<sha256>"}
-  }
-}
-```
+## Wave 5 re-audit finding
 
-Thực tế file phải chứa **đúng toàn bộ required gate IDs**, mỗi gate `PASS` phải có SHA-256 của report local tương ứng. File evidence không commit vào Git.
+Bản đầu Wave 5 chỉ yêu cầu `report_sha256` trong evidence nhưng chưa tự chứng minh local report file tồn tại và digest khớp actual bytes. Re-audit đã đóng khoảng trống này bằng deterministic report binding/hashing như mô tả trên.
 
-## Release provenance blocker hiện tại
+## Release provenance transition
 
-V8 branch hiện vẫn kế thừa release contract V7:
+Wave 5 không còn dùng V7 provenance như contract V8. Wave 6 thêm V8-specific read-only release policy/provenance preparation. Historical V7 release manifest/tags vẫn immutable.
 
-- `src/shared/version.py` vẫn là product `7.1.0`;
-- `scripts/verify_release_provenance.py` vẫn review branch `feature/v7-operational-closure`;
-- intended tag vẫn thuộc `v7.*`;
-- `distribution/release_manifest.json` là historical V7 manifest.
+Release vẫn bị khóa vì:
 
-Đây là blocker **cố ý**. Wave 5 source preflight không tự đổi version/tag/branch provenance để làm gate xanh. Chỉ khi Windows acceptance đủ evidence và người dùng phê duyệt release package riêng mới được thiết kế V8 version/tag/provenance rồi build artifact.
+- 12 local Windows gates chưa có valid PASS evidence bundle;
+- final V8 release identity chưa được người dùng phê duyệt;
+- product version activation chưa thực hiện;
+- strict release preflight chưa PASS trên exact release commit;
+- main merge/tag/release vẫn cần user approval.
 
-## Wave 4 re-audit carried into Wave 5
-
-Trước khi mở preflight, Wave 4 source được siết thêm:
-
-- Components UI không còn mặc định metadata `component_type` lạ thành `model`; invalid public component type/action bị loại fail-closed.
-- mount của V8 control-plane có idempotence guard.
-- `REFERENCE_EXISTING` hiển thị `Use Existing`, `MANUAL_INSTALL` hiển thị `Manual Install` thay vì fallback `Manual Review`.
-
-Những sửa này chỉ là source correctness; WebView2/5-language/focus/keyboard acceptance vẫn phải chạy trên Windows thật.
-
-## Không được làm trong source preflight
-
-- không merge `main`;
-- không tạo/move tag;
-- không bump product version;
-- không sửa historical release manifest thành V8 giả;
-- không build/publish installer;
-- không chạy provider request, model download, GPU inference hoặc FFmpeg workload;
-- không commit machine-local acceptance report/evidence.
-
-Chi tiết phần local chưa thể xử lý từ GitHub nằm trong `Plan_Miss.md`.
+Chi tiết nằm trong `Plan_Miss.md` và `docs/V8_WAVE6_RELEASE_PROVENANCE_PREPARATION.md`.
