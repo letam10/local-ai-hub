@@ -240,6 +240,13 @@ release cannot be inferred from these partial PASS reports.
   change. A fresh explicit lifecycle plan, confirmation, pinned-download
   verification, receipt, and bounded CPU-only smoke remain required before
   `real_component_lifecycle` or `runtime_smoke` can become PASS.
+- Live Windows preflight then found the legacy `runtime/tools/ffmpeg` target is
+  a junction into the Anime Upscale Studio runtime, which contains an older
+  Jellyfin FFmpeg 4.4.1 build. It is intentionally not treated as a V8-managed
+  leaf and must not be overwritten, removed, or followed by the installer.
+  V8 planning and confirmation now refuse that existing/reparse target before
+  a downloader is created. A separate, explicitly scoped migration or
+  reference-existing decision is required before any FFmpeg download can run.
 
 ## 8. Real component lifecycle — CHƯA LÀM
 
