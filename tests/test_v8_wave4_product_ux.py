@@ -80,10 +80,11 @@ class V8Wave4ProductUxTests(unittest.TestCase):
         self.assertEqual(response.status, 409)
         self.assertEqual(response.payload["code"], "plan_session_lost")
 
-    def test_components_product_ux_is_mounted_and_non_polling(self) -> None:
+    def test_components_product_ux_is_mounted_non_polling_and_fail_closed(self) -> None:
         repo = Path(__file__).resolve().parents[1]
         index = (repo / "src" / "ui" / "index.html").read_text(encoding="utf-8")
         renderer = (repo / "src" / "ui" / "features" / "components" / "render.js").read_text(encoding="utf-8")
+        feature = (repo / "src" / "ui" / "features" / "components" / "index.js").read_text(encoding="utf-8")
         control = (repo / "src" / "ui" / "features" / "components" / "v8_control_plane.js").read_text(encoding="utf-8")
 
         self.assertIn('/ui/features/components/v8_control_plane.js', index)
@@ -94,10 +95,16 @@ class V8Wave4ProductUxTests(unittest.TestCase):
         self.assertIn('/api/components/source-acceptance', control)
         self.assertIn('data-v8-operation-confirm', control)
         self.assertIn('data-v8-operation-cancel', control)
+        self.assertIn('FINITE_COMPONENT_TYPES', control)
+        self.assertIn('FINITE_OPERATION_ACTIONS', control)
+        self.assertNotIn('value.component_type === "runtime" ? "runtime" : "model"', control)
+        self.assertIn('if (mounted) return;', control)
         self.assertNotIn("setInterval(", control)
         self.assertNotIn("filesystem_path", control)
         self.assertNotIn("source_path", control)
         self.assertNotIn("selected_path", control)
+        self.assertIn('REFERENCE_EXISTING: "Use Existing"', feature)
+        self.assertIn('MANUAL_INSTALL: "Manual Install"', feature)
 
 
 if __name__ == "__main__":
