@@ -25,7 +25,7 @@ waves:
     windows_acceptance: deferred
   wave1:
     name: durable_component_lifecycle
-    status: reviewed_and_component_api_migrated
+    status: reviewed_and_extended_through_wave3
     owner: src/services/component_lifecycle_v8.py
     production_api: src/services/api/components.py
     depends_on:
@@ -41,13 +41,18 @@ waves:
       - terminal_operation_not_reexecuted
       - restart_without_plan_fails_closed
       - committed_does_not_imply_operational
+    wave3_extensions:
+      - native_import_plan_has_durable_operation
+      - composite_bundle_plan_has_durable_operation
+      - planned_operation_cancel_is_durable
     deferred:
-      - native_manual_import_journal
-      - composite_bundle_operation
-      - direct_operation_ui
+      - native_selection_restart_resumability
+      - executing_operation_cancel_bridge
+      - atomic_multi_component_bundle_rollback
+      - desktop_operation_ui
   wave2:
     name: production_callsite_migration
-    status: source_migration_implemented_windows_acceptance_pending
+    status: reaudited_and_publication_boundary_hardened_windows_acceptance_pending
     owners:
       artifact_compatibility: src/services/artifact_access_v8.py
       output_bridge: src/services/v8_output_bridge.py
@@ -56,30 +61,56 @@ waves:
     invariants:
       - new_worker_output_has_single_v8_publication_authority
       - legacy_output_scope_is_safety_only
+      - publication_rechecks_candidate_ownership
+      - reservation_alone_never_proves_output_ownership
       - historical_v7_artifacts_remain_readable
       - production_durable_engine_reserves_before_adapter
       - component_plan_id_maps_to_durable_operation
       - no_main_merge_or_release
+    windows_acceptance: deferred
+  wave3:
+    name: component_enablement_control_plane
+    status: source_control_plane_implemented_real_lifecycle_pending
+    owners:
+      lifecycle: src/services/component_lifecycle_v8.py
+      component_api: src/services/api/components.py
+      component_routes: src/services/api/routes/component_v8.py
+      source_acceptance: src/services/component_enablement_v8.py
+    invariants:
+      - import_and_bundle_use_opaque_durable_operations
+      - source_acceptance_is_catalog_only
+      - no_provider_request_during_acceptance
+      - no_implicit_license_acceptance
+      - catalog_disposition_required_for_auto_install
+      - model_auto_install_not_implicitly_enabled
+      - committed_does_not_imply_operational
 next_wave:
-  name: real_component_enablement
+  name: windows_real_lifecycle_acceptance
   requirements:
-    - resolve_plan_miss_windows_gates
+    - resolve_plan_miss_windows_filesystem_gates
     - full_local_artifact_callsite_inventory
-    - native_import_and_bundle_lifecycle_design
-    - per_component_trusted_source_acceptance
+    - native_picker_and_selection_acceptance
+    - real_component_install_reuse_verify_repair_update_rollback_uninstall
+    - bundle_failure_and_rollback_acceptance
+    - loopback_api_and_desktop_operation_ui_acceptance
+    - v8_control_database_backup_restore
 deferred_local_acceptance:
   - windows_reparse_junction_and_handle_race_acceptance
   - loopback_api_and_desktop_acceptance
-  - native_manual_import_journal
-  - composite_bundle_operation
+  - native_selection_restart_resumability
+  - executing_operation_cancel_bridge
+  - atomic_multi_component_bundle_rollback
+  - per_component_provider_license_hash_review
   - real_component_download_install_repair_update_rollback_uninstall
   - runtime_smoke
   - model_inference
   - v8_control_database_backup_restore
-prohibited_in_source_migration:
+prohibited_in_source_control_plane:
   - raw_browser_paths
   - arbitrary_download_urls
+  - provider_network_probe
   - startup_model_download
+  - implicit_license_acceptance
   - driver_or_cuda_mutation
   - automatic_main_merge
   - automatic_tag_or_release
