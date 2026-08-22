@@ -167,6 +167,27 @@ class V8Wave3ComponentEnablementTests(unittest.TestCase):
             self.assertEqual(finalized["status"], "manual_review")
             self.assertTrue(baseline.is_file())
 
+    def test_wave2_atomic_bytes_preserve_public_name_and_media_type(self) -> None:
+        authority = ProductionOutputAuthority(paths=self.paths, store=self.store)
+        bridge = V8OutputBridge(authority)
+        job_id = _job("d")
+        artifact = bridge.publish_bytes(
+            job_id=job_id,
+            content=b"synthetic-image-bytes",
+            name="preview.bin",
+            media_type="image/png",
+            provenance=_provenance(job_id),
+        )
+        self.assertIsNotNone(artifact)
+        assert artifact is not None
+        self.assertEqual(artifact["name"], "preview.bin")
+        self.assertEqual(artifact["media_type"], "image/png")
+        described = authority.describe(str(artifact["id"]))
+        self.assertIsNotNone(described)
+        assert described is not None
+        self.assertEqual(described["name"], "preview.bin")
+        self.assertEqual(described["media_type"], "image/png")
+
     def test_import_and_bundle_are_durable_operations(self) -> None:
         installer = _FakeInstaller()
         bundle = _FakeBundle()
