@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import os
 import re
 import secrets
 import sqlite3
@@ -37,6 +38,7 @@ _ADAPTER_ID = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 _SQLITE_INT64_MIN = -(1 << 63)
 _SQLITE_INT64_MAX = (1 << 63) - 1
 _UINT64_MAX = (1 << 64) - 1
+_MAX_BACKUP_BYTES = 128 * 1024 * 1024
 
 _COMPONENT_TRANSITIONS = {
     "planned": frozenset({"executing", "blocked", "cancelled"}),
@@ -228,6 +230,160 @@ class V8TransactionStore:
                 db.execute("INSERT INTO meta(key,value) VALUES('schema_version',?)", (SCHEMA_VERSION,))
             elif row["value"] != SCHEMA_VERSION:
                 raise TransactionStoreError("transaction_store_schema_mismatch")
+
+    @staticmethod
+    def _regular_path(path: Path, *, required: bool, code: str) -> Path:
+        """Validate one local SQLite leaf without resolving through reparses.
+
+        Backup and restore are deliberately internal store primitives.  Callers
+        receive only a finite success/failure result; this guard makes their
+        supplied leaf and every existing parent ordinary before SQLite opens a
+        handle.  It never creates a missing parent chain.
+        """
+
+        candidate = Path(path).absolute()
+        current = candidate.parent
+        while True:
+            try:
+                if not current.exists() or current.is_symlink() or is_reparse_point(current) or not current.is_dir():
+                    raise TransactionStoreError(code)
+            except OSError as exc:
+                raise TransactionStoreError(code) from exc
+            if current.parent == current:
+                break
+            current = current.parent
+        try:
+            exists = candidate.exists()
+            if required and not exists:
+                raise TransactionStoreError(code)
+            if exists and (candidate.is_symlink() or is_reparse_point(candidate) or not candidate.is_file()):
+                raise TransactionStoreError(code)
+        except OSError as exc:
+            raise TransactionStoreError(code) from exc
+        return candidate
+
+    @staticmethod
+    def _readonly_connection(path: Path) -> sqlite3.Connection:
+        try:
+            return sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5.0, isolation_level=None)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            raise TransactionStoreError("transaction_backup_unavailable") from exc
+
+    @classmethod
+    def _validate_snapshot(cls, path: Path) -> int:
+        candidate = cls._regular_path(path, required=True, code="transaction_backup_invalid")
+        try:
+            size = candidate.stat().st_size
+        except OSError as exc:
+            raise TransactionStoreError("transaction_backup_invalid") from exc
+        if size < 1 or size > _MAX_BACKUP_BYTES:
+            raise TransactionStoreError("transaction_backup_invalid")
+        connection = cls._readonly_connection(candidate)
+        try:
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()
+            if integrity is None or str(integrity[0]).lower() != "ok":
+                raise TransactionStoreError("transaction_backup_invalid")
+            row = connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+            if row is None or row[0] != SCHEMA_VERSION:
+                raise TransactionStoreError("transaction_store_schema_mismatch")
+            tables = {
+                str(item[0])
+                for item in connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            }
+            required_tables = {"meta", "output_reservations", "output_transactions", "artifact_objects", "component_operations"}
+            if not required_tables.issubset(tables):
+                raise TransactionStoreError("transaction_backup_invalid")
+        except sqlite3.Error as exc:
+            raise TransactionStoreError("transaction_backup_invalid") from exc
+        finally:
+            connection.close()
+        return int(size)
+
+    @staticmethod
+    def _temporary_sibling(destination: Path, *, prefix: str) -> Path:
+        for _ in range(8):
+            candidate = destination.with_name(f".{destination.name}.{prefix}.{secrets.token_hex(12)}.tmp")
+            try:
+                with candidate.open("xb"):
+                    pass
+                return candidate
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                raise TransactionStoreError("transaction_backup_unavailable") from exc
+        raise TransactionStoreError("transaction_backup_unavailable")
+
+    @staticmethod
+    def _copy_sqlite(source: sqlite3.Connection, destination: Path) -> None:
+        try:
+            target = sqlite3.connect(str(destination), timeout=5.0, isolation_level=None)
+        except sqlite3.Error as exc:
+            raise TransactionStoreError("transaction_backup_unavailable") from exc
+        try:
+            source.backup(target)
+            target.execute("PRAGMA synchronous=FULL")
+        except sqlite3.Error as exc:
+            raise TransactionStoreError("transaction_backup_unavailable") from exc
+        finally:
+            target.close()
+
+    def backup_to(self, destination: Path) -> dict[str, int | str]:
+        """Create a SQLite-consistent, validated snapshot without overwriting a leaf.
+
+        The SQLite backup API reads a coherent database image even while the
+        store has future writers.  A destination must be a new regular leaf;
+        an existing backup is never overwritten implicitly.
+        """
+
+        target = self._regular_path(destination, required=False, code="transaction_backup_destination_unsafe")
+        if target.exists():
+            raise TransactionStoreError("transaction_backup_destination_exists")
+        temporary = self._temporary_sibling(target, prefix="backup")
+        try:
+            with self._lock:
+                source = self._connect()
+                try:
+                    self._copy_sqlite(source, temporary)
+                finally:
+                    source.close()
+            bytes_written = self._validate_snapshot(temporary)
+            if target.exists():
+                raise TransactionStoreError("transaction_backup_destination_exists")
+            os.replace(temporary, target)
+            bytes_written = self._validate_snapshot(target)
+            return {"status": "completed", "bytes_written": bytes_written, "schema_version": SCHEMA_VERSION}
+        except TransactionStoreError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise TransactionStoreError("transaction_backup_unavailable") from exc
+
+    def restore_from(self, snapshot: Path) -> dict[str, int | str]:
+        """Restore only a prevalidated V8 snapshot through an atomic sibling swap.
+
+        Validation happens before the live control database is touched.  A
+        corrupt, reparse-backed or schema-mismatched snapshot therefore leaves
+        the existing V8 journal untouched for forensic/manual review.
+        """
+
+        source_path = self._regular_path(snapshot, required=True, code="transaction_backup_invalid")
+        self._validate_snapshot(source_path)
+        live = self._regular_path(self.path, required=True, code="transaction_store_path_unsafe")
+        temporary = self._temporary_sibling(live, prefix="restore")
+        try:
+            source = self._readonly_connection(source_path)
+            try:
+                self._copy_sqlite(source, temporary)
+            finally:
+                source.close()
+            bytes_restored = self._validate_snapshot(temporary)
+            self._regular_path(live, required=True, code="transaction_store_path_unsafe")
+            os.replace(temporary, live)
+            bytes_restored = self._validate_snapshot(live)
+            return {"status": "completed", "bytes_restored": bytes_restored, "schema_version": SCHEMA_VERSION}
+        except TransactionStoreError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise TransactionStoreError("transaction_backup_unavailable") from exc
 
     @staticmethod
     def _require_job_id(job_id: object) -> str:
