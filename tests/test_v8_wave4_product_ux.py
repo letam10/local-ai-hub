@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 
@@ -15,6 +16,10 @@ from src.services.api.context import ApiContext
 from src.services.api.router import ApiRequest
 from src.services.api.routes import component_v8
 from src.services.component_enablement_v8 import ComponentEnablementService
+from src.platform.paths import HubPaths
+from src.services.component_installer.maintenance_executor import MaintenanceExecutor
+from src.services.component_installer.receipts import write_component_receipt
+from src.services.productization import ComponentLifecycle
 from src.services.productization.catalog import ProductionCatalog
 
 
@@ -53,6 +58,37 @@ class V8Wave4ProductUxTests(unittest.TestCase):
         record = catalog.runtimes["ffmpeg"]
         self.assertEqual(record["required_leaves"], ["v8/ffmpeg/ffmpeg.exe", "v8/ffmpeg/ffprobe.exe"])
         self.assertNotIn("tools/ffmpeg/", json.dumps(record, ensure_ascii=True))
+
+    def test_v2_runtime_maintenance_binds_record_and_preserves_fixed_leaves(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary)
+            paths = HubPaths(app_root=repo, data_root=data)
+            catalog = ProductionCatalog(paths=paths, catalog_path=repo / "Config" / "v7_production_catalog.example.json")
+            lifecycle = ComponentLifecycle(paths=paths, catalog=catalog)
+            record = catalog.runtimes["ffmpeg"]
+            binding = lifecycle._catalog_binding("runtime", record)
+            leaves = []
+            for relative in record["required_leaves"]:
+                target = data / "runtime" / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"fixture-runtime-leaf")
+                leaves.append({"relative_path": relative, "observed_size_bytes": target.stat().st_size, "observed_mtime_ns": target.stat().st_mtime_ns, "verification_level": "unverified"})
+            write_component_receipt(paths.config_root, "ffmpeg", {"component_id": "ffmpeg", "component_type": "runtime", "root_class": "runtime_root", "location_class": "runtime_root", "source_identity": record["source_identity"], "leaves": leaves, "state": "INSTALLED_UNVERIFIED", "source": "catalog_primary", "operational": False}, catalog_binding=binding)
+            executor = MaintenanceExecutor(paths=paths, catalog=catalog)
+
+            repair = lifecycle.plan_maintenance("ffmpeg", "repair")
+            repaired = executor.apply(lifecycle._plans[repair["plan_id"]], confirmed=True, catalog_binding=binding, current_record=record)
+            self.assertEqual(repaired["status"], "completed")
+
+            update = lifecycle.plan_maintenance("ffmpeg", "update")
+            update_result = executor.apply(lifecycle._plans[update["plan_id"]], confirmed=True, catalog_binding=binding, current_record=record)
+            self.assertEqual(update_result["code"], "update_candidate_required")
+
+            uninstall = lifecycle.plan_maintenance("ffmpeg", "uninstall")
+            removed = executor.apply(lifecycle._plans[uninstall["plan_id"]], confirmed=True, catalog_binding=binding, current_record=record)
+            self.assertEqual(removed["status"], "completed")
+            self.assertTrue(all(not (data / "runtime" / relative).exists() for relative in record["required_leaves"]))
 
     def test_operation_route_uses_injected_context_with_bounded_limit(self) -> None:
         observed: list[int] = []

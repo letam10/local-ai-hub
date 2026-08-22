@@ -326,7 +326,22 @@ class ComponentLifecycle:
         current = self._inspect_component(component_id, kind, record, catalog_binding=binding)
         body = {"schema_version": "v7-component-maintenance-plan.v1", "component_id": component_id, "component_type": kind, "action": action, "catalog_fingerprint": self.catalog.fingerprint, "expected_state": current["status"], "preserve_existing": True, "execution": "not_run", "dry_run": True}
         plan_id = "v7_maintenance_" + secrets.token_hex(16)
-        plan = {**body, "plan_id": plan_id, "plan_fingerprint": _fingerprint(body), "_catalog_binding": binding}
+        # Keep the execution-bound fields private but complete.  The V8
+        # maintenance executor validates the exact record/revision/strategy
+        # before it may repair or remove a fixed runtime leaf; a public plan
+        # must never be treated as authority merely because its component ID
+        # matches.
+        plan = {
+            **body,
+            "plan_id": plan_id,
+            "plan_fingerprint": _fingerprint(body),
+            "_catalog_binding": binding,
+            "_record": dict(record),
+            "_record_revision": record.get("revision"),
+            "_install_strategy": record.get("install_strategy"),
+            "_latest_supported_revision": record.get("latest_supported_revision", record.get("revision")),
+            "_candidate_fingerprint": _fingerprint(record.get("update_candidate")) if isinstance(record.get("update_candidate"), Mapping) else None,
+        }
         self._plans[plan_id] = plan
         return {**body, "plan_id": plan_id, "plan_fingerprint": plan["plan_fingerprint"], "status": "planned", "reason": "Maintenance is plan-only until a separately confirmed manager executor is available.", "next_action": "Review the exact existing receipt and dependency impact."}
 
