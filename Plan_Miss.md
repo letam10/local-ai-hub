@@ -248,6 +248,29 @@ release cannot be inferred from these partial PASS reports.
   a downloader is created. A separate, explicitly scoped migration or
   reference-existing decision is required before any FFmpeg download can run.
 
+### 7D. BackupManager V8 SQLite archive integration — fixture-verified, production matrix pending
+
+- `BackupManager` now adds the fixed opaque archive member
+  `v8/v8_control.sqlite3` only when an existing safe V8 control journal is
+  present. It obtains that member through the transaction store's read-only
+  SQLite backup API, not by copying raw live database bytes. Legacy JSON-only
+  backups remain readable with their original manifest shape.
+- Restore stages and validates the SQLite snapshot before changing Config,
+  applies ordinary JSON members first, then restores the existing V8 journal
+  last; a SQLite refusal rolls back any already-applied JSON members. A
+  missing/reparse/corrupt V8 journal or snapshot fails closed and does not
+  create a new live journal from the archive.
+- Task-owned fixture coverage includes archive membership and hash integrity,
+  copy-only restore, post-plan V8 conflict refusal, corrupt snapshot refusal,
+  and reparse-backed source refusal. A separate read-only snapshot of the
+  real local journal was performed earlier; this integration has not restored
+  or overwritten the real `Config/v8_control.sqlite3`.
+- The full Windows matrix is still required before `sqlite_backup_restore`
+  can be PASS: WAL/concurrent writer behavior through `BackupManager`,
+  read-only/locked/ENOSPC fault injection, interrupted restore/restart, and
+  actual backup-route confirm/cancel checks. No release or runtime claim is
+  implied by the source/fixture result.
+
 ## 8. Real component lifecycle — CHƯA LÀM
 
 Từng vertical slice trên controlled Windows root:
@@ -275,9 +298,14 @@ Download >1 GB hoặc model/GPU inference phải dừng hỏi người dùng n�
 - installer/portable/managed shortcut/upgrade preservation;
 - clean clone + APP_ROOT/DATA_ROOT reuse.
 
-## 10. `v8_control.sqlite3` backup/restore — CHƯA LÀM
+## 10. `v8_control.sqlite3` backup/restore — PARTIAL, full Windows acceptance còn thiếu
 
-Không copy live DB theo cách tạo snapshot rách. Test WAL/journal mode, idle/concurrent backup, clean restore, schema mismatch, corrupt/read-only/locked, interrupted backup/restore, artifact-object↔DB identity, legacy V7 compatibility, failed validation không overwrite forensic DB.
+Không copy live DB theo cách tạo snapshot rách. Nguồn hiện dùng SQLite backup
+API cho member archive cố định và fixture đã phủ clean restore/schema mismatch/
+corrupt/reparse/plan conflict. Vẫn phải test WAL/journal mode, idle/concurrent
+backup qua BackupManager, read-only/locked/ENOSPC, interrupted backup/restore,
+artifact-object↔DB identity, legacy V7 compatibility và failed validation không
+overwrite forensic DB.
 
 ## 11. Runtime/model/GPU — DEFERRED
 

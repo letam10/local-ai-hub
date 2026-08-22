@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
 import threading
 import time
 from pathlib import Path
@@ -126,9 +127,21 @@ def decode_file_identity_from_sqlite(value: object) -> int:
 class V8TransactionStore:
     """Authoritative metadata journal for V8 output and component operations."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, initialize: bool = True) -> None:
+        """Open the V8 control journal.
+
+        ``initialize=False`` is deliberately read-only construction for
+        server-owned backup/restore orchestration.  It validates an existing
+        journal path without creating parents, opening a write connection, or
+        applying SQLite pragmas to the live Config database merely to take a
+        snapshot.
+        """
+
         self.path = Path(path).absolute()
         self._lock = threading.RLock()
+        if not initialize:
+            self._regular_path(self.path, required=True, code="transaction_store_path_unsafe")
+            return
         try:
             if self.path.exists() and (self.path.is_symlink() or is_reparse_point(self.path) or not self.path.is_file()):
                 raise TransactionStoreError("transaction_store_path_unsafe")
@@ -335,6 +348,18 @@ class V8TransactionStore:
             connection.close()
         return int(size)
 
+    @classmethod
+    def validate_snapshot(cls, path: Path) -> int:
+        """Read-only validation for an existing V8 backup snapshot.
+
+        Backup adapters use this public narrow seam instead of instantiating a
+        normal store, which would initialize the supplied path as a live
+        journal.  The validator rejects reparses, corrupt databases, and
+        schema mismatches without creating or changing any file.
+        """
+
+        return cls._validate_snapshot(path)
+
     @staticmethod
     def _temporary_sibling(destination: Path, *, prefix: str) -> Path:
         for _ in range(8):
@@ -348,6 +373,35 @@ class V8TransactionStore:
             except OSError as exc:
                 raise TransactionStoreError("transaction_backup_unavailable") from exc
         raise TransactionStoreError("transaction_backup_unavailable")
+
+    @staticmethod
+    def _temporary_identity(path: Path) -> tuple[int, int, int] | None:
+        """Return identity only for a task-created ordinary temporary leaf."""
+
+        try:
+            value = os.lstat(path)
+        except (OSError, ValueError):
+            return None
+        if is_reparse_point(path) or not stat.S_ISREG(value.st_mode):
+            return None
+        return (int(getattr(value, "st_dev", 0)), int(getattr(value, "st_ino", 0)), int(value.st_mode))
+
+    @classmethod
+    def _remove_owned_temporary(cls, path: Path, expected: tuple[int, int, int] | None) -> None:
+        """Remove only an unchanged private SQLite copy temporary.
+
+        A failed snapshot/restore must not leave a residue, but a replacement
+        or reparse must be preserved for manual review rather than unlinked.
+        """
+
+        if expected is None or cls._temporary_identity(path) != expected:
+            return
+        try:
+            cls._regular_path(path, required=True, code="transaction_backup_unavailable")
+            if cls._temporary_identity(path) == expected:
+                path.unlink()
+        except (OSError, ValueError, TransactionStoreError):
+            return
 
     @staticmethod
     def _copy_sqlite(source: sqlite3.Connection, destination: Path) -> None:
@@ -385,6 +439,7 @@ class V8TransactionStore:
         if target.exists():
             raise TransactionStoreError("transaction_backup_destination_exists")
         temporary = self._temporary_sibling(target, prefix="backup")
+        temporary_identity = self._temporary_identity(temporary)
         try:
             with self._lock:
                 # A backup is a read-only observation of the live journal.
@@ -407,6 +462,8 @@ class V8TransactionStore:
             raise
         except (OSError, ValueError) as exc:
             raise TransactionStoreError("transaction_backup_unavailable") from exc
+        finally:
+            self._remove_owned_temporary(temporary, temporary_identity)
 
     def restore_from(self, snapshot: Path) -> dict[str, int | str]:
         """Restore only a prevalidated V8 snapshot through an atomic sibling swap.
@@ -420,6 +477,7 @@ class V8TransactionStore:
         self._validate_snapshot(source_path)
         live = self._regular_path(self.path, required=True, code="transaction_store_path_unsafe")
         temporary = self._temporary_sibling(live, prefix="restore")
+        temporary_identity = self._temporary_identity(temporary)
         try:
             source = self._readonly_connection(source_path)
             try:
@@ -435,6 +493,8 @@ class V8TransactionStore:
             raise
         except (OSError, ValueError) as exc:
             raise TransactionStoreError("transaction_backup_unavailable") from exc
+        finally:
+            self._remove_owned_temporary(temporary, temporary_identity)
 
     @staticmethod
     def _require_job_id(job_id: object) -> str:
