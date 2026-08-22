@@ -189,7 +189,7 @@ def atomic_write_job_output(
 ) -> dict[str, Any]:
     """Compatibility writer: reserve first, then produce/publish only through V8."""
 
-    del media_type, disk_safety_bytes
+    del disk_safety_bytes
     bridge = default_bridge(create=True)
     if bridge is None:
         raise artifact_store.ArtifactWriteError("V8 output authority is unavailable.")
@@ -197,6 +197,7 @@ def atomic_write_job_output(
         job_id=job_id,
         content=content,
         name=name,
+        media_type=media_type,
         provenance=provenance,
     )
     if artifact is None:
