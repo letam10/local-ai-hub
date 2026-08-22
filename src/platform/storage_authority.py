@@ -8,6 +8,7 @@ public state.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -237,6 +238,91 @@ class StorageAuthority:
         if info is None:
             raise StorageAuthorityError("managed_leaf_unavailable")
         return path, relative, FileIdentity.from_stat(info)
+
+    @contextmanager
+    def hold_file_identity(
+        self,
+        lease: RootLease,
+        relative: Path | str,
+        expected: FileIdentity,
+    ):
+        """Hold an exact managed leaf through one atomic publication boundary.
+
+        On Windows this opens the leaf without following a reparse point and
+        denies write/delete sharing. A foreign actor cannot replace the
+        pathname after pre-commit validation and before the SQLite visibility
+        commit. Other platforms retain an identity-checked no-follow read
+        handle; their callers still revalidate around external boundaries.
+        """
+
+        try:
+            candidate = self.resolve_relative(lease, relative, require_exists=True, expect_file=True)
+            current = self.file_identity(lease, relative)
+        except StorageAuthorityError:
+            raise StorageAuthorityError("managed_leaf_unavailable") from None
+        if not expected.same_file_state(current):
+            raise StorageAuthorityError("managed_leaf_identity_changed")
+
+        fd: int | None = None
+        try:
+            if os.name == "nt":
+                import ctypes
+                import msvcrt
+                from ctypes import wintypes
+
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                create_file = kernel32.CreateFileW
+                create_file.argtypes = [
+                    wintypes.LPCWSTR,
+                    wintypes.DWORD,
+                    wintypes.DWORD,
+                    wintypes.LPVOID,
+                    wintypes.DWORD,
+                    wintypes.DWORD,
+                    wintypes.HANDLE,
+                ]
+                create_file.restype = wintypes.HANDLE
+                handle = create_file(
+                    os.fspath(candidate),
+                    0x80000000,  # GENERIC_READ
+                    0x00000001,  # FILE_SHARE_READ; deny write and delete
+                    None,
+                    3,  # OPEN_EXISTING
+                    0x00200000,  # FILE_FLAG_OPEN_REPARSE_POINT
+                    None,
+                )
+                invalid_handle = ctypes.c_void_p(-1).value
+                if int(handle) == invalid_handle:
+                    raise StorageAuthorityError("managed_leaf_unavailable")
+                try:
+                    fd = msvcrt.open_osfhandle(int(handle), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+                except (OSError, ValueError):
+                    kernel32.CloseHandle(handle)
+                    raise StorageAuthorityError("managed_leaf_unavailable") from None
+            else:
+                flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                fd = os.open(candidate, flags)
+
+            if not expected.same_file_state(FileIdentity.from_stat(os.fstat(fd))):
+                raise StorageAuthorityError("managed_leaf_identity_changed")
+            lease.assert_current()
+            self._assert_existing_chain(candidate)
+            current_stat = self._lstat(candidate)
+            if current_stat is None or not stat.S_ISREG(current_stat.st_mode) or is_reparse_point(candidate):
+                raise StorageAuthorityError("managed_leaf_unavailable")
+            if not expected.same_file_state(FileIdentity.from_stat(current_stat)):
+                raise StorageAuthorityError("managed_leaf_identity_changed")
+            yield fd
+        except StorageAuthorityError:
+            raise
+        except (AttributeError, ImportError, OSError, TypeError, ValueError):
+            raise StorageAuthorityError("managed_leaf_unavailable") from None
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
     def _delete_windows_identity_attested(
         self,

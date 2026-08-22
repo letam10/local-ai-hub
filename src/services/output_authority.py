@@ -7,6 +7,7 @@ reservation/job/transaction binding is durably authorized.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 import hashlib
 import os
 from pathlib import Path
@@ -303,21 +304,25 @@ class OutputAuthority:
                 )
                 prepared.append((artifact_id, Path(object_key), object_identity))
 
-            for artifact_id, _relative, _identity in prepared:
-                row = self.store.internal_artifact(artifact_id)
-                if row is None:
-                    raise OutputAuthorityError("prepared_artifact_missing")
-                self._validate_managed_row(lease, row)
-            if not self.store.authorize_output_transaction(transaction_id, reservation_id, job_id):
-                raise OutputAuthorityError("transaction_authorization_failed")
-            for artifact_id, _relative, _identity in prepared:
-                row = self.store.internal_artifact(artifact_id)
-                if row is None:
-                    raise OutputAuthorityError("prepared_artifact_missing")
-                self._validate_managed_row(lease, row)
-            lease.assert_current()
-            published = self.store.commit_output_transaction(transaction_id, reservation_id, job_id)
-            return published if isinstance(published, list) and len(published) == len(prepared) else None
+            # Re-open every managed object with identity attestation before
+            # authorization and keep those handles through the final SQLite
+            # visibility commit.  On Windows this denies a replacement after
+            # validation but before the record becomes publicly addressable.
+            with ExitStack() as held_objects:
+                for artifact_id, _relative, _identity in prepared:
+                    row = self.store.internal_artifact(artifact_id)
+                    if row is None:
+                        raise OutputAuthorityError("prepared_artifact_missing")
+                    object_key = row.get("object_key")
+                    if not isinstance(object_key, str):
+                        raise OutputAuthorityError("prepared_artifact_missing")
+                    _path, identity = self._validate_managed_row(lease, row)
+                    held_objects.enter_context(self.storage.hold_file_identity(lease, object_key, identity))
+                if not self.store.authorize_output_transaction(transaction_id, reservation_id, job_id):
+                    raise OutputAuthorityError("transaction_authorization_failed")
+                lease.assert_current()
+                published = self.store.commit_output_transaction(transaction_id, reservation_id, job_id)
+                return published if isinstance(published, list) and len(published) == len(prepared) else None
         except (OutputAuthorityError, StorageAuthorityError, TransactionStoreError, OSError, ValueError):
             try:
                 self.store.abort_output_transaction(transaction_id, reservation_id, job_id)

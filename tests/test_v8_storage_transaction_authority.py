@@ -9,6 +9,7 @@ import hashlib
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from src.platform.paths import HubPaths
 from src.platform.storage_authority import StorageAuthority, StorageAuthorityError
@@ -227,6 +228,35 @@ class V8StorageTransactionAuthorityTests(unittest.TestCase):
         )
         self.assertIsNone(result)
         self.assertEqual(authority.list_public(), [])
+
+    def test_replacement_immediately_before_final_commit_is_not_published(self) -> None:
+        authority = self._authority()
+        job_id = _job("3")
+        reservation = authority.begin_reservation(job_id)
+        producer = self.data / "Output" / "late-replacement.bin"
+        producer.write_bytes(b"owned bytes")
+        original_commit = self.store.commit_output_transaction
+
+        def replace_then_commit(transaction_id: str, reservation_id: str, committing_job_id: str):
+            staged = self.store.incomplete_artifacts()
+            self.assertEqual(len(staged), 1)
+            lease = authority.storage.lease("output", create=True)
+            managed = authority.storage.resolve_relative(lease, staged[0]["object_key"], require_exists=True)
+            replacement = managed.with_name("foreign-replacement.bin")
+            replacement.write_bytes(b"foreign replacement bytes")
+            replacement.replace(managed)
+            return original_commit(transaction_id, reservation_id, committing_job_id)
+
+        with patch.object(self.store, "commit_output_transaction", side_effect=replace_then_commit):
+            published = authority.publish_owned_candidates(
+                reservation_id=reservation,
+                job_id=job_id,
+                candidates=[producer],
+                provenance=_provenance(job_id),
+            )
+
+        self.assertIsNone(published)
+        self.assertEqual(self.store.list_public_artifacts(), [])
 
 
 if __name__ == "__main__":
