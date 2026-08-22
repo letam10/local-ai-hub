@@ -1,8 +1,10 @@
 """V8 durable component-lifecycle coordinator.
 
-The coordinator keeps the existing V7 ComponentInstaller as the execution
-implementation, but moves user-visible lifecycle authority behind an opaque,
-path-free operation journal. API/UI wiring is intentionally a later wave.
+The coordinator keeps the existing V7 ComponentInstaller and bundle service as
+execution implementations, but moves user-visible lifecycle authority behind
+an opaque, path-free operation journal. Wave 3 extends that journal to native
+manual-import plans and composite bundle plans without making their local file
+selection or multi-step execution magically restartable.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from src.services.transaction_store import TransactionStoreError, V8TransactionS
 
 
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_-]{1,47}$")
+_FINGERPRINT = re.compile(r"^[a-f0-9]{64}$")
 _TERMINAL = frozenset({"committed", "failed", "blocked", "cancelled"})
 _ACTIVE = frozenset({"planned", "executing", "verifying"})
 _PLAN_PUBLIC_KEYS = frozenset(
@@ -27,17 +30,22 @@ _PLAN_PUBLIC_KEYS = frozenset(
         "dry_run",
         "component_id",
         "component_type",
+        "component",
         "existing_status",
         "current_status",
         "auto_install_supported",
         "download_bytes",
         "estimated_disk_bytes",
         "dependencies",
+        "steps",
         "warnings",
         "reason",
         "next_action",
         "action",
         "mode",
+        "selection_id",
+        "preserve_existing_dependencies",
+        "shared_dependency_policy",
     }
 )
 _RESULT_PUBLIC_KEYS = frozenset(
@@ -53,9 +61,12 @@ _RESULT_PUBLIC_KEYS = frozenset(
         "verified",
         "operational",
         "receipt",
+        "steps",
         "next_action",
     }
 )
+_LIST_KEYS = frozenset({"dependencies", "warnings", "steps"})
+_BLOCKED_CHILD_KEYS = frozenset({"path", "url", "command", "executable", "selected", "source_path"})
 
 
 class ComponentLifecycleError(RuntimeError):
@@ -75,6 +86,18 @@ def _safe_code(value: object, fallback: str) -> str:
     return fallback
 
 
+def _safe_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or key in _BLOCKED_CHILD_KEYS:
+            continue
+        if isinstance(item, (bool, int, float)) or item is None:
+            result[key] = item
+        elif isinstance(item, str) and "\x00" not in item and len(item) <= 300:
+            result[key] = item
+    return result
+
+
 def _project(value: Mapping[str, Any], keys: frozenset[str]) -> dict[str, Any]:
     """Keep a bounded path-free projection from server-owned lifecycle results."""
 
@@ -88,21 +111,15 @@ def _project(value: Mapping[str, Any], keys: frozenset[str]) -> dict[str, Any]:
         elif isinstance(item, str):
             if "\x00" not in item and len(item) <= 800:
                 result[key] = item
-        elif key in {"dependencies", "warnings"} and isinstance(item, list):
+        elif key == "component" and isinstance(item, Mapping):
+            result[key] = _safe_mapping(item)
+        elif key in _LIST_KEYS and isinstance(item, list):
             clean: list[Any] = []
             for child in item[:64]:
                 if isinstance(child, str) and len(child) <= 300:
                     clean.append(child)
                 elif isinstance(child, Mapping):
-                    projected: dict[str, Any] = {}
-                    for child_key, child_value in child.items():
-                        if (
-                            isinstance(child_key, str)
-                            and child_key not in {"path", "url", "command", "executable"}
-                            and isinstance(child_value, (str, int, bool, type(None)))
-                        ):
-                            projected[child_key] = child_value
-                    clean.append(projected)
+                    clean.append(_safe_mapping(child))
             result[key] = clean
     return result
 
@@ -115,6 +132,7 @@ class ComponentLifecycleCoordinator:
         *,
         installer: Any | None = None,
         store: V8TransactionStore | None = None,
+        bundle_service: Any | None = None,
     ) -> None:
         if installer is None:
             from src.services.component_installer.manager import ComponentInstaller
@@ -122,6 +140,14 @@ class ComponentLifecycleCoordinator:
             installer = ComponentInstaller()
         self.installer = installer
         self.store = store or V8TransactionStore.for_paths(getattr(installer, "paths", None))
+        self._bundle_service = bundle_service
+
+    def bundle_service(self) -> Any:
+        if self._bundle_service is None:
+            from src.services.component_installer.bundle import ComponentBundleService
+
+            self._bundle_service = ComponentBundleService(self.installer)
+        return self._bundle_service
 
     def _register(
         self,
@@ -132,8 +158,12 @@ class ComponentLifecycleCoordinator:
         action: str,
     ) -> dict[str, Any]:
         plan_id = plan.get("plan_id")
-        expected = plan.get("expected_state_fingerprint")
-        if not isinstance(plan_id, str) or not isinstance(expected, str):
+        expected = plan.get("expected_state_fingerprint") or plan.get("plan_fingerprint")
+        if (
+            not isinstance(plan_id, str)
+            or not isinstance(expected, str)
+            or _FINGERPRINT.fullmatch(expected) is None
+        ):
             raise ComponentLifecycleError("plan_contract_incomplete")
         try:
             operation_id = self.store.create_component_operation(
@@ -201,6 +231,28 @@ class ComponentLifecycleCoordinator:
         )
         return self._register(plan, component_id=component_id, component_type=component_type, action="reuse")
 
+    def plan_import(self, selection_id: str, *, mode: str) -> dict[str, Any]:
+        plan = self.installer.plan_import(selection_id, mode=mode)
+        plan_id = plan.get("plan_id")
+        lookup = self.installer.lookup_plan(plan_id) if isinstance(plan_id, str) else None
+        component_id = lookup.get("component_id") if isinstance(lookup, Mapping) else plan.get("component_id")
+        if not isinstance(component_id, str):
+            component = plan.get("component")
+            component_id = component.get("component_id") if isinstance(component, Mapping) else None
+        if not isinstance(component_id, str):
+            raise ComponentLifecycleError("plan_contract_incomplete")
+        return self._register(plan, component_id=component_id, component_type="model", action="import")
+
+    def plan_bundle(
+        self,
+        component_id: str,
+        *,
+        component_type: str = "model",
+        variant: str = "default",
+    ) -> dict[str, Any]:
+        plan = self.bundle_service().plan(component_id, component_type=component_type, variant=variant)
+        return self._register(plan, component_id=component_id, component_type=component_type, action="bundle")
+
     def plan_maintenance(
         self,
         component_id: str,
@@ -231,6 +283,15 @@ class ComponentLifecycleCoordinator:
     def list_operations(self, *, limit: int = 100) -> list[dict[str, Any]]:
         return self.store.list_component_operations(limit=limit)
 
+    def _plan_exists(self, operation: Mapping[str, Any]) -> bool:
+        plan_id = str(operation.get("plan_id") or "")
+        action = str(operation.get("action") or "")
+        if action == "bundle":
+            lookup = getattr(self.bundle_service(), "lookup", None)
+            return bool(callable(lookup) and lookup(plan_id) is not None)
+        lookup = getattr(self.installer, "lookup_plan", None)
+        return bool(callable(lookup) and lookup(plan_id) is not None)
+
     def _delegate(
         self,
         operation: Mapping[str, Any],
@@ -245,6 +306,10 @@ class ComponentLifecycleCoordinator:
             value = self.installer.confirm_verify(plan_id, confirmed=True, catalog_binding=catalog_binding)
         elif action == "reuse":
             value = self.installer.confirm_reuse(plan_id, confirmed=True, catalog_binding=catalog_binding)
+        elif action == "import":
+            value = self.installer.confirm_import(plan_id, confirmed=True)
+        elif action == "bundle":
+            value = self.bundle_service().confirm(plan_id, confirmed=True)
         elif action in {"repair", "update", "uninstall"}:
             value = self.installer.confirm_maintenance(plan_id, confirmed=True, catalog_binding=catalog_binding)
         else:
@@ -288,9 +353,7 @@ class ComponentLifecycleCoordinator:
                 "execution": "not_run",
                 "dry_run": True,
             }
-
-        lookup = getattr(self.installer, "lookup_plan", None)
-        if not callable(lookup) or lookup(str(operation["plan_id"])) is None:
+        if not self._plan_exists(operation):
             self.store.transition_component_operation(
                 operation_id,
                 expected_state="planned",
@@ -303,7 +366,6 @@ class ComponentLifecycleCoordinator:
                 "operation": self.store.component_operation(operation_id),
                 "execution": "not_run",
             }
-
         if not self.store.transition_component_operation(
             operation_id,
             expected_state="planned",
@@ -347,8 +409,39 @@ class ComponentLifecycleCoordinator:
         public.setdefault("execution", "not_run" if target != "committed" else result.get("execution", "not_run"))
         return public
 
+    def cancel_operation(self, operation_id: str) -> dict[str, Any]:
+        """Cancel only a not-yet-executing operation.
+
+        Running V7 installer/bundle cancellation uses a separate process-local
+        contract and is intentionally not guessed from the durable journal.
+        """
+
+        operation = self.store.component_operation(operation_id)
+        if operation is None:
+            return {"status": "error", "code": "unknown_component_operation", "execution": "not_run"}
+        state = str(operation.get("state") or "")
+        if state != "planned":
+            return {
+                "status": "conflict",
+                "code": "component_operation_not_cancellable",
+                "operation": operation,
+                "execution": "not_run",
+            }
+        changed = self.store.transition_component_operation(
+            operation_id,
+            expected_state="planned",
+            target_state="cancelled",
+            result_code="cancelled",
+        )
+        return {
+            "status": "cancelled" if changed else "conflict",
+            "code": "cancelled" if changed else "component_operation_changed",
+            "operation": self.store.component_operation(operation_id),
+            "execution": "not_run",
+        }
+
     def reconcile_startup(self) -> dict[str, int]:
-        """Fail closed for operations whose in-memory V7 plan did not survive restart."""
+        """Fail closed when the process-local V7 plan did not survive restart."""
 
         blocked = 0
         retained = 0
@@ -362,9 +455,8 @@ class ComponentLifecycleCoordinator:
             operation_id = str(operation.get("operation_id") or "")
             if not operation_id:
                 continue
-            lookup = getattr(self.installer, "lookup_plan", None)
-            plan_exists = callable(lookup) and lookup(str(operation.get("plan_id") or "")) is not None
-            if state == "planned" and plan_exists:
+            plan_exists = state == "planned" and self._plan_exists(operation)
+            if plan_exists:
                 retained += 1
                 continue
             if self.store.transition_component_operation(
