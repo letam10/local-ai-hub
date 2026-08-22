@@ -1,123 +1,240 @@
 # Plan_Miss — LOCAL AI HUB V8 deferred/local work
 
-File này là handoff bắt buộc cho Codex sau Wave 0–3. Chỉ đánh dấu DONE khi có evidence phù hợp với loại gate: source gate có thể chứng minh bằng CI; Windows/runtime gate phải có evidence trên đúng Windows installation. Không suy diễn Linux CI thành Windows acceptance. Không tự merge `main`, không tạo/move tag, không download model/runtime lớn hoặc chạy GPU inference nếu chưa có phê duyệt riêng.
+File này là handoff bắt buộc cho Codex sau Wave 0–4. Chỉ đánh dấu DONE khi có evidence phù hợp với loại gate: source gate có thể chứng minh bằng CI; Windows/runtime/desktop gate phải có evidence trên đúng Windows installation. Không suy diễn Linux CI thành Windows acceptance. Không tự merge `main`, không tạo/move tag, không download model/runtime lớn hoặc chạy GPU inference nếu chưa có phê duyệt riêng.
 
-## 1. Tổng hợp kiểm tra đã thực hiện
+## 1. Tổng hợp source work đã hoàn thành
 
 Wave 0: Storage Authority, SQLite transaction journal, reservation/job/transaction binding, staged-private + copy-once managed object, public commit atomic, exact-identity cleanup; Wave 2 sửa stale aborted staged-row reconciliation để cleanup hội tụ.
 
 Wave 1: durable component operation journal; confirmation bắt buộc; terminal operation không chạy lại; restart mất process-local V7 plan → `plan_session_lost`; committed không tự nâng OPERATIONAL.
 
-Wave 2: new worker-output publication chuyển sang V8, historical V7 reads được giữ. Re-audit Wave 3 đã khóa thêm hai lỗi source-level:
-- V8 reservation **không** còn đủ để publish worker filesystem candidate; publication boundary tự re-check V7 scope và chỉ nhận candidate batch có ownership `owned`.
-- V8 byte/atomic output giữ public artifact `name` và explicit `media_type`; private producer filename không được rò ra product metadata.
+Wave 2: new worker-output publication chuyển sang V8, historical V7 reads được giữ. Publication boundary tự re-check V7 ownership scope; V8 reservation không tự chứng minh filesystem ownership. Byte/atomic output giữ đúng public artifact name/media type.
 
-Wave 3 source/control-plane đã làm:
-- manual-import plan có opaque durable V8 operation;
-- composite-bundle plan có opaque durable V8 operation;
-- planned operation có durable cancel; executing cancellation chưa giả lập;
-- direct operation list/inspect/confirm/cancel routes;
-- trusted-source acceptance classifier dựa trên tracked catalog disposition/source/auth/license/integrity/size;
-- không gọi provider, không download, không implicit accept license, không tự bật model AUTO_INSTALL_READY.
+Wave 3: manual-import và composite-bundle plan có opaque durable operation; planned operation có durable cancel; direct operation routes; tracked-catalog source acceptance; không provider request, download, implicit license accept hoặc implicit model AUTO_INSTALL_READY.
 
-Latest source gate đã chạy trên GitHub Actions run #647:
-- `python scripts/ci_validate.py`: PASS, 721 tracked files, không forbidden artifact/unmasked secret;
-- `python -m unittest discover -s tests -p "test_v8_*.py"`: 23/23 PASS;
+Wave 3 re-audit trong Wave 4 đã sửa:
+- `REFERENCE_EXISTING` là disposition có thẩm quyền; không được biến thành license/source/integrity/size download gate.
+- V8 Component route dùng `ApiContext` application-owned bindings thay vì transport layer tự gọi singleton manager.
+- Operation list có bounded `limit=1..500`.
+- direct confirm gặp `plan_session_lost` trả conflict 409, không giả thành success.
+
+Wave 4 source-side Product UX đã làm:
+- Components page có V8 operation journal riêng.
+- Hiển thị opaque operation ID/state/action/result.
+- Chỉ `planned` operation có Confirm/Cancel action.
+- Mỗi component có truthful V8 source-acceptance state + disposition + source/auth/license/integrity/size gates.
+- Không raw workstation path/credential/command trong surface mới.
+- Không polling; refresh theo page render/navigation hoặc nút user refresh.
+- New V8 UX module được mount từ `src/ui/index.html`.
+- Duplicate `id="snapshot-status"` cũ trong `index.html` đã được loại bỏ.
+
+Source validation sau Wave 4 implementation: GitHub Actions run #667 PASS:
+- `python scripts/ci_validate.py`: PASS, 723 tracked files, không forbidden artifact/unmasked secret;
+- `python -m unittest discover -s tests -p "test_v8_*.py"`: 27/27 PASS;
 - `git diff --check` từ PR base: PASS.
 
-Mỗi lần Codex tiếp tục phải chạy lại ba gate trên, sau đó chạy full relevant tests từ local checkout nếu khả dụng.
+Codex phải chạy lại ba gate trên ở HEAD mới nhất trước khi bắt đầu local acceptance.
 
-## 2. LOCAL_ONLY / không có trên GitHub
+## 2. LOCAL_ONLY / hiện không tồn tại trên GitHub
 
-Phải inspect trên máy thật, tuyệt đối không tạo giả từ example config:
-- `D:\LocalAIHub\Config\` machine state, gồm `v8_control.sqlite3` khi V8 được chạy thật, legacy `artifacts.json`, job stores, receipts, component history và các local/recovery files.
-- `D:\LocalAIHub\Models\`, `Environments\`, `runtime\`, `Output\`, `Cache\`, `Temp\`, `Logs\`, `Reports\`, `Backups\`, project/workflow persistent state và user media.
-- Existing SAM2/AnimeSR/Whisper/FFmpeg/AIRI/model/runtime installations và external-managed paths.
-- Desktop-installed binaries, shortcuts, packaging state, Windows services/process ownership, actual disk/free-space conditions.
-- Any local native-picker selection, provider credential, local license acceptance record hoặc user-selected import path.
+Các dữ liệu sau phải inspect trên máy thật. Không tạo giả từ `*.example.*` hoặc source test fixture:
 
-Không commit các dữ liệu trên vào Git.
+- `D:\LocalAIHub\Config\` machine state, gồm `v8_control.sqlite3` nếu V8 đã chạy thật, legacy `artifacts.json`, job stores, receipts, component history, machine registry, recovery/forensic state và local settings.
+- `D:\LocalAIHub\Models\`.
+- `D:\LocalAIHub\Environments\`.
+- `D:\LocalAIHub\runtime\`.
+- `D:\LocalAIHub\Output\`, bao gồm historical V6/V7 outputs và `.hub-v8` nếu đã tạo thật.
+- `D:\LocalAIHub\Cache\`, `Temp\`, `Logs\`, `Reports\`, `Backups\`.
+- Project/workflow persistent state và user media.
+- Existing SAM2, AnimeSR, Whisper, FFmpeg, AIRI, ComfyUI, FLUX, Qwen và các runtime/model installations thực tế.
+- External-managed runtime/model roots hoặc junction/reparse tồn tại trên máy.
+- Desktop-installed binaries, pywebview/WebView2 runtime, shortcut, packaging/installer state.
+- Windows process/service ownership và process đang chạy.
+- Actual disk/free-space/quota/ACL/locking state.
+- Native-picker selections, selected local file/folder paths, provider credentials và local license acceptance records.
 
-## 3. Windows adversarial acceptance bắt buộc
+Không commit các dữ liệu này vào Git. Không overwrite/remove forensic evidence hoặc user files để làm test pass.
 
-Chạy bounded synthetic/local tests trên NTFS:
-- symlink/junction/reparse/mount-point ở DATA_ROOT, Config, Output, `.hub-v8`, object shard và producer ancestor;
-- replace root/ancestor sau khi `RootLease` được cấp;
-- producer swap/truncate/rename trong lúc copy; managed-object replacement trong lúc resolve/stream;
-- Windows file sharing/locking/handle identity và TOCTOU giữa validation → copy → authorize → commit;
-- crash/process kill ở reserve, copy, stage, authorize, final commit, cleanup và startup reconcile;
-- xác minh final public commit không cần mandatory metadata write khác để artifact tồn tại hợp lệ;
-- concurrent same-name producers, multi-artifact/job và explicit public name/media metadata;
-- cancellation trước producer, giữa producer, sau stage, trước/đúng lúc public commit;
-- API byte-range/HEAD streaming từ V8 object và historical V7 artifact, không lộ raw path;
-- SQLite corruption/read-only/disk-full/locked-file recovery phải fail closed và không overwrite evidence.
+## 3. Windows filesystem adversarial acceptance — CHƯA LÀM
 
-## 4. Wave 2 follow-up cần local/Codex
+Dùng clean/controlled test DATA_ROOT trên NTFS, không phá dữ liệu thật:
 
-- Chạy full consumer grep trên local checkout cho mọi direct use của `artifact_store.resolve`, `describe`, `register_worker_outputs`, `atomic_write_job_output`, `stage_job_artifact`, `_mark_staged_linked`, `publish_staged`; GitHub connector search không chứng minh được 100% callsite coverage.
-- Xác minh direct `HubJobManager` thật tạo V8 reservation trước producer cho tất cả output-producing tools; tool tạo output nhưng không thuộc output-scope/`requires_published_artifact` phải được phân loại và sửa fail-closed.
-- Xác minh `V8DurableWorkEngine` với bounded fake/local adapter trong production composition: reservation trước adapter, managed producer, byte output metadata, restart/cancel/retry/artifact lineage.
-- Legacy managed V6 artifact CAS chưa destructive-migrate; historical links phải còn đọc được. Thiết kế migration/backfill riêng nếu sau này bỏ JSON store.
-- Chỉ fold `V8ProductionTransactionStore`/`ProductionOutputAuthority` extensions vào core Wave 0 sau Windows acceptance; không xóa compatibility layer trước evidence.
-- Thiết kế backup/restore/migration nhất quán cho `Config/v8_control.sqlite3`; không copy SQLite DB đang transaction theo cách tạo snapshot rách.
+- symlink/junction/reparse/mount-point tại DATA_ROOT, Config, Output, `.hub-v8`, object shard và producer ancestor;
+- root/ancestor replacement sau khi `RootLease` đã cấp;
+- producer swap/truncate/rename/replace trong khi copy;
+- managed-object replacement giữa resolve và stream/open;
+- Windows file sharing, handle identity, antivirus/indexer lock và TOCTOU giữa validation → copy → authorize → commit;
+- crash/process kill ở reserve, producer, copy, stage, authorize, final public commit, cleanup và startup reconcile;
+- final public commit phải là persistence boundary cuối cùng bắt buộc để artifact hợp lệ;
+- concurrent same-name producers và multi-artifact transaction;
+- cancellation trước producer, giữa producer, sau stage, trước/đúng lúc commit;
+- SQLite locked/read-only/disk-full/corrupt behavior phải fail closed, giữ evidence và không replace DB bằng dữ liệu giả;
+- ambiguous/foreign/reparse files không được auto-delete.
 
-## 5. Wave 3 — phần source đã làm, phần còn thiếu
+## 4. Wave 2 production callsite inventory — cần Codex local
 
-ĐÃ LÀM trên GitHub/source:
-- V8 journal cho `import` và `bundle` action.
-- `plan_fingerprint` được dùng làm durable binding khi legacy plan không có `expected_state_fingerprint` riêng.
-- direct routes: `GET /api/components/operations`, `GET /api/components/operations/{operation_id}`, `POST .../confirm`, `POST .../cancel`.
-- source acceptance routes: `GET /api/components/source-acceptance`, `GET /api/components/{component_id}/source-acceptance`.
-- finite source acceptance không trả raw local path và không gọi network.
-- tracked catalog test chứng minh không model nào bị auto-promote; SAM2 có verified source/hash/size nhưng vẫn manual do disposition; FLUX vẫn AUTH_REQUIRED.
+GitHub connector search không chứng minh được 100% symbol/callsite coverage. Trên full checkout chạy exact grep/ripgrep và phân loại mọi caller của:
 
-CÒN THIẾU / cần Codex local:
-- Native picker selection/path vẫn process-local và expiry-based; operation journal không làm selection restart-resumable. Sau restart phải fail closed, không tự tìm lại path.
-- Windows native picker acceptance: expiry, wrong component, reparse selection, file changed after selection, restart, user cancel.
-- Executing component operation cancellation bridge: hiện chỉ `planned → cancelled`; không force-cancel executor đang chạy nếu không có process-owned cancellation contract.
-- Composite bundle vẫn dùng ordered V7 child execution; chưa có atomic multi-component transaction/rollback. Cần test partial child failure, shared dependency preservation, rollback và restart.
-- Direct operation API đã có nhưng Desktop/WebView2 UI cho operation ID/state/confirm/cancel chưa có.
-- Trusted-source acceptance chỉ đọc catalog. Chưa có live upstream discovery/probe, provider auth flow, license acceptance record hoặc official-source revalidation.
-- Phải review từng component trước real enablement: canonical source, revision, size, digest, license, auth, runtime/dependency graph. Không bật hàng loạt.
-- Production catalog validator hiện chủ động cấm model AUTO_INSTALL_READY; không bỏ guard này chỉ để test pass. Chỉ thay đổi bằng package riêng sau per-component evidence.
-- `committed` operation vẫn không được coi là OPERATIONAL nếu thiếu bounded runtime evidence.
+- `artifact_store.resolve`
+- `artifact_store.describe`
+- `register_worker_outputs`
+- `atomic_write_job_output`
+- `begin_job_output_scope`
+- `prepare_job_output_scope`
+- `finalize_job_output_scope`
+- `stage_job_artifact`
+- `_mark_staged_linked`
+- `publish_staged`
+- `DurableWorkEngine` / `LegacyDurableWorkEngine` / `V8DurableWorkEngine`
 
-## 6. Real component lifecycle chưa chạy
+Với từng output-producing tool xác minh:
 
-Trên clean/controlled Windows test root cần chạy từng vertical slice:
-- inspect → plan → confirm → install/import/reuse → verify → receipt → bounded smoke → OPERATIONAL evidence;
-- repair phải reacquire/reconstruct đúng artifact khi được phép, không chỉ revalidate;
-- update phải có candidate/stage/verify/activate/rollback và không auto-update;
-- uninstall phải preserve shared dependency và user/project data;
-- bundle phải chứng minh rollback/restart semantics;
-- source outage không được demote một local installation hợp lệ;
-- license/auth-required component phải dừng đúng gate.
+1. V8 reservation được tạo trước producer/adaptor work.
+2. Filesystem candidate được ownership scope chứng minh tại publication boundary.
+3. Producer failure/cancel không xóa foreign/user file.
+4. Public artifact chỉ xuất hiện sau V8 final commit.
+5. Historical V6/V7 artifact vẫn read được.
 
-Mọi download lớn >1GB hoặc GPU/model inference phải dừng hỏi người dùng trước nếu chưa có phê duyệt riêng.
+Xác minh direct `HubJobManager` và `V8DurableWorkEngine` bằng bounded fake/local adapter trong production composition: reserve → adapter → managed producer/bytes → publish → restart/cancel/retry → artifact lineage.
 
-## 7. API/Desktop/runtime acceptance chưa chạy
+Legacy V6/V7 JSON/CAS chưa destructive-migrate. Nếu muốn bỏ legacy store, lập migration/backfill package riêng và test downgrade/read compatibility trước.
 
-- Loopback API `127.0.0.1:8765` real launch, shutdown, concurrent request, operation routes, artifact streaming và restart acceptance.
-- Desktop WebView2 composition/UI wiring cho V8 operation IDs, source acceptance và output objects.
+## 5. Wave 3 local gaps — CHƯA LÀM
+
+Native picker/selection vẫn process-local, expiry-based. Operation journal không làm selected path restart-resumable. Phải test trên Windows:
+
+- user cancel picker;
+- expired selection;
+- wrong component/type;
+- selected file/folder là reparse/junction;
+- selected file đổi identity/size/hash sau selection trước confirm;
+- restart giữa selection và confirm;
+- restart giữa plan và confirm;
+- stale selection không được tự rediscover theo path.
+
+Executing component-operation cancellation chưa có durable process-owned bridge. Hiện chỉ `planned → cancelled`. Không force-kill process từ operation ID cho tới khi ownership/cancel handle được thiết kế và test.
+
+Composite bundle vẫn ordered V7 child execution, chưa atomic multi-component rollback. Cần test partial child success/failure, restart, shared dependency preservation, rollback idempotence và user-data preservation.
+
+Trusted-source acceptance hiện chỉ đọc tracked catalog. Còn thiếu real upstream/source review:
+
+- canonical official source;
+- exact revision/release;
+- HTTPS/provider identity;
+- exact size/digest;
+- license/SPDX/review state;
+- auth/gated-source behavior;
+- runtime/dependency graph;
+- source outage/rate-limit/auth-failure behavior.
+
+Production catalog validator đang cố ý cấm model AUTO_INSTALL_READY. Không bỏ guard chỉ để test pass. Mọi component promotion phải là package riêng có evidence.
+
+## 6. Wave 4 Product UX — source DONE, Windows/WebView2 acceptance CHƯA LÀM
+
+Source files hiện đã có:
+
+- `src/services/api/context.py`
+- `src/services/api/routes/component_v8.py`
+- `src/ui/features/components/render.js`
+- `src/ui/features/components/v8_control_plane.js`
+- `src/ui/index.html`
+- `tests/test_v8_wave4_product_ux.py`
+
+Codex phải mở **desktop app thật** và xác minh:
+
+- Components page render V8 panel đúng trong WebView2;
+- recent operation list hiển thị đúng sau create/confirm/cancel;
+- source acceptance gắn đúng component row;
+- `planned` có Confirm/Cancel, terminal/executing không hiện action sai;
+- browser confirmation không thể bị bypass bằng double-click/re-render;
+- keyboard Tab/Shift+Tab/Enter/Space hoạt động;
+- focus không bị mất hoặc nhảy sai sau refresh/render;
+- screen-reader labels/live-region hợp lý;
+- 5 language modes không tạo mojibake/overflow/truncation; strings chưa được dịch phải được ghi nhận và sửa source, không fake acceptance;
+- responsive layout ở desktop minimum size và HiDPI scaling;
+- refresh không tạo request loop/polling;
+- route navigation ra/vào Components không nhân đôi listener/request vô hạn;
+- API error/degraded state không làm mất dữ liệu đang hiển thị hoặc lộ stack/path;
+- raw path, executable, credential, selection path không xuất hiện trong DOM/network JSON public.
+
+Static/Linux tests **không đủ** để đánh dấu các mục này DONE.
+
+## 7. Real component lifecycle matrix — CHƯA LÀM
+
+Trên clean/controlled Windows test root, làm từng vertical slice chứ không bật hàng loạt:
+
+- inspect → plan → explicit confirm → install/import/reuse → verify → receipt → bounded smoke → OPERATIONAL evidence;
+- repair phải reacquire/reconstruct artifact đúng khi policy cho phép, không chỉ revalidate;
+- update phải candidate → stage → verify → activate → rollback, không auto-update;
+- rollback giữ version/evidence trước và không đụng user data;
+- uninstall preserve shared dependencies, project/workflow/user media;
+- source outage không demote local installation hợp lệ;
+- auth/license-required component dừng đúng gate;
+- restart/crash recovery giữa từng state;
+- bundle phải chứng minh partial-failure rollback/restart semantics.
+
+Ưu tiên component nhỏ/trusted/runtime trước. Không suy diễn từ synthetic fixture sang production component.
+
+Mọi download >1 GB hoặc GPU/model inference phải dừng hỏi người dùng nếu chưa có phê duyệt riêng.
+
+## 8. Loopback API / Desktop / packaging acceptance — CHƯA LÀM
+
+- Real launch `127.0.0.1:8765`; không bind LAN.
+- Startup/shutdown/restart/concurrent request acceptance.
+- Direct V8 operation routes và source-acceptance routes qua real HTTP server.
+- Artifact GET/HEAD/range streaming cho V8 object và historical V7 artifact.
 - Windows open-artifact shell behavior.
-- Installer/shortcut/upgrade preservation and clean-clone acceptance.
-- FFmpeg/SAM2/AnimeSR/Whisper/ComfyUI/FLUX/Qwen real workload, GPU/VRAM, CUDA/driver interaction: DEFERRED.
-- No provider/cloud request executed trong Wave 0–3 source work.
+- pywebview/WebView2 lifecycle, close/reopen, crash/reload.
+- Installer/portable package/managed shortcut/upgrade preservation.
+- Clean-clone setup và APP_ROOT/DATA_ROOT reuse.
+- Không thay CUDA/driver hoặc model registry ngoài explicit plan.
 
-## 8. Git/connector cleanup chưa làm được
+## 9. `v8_control.sqlite3` backup/restore/migration — CHƯA LÀM
+
+Thiết kế và test consistent snapshot. Không copy file SQLite đang transaction theo cách tạo snapshot rách.
+
+Acceptance phải bao phủ:
+
+- WAL/journal mode thực tế;
+- backup trong idle và concurrent read/write;
+- restore vào clean controlled root;
+- schema/version mismatch;
+- corrupt/read-only/locked DB;
+- interrupted backup/restore;
+- preserved artifact object ↔ DB identity;
+- legacy V7 data vẫn đọc được;
+- không overwrite existing forensic DB khi restore validation fail.
+
+## 10. Runtime/model/GPU acceptance — DEFERRED
+
+Chưa chạy trong Wave 0–4 source work:
+
+- FFmpeg real workload;
+- SAM2 segmentation;
+- AnimeSR upscale;
+- Faster-Whisper transcription;
+- ComfyUI lifecycle;
+- FLUX/Qwen inference;
+- GPU/VRAM/CUDA behavior.
+
+No provider/cloud request được thực hiện bởi source work này.
+
+## 11. Git/branch cleanup chưa thực hiện
 
 Ba branch tạm phải **verify không có unique work rồi mới delete**:
+
 - `feature/local-ai-hub-v8-wave0-temp`
 - `feature/local-ai-hub-v8-wave0-temp2`
 - `feature/local-ai-hub-v8-wave0-temp3`
 
-GitHub connector hiện không expose delete-ref. Không force-push/rewrite history để thay thế. Codex local có thể dùng `git push origin --delete <branch>` sau verification và explicit cleanup scope.
+GitHub connector hiện không expose delete-ref. Không force-push/rewrite history để thay thế. Codex local có thể dùng `git push origin --delete <branch>` chỉ sau khi xác minh chúng không chứa unique work và cleanup scope được cho phép.
 
-`PLAN.md` không được tái tạo; handoff chính là `Plan_Miss.md`.
+`PLAN.md` không được tái tạo. Handoff chính là `Plan_Miss.md`.
 
-## 9. Release còn thiếu
+## 12. Release gate — CHƯA ĐƯỢC PHÉP
 
-- Giữ PR #102 OPEN + DRAFT trong Wave 0–3.
+- Giữ PR #102 OPEN + DRAFT trong Wave 4.
 - Không merge V8 vào `main` tự động.
-- Không tạo V8 tag/version/release.
-- Sau Windows real-lifecycle acceptance phải cập nhật PR evidence, đóng/resolved các mục `Plan_Miss.md`, rồi người dùng quyết định release/main merge.
+- Không tạo/move V8 tag/version/release.
+- Wave 5 Acceptance & Release chỉ bắt đầu sau khi các Windows real-lifecycle gates cần thiết ở trên có evidence và `Plan_Miss.md` được cập nhật theo kết quả thật.
+- Người dùng quyết định cuối cùng về release/main merge.
