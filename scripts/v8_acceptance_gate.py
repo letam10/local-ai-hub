@@ -38,10 +38,14 @@ REQUIRED_SOURCE_FILES = (
     "architecture/v8_acceptance_gates.json",
     "docs/architecture/V8_MIGRATION_PLAN.md",
     "docs/V8_WAVE4_WINDOWS_LIFECYCLE_PRODUCT_UX.md",
+    "docs/V8_WAVE5_ACCEPTANCE_RELEASE.md",
+    "scripts/v8_acceptance_gate.py",
     "src/services/api/routes/component_v8.py",
     "src/services/component_enablement_v8.py",
+    "src/ui/features/components/index.js",
     "src/ui/features/components/v8_control_plane.js",
     "tests/test_v8_wave4_product_ux.py",
+    "tests/test_v8_wave5_acceptance_gate.py",
 )
 
 
