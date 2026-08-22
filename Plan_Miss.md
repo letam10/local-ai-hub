@@ -27,7 +27,7 @@ Phải inspect trên máy thật, không tạo giả từ example/test fixture:
 
 Không commit các dữ liệu trên. Không overwrite/remove forensic evidence hoặc user data để test pass.
 
-## 3. Wave 4 Windows filesystem adversarial acceptance — CHƯA LÀM
+## 3. Wave 4 Windows filesystem adversarial acceptance — PARTIAL/HISTORICAL - SEE LATEST CHECKPOINT
 
 Dùng clean/controlled NTFS test DATA_ROOT:
 
@@ -60,7 +60,7 @@ Trên full checkout chạy exact `rg` cho mọi caller của:
 
 Với mỗi output producer chứng minh reservation trước producer, ownership proof tại publication boundary, failure/cancel không xóa foreign/user file, public artifact chỉ sau final commit, historical V6/V7 read vẫn hoạt động. GitHub connector search không đủ để tuyên bố 100% callsite coverage.
 
-## 5. Wave 3 component lifecycle local gaps — CHƯA LÀM
+## 5. Wave 3 component lifecycle local gaps — PARTIAL/HISTORICAL - SEE LATEST CHECKPOINT
 
 Native picker/selection vẫn process-local/expiry-based. Test user cancel, expiry, wrong type/component, reparse/junction selection, selected file thay identity/size/hash sau selection, restart selection→plan→confirm, stale selection không tự rediscover path.
 
@@ -70,7 +70,7 @@ Composite bundle chưa atomic multi-component rollback. Test partial failure, re
 
 Per-component source review còn thiếu official source, exact revision, HTTPS/provider identity, exact size/hash, license, auth, dependency graph, outage/rate-limit behavior. Không bỏ model AUTO_INSTALL guard chỉ để test pass.
 
-## 6. Wave 4 Product UX — source DONE, WebView2 acceptance CHƯA LÀM
+## 6. Wave 4 Product UX — source DONE, WebView2 acceptance PARTIAL/HISTORICAL - SEE LATEST CHECKPOINT
 
 Trên desktop app thật xác minh:
 
@@ -85,7 +85,7 @@ Trên desktop app thật xác minh:
 - degraded/error state không lộ stack/path;
 - DOM/network public không có raw path/executable/credential/selection path.
 
-## 7. Wave 5 acceptance evidence — CHƯA CÓ WINDOWS EVIDENCE
+## 7. Wave 5 acceptance evidence — PARTIAL/HISTORICAL - SEE LATEST CHECKPOINT
 
 Required gates:
 
@@ -411,7 +411,42 @@ HEAD are:
   bindings and verified by `scripts/v8_acceptance_gate.py --evidence`; no digest
   is to be edited by hand. The five blocked gates remain unchanged.
 
-## 8. Real component lifecycle — CHƯA LÀM
+### 7J. Final V8 correctness handoff before exact-head evidence rebinding
+
+- Source commit `093a5e645bdb03699eb802922d1798516987e08a`
+  (`fix(v8): add catalog-bound runtime update activation`) adds a strict V2
+  runtime update candidate contract: official HTTPS source identity, archive
+  size/SHA-256, fixed executable-leaf mapping and bounded extracted size.
+  `UpdateResolver` downloads only that server-owned candidate, while the
+  runtime updater activates the isolated `runtime/v8/<slot>` directory with
+  rollback storage and V3 bundle-revision receipt binding. The legacy
+  `runtime/tools/ffmpeg` junction is not moved or followed.
+- The exact Windows source suite passed 89 tests; `ci_validate.py` passed 743
+  tracked files; source-only provenance and acceptance preflights remain valid
+  and correctly blocked only by release identity/local evidence.
+- Official GyanD FFmpeg 8.1.2 essentials was downloaded into task-owned Temp,
+  verified at 109728040 bytes with SHA-256
+  `db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec`.
+  The controlled lifecycle completed install 9.0.1, candidate update 8.1.2,
+  rollback, re-update, repair and uninstall while preserving the legacy
+  marker/junction. No FFmpeg executable, model, GPU or provider workload was
+  run during this lifecycle proof.
+- GitHub Actions push run `32582464094` and PR run `32582466512` both passed on
+  the exact source commit above. The final tracked handoff docs commit will be
+  the evidence source HEAD; reports are regenerated after that commit and are
+  never rebound by editing a digest manually.
+- Current gate disposition is truthful: artifact inventory, native picker,
+  cancellation, bundle rollback, loopback API and SQLite backup/restore remain
+  eligible PASS after exact-head report regeneration; real component lifecycle
+  is technically PASS after the candidate/rollback proof; Windows filesystem
+  remains BLOCKED for prohibited physical-volume-full and unavailable
+  AV/indexer contention; WebView2 remains BLOCKED for open-artifact/default-app
+  and full UIA/keyboard/HiDPI/degraded coverage; packaging remains BLOCKED only
+  on unapproved release identity; crash recovery remains BLOCKED on the full
+  component/database/bundle/desktop child-crash matrix; runtime smoke remains
+  separate and must not imply operational readiness.
+
+## 8. Real component lifecycle — PARTIAL/HISTORICAL - SEE LATEST CHECKPOINT
 
 Từng vertical slice trên controlled Windows root:
 
@@ -427,7 +462,7 @@ Từng vertical slice trên controlled Windows root:
 
 Download >1 GB hoặc model/GPU inference phải dừng hỏi người dùng nếu chưa có approval riêng.
 
-## 9. Loopback API / Desktop / packaging — CHƯA LÀM
+## 9. Loopback API / Desktop / packaging — PARTIAL/HISTORICAL - SEE LATEST CHECKPOINT
 
 - real `127.0.0.1:8765`, không LAN bind;
 - startup/shutdown/restart/concurrency;
