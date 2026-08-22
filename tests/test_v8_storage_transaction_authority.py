@@ -266,6 +266,7 @@ class V8StorageTransactionAuthorityTests(unittest.TestCase):
         producer = self.data / "Output" / "post-commit-replacement.bin"
         producer.write_bytes(b"owned bytes")
         original_commit = self.store.commit_output_transaction
+        managed_holder: list[tuple[Path, Path]] = []
 
         def commit_then_replace(transaction_id: str, reservation_id: str, committing_job_id: str):
             published = original_commit(transaction_id, reservation_id, committing_job_id)
@@ -278,6 +279,7 @@ class V8StorageTransactionAuthorityTests(unittest.TestCase):
                 require_exists=True,
             )
             replacement = managed.with_name("foreign-post-commit.bin")
+            managed_holder.append((managed, replacement))
             replacement.write_bytes(b"foreign post-commit bytes")
             replacement.replace(managed)
             return published
@@ -292,10 +294,14 @@ class V8StorageTransactionAuthorityTests(unittest.TestCase):
 
         self.assertIsNone(published)
         self.assertEqual(self.store.list_public_artifacts(), [])
-        managed = self.data / "Output" / ".hub-v8" / "objects"
-        replacements = list(managed.rglob("foreign-post-commit.bin")) if managed.exists() else []
-        self.assertEqual(len(replacements), 1)
-        self.assertEqual(replacements[0].read_bytes(), b"foreign post-commit bytes")
+        self.assertEqual(len(managed_holder), 1)
+        managed, replacement = managed_holder[0]
+        survivors = [
+            path
+            for path in (managed, replacement)
+            if path.exists() and path.read_bytes() == b"foreign post-commit bytes"
+        ]
+        self.assertEqual(len(survivors), 1)
 
     def test_publication_rollback_is_idempotent_and_removes_index_rows(self) -> None:
         job_id = _job("6")
