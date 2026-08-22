@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -129,6 +130,56 @@ class V8WindowsFilesystemAdversarialTests(unittest.TestCase):
         self.assertTrue(bridge.abort_job(job_id))
         self.assertEqual(producer.read_bytes(), b"foreign bytes")
         self.assertEqual(bridge.list_public(), [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows sharing semantics are required")
+    def test_exclusive_windows_producer_handle_refuses_publication_without_delete(self) -> None:
+        """An owned share-denied fixture handle must not become a partial artifact."""
+
+        import ctypes
+        from ctypes import wintypes
+
+        job_id = _job("d")
+        reservation = self.authority.begin_reservation(job_id)
+        producer = self.paths.output_root / "share-denied.bin"
+        payload = b"task-owned sharing fixture"
+        producer.write_bytes(payload)
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.CreateFileW(
+            str(producer),
+            0x80000000,  # GENERIC_READ
+            0,  # deny all sharing for this task-owned fixture only
+            None,
+            3,  # OPEN_EXISTING
+            0x80,  # FILE_ATTRIBUTE_NORMAL
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        self.assertNotEqual(ctypes.c_void_p(handle).value, invalid_handle)
+        try:
+            published = self.authority.publish_owned_candidates(
+                reservation_id=reservation,
+                job_id=job_id,
+                candidates=[producer],
+                provenance=_provenance(job_id),
+            )
+            self.assertIsNone(published)
+            self.assertEqual(self.authority.list_public(), [])
+        finally:
+            self.assertTrue(kernel32.CloseHandle(handle))
+        self.assertEqual(producer.read_bytes(), payload)
 
 
 if __name__ == "__main__":

@@ -204,6 +204,11 @@ Sau checkpoint trên, V8 đã bổ sung các source/test package nhỏ, reviewab
 - V8 cleanup Windows dùng handle-bound identity-attested deletion; replacement
   foreign trước cleanup không bị xóa. Crash child acceptance phủ reserve,
   producer, staged, authorized và post-commit recovery.
+- Controlled Windows sharing coverage now holds a task-owned producer with a
+  real zero-share `CreateFileW` handle. Publication refuses without a public
+  artifact and preserves the producer bytes after the handle is released.
+  This is one bounded sharing proof only; it does not stand in for the still
+  missing AV/indexer or physical disk-full matrix.
 
 Historical evidence at source `529e3108227ddde64aab7197febd4e72ff504b9f`
 verified four PASS reports by their actual bytes/digests:
