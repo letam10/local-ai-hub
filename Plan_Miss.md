@@ -1,6 +1,6 @@
 # Plan_Miss — LOCAL AI HUB V8 deferred/local work
 
-Handoff bắt buộc cho Codex sau Wave 0–6 source work. Chỉ đánh dấu DONE khi có evidence đúng loại gate. Linux/GitHub CI không thay thế Windows acceptance. Không tự merge `main`, không tạo/move tag, không bump version, không build/publish release, không download/model/GPU workload lớn nếu chưa có phê duyệt riêng.
+Handoff bắt buộc cho Codex sau Wave 0–6 source work. Chỉ đánh dấu DONE khi có evidence đúng loại gate. Linux/GitHub CI không thay thế Windows acceptance. Không tự merge `main`, không tạo/move tag, không bump version, không build/publish release.
 
 ## 1. Source work đã hoàn thành
 
@@ -319,6 +319,97 @@ The remaining gates are explicitly `BLOCKED`, not synthetic PASS:
 
 Evidence is local and untracked. Any later source commit must regenerate its
 report bundle before it can be used for release evaluation.
+
+### 7F. Continuation checkpoint at `35bf99bb26f6efc5c0f7088d95bf876f3824c2b4`
+
+- The V8 catalog now maps FFmpeg to the separate Hub-owned
+  `runtime/v8/ffmpeg/` namespace. The legacy `runtime/tools/ffmpeg` junction
+  remains read-only and is never followed, overwritten or removed.
+- A real pinned GyanD FFmpeg `9.0.1` lifecycle was run under
+  `Temp/V8_FFmpeg_Lifecycle_35bf99b_final`: plan → explicit confirm →
+  111253802-byte archive verification → install → version/FFprobe probe →
+  16×16 CPU transform → matching runtime evidence → repair → safe update
+  refusal without a candidate → uninstall. All recorded checks passed and the
+  legacy junction target was unchanged. No model/GPU/provider workload ran.
+- The lifecycle maintenance plan now carries its private V2 catalog binding,
+  record revision, install strategy and supported revision, so repair/uninstall
+  cannot act on a matching component ID with a stale record.
+- SQLite WAL acceptance found and fixed cleanup of task-created `-wal`/`-shm`
+  sidecars. The final controlled matrix covers WAL, an active concurrent writer,
+  read-only source bytes, a bounded larger journal, process-restart restore,
+  injected ENOSPC publication refusal, interrupted snapshot behavior and JSON
+  rollback after SQLite restore refusal. Result: PASS in
+  `Temp/V8_SQLite_Acceptance_35bf99b_final/result.json`.
+- Real WebView2 acceptance ran against the exact source through a task-owned
+  data root. Five language modes, focus continuity, live-region presence,
+  planned confirmation surface, duplicate-ID checks, mojibake/overflow checks,
+  path/secret-free DOM and listener release all passed. The gate remains
+  BLOCKED for the untested default open-artifact shell and full trusted
+  keyboard/HiDPI/degraded/error matrix; lifecycle smoke is not promoted to a
+  full UX PASS.
+- `python -B -m unittest discover -s tests -p "test_v8_*.py"` passed 85 tests
+  at this checkpoint; `scripts/ci_validate.py` passed 741 tracked files.
+
+### 7G. Current truthful closure disposition
+
+- `artifact_callsite_inventory`, `native_picker_restart`,
+  `executing_operation_cancel`, `bundle_atomic_rollback`, `loopback_api`,
+  `sqlite_backup_restore`, and the bounded CPU `runtime_smoke` are eligible
+  for PASS reports after exact final-head byte hashing.
+- `real_component_lifecycle` has a PASS install/verify/repair/uninstall slice,
+  but remains BLOCKED for a reviewed update candidate/rollback activation.
+- `windows_filesystem` remains BLOCKED only for AV/indexer contention and
+  physical-volume-full coverage; reparse, lease, replacement, zero-share and
+  injected ENOSPC cases remain safe PASS evidence.
+- `webview2_product_ux` remains BLOCKED for open-artifact/default-app handling
+  and the complete keyboard/screen-reader/HiDPI/degraded matrix.
+- `packaging_upgrade` remains BLOCKED on release identity approval and final
+  staging inputs. `crash_recovery` remains BLOCKED on the full component,
+  database, bundle and desktop crash-phase matrix; output transaction child
+  crashes and the bounded desktop lifecycle smoke pass.
+- No V8 version/tag, main merge, release build/publish, model download, GPU
+  inference or user-process intervention was performed.
+
+### 7H. Exact final-head evidence bundle
+
+The final untracked bundle is
+`Temp/V8_Acceptance/35bf99bb26f6efc5c0f7088d95bf876f3824c2b4/evidence.json`.
+`scripts/v8_acceptance_gate.py --evidence` verified `source_commit_matches=true`,
+`reports_verified=true`, `passed=7`, and the strict run correctly remained
+blocked (`STRICT_EXIT=1`) on the five incomplete Windows gates plus release
+identity approval.
+
+PASS report SHA-256 values for the exact `35bf99bb26f6efc5c0f7088d95bf876f3824c2b4`
+HEAD are:
+
+- `artifact_callsite_inventory`: `e05e7cbd4a10250612160fc3d8e6565b6ff1a16fe76bfc1bde0e6cd2acbed0e6`
+- `native_picker_restart`: `93b8451fc3550527c936576186d7bac49103cbca9ff8c036f07bfeb3e357041b`
+- `executing_operation_cancel`: `cd462d3bf2e6aa2dd526a2ba860397b1644caa3d0eae92f523386e12e5ae931f`
+- `bundle_atomic_rollback`: `7e23e1fb0c34083eb3c8146bab1df7980ee3ec9e79e47fb3150ba35b2ddab322`
+- `loopback_api`: `448d788a078f9be106329276f2ead08f96c2f7352019c711845df981168021a3`
+- `sqlite_backup_restore`: `1c73fd000134cb62cf7c701d9756e551eb29df5b00cffcb44f708b683e41a90d`
+- `runtime_smoke`: `c5b8a1040fd3aced5d073cef5b5fca1f656604dd4b653ff402b36ff85e7902c6`
+
+### 7I. CI correctness closure after Ubuntu failure
+
+- GitHub Actions workflow run `#785` on exact source `35bf99b` failed one
+  Ubuntu test: `test_replacement_immediately_before_final_commit_is_not_published`.
+  The Windows result was not treated as sufficient: Windows deny-share handles
+  prevent the replacement, while POSIX `O_NOFOLLOW` protects only the opened
+  inode and still permits pathname rename/replace.
+- The source fix is split into two small commits: `6b2b70c` adds post-boundary
+  cross-platform identity revalidation, compensating transaction/index rollback
+  and the source regression; `b6d660d` makes the foreign-byte race fixture
+  portable. Changed source/test/docs files are limited to the V8 storage and
+  output-authority boundary.
+- Windows full V8 suite after the fix: 87 tests PASS. GitHub Actions run
+  `#788` on exact `b6d660d` completed PASS; run `#786` is retained as the
+  expected pre-test-correction failure, not evidence of the final source.
+- The seven PASS machine reports under the `35bf99b` bundle remain historical
+  evidence. After this tracked handoff commit creates the final HEAD, a new
+  local untracked bundle must be regenerated with exact final-head report
+  bindings and verified by `scripts/v8_acceptance_gate.py --evidence`; no digest
+  is to be edited by hand. The five blocked gates remain unchanged.
 
 ## 8. Real component lifecycle — CHƯA LÀM
 
