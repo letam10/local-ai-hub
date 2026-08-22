@@ -66,6 +66,8 @@ class V8OutputBridge:
         candidates: Iterable[Path | str],
         provenance: dict[str, Any],
         reservation_id: str | None = None,
+        names: Iterable[str] | None = None,
+        media_types: Iterable[str | None] | None = None,
     ) -> list[dict[str, Any]] | None:
         job_id = self._job(job_id)
         reservation = reservation_id or self.open_reservation(job_id)
@@ -76,6 +78,8 @@ class V8OutputBridge:
             job_id=job_id,
             candidates=candidates,
             provenance=provenance,
+            names=names,
+            media_types=media_types,
         )
 
     def publish_bytes(
@@ -85,6 +89,7 @@ class V8OutputBridge:
         content: bytes,
         name: str,
         provenance: dict[str, Any],
+        media_type: str | None = None,
         reservation_id: str | None = None,
     ) -> dict[str, Any] | None:
         job_id = self._job(job_id)
@@ -109,6 +114,8 @@ class V8OutputBridge:
                 candidates=[producer],
                 provenance=provenance,
                 reservation_id=reservation,
+                names=[safe_name],
+                media_types=[media_type],
             )
             return published[0] if isinstance(published, list) and len(published) == 1 else None
         except (OSError, OutputAuthorityError, StorageAuthorityError, TransactionStoreError):
