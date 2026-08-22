@@ -49,7 +49,8 @@ V2_RUNTIME_DISPOSITIONS = frozenset({"AUTO_INSTALL_READY", "REFERENCE_EXISTING",
 V2_MODEL_INSTALL_STRATEGIES = frozenset({"portable_archive", "provider_authorization", "manual_import", "unsupported_source"})
 V2_RUNTIME_INSTALL_STRATEGIES = frozenset({"portable_archive", "reference_existing", "manual_install", "unsupported_source"})
 V2_SOURCE_STATES = frozenset({"verified", "unverified", "manual", "auth_required", "unsupported", "unknown"})
-V2_LICENSE_STATES = frozenset({"review_required", "apache-2.0", "gated", "unknown"})
+V2_LICENSE_STATES = frozenset({"review_required", "apache-2.0", "gpl-3.0-or-later", "gated", "unknown"})
+AUTO_INSTALL_LICENSE_STATES = frozenset({"apache-2.0", "gpl-3.0-or-later"})
 V2_AUTH_STATES = frozenset({"not_required", "required", "unknown"})
 V2_UPDATE_PARTS = frozenset({"backend", "runtime", "dependencies", "model"})
 V2_ROOT_CLASSES = frozenset({"runtime_root", "environments_root", "external_managed"})
@@ -68,6 +69,7 @@ _V2_RUNTIME_KEYS = frozenset({
     "latest_supported_revision", "license", "authentication", "update_parts", "integrity",
     "estimated_download_size", "estimated_disk_size", "notes",
 })
+_V2_RUNTIME_OPTIONAL_KEYS = frozenset({"archive_prefix", "archive_leaves"})
 _V2_SOURCE_KEYS = frozenset({"provider", "kind", "canonical_identity", "revision", "verification_state", "url", "authentication_required", "license_required"})
 _V2_LICENSE_KEYS = frozenset({"state", "spdx_id", "url"})
 _V2_AUTH_KEYS = frozenset({"required", "state"})
@@ -80,6 +82,13 @@ _V2_UNSAFE_TEXT_RE = re.compile(r"(?i)(?:[a-z]:[\\/]|\\\\|\b(?:cmd|powershell)(?
 
 class ProductionCatalogError(ValueError):
     """Raised when a production catalog is malformed or unsafe."""
+
+
+def license_is_auto_install_ready(record: Mapping[str, Any]) -> bool:
+    """Return whether the catalog carries one explicitly reviewed license class."""
+
+    value = record.get("license")
+    return isinstance(value, Mapping) and value.get("state") in AUTO_INSTALL_LICENSE_STATES
 
 
 def _strict_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -250,6 +259,42 @@ def _v2_license(value: object) -> dict[str, Any]:
     return {"state": state, "spdx_id": spdx_id, "url": url}
 
 
+def _v2_runtime_archive_mapping(
+    item: Mapping[str, Any],
+    *,
+    required_leaves: list[str],
+    disposition: object,
+    strategy: object,
+) -> tuple[str | None, dict[str, str]]:
+    """Validate the fixed archive-to-managed-leaf mapping for a runtime.
+
+    The executor must never discover a binary by walking an archive. An
+    AUTO_INSTALL_READY portable runtime therefore declares every selected
+    archive leaf up front; other records may omit both mapping fields.
+    """
+
+    prefix_value = item.get("archive_prefix")
+    leaves_value = item.get("archive_leaves")
+    has_prefix = prefix_value is not None
+    has_leaves = leaves_value is not None
+    required = disposition == "AUTO_INSTALL_READY" and strategy == "portable_archive"
+    if not has_prefix and not has_leaves:
+        if required:
+            raise ProductionCatalogError("runtime_archive_mapping_required")
+        return None, {}
+    if not has_prefix or not has_leaves:
+        raise ProductionCatalogError("invalid_runtime_archive_mapping")
+    prefix = _v2_relative(prefix_value)
+    if not isinstance(leaves_value, Mapping) or set(leaves_value) != set(required_leaves):
+        raise ProductionCatalogError("invalid_runtime_archive_mapping")
+    mapped: dict[str, str] = {}
+    for target in required_leaves:
+        mapped[target] = _v2_relative(leaves_value.get(target))
+    if len(set(mapped.values())) != len(mapped):
+        raise ProductionCatalogError("duplicate_runtime_archive_leaf")
+    return prefix, mapped
+
+
 def _v2_authentication(value: object) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ProductionCatalogError("invalid_authentication")
@@ -341,7 +386,8 @@ def _validate_v2_model(item: object) -> dict[str, Any]:
 def _validate_v2_runtime(item: object) -> dict[str, Any]:
     if not isinstance(item, Mapping):
         raise ProductionCatalogError("invalid_runtime_record")
-    _v2_keys(item, _V2_RUNTIME_KEYS, "invalid_runtime_record_fields")
+    if not set(item).issubset(_V2_RUNTIME_KEYS | _V2_RUNTIME_OPTIONAL_KEYS) or not _V2_RUNTIME_KEYS.issubset(item):
+        raise ProductionCatalogError("invalid_runtime_record_fields")
     runtime_id = _v2_id(item.get("runtime_id"), "runtime_id")
     disposition = item.get("disposition")
     strategy = item.get("install_strategy")
@@ -354,6 +400,12 @@ def _validate_v2_runtime(item: object) -> dict[str, Any]:
     if not isinstance(leaves, list) or any(not isinstance(value, str) for value in leaves) or not leaves or len(set(leaves)) != len(leaves):
         raise ProductionCatalogError("invalid_runtime_leaves")
     normalized_leaves = [_v2_relative(value) for value in leaves]
+    archive_prefix, archive_leaves = _v2_runtime_archive_mapping(
+        item,
+        required_leaves=normalized_leaves,
+        disposition=disposition,
+        strategy=strategy,
+    )
     source_identity = _v2_text(item.get("source_identity"), "source_identity", nullable=True, max_length=256)
     primary = None if item.get("primary_source") is None else _v2_source(item.get("primary_source"), source_identity)
     fallbacks = _v2_sources(item.get("trusted_fallback_sources"), source_identity)
@@ -377,6 +429,7 @@ def _validate_v2_runtime(item: object) -> dict[str, Any]:
         "revision": _v2_text(item.get("revision"), "revision", max_length=128),
         "root_class": root_class,
         "required_leaves": normalized_leaves, "modules": [_v2_id(value, "module_id") for value in modules],
+        "archive_prefix": archive_prefix, "archive_leaves": archive_leaves,
         "disposition": disposition, "install_strategy": strategy, "primary_source": primary,
         "trusted_fallback_sources": fallbacks, "source_identity": source_identity, "source_verification": source_verification,
         "latest_upstream_revision": _v2_nullable_revision(item.get("latest_upstream_revision"), "latest_upstream_revision"),

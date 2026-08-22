@@ -225,6 +225,22 @@ packaging identity, remaining crash cleanup phases, and runtime/model/GPU
 approval. Evidence must be regenerated after every source commit; strict
 release cannot be inferred from these partial PASS reports.
 
+### 7C. FFmpeg source acceptance correction — source-only, install pending
+
+- The pinned GyanD `9.0.1` release asset was independently reconciled against
+  the release API and HTTPS HEAD metadata: the essentials ZIP is
+  `111253802` bytes with SHA-256
+  `fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9`.
+  GyanD's build page classifies the static essentials build as GPLv3.
+- The V2 production catalog now records the reviewed `GPL-3.0-or-later`
+  contract plus a fixed archive-to-managed-leaf mapping. Source acceptance and
+  the executable lifecycle share the same finite license allowlist; a
+  `review_required` V2 record refuses before downloader invocation.
+- The archive has **not** yet been downloaded or installed by this source
+  change. A fresh explicit lifecycle plan, confirmation, pinned-download
+  verification, receipt, and bounded CPU-only smoke remain required before
+  `real_component_lifecycle` or `runtime_smoke` can become PASS.
+
 ## 8. Real component lifecycle — CHƯA LÀM
 
 Từng vertical slice trên controlled Windows root:

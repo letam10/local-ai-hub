@@ -14,6 +14,7 @@ from src.services.api.context import ApiContext
 from src.services.api.router import ApiRequest
 from src.services.api.routes import component_v8
 from src.services.component_enablement_v8 import ComponentEnablementService
+from src.services.productization.catalog import ProductionCatalog
 
 
 class V8Wave4ProductUxTests(unittest.TestCase):
@@ -39,6 +40,15 @@ class V8Wave4ProductUxTests(unittest.TestCase):
         self.assertEqual(value["acceptance_state"], "REFERENCE_EXISTING")
         self.assertFalse(value["auto_install_eligible"])
         self.assertIn("existing managed runtime", value["next_action"])
+
+    def test_reviewed_gpl_runtime_can_be_source_accepted_without_promoting_execution(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        catalog = ProductionCatalog(catalog_path=repo / "Config" / "v7_production_catalog.example.json")
+        value = ComponentEnablementService(catalog=catalog).assess("ffmpeg")
+        self.assertEqual(value["acceptance_state"], "AUTO_INSTALL_READY")
+        self.assertTrue(value["auto_install_eligible"])
+        self.assertEqual(value["execution"], "not_run")
+        self.assertTrue(value["dry_run"])
 
     def test_operation_route_uses_injected_context_with_bounded_limit(self) -> None:
         observed: list[int] = []

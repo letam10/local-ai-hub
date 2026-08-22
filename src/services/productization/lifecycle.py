@@ -26,7 +26,7 @@ from typing import Any
 from src.platform.paths import ComponentPathError, HubPaths, get_paths, resolve_component_root
 from src.services.component_installer.receipts import CatalogBindingContext, V2_CATALOG_SCHEMA
 
-from .catalog import ProductionCatalog, ProductionCatalogError
+from .catalog import ProductionCatalog, ProductionCatalogError, license_is_auto_install_ready
 from .runtime_executor import RuntimeArchiveExecutor
 from .model_executor import ModelArchiveExecutor
 from src.services.component_installer.downloader import DownloadError, TrustedDownloader
@@ -141,6 +141,17 @@ class ComponentLifecycle:
         value["maintenance_actions"] = ["repair", "update", "uninstall"]
         return value
 
+    def _auto_install_ready(self, record: Mapping[str, Any]) -> bool:
+        """Keep the executable lifecycle aligned with V8 source acceptance."""
+
+        if record.get("disposition") != "AUTO_INSTALL_READY":
+            return False
+        # Legacy V1 fixture catalogs predate the V8 review field. Only V2
+        # records are production eligibility inputs for this lifecycle path.
+        if self.catalog.catalog_schema_version != V2_CATALOG_SCHEMA:
+            return True
+        return license_is_auto_install_ready(record)
+
     def plan_one_click(self, component_id: str) -> dict[str, Any]:
         kind, record = self._record(component_id)
         binding = self._catalog_binding(kind, record)
@@ -158,8 +169,8 @@ class ComponentLifecycle:
         if kind == "model" and runtime_id:
             dependencies.append({"kind": "runtime", "id": runtime_id, "status": runtime["status"] if runtime else "UNAVAILABLE"})
         dependencies.append({"kind": kind, "id": component_id, "status": current["status"]})
-        can_install = record.get("disposition") == "AUTO_INSTALL_READY"
-        action = "Download & Install" if can_install else ("Authorize & Install" if record.get("disposition") == "AUTH_REQUIRED" else "Review License" if record.get("disposition") == "LICENSE_REQUIRED" else "Import Model" if kind == "model" else "Review Runtime")
+        can_install = self._auto_install_ready(record)
+        action = "Download & Install" if can_install else ("Authorize & Install" if record.get("disposition") == "AUTH_REQUIRED" else "Review License" if record.get("disposition") in {"LICENSE_REQUIRED", "AUTO_INSTALL_READY"} else "Import Model" if kind == "model" else "Review Runtime")
         body = {"schema_version": "v7-component-install-plan.v1", "component_id": component_id, "component_type": kind, "catalog_fingerprint": self.catalog.fingerprint, "dependencies": dependencies, "expected_state": current["status"], "action": action, "disposition": record.get("disposition"), "estimated_download_size_bytes": int(record.get("estimated_download_size", 0)), "estimated_disk_size_bytes": int(record.get("estimated_disk_size", 0)), "preserve_existing": True, "execution": "not_run", "dry_run": True}
         plan_id = "v7_plan_" + secrets.token_hex(16)
         # Keep the normalized catalog record server-side only; the public plan
@@ -186,6 +197,8 @@ class ComponentLifecycle:
             return self._binding_refusal(plan_id, binding_error or "stale_binding")
         if plan.get("disposition") != "AUTO_INSTALL_READY":
             return {"status": "unavailable", "code": "manual_review_required", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": "Use the explicitly documented import/license/authentication flow."}
+        if not self._auto_install_ready(record):
+            return {"status": "unavailable", "code": "license_review_required", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": "Review the tracked license contract before creating a new install plan."}
         dependency_block = next((item for item in plan.get("dependencies", []) if item.get("kind") == "runtime" and item.get("id") != plan.get("component_id") and item.get("status") not in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"}), None)
         if dependency_block is not None:
             return {"status": "unavailable", "code": "dependency_unavailable", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "dependency": {key: dependency_block.get(key) for key in ("kind", "id", "status")}, "next_action": "Install or reuse the server-owned runtime dependency before this component."}

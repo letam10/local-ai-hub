@@ -11,7 +11,7 @@ from collections.abc import Mapping
 import re
 from typing import Any
 
-from src.services.productization.catalog import ProductionCatalog
+from src.services.productization.catalog import ProductionCatalog, license_is_auto_install_ready
 
 
 SCHEMA_VERSION = "v8-component-source-acceptance.v1"
@@ -103,8 +103,7 @@ class ComponentEnablementService:
 
     @staticmethod
     def _license_ready(record: Mapping[str, Any]) -> bool:
-        value = record.get("license")
-        return isinstance(value, Mapping) and value.get("state") == "apache-2.0"
+        return license_is_auto_install_ready(record)
 
     @staticmethod
     def _size_ready(record: Mapping[str, Any]) -> bool:
@@ -220,4 +219,9 @@ class ComponentEnablementService:
         }
 
 
-__all__ = ["ComponentEnablementError", "ComponentEnablementService", "SCHEMA_VERSION"]
+__all__ = [
+    "ComponentEnablementError",
+    "ComponentEnablementService",
+    "SCHEMA_VERSION",
+    "license_is_auto_install_ready",
+]

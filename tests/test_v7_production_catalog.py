@@ -56,6 +56,10 @@ class V7ProductionCatalogTests(unittest.TestCase):
         self.assertEqual({item["model_id"] for item in raw["models"]}, V2_MODEL_IDS)
         self.assertEqual({item["runtime_id"] for item in raw["runtimes"]}, V2_RUNTIME_IDS)
         self.assertEqual([item["runtime_id"] for item in raw["runtimes"] if item["disposition"] == "AUTO_INSTALL_READY"], ["ffmpeg"])
+        ffmpeg = next(item for item in raw["runtimes"] if item["runtime_id"] == "ffmpeg")
+        self.assertEqual(ffmpeg["license"], {"state": "gpl-3.0-or-later", "spdx_id": "GPL-3.0-or-later", "url": "https://www.gyan.dev/ffmpeg/builds/"})
+        self.assertEqual(ffmpeg["archive_prefix"], "ffmpeg-9.0.1-essentials_build")
+        self.assertEqual(set(ffmpeg["archive_leaves"]), set(ffmpeg["required_leaves"]))
         self.assertFalse(any(item["disposition"] == "AUTO_INSTALL_READY" for item in raw["models"]))
         runtime_ids = {item["runtime_id"] for item in raw["runtimes"]}
         for item in raw["models"]:
@@ -143,6 +147,18 @@ class V7ProductionCatalogTests(unittest.TestCase):
         runtime_integrity = self._raw()
         runtime_integrity["runtimes"][1]["integrity"]["size_bytes"] = 0
         self._assert_rejected(runtime_integrity, "unverified_runtime_must_omit_integrity")
+
+    def test_auto_runtime_requires_a_complete_fixed_archive_mapping(self) -> None:
+        missing = self._raw()
+        ffmpeg = next(item for item in missing["runtimes"] if item["runtime_id"] == "ffmpeg")
+        del ffmpeg["archive_prefix"]
+        del ffmpeg["archive_leaves"]
+        self._assert_rejected(missing, "runtime_archive_mapping_required")
+
+        unsafe = self._raw()
+        ffmpeg = next(item for item in unsafe["runtimes"] if item["runtime_id"] == "ffmpeg")
+        ffmpeg["archive_leaves"]["tools/ffmpeg/ffprobe.exe"] = "../ffmpeg.exe"
+        self._assert_rejected(unsafe, "unsafe_catalog_leaf")
 
     def test_unknown_schema_does_not_silently_load_as_v2_and_v1_stays_explicit(self) -> None:
         unknown = self._raw()
