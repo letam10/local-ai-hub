@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 from src.platform.paths import HubPaths
 from src.platform.storage_authority import StorageAuthority, StorageAuthorityError
@@ -179,6 +181,32 @@ class V8WindowsFilesystemAdversarialTests(unittest.TestCase):
             self.assertEqual(self.authority.list_public(), [])
         finally:
             self.assertTrue(kernel32.CloseHandle(handle))
+        self.assertEqual(producer.read_bytes(), payload)
+
+    def test_injected_no_space_during_managed_copy_preserves_producer_and_hides_output(self) -> None:
+        """A bounded ENOSPC injection must not publish or delete task input."""
+
+        job_id = _job("e")
+        reservation = self.authority.begin_reservation(job_id)
+        producer = self.paths.output_root / "no-space.bin"
+        payload = b"task-owned no-space fixture"
+        producer.write_bytes(payload)
+        original_open = Path.open
+
+        def fail_managed_create(path: Path, mode: str = "r", buffering: int = -1, encoding: str | None = None, errors: str | None = None, newline: str | None = None):
+            if "x" in mode and path.name.startswith("obj_"):
+                raise OSError(errno.ENOSPC, "task-owned injected no space")
+            return original_open(path, mode, buffering, encoding, errors, newline)
+
+        with patch.object(Path, "open", new=fail_managed_create):
+            published = self.authority.publish_owned_candidates(
+                reservation_id=reservation,
+                job_id=job_id,
+                candidates=[producer],
+                provenance=_provenance(job_id),
+            )
+        self.assertIsNone(published)
+        self.assertEqual(self.authority.list_public(), [])
         self.assertEqual(producer.read_bytes(), payload)
 
 

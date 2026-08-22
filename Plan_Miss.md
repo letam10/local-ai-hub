@@ -207,8 +207,9 @@ Sau checkpoint trên, V8 đã bổ sung các source/test package nhỏ, reviewab
 - Controlled Windows sharing coverage now holds a task-owned producer with a
   real zero-share `CreateFileW` handle. Publication refuses without a public
   artifact and preserves the producer bytes after the handle is released.
-  This is one bounded sharing proof only; it does not stand in for the still
-  missing AV/indexer or physical disk-full matrix.
+  A task-owned `ENOSPC` write-boundary injection has the same fail-closed,
+  no-publication/no-delete outcome. These are bounded proofs only; they do not
+  stand in for the still missing AV/indexer or physical disk-full matrix.
 
 Historical evidence at source `529e3108227ddde64aab7197febd4e72ff504b9f`
 verified four PASS reports by their actual bytes/digests:
