@@ -262,9 +262,13 @@ release cannot be inferred from these partial PASS reports.
   create a new live journal from the archive.
 - Task-owned fixture coverage includes archive membership and hash integrity,
   copy-only restore, post-plan V8 conflict refusal, corrupt snapshot refusal,
-  and reparse-backed source refusal. A separate read-only snapshot of the
-  real local journal was performed earlier; this integration has not restored
-  or overwritten the real `Config/v8_control.sqlite3`.
+  reparse-backed source refusal, a SQLite EXCLUSIVE-lock timeout and injected
+  snapshot failure with no JSON-only archive publication, plus JSON rollback
+  when the final SQLite restore refuses. The real backup HTTP route also
+  completed create/inspect/plan/unconfirmed/confirmed restore against a
+  controlled loopback Config root. A separate read-only snapshot of the real
+  local journal was performed earlier; this integration has not restored or
+  overwritten the real `Config/v8_control.sqlite3`.
 - The full Windows matrix is still required before `sqlite_backup_restore`
   can be PASS: WAL/concurrent writer behavior through `BackupManager`,
   read-only/locked/ENOSPC fault injection, interrupted restore/restart, and

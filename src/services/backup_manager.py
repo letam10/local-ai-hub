@@ -657,7 +657,7 @@ class BackupManager:
                 if not _guard_same(config_guard) or not _guard_same(backup_guard) or published.target_identity is None:
                     raise _StorageUnsafe
                 return {"accepted": True, "backup_id": self._backup_id_for_file(target), "manifest": _public_manifest(manifest)}
-        except (_StorageUnsafe, OSError, ValueError, TypeError, zipfile.BadZipFile, OverflowError):
+        except (_StorageUnsafe, OSError, ValueError, TypeError, zipfile.BadZipFile, OverflowError, TransactionStoreError):
             return _failure("backup_create_failed")
         finally:
             if temporary is not None:
