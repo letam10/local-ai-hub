@@ -238,6 +238,89 @@ class StorageAuthority:
             raise StorageAuthorityError("managed_leaf_unavailable")
         return path, relative, FileIdentity.from_stat(info)
 
+    def _delete_windows_identity_attested(
+        self,
+        lease: RootLease,
+        candidate: Path,
+        expected: FileIdentity,
+    ) -> bool:
+        """Mark exactly one opened Windows leaf for deletion.
+
+        A pathname-based unlink after an identity check can delete a later
+        replacement.  Open the already-attested regular leaf with reparse
+        following disabled and DELETE sharing denied, then set deletion on
+        that same handle.  A competing replacement either fails while the
+        handle is held or remains at the pathname while only the original
+        handle-bound object is removed.
+        """
+
+        if os.name != "nt":
+            return False
+        fd: int | None = None
+        try:
+            import ctypes
+            import msvcrt
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            create_file = kernel32.CreateFileW
+            create_file.argtypes = [
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                wintypes.LPVOID,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                wintypes.HANDLE,
+            ]
+            create_file.restype = wintypes.HANDLE
+            handle = create_file(
+                os.fspath(candidate),
+                0x80000000 | 0x00010000,  # GENERIC_READ | DELETE
+                0x00000001 | 0x00000002,  # FILE_SHARE_READ | FILE_SHARE_WRITE; deny delete
+                None,
+                3,  # OPEN_EXISTING
+                0x00200000,  # FILE_FLAG_OPEN_REPARSE_POINT
+                None,
+            )
+            invalid_handle = ctypes.c_void_p(-1).value
+            if int(handle) == invalid_handle:
+                return False
+            try:
+                fd = msvcrt.open_osfhandle(int(handle), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+            except (OSError, ValueError):
+                kernel32.CloseHandle(handle)
+                return False
+            if not expected.same_file_state(FileIdentity.from_stat(os.fstat(fd))):
+                return False
+            # Revalidate the root and lexical chain after handle acquisition.
+            # This catches a replacement that happened before the open, while
+            # the denied-delete handle protects the final deletion afterward.
+            lease.assert_current()
+            self._assert_existing_chain(candidate)
+            current = self._lstat(candidate)
+            if current is None or not stat.S_ISREG(current.st_mode) or is_reparse_point(candidate):
+                return False
+            if not expected.same_file_state(FileIdentity.from_stat(current)):
+                return False
+
+            class _FileDispositionInfo(ctypes.Structure):
+                _fields_ = [("DeleteFile", wintypes.BOOLEAN)]
+
+            disposition = _FileDispositionInfo(1)
+            set_file_information = kernel32.SetFileInformationByHandle
+            set_file_information.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD]
+            set_file_information.restype = wintypes.BOOL
+            return bool(set_file_information(handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)))
+        except (AttributeError, ImportError, OSError, TypeError, ValueError):
+            return False
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
     def unlink_if_identity(self, lease: RootLease, relative: Path | str, expected: FileIdentity) -> bool:
         """Delete only a regular Hub-owned leaf whose exact identity still matches."""
 
@@ -248,6 +331,8 @@ class StorageAuthority:
             return False
         if not expected.same_file_state(current):
             return False
+        if os.name == "nt":
+            return self._delete_windows_identity_attested(lease, candidate, expected)
         try:
             candidate.unlink()
         except OSError:

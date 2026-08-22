@@ -11,7 +11,7 @@ import tempfile
 import unittest
 
 from src.platform.paths import HubPaths
-from src.platform.storage_authority import StorageAuthorityError
+from src.platform.storage_authority import StorageAuthority, StorageAuthorityError
 from src.services.output_authority import OutputAuthority, OutputAuthorityError
 from src.services.transaction_store import (
     V8TransactionStore,
@@ -197,6 +197,20 @@ class V8StorageTransactionAuthorityTests(unittest.TestCase):
         self.assertIsNone(authority.resolve(artifact_id))
         self.assertIsNone(authority.describe(artifact_id))
         self.assertEqual(authority.list_public(), [])
+
+    def test_identity_attested_cleanup_preserves_a_replaced_foreign_leaf(self) -> None:
+        storage = StorageAuthority(self.paths)
+        lease = storage.lease("output", create=True)
+        relative = "owned.bin"
+        target = storage.resolve_relative(lease, relative, require_exists=False)
+        target.write_bytes(b"owned bytes")
+        expected = storage.file_identity(lease, relative)
+        replacement = target.with_name("foreign-replacement.bin")
+        replacement.write_bytes(b"foreign bytes")
+        replacement.replace(target)
+
+        self.assertFalse(storage.unlink_if_identity(lease, relative, expected))
+        self.assertEqual(target.read_bytes(), b"foreign bytes")
 
     def test_foreign_job_cannot_use_owner_reservation(self) -> None:
         authority = self._authority()
