@@ -3,6 +3,8 @@ export const componentActionLabel = (disposition) => ({
   AUTH_REQUIRED: "Authorize & Install",
   LICENSE_REQUIRED: "Review License",
   MANUAL_IMPORT_ONLY: "Import Model",
+  MANUAL_INSTALL: "Manual Install",
+  REFERENCE_EXISTING: "Use Existing",
   UNSUPPORTED_SOURCE: "Manual Review",
 }[String(disposition || "MANUAL_IMPORT_ONLY")] || "Manual Review");
 
