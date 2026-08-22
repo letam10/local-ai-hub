@@ -32,7 +32,7 @@ Owners:
 - `src/services/job_manager/v8_engine.py`
 - `src/services/api/components.py`
 
-New worker outputs dùng V7 ownership scope như pre-publication safety proof, sau đó publish duy nhất qua V8 reservation-bound Output Authority. Wave 3 re-audit khóa thêm invariant: V8 reservation tự nó không chứng minh filesystem ownership; `register_worker_outputs()` phải re-check bounded ownership và chỉ nhận `owned`. Historical V7 artifacts/uploads vẫn có read fallback. Package `src.services.job_manager` export `V8DurableWorkEngine` làm production `DurableWorkEngine`, đồng thời giữ `LegacyDurableWorkEngine` cho compatibility/forensic review.
+New worker outputs dùng V7 ownership scope như pre-publication safety proof, sau đó publish duy nhất qua V8 reservation-bound Output Authority. Wave 3 re-audit khóa thêm invariant: V8 reservation tự nó không chứng minh filesystem ownership; `register_worker_outputs()` phải re-check bounded ownership và chỉ nhận `owned`. Byte/atomic publication giữ caller-facing artifact name/media metadata thay vì private producer filename. Historical V7 artifacts/uploads vẫn có read fallback. Package `src.services.job_manager` export `V8DurableWorkEngine` làm production `DurableWorkEngine`, đồng thời giữ `LegacyDurableWorkEngine` cho compatibility/forensic review.
 
 Không tuyên bố Wave 2 production-accepted trước Windows adversarial QA, full local callsite grep và real loopback/desktop acceptance trong `Plan_Miss.md`.
 
@@ -54,7 +54,7 @@ Wave 3 hoàn thành ba phần source-level:
 
 Không bật model AUTO_INSTALL_READY bằng suy diễn. `auto_install_eligible` chỉ true nếu catalog đã explicit cho auto và toàn bộ gate source/license/auth/hash/size đều đạt. Production V2 validator vẫn cố ý cấm model AUTO_INSTALL_READY ở thời điểm này.
 
-GitHub Actions source gate sau Wave 3: `ci_validate` PASS, 22/22 V8 tests PASS, `git diff --check` PASS. Đây không thay thế Windows acceptance.
+GitHub Actions source gate sau Wave 3: `ci_validate` PASS, 23/23 V8 tests PASS, `git diff --check` PASS. Đây không thay thế Windows acceptance.
 
 ## Wave 4 — Windows Real Lifecycle & Product UX
 
