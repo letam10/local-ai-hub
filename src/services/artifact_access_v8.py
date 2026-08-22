@@ -22,6 +22,7 @@ _LEGACY = {
     "list_artifacts": artifact_store.list_artifacts,
     "open_artifact": artifact_store.open_artifact,
     "begin_job_output_scope": artifact_store.begin_job_output_scope,
+    "prepare_job_output_scope": artifact_store.prepare_job_output_scope,
     "register_worker_outputs": artifact_store.register_worker_outputs,
     "finalize_job_output_scope": artifact_store.finalize_job_output_scope,
     "reconcile_job_output_scopes": artifact_store.reconcile_job_output_scopes,
@@ -106,17 +107,32 @@ def register_worker_outputs(
     *,
     provenance: dict[str, Any],
 ) -> list[dict[str, Any]] | None:
-    """V7 call signature, V8-only publication implementation."""
+    """V7 call signature, V8 publication, with ownership proof at the boundary.
+
+    A reservation proves only that the job may publish; it never proves that a
+    returned filesystem candidate belongs to that job. Re-run the bounded V7
+    scope claim here and require every candidate to be newly job-owned before
+    handing anything to the V8 copy-once publisher.
+    """
 
     job_id = provenance.get("job_id") if isinstance(provenance, dict) else None
     if not isinstance(job_id, str):
         return None
+    values = list(paths)
+    if not values:
+        return None
     bridge = default_bridge(create=False)
     if bridge is None or bridge.open_reservation(job_id) is None:
         return None
+    proof = _LEGACY["prepare_job_output_scope"](
+        job_id,
+        {"status": "completed", "outputs": values},
+    )
+    if not isinstance(proof, dict) or proof.get("status") != "owned":
+        return None
     return bridge.publish_candidates(
         job_id=job_id,
-        candidates=paths,
+        candidates=values,
         provenance=provenance,
     )
 
