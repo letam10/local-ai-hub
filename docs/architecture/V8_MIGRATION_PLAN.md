@@ -32,13 +32,13 @@ Owners:
 - `src/services/job_manager/v8_engine.py`
 - `src/services/api/components.py`
 
-New worker outputs dùng V7 ownership scope như pre-publication safety proof, sau đó publish duy nhất qua V8 reservation-bound Output Authority. Wave 3 re-audit khóa thêm invariant: V8 reservation tự nó không chứng minh filesystem ownership; `register_worker_outputs()` phải re-check bounded ownership và chỉ nhận `owned`. Byte/atomic publication giữ caller-facing artifact name/media metadata thay vì private producer filename. Historical V7 artifacts/uploads vẫn có read fallback. Package `src.services.job_manager` export `V8DurableWorkEngine` làm production `DurableWorkEngine`, đồng thời giữ `LegacyDurableWorkEngine` cho compatibility/forensic review.
+New worker outputs dùng V7 ownership scope như pre-publication safety proof, sau đó publish duy nhất qua V8 reservation-bound Output Authority. V8 reservation tự nó không chứng minh filesystem ownership; `register_worker_outputs()` phải re-check bounded ownership và chỉ nhận `owned`. Byte/atomic publication giữ caller-facing artifact name/media metadata thay vì private producer filename. Historical V7 artifacts/uploads vẫn có read fallback.
 
 Không tuyên bố Wave 2 production-accepted trước Windows adversarial QA, full local callsite grep và real loopback/desktop acceptance trong `Plan_Miss.md`.
 
 ## Wave 3 — Component Enablement Control Plane
 
-Status: **SOURCE/CONTROL-PLANE IMPLEMENTED; REAL LIFECYCLE PENDING**.
+Status: **RE-AUDITED; SOURCE CORRECTNESS CLOSED; REAL LIFECYCLE PENDING**.
 
 Owners:
 - `src/services/component_lifecycle_v8.py`
@@ -46,23 +46,48 @@ Owners:
 - `src/services/api/routes/component_v8.py`
 - `src/services/component_enablement_v8.py`
 
-Wave 3 hoàn thành ba phần source-level:
+Wave 3 hoàn thành:
 
-1. import và bundle plan được bind vào opaque V8 `operation_id`, explicit confirmation, finite CAS states và terminal no-reexecution;
+1. import và bundle plan bind vào opaque V8 `operation_id`, explicit confirmation, finite CAS states và terminal no-reexecution;
 2. direct operation routes cho list/inspect/confirm/planned-cancel;
 3. trusted-source acceptance phân loại production catalog theo disposition/source verification/auth/license/integrity/download+disk size mà không gọi provider.
 
-Không bật model AUTO_INSTALL_READY bằng suy diễn. `auto_install_eligible` chỉ true nếu catalog đã explicit cho auto và toàn bộ gate source/license/auth/hash/size đều đạt. Production V2 validator vẫn cố ý cấm model AUTO_INSTALL_READY ở thời điểm này.
+Wave 4 re-audit sửa thêm hai contract:
 
-GitHub Actions source gate sau Wave 3: `ci_validate` PASS, 23/23 V8 tests PASS, `git diff --check` PASS. Đây không thay thế Windows acceptance.
+- `REFERENCE_EXISTING` là disposition có thẩm quyền và không được biến thành download/source/license gate;
+- route V8 Components phải dùng application-owned `ApiContext` binding thay vì tự tạo/call module singleton từ transport layer.
+
+Không bật model AUTO_INSTALL_READY bằng suy diễn. `auto_install_eligible` chỉ true nếu catalog đã explicit cho auto và toàn bộ gate source/license/auth/hash/size đều đạt. Production V2 validator vẫn cố ý cấm model AUTO_INSTALL_READY ở thời điểm này.
 
 ## Wave 4 — Windows Real Lifecycle & Product UX
 
-Wave kế tiếp phải dùng máy Windows thật để xử lý `Plan_Miss.md`: NTFS/reparse/TOCTOU, native picker, full artifact consumer inventory, real component install/reuse/verify/repair/update/rollback/uninstall, bundle failure/rollback, loopback API, WebView2/Desktop operation UI và `v8_control.sqlite3` backup/restore. Mọi real download lớn hoặc GPU inference vẫn cần scope/phê duyệt riêng.
+Status: **SOURCE-SIDE PRODUCT UX IMPLEMENTED; WINDOWS REAL-LIFECYCLE ACCEPTANCE PENDING**.
+
+Source owners bổ sung:
+- `src/services/api/context.py`
+- `src/services/api/routes/component_v8.py`
+- `src/ui/features/components/render.js`
+- `src/ui/features/components/v8_control_plane.js`
+- `src/ui/index.html`
+- `tests/test_v8_wave4_product_ux.py`
+
+Phần source-side đã làm:
+
+- V8 operation list/inspect/confirm/cancel đi qua `ApiContext`;
+- operation list dùng bounded `limit`;
+- Components UI hiển thị opaque operation journal và source acceptance;
+- chỉ operation `planned` có confirm/cancel UI;
+- source acceptance hiển thị truthful disposition/gates, không raw path;
+- không polling, không auto-download/auto-install khi mở trang;
+- duplicate `snapshot-status` DOM ID cũ được loại bỏ khi mount module V8.
+
+Phần **Windows Real Lifecycle** không thể được chứng minh từ GitHub repository và vẫn phải dùng máy Windows thật để xử lý `Plan_Miss.md`: NTFS/reparse/TOCTOU, native picker, full artifact consumer inventory, real install/reuse/verify/repair/update/rollback/uninstall, bundle failure/rollback, executing cancellation, loopback API, WebView2 interaction/accessibility, installer/shortcut/upgrade preservation và `v8_control.sqlite3` backup/restore.
+
+Source validation đã đạt GitHub Actions run #667: `ci_validate` PASS, 27/27 V8 tests PASS, `git diff --check` PASS. Đây không thay thế Windows acceptance.
 
 ## Wave 5 — Acceptance & Release
 
-Clean Windows acceptance, upgrade preservation, reuse/import/install/update/rollback/repair/uninstall, crash recovery, packaging, installer, provenance và release review. Tag/version chỉ thay đổi trong package release được người dùng phê duyệt riêng.
+Chỉ bắt đầu sau khi Wave 4 Windows gate được xử lý. Phạm vi: clean Windows acceptance, upgrade preservation, lifecycle matrix, crash recovery, packaging, installer, provenance và release review. Tag/version chỉ thay đổi trong package release được người dùng phê duyệt riêng.
 
 ## Quy tắc chung
 
