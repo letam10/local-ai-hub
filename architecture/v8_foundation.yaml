@@ -49,7 +49,6 @@ waves:
       - native_selection_restart_resumability
       - executing_operation_cancel_bridge
       - atomic_multi_component_bundle_rollback
-      - desktop_operation_ui
   wave2:
     name: production_callsite_migration
     status: reaudited_and_publication_boundary_hardened_windows_acceptance_pending
@@ -70,7 +69,7 @@ waves:
     windows_acceptance: deferred
   wave3:
     name: component_enablement_control_plane
-    status: source_control_plane_implemented_real_lifecycle_pending
+    status: reaudited_source_correctness_closed_real_lifecycle_pending
     owners:
       lifecycle: src/services/component_lifecycle_v8.py
       component_api: src/services/api/components.py
@@ -79,29 +78,57 @@ waves:
     invariants:
       - import_and_bundle_use_opaque_durable_operations
       - source_acceptance_is_catalog_only
+      - reference_existing_never_implies_hub_download
+      - transport_routes_use_application_context_bindings
       - no_provider_request_during_acceptance
       - no_implicit_license_acceptance
       - catalog_disposition_required_for_auto_install
       - model_auto_install_not_implicitly_enabled
       - committed_does_not_imply_operational
+  wave4:
+    name: windows_real_lifecycle_and_product_ux
+    status: source_product_ux_implemented_windows_real_lifecycle_pending
+    source_owners:
+      api_context: src/services/api/context.py
+      component_routes: src/services/api/routes/component_v8.py
+      component_renderer: src/ui/features/components/render.js
+      component_control_plane: src/ui/features/components/v8_control_plane.js
+      ui_mount: src/ui/index.html
+      tests: tests/test_v8_wave4_product_ux.py
+    source_invariants:
+      - opaque_operation_ids_only
+      - bounded_operation_list
+      - planned_operation_requires_explicit_confirm_or_cancel
+      - source_acceptance_is_truthful_and_path_free
+      - no_product_ux_polling
+      - no_page_load_download_or_install
+      - reference_existing_is_non_installing
+    source_validation:
+      github_actions_run: 667
+      v8_tests: 27
+      result: pass
+    windows_acceptance: deferred
 next_wave:
-  name: windows_real_lifecycle_acceptance
+  name: acceptance_and_release
+  blocked_until:
+    - wave4_windows_real_lifecycle_acceptance
   requirements:
-    - resolve_plan_miss_windows_filesystem_gates
-    - full_local_artifact_callsite_inventory
-    - native_picker_and_selection_acceptance
-    - real_component_install_reuse_verify_repair_update_rollback_uninstall
-    - bundle_failure_and_rollback_acceptance
-    - loopback_api_and_desktop_operation_ui_acceptance
-    - v8_control_database_backup_restore
+    - clean_windows_lifecycle_matrix
+    - upgrade_preservation
+    - crash_recovery
+    - packaging_and_installer_acceptance
+    - release_provenance_review
 deferred_local_acceptance:
   - windows_reparse_junction_and_handle_race_acceptance
+  - full_local_artifact_callsite_inventory
   - loopback_api_and_desktop_acceptance
   - native_selection_restart_resumability
   - executing_operation_cancel_bridge
   - atomic_multi_component_bundle_rollback
   - per_component_provider_license_hash_review
   - real_component_download_install_repair_update_rollback_uninstall
+  - webview2_operation_ui_interaction_and_accessibility
+  - installer_shortcut_upgrade_preservation
   - runtime_smoke
   - model_inference
   - v8_control_database_backup_restore
