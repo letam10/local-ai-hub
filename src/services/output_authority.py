@@ -16,7 +16,11 @@ from typing import Any, Iterable
 
 from src.platform.paths import HubPaths, get_paths
 from src.platform.storage_authority import FileIdentity, RootLease, StorageAuthority, StorageAuthorityError
-from src.services.transaction_store import TransactionStoreError, V8TransactionStore
+from src.services.transaction_store import (
+    TransactionStoreError,
+    V8TransactionStore,
+    decode_file_identity_from_sqlite,
+)
 
 
 MAX_ARTIFACTS_PER_TRANSACTION = 64
@@ -215,13 +219,16 @@ class OutputAuthority:
             raise OutputAuthorityError("managed_object_key_invalid")
         path = self.storage.resolve_relative(lease, object_key, require_exists=True, expect_file=True)
         identity = self.storage.file_identity(lease, object_key)
-        expected = FileIdentity(
-            device=int(row.get("file_device", -1)),
-            inode=int(row.get("file_inode", -1)),
-            size_bytes=int(row.get("size_bytes", -1)),
-            mtime_ns=int(row.get("file_mtime_ns", -1)),
-            mode=identity.mode,
-        )
+        try:
+            expected = FileIdentity(
+                device=decode_file_identity_from_sqlite(row.get("file_device")),
+                inode=decode_file_identity_from_sqlite(row.get("file_inode")),
+                size_bytes=int(row.get("size_bytes", -1)),
+                mtime_ns=decode_file_identity_from_sqlite(row.get("file_mtime_ns")),
+                mode=identity.mode,
+            )
+        except TransactionStoreError as exc:
+            raise OutputAuthorityError("managed_object_identity_invalid") from exc
         if not expected.same_file_state(identity):
             raise OutputAuthorityError("managed_object_identity_changed")
         return path, identity

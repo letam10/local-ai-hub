@@ -34,6 +34,9 @@ _SAFE_ACTION = re.compile(r"^[a-z][a-z0-9_-]{1,47}$")
 _FINGERPRINT = re.compile(r"^[a-f0-9]{64}$")
 _MEDIA_TYPE = re.compile(r"^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$")
 _ADAPTER_ID = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
+_SQLITE_INT64_MIN = -(1 << 63)
+_SQLITE_INT64_MAX = (1 << 63) - 1
+_UINT64_MAX = (1 << 64) - 1
 
 _COMPONENT_TRANSITIONS = {
     "planned": frozenset({"executing", "blocked", "cancelled"}),
@@ -71,6 +74,28 @@ def _safe_object_key(value: object) -> str:
     if any(part in {"", ".", ".."} for part in parts):
         raise TransactionStoreError("invalid_object_key")
     return value
+
+
+def encode_file_identity_for_sqlite(value: object) -> int:
+    """Store Windows unsigned file identifiers without SQLite overflow.
+
+    ``st_ino`` can represent an unsigned 64-bit NTFS file identifier, while
+    SQLite INTEGER is signed 64-bit.  Persist the same bit pattern using its
+    two's-complement signed representation; callers decode it before identity
+    comparison, so no high-bit truncation or collision is introduced.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _UINT64_MAX:
+        raise TransactionStoreError("invalid_file_identity")
+    return value if value <= _SQLITE_INT64_MAX else value - (1 << 64)
+
+
+def decode_file_identity_from_sqlite(value: object) -> int:
+    """Recover the original unsigned identity value from SQLite INTEGER."""
+
+    if isinstance(value, bool) or not isinstance(value, int) or not _SQLITE_INT64_MIN <= value <= _SQLITE_INT64_MAX:
+        raise TransactionStoreError("invalid_file_identity")
+    return value if value >= 0 else value + (1 << 64)
 
 
 class V8TransactionStore:
@@ -281,9 +306,9 @@ class V8TransactionStore:
             raise TransactionStoreError("invalid_artifact_size")
         if not isinstance(sha256, str) or _FINGERPRINT.fullmatch(sha256) is None:
             raise TransactionStoreError("invalid_artifact_hash")
-        for value in (file_device, file_inode, file_mtime_ns):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise TransactionStoreError("invalid_file_identity")
+        file_device = encode_file_identity_for_sqlite(file_device)
+        file_inode = encode_file_identity_for_sqlite(file_inode)
+        file_mtime_ns = encode_file_identity_for_sqlite(file_mtime_ns)
         if not isinstance(provenance, dict):
             raise TransactionStoreError("invalid_provenance")
         fingerprint = provenance.get("job_spec_fingerprint")

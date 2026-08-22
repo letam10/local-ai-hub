@@ -13,7 +13,10 @@ import unittest
 from src.platform.paths import HubPaths
 from src.platform.storage_authority import StorageAuthorityError
 from src.services.output_authority import OutputAuthority, OutputAuthorityError
-from src.services.transaction_store import V8TransactionStore
+from src.services.transaction_store import (
+    V8TransactionStore,
+    decode_file_identity_from_sqlite,
+)
 
 
 def _job(char: str) -> str:
@@ -117,6 +120,31 @@ class V8StorageTransactionAuthorityTests(unittest.TestCase):
         self.assertTrue(self.store.authorize_output_transaction(transaction, reservation, job_id))
         self.assertIsNone(self.store.public_artifact(artifact_id))
         self.assertEqual(self.store.list_public_artifacts(), [])
+
+    def test_unsigned_windows_file_identity_round_trips_through_sqlite(self) -> None:
+        job_id = _job("c")
+        reservation = self.store.create_output_reservation(job_id)
+        transaction = self.store.create_output_transaction(reservation, job_id)
+        artifact_id = self.store.stage_artifact(
+            transaction_id=transaction,
+            reservation_id=reservation,
+            job_id=job_id,
+            object_id="obj_" + "e" * 32,
+            object_key=".hub-v8/objects/ee/obj_" + "e" * 32,
+            name="result.bin",
+            media_type="application/octet-stream",
+            size_bytes=1,
+            sha256=hashlib.sha256(b"x").hexdigest(),
+            file_device=(1 << 64) - 1,
+            file_inode=(1 << 63) + 9,
+            file_mtime_ns=3,
+            provenance=_provenance(job_id),
+        )
+        row = self.store.internal_artifact(artifact_id)
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(decode_file_identity_from_sqlite(row["file_device"]), (1 << 64) - 1)
+        self.assertEqual(decode_file_identity_from_sqlite(row["file_inode"]), (1 << 63) + 9)
 
     def test_public_artifact_is_detached_from_mutable_producer_path(self) -> None:
         authority = self._authority()
