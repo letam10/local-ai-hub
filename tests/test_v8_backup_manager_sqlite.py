@@ -228,6 +228,18 @@ class V8BackupManagerSQLiteTests(unittest.TestCase):
         self.assertEqual(list(self.backups.glob("*.zip")), [])
         self.assertEqual(list(self.backups.glob(".v8-backup-*")), [])
 
+    def test_wal_backup_cleans_private_sqlite_sidecars(self) -> None:
+        connection = sqlite3.connect(self.control)
+        try:
+            self.assertEqual(connection.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+        finally:
+            connection.close()
+        self.store.create_output_reservation(_job("7"))
+        created = self._manager().create_backup()
+        self.assertTrue(created["accepted"], created)
+        self.assertEqual(list(self.backups.glob(".v8-backup-*")), [])
+        self.assertEqual(list(self.backups.glob("*.sqlite3-*")), [])
+
     def test_v8_snapshot_failure_does_not_publish_json_only_archive(self) -> None:
         self.store.create_output_reservation(_job("c"))
         before = self.control.read_bytes()

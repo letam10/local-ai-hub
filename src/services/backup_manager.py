@@ -622,6 +622,7 @@ class BackupManager:
                     V8TransactionStore(v8_path, initialize=False).backup_to(v8_snapshot)
                     v8_snapshot_guard = _guard(v8_snapshot, kind="file", anchor=backup_guard.path, allow_missing=False)
                     V8TransactionStore.validate_snapshot(v8_snapshot)
+                    V8TransactionStore._remove_owned_sqlite_sidecars(v8_snapshot)
                     v8_content = _read_bounded(v8_snapshot, v8_snapshot_guard, _MAX_V8_SNAPSHOT_BYTES)
                 manifest: dict[str, Any] = {
                     "schema_version": BACKUP_SCHEMA_VERSION,
@@ -907,6 +908,7 @@ class BackupManager:
                         staged_guard = _guard(stage, kind="file", anchor=stage_root, allow_missing=False)
                         if member == _V8_SQLITE_MEMBER:
                             V8TransactionStore.validate_snapshot(stage)
+                            V8TransactionStore._remove_owned_sqlite_sidecars(stage)
                         staged.append({"entry": entry, "target_guard": target_guard, "stage": stage, "stage_guard": staged_guard})
                 if not _guard_same(config_guard) or not _guard_same(archive_guard) or not _guard_same(stage_guard):
                     raise _StorageUnsafe
@@ -941,6 +943,7 @@ class BackupManager:
                     if not _guard_same(config_guard) or not _guard_same(archive_guard):
                         raise _StorageUnsafe
                     V8TransactionStore.validate_snapshot(item["stage"])
+                    V8TransactionStore._remove_owned_sqlite_sidecars(item["stage"])
                     V8TransactionStore(target, initialize=False).restore_from(item["stage"])
                     final = _guard(target, kind="file", anchor=config_guard.path, allow_missing=False)
                     if final.target_identity is None or not _guard_same(config_guard) or not _guard_same(archive_guard):

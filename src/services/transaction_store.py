@@ -403,6 +403,23 @@ class V8TransactionStore:
         except (OSError, ValueError, TransactionStoreError):
             return
 
+    @classmethod
+    def _remove_owned_sqlite_sidecars(cls, base: Path) -> None:
+        """Remove only WAL/SHM files created beside one private copy.
+
+        SQLite may create ``-wal`` and ``-shm`` siblings when the destination
+        connection is opened while the source uses WAL mode.  They are not
+        part of the validated snapshot and must not survive a backup/restore
+        attempt.  Each sibling is identity-attested before removal; a foreign
+        replacement or reparse is preserved for manual review.
+        """
+
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(f"{base}{suffix}")
+            expected = cls._temporary_identity(sidecar)
+            if expected is not None:
+                cls._remove_owned_temporary(sidecar, expected)
+
     @staticmethod
     def _copy_sqlite(source: sqlite3.Connection, destination: Path) -> None:
         try:
@@ -426,6 +443,7 @@ class V8TransactionStore:
             raise TransactionStoreError("transaction_backup_unavailable") from exc
         finally:
             target.close()
+            V8TransactionStore._remove_owned_sqlite_sidecars(destination)
 
     def backup_to(self, destination: Path) -> dict[str, int | str]:
         """Create a SQLite-consistent, validated snapshot without overwriting a leaf.
@@ -463,6 +481,12 @@ class V8TransactionStore:
         except (OSError, ValueError) as exc:
             raise TransactionStoreError("transaction_backup_unavailable") from exc
         finally:
+            # SQLite may finish publishing WAL/SHM siblings after the target
+            # connection closes; repeat the identity-attested cleanup at the
+            # outer boundary so a failed or successful snapshot cannot leave
+            # private sidecars beside the backup leaf.
+            self._remove_owned_sqlite_sidecars(target)
+            self._remove_owned_sqlite_sidecars(temporary)
             self._remove_owned_temporary(temporary, temporary_identity)
 
     def restore_from(self, snapshot: Path) -> dict[str, int | str]:
@@ -494,6 +518,7 @@ class V8TransactionStore:
         except (OSError, ValueError) as exc:
             raise TransactionStoreError("transaction_backup_unavailable") from exc
         finally:
+            self._remove_owned_sqlite_sidecars(temporary)
             self._remove_owned_temporary(temporary, temporary_identity)
 
     @staticmethod
