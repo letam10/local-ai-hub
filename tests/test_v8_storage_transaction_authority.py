@@ -5,6 +5,7 @@ No network, runtime, model, GPU or external application is used.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 from pathlib import Path
 import tempfile
@@ -257,6 +258,26 @@ class V8StorageTransactionAuthorityTests(unittest.TestCase):
 
         self.assertIsNone(published)
         self.assertEqual(self.store.list_public_artifacts(), [])
+
+    def test_disk_full_during_managed_copy_aborts_without_public_artifact(self) -> None:
+        authority = self._authority()
+        job_id = _job("4")
+        reservation = authority.begin_reservation(job_id)
+        producer = self.data / "Output" / "disk-full.bin"
+        producer.write_bytes(b"producer bytes remain intact")
+
+        with patch("src.services.output_authority.os.fsync", side_effect=OSError(errno.ENOSPC, "disk full")):
+            published = authority.publish_owned_candidates(
+                reservation_id=reservation,
+                job_id=job_id,
+                candidates=[producer],
+                provenance=_provenance(job_id),
+            )
+
+        self.assertIsNone(published)
+        self.assertEqual(self.store.list_public_artifacts(), [])
+        self.assertEqual(self.store.incomplete_artifacts(), [])
+        self.assertEqual(producer.read_bytes(), b"producer bytes remain intact")
 
 
 if __name__ == "__main__":
