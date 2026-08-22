@@ -6,8 +6,11 @@ import errno
 import hashlib
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -181,6 +184,55 @@ class V8WindowsFilesystemAdversarialTests(unittest.TestCase):
             self.assertEqual(self.authority.list_public(), [])
         finally:
             self.assertTrue(kernel32.CloseHandle(handle))
+        self.assertEqual(producer.read_bytes(), payload)
+
+    @unittest.skipUnless(os.name == "nt", "Windows sharing semantics are required")
+    def test_task_owned_child_process_share_denial_refuses_publication(self) -> None:
+        """A separate producer process holding a zero-share handle remains authoritative."""
+
+        import json
+
+        job_id = _job("c")
+        reservation = self.authority.begin_reservation(job_id)
+        producer = self.paths.output_root / "child-share-denied.bin"
+        signal = self.root / "child-share-denied.ready"
+        payload = b"child-process producer bytes"
+        producer.write_bytes(payload)
+        child_code = (
+            "import ctypes, json, pathlib, sys, time; "
+            "from ctypes import wintypes; "
+            "k=ctypes.windll.kernel32; "
+            "k.CreateFileW.argtypes=[wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,wintypes.LPVOID,wintypes.DWORD,wintypes.DWORD,wintypes.HANDLE]; "
+            "k.CreateFileW.restype=wintypes.HANDLE; "
+            "h=k.CreateFileW(sys.argv[1],0x80000000,0,None,3,0x80,None); "
+            "assert ctypes.c_void_p(h).value != ctypes.c_void_p(-1).value; "
+            "pathlib.Path(sys.argv[2]).write_text(json.dumps({'ready': True}), encoding='ascii'); "
+            "time.sleep(30)"
+        )
+        child = subprocess.Popen(
+            [sys.executable, "-c", child_code, str(producer), str(signal)],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not signal.exists():
+                time.sleep(0.05)
+            self.assertTrue(signal.exists(), "child did not publish readiness")
+            published = self.authority.publish_owned_candidates(
+                reservation_id=reservation,
+                job_id=job_id,
+                candidates=[producer],
+                provenance=_provenance(job_id),
+            )
+            self.assertIsNone(published)
+            self.assertEqual(self.authority.list_public(), [])
+        finally:
+            if child.poll() is None:
+                child.terminate()
+            child.wait(timeout=5)
+            signal.unlink(missing_ok=True)
         self.assertEqual(producer.read_bytes(), payload)
 
     def test_injected_no_space_during_managed_copy_preserves_producer_and_hides_output(self) -> None:

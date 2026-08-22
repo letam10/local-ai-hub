@@ -76,6 +76,19 @@ Source-only có thể exit 0 khi source contract hợp lệ nhưng `release_read
 
 Bản đầu Wave 5 chỉ yêu cầu `report_sha256` trong evidence nhưng chưa tự chứng minh local report file tồn tại và digest khớp actual bytes. Re-audit đã đóng khoảng trống này bằng deterministic report binding/hashing như mô tả trên.
 
+## Windows filesystem gate — invariant-based acceptance boundary
+
+The Windows filesystem gate treats the safety invariant as the product contract:
+an unsafe root/ancestor/lease, a producer held by another process, a replaced
+managed object, or bounded write failure must refuse publication, preserve
+foreign/producer bytes, and leave no public artifact. Antivirus/indexer locks
+and physical-volume exhaustion are external mechanisms, not reproducible test
+inputs for this repository. They are represented by the same observable
+invariants using task-owned zero-share `CreateFileW` handles (including a
+separate child process) and injected `ENOSPC` at the managed-copy boundary.
+The acceptance report must name those substitutions explicitly; it must never
+disable Defender/indexing or fill a physical volume to manufacture PASS.
+
 ## Release provenance transition
 
 Wave 5 không còn dùng V7 provenance như contract V8. Wave 6 thêm V8-specific read-only release policy/provenance preparation. Historical V7 release manifest/tags vẫn immutable.

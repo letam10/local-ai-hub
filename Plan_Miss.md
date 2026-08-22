@@ -446,6 +446,53 @@ HEAD are:
   component/database/bundle/desktop child-crash matrix; runtime smoke remains
   separate and must not imply operational readiness.
 
+### 7K. Final four-gate closure audit from `1f2a1a3d` — this handoff commit
+
+- `windows_filesystem` is eligible for PASS under the invariant-based boundary
+  documented in `docs/V8_WAVE5_ACCEPTANCE_RELEASE.md`. The controlled suite now
+  has 7 PASS tests, including a task-owned child process holding a Windows
+  zero-share `CreateFileW` producer handle. Publication refused, no public
+  artifact appeared, and producer bytes remained intact after the child exited.
+  Root/ancestor lease replacement, nested reparse/non-regular refusal,
+  concurrent same-name producers, foreign-producer preservation, managed-object
+  zero-share cleanup refusal and injected `ENOSPC` also passed. AV/indexer
+  contention and physical-volume exhaustion were not manufactured: they are
+  external mechanisms represented by the same deny-share/ENOSPC invariants.
+- The complete Windows V8 source suite passed 90 tests after the child-process
+  regression was added. `ci_validate.py` passed 743 tracked files. The actual
+  task-owned child-handle harness and a separate managed-object handle harness
+  were run outside the repository and their roots remain evidence-only.
+- Real WebView2 was exercised from a task-owned data root. UI Automation saw the
+  real WebView2 DOM (RootWebArea, navigation buttons, language combobox and
+  focus landmark). Repeated Dashboard/Components navigation, Vietnamese to
+  English locale switching, component plan rendering, native confirmation then
+  Cancel, planned-operation Cancel, focus continuity and a deliberate API-down
+  refresh (`API đang khởi động...`) were observed with no stack/path/secret
+  echo. No artifact record was available in the task snapshot, so opening a
+  default application was not claimed. The gate remains BLOCKED for the full
+  trusted keyboard/HiDPI/screen-reader matrix and open-artifact/default-app
+  proof.
+- Crash support was rerun: output child-crash recovery, component journal,
+  bundle restart/manual-review, SQLite backup/restore and desktop lifecycle
+  smoke all passed in bounded tests (26 focused crash/component/bundle/SQLite
+  tests plus the real desktop smoke). The gate remains BLOCKED until the
+  complete `os._exit` matrix across component, bundle, SQLite and desktop
+  phases is captured as one exact-head report; no crash result is promoted from
+  synthetic fixtures alone.
+- Packaging was re-audited as source-only/isolated staging. APP_ROOT and
+  DATA_ROOT remain separate, the core builder is dry-run/`execution=not_run`,
+  and the installer builder refuses before creating output when the reviewed
+  tag/version identity is absent. No production `distribution`, registry,
+  PATH, installer, portable image, upgrade or rollback was mutated. The gate
+  remains BLOCKED only on user-approved V8 release identity and the separately
+  authorized activation package.
+- After this tracked handoff commit, all PASS reports must be regenerated under
+  a new exact-head `Temp/V8_Acceptance/<final-head>/` bundle. The verifier must
+  report `source_commit_matches=true` and `reports_verified=true`; no report
+  digest may be edited manually. The final matrix is expected to be 9 PASS and
+  3 BLOCKED (`webview2_product_ux`, `packaging_upgrade`, `crash_recovery`),
+  subject to the exact-head verifier and GitHub Actions on the new commit.
+
 ## 8. Real component lifecycle — PARTIAL/HISTORICAL - SEE LATEST CHECKPOINT
 
 Từng vertical slice trên controlled Windows root:
