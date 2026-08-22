@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
-from src.platform.paths import HubPaths, get_paths
+from src.platform.paths import HubPaths, get_paths, is_reparse_point
 from src.platform.storage_authority import StorageAuthorityError
 from src.services.output_authority import OutputAuthority, OutputAuthorityError
 from src.services.transaction_store import TransactionStoreError
@@ -22,6 +24,63 @@ class ProductionOutputAuthority(OutputAuthority):
         )
         if not isinstance(self.store, V8ProductionTransactionStore):
             raise TypeError("ProductionOutputAuthority requires V8ProductionTransactionStore.")
+
+    def _count_untracked_managed_objects(self, lease: Any) -> int:
+        """Count bounded orphan candidates without deleting ambiguous bytes.
+
+        A crash after a copy succeeds but before ``stage_artifact`` writes its
+        row leaves no ownership proof for the object. Treating a matching name
+        as permission to delete would risk a foreign replacement, so startup
+        reports it through the existing manual-review count and preserves it.
+        """
+
+        try:
+            known = self.store.known_artifact_object_keys(limit=4096)
+            root_relative = ".hub-v8/objects"
+            root = self.storage.resolve_relative(lease, root_relative, require_exists=True, expect_file=False)
+        except (StorageAuthorityError, TransactionStoreError):
+            return 1
+        manual_review = 0
+        scanned = 0
+        try:
+            with os.scandir(root) as shards:
+                for shard in shards:
+                    if scanned >= 1024:
+                        return manual_review + 1
+                    scanned += 1
+                    if shard.is_symlink() or not shard.is_dir(follow_symlinks=False) or is_reparse_point(Path(shard.path)):
+                        manual_review += 1
+                        continue
+                    shard_name = shard.name
+                    if len(shard_name) != 2 or any(char not in "0123456789abcdef" for char in shard_name):
+                        manual_review += 1
+                        continue
+                    shard_relative = f"{root_relative}/{shard_name}"
+                    try:
+                        directory = self.storage.resolve_relative(
+                            lease, shard_relative, require_exists=True, expect_file=False
+                        )
+                    except StorageAuthorityError:
+                        manual_review += 1
+                        continue
+                    with os.scandir(directory) as entries:
+                        for entry in entries:
+                            if scanned >= 1024:
+                                return manual_review + 1
+                            scanned += 1
+                            if entry.is_symlink() or not entry.is_file(follow_symlinks=False) or is_reparse_point(Path(entry.path)):
+                                manual_review += 1
+                                continue
+                            name = entry.name
+                            if len(name) != 36 or not name.startswith("obj_") or any(char not in "0123456789abcdef" for char in name[4:]):
+                                manual_review += 1
+                                continue
+                            object_key = f"{shard_relative}/{name}"
+                            if object_key not in known:
+                                manual_review += 1
+        except OSError:
+            return manual_review + 1
+        return manual_review
 
     def reconcile_incomplete(self) -> dict[str, int]:
         """Converge aborted rows without repeatedly flagging already-removed objects."""
@@ -98,6 +157,7 @@ class ProductionOutputAuthority(OutputAuthority):
                 else:
                     manual_review += 1
 
+        manual_review += self._count_untracked_managed_objects(lease)
         return {
             "aborted_transactions": aborted,
             "removed_objects": removed,

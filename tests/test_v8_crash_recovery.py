@@ -45,7 +45,7 @@ def _child(root_text: str, phase: str) -> int:
     paths = HubPaths(app_root=root / "app", data_root=root / "data")
     store = V8ProductionTransactionStore(paths.config_root / "v8_control.sqlite3")
     authority = ProductionOutputAuthority(paths=paths, store=store)
-    job_id = _job({"reserve": "a", "producer": "b", "staged": "c", "authorized": "d", "committed": "e"}[phase])
+    job_id = _job({"reserve": "a", "producer": "b", "staged": "c", "authorized": "d", "committed": "e", "copy": "f"}[phase])
     reservation = authority.begin_reservation(job_id)
     marker = root / f"{phase}.json"
     marker.write_text(json.dumps({"job_id": job_id, "reservation": reservation}), encoding="ascii")
@@ -57,6 +57,32 @@ def _child(root_text: str, phase: str) -> int:
     producer.write_bytes(f"producer-{phase}".encode("ascii"))
     if phase == "producer":
         os._exit(17)
+
+    if phase == "copy":
+        original_copy = authority._copy_managed_object
+
+        def crash_after_copy(*args: object, **kwargs: object):
+            copied = original_copy(*args, **kwargs)
+            marker.write_text(
+                json.dumps(
+                    {
+                        "job_id": job_id,
+                        "reservation": reservation,
+                        "object_key": copied[1],
+                    }
+                ),
+                encoding="ascii",
+            )
+            os._exit(17)
+
+        authority._copy_managed_object = crash_after_copy  # type: ignore[method-assign]
+        authority.publish_owned_candidates(
+            reservation_id=reservation,
+            job_id=job_id,
+            candidates=[producer],
+            provenance=_provenance(job_id),
+        )
+        return 5
 
     lease = authority.storage.lease("output", create=True)
     transaction = store.create_output_transaction(reservation, job_id)
@@ -160,6 +186,17 @@ class V8CrashRecoveryTests(unittest.TestCase):
         public = bridge.list_public()
         self.assertEqual([item["id"] for item in public], [marker["artifact"]])
         self.assertIsNotNone(bridge.resolve(marker["artifact"]))
+
+    def test_copy_phase_crash_preserves_untracked_object_for_manual_review(self) -> None:
+        marker = self._run_child("copy")
+        bridge = self._bridge()
+        recovered = bridge.reconcile(active_job_ids=set())
+        self.assertEqual(recovered["aborted_reservations"], 1)
+        self.assertGreaterEqual(recovered["manual_review"], 1)
+        self.assertEqual(bridge.list_public(), [])
+        lease = bridge.authority.storage.lease("output", create=True)
+        orphan = bridge.authority.storage.resolve_relative(lease, marker["object_key"], require_exists=True)
+        self.assertTrue(orphan.is_file())
 
 
 if __name__ == "__main__":

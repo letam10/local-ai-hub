@@ -783,6 +783,23 @@ class V8TransactionStore:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def known_artifact_object_keys(self, *, limit: int = 4096) -> set[str]:
+        """Return a bounded internal key set for orphan reconciliation.
+
+        The result remains inside the server-owned storage boundary. It lets
+        startup distinguish a journal-owned managed object from an untracked
+        object that must be preserved for manual review after a copy-phase
+        process interruption.
+        """
+
+        bounded = max(1, min(4096, int(limit)))
+        with self._read() as db:
+            rows = db.execute(
+                "SELECT object_key FROM artifact_objects ORDER BY created_at DESC LIMIT ?",
+                (bounded,),
+            ).fetchall()
+        return {str(row["object_key"]) for row in rows if isinstance(row["object_key"], str)}
+
     def create_component_operation(
         self,
         *,
