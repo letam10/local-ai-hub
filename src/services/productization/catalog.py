@@ -69,7 +69,11 @@ _V2_RUNTIME_KEYS = frozenset({
     "latest_supported_revision", "license", "authentication", "update_parts", "integrity",
     "estimated_download_size", "estimated_disk_size", "notes",
 })
-_V2_RUNTIME_OPTIONAL_KEYS = frozenset({"archive_prefix", "archive_leaves"})
+_V2_RUNTIME_OPTIONAL_KEYS = frozenset({"archive_prefix", "archive_leaves", "update_candidate"})
+_V2_RUNTIME_UPDATE_KEYS = frozenset({
+    "version", "revision", "source_identity", "source_verification", "primary_source",
+    "integrity", "archive_prefix", "archive_leaves", "estimated_disk_size",
+})
 _V2_SOURCE_KEYS = frozenset({"provider", "kind", "canonical_identity", "revision", "verification_state", "url", "authentication_required", "license_required"})
 _V2_LICENSE_KEYS = frozenset({"state", "spdx_id", "url"})
 _V2_AUTH_KEYS = frozenset({"required", "state"})
@@ -295,6 +299,49 @@ def _v2_runtime_archive_mapping(
     return prefix, mapped
 
 
+def _v2_runtime_update_candidate(value: object, *, required_leaves: list[str]) -> dict[str, Any] | None:
+    """Validate one immutable, catalog-owned runtime update candidate.
+
+    The candidate is deliberately separate from the installed record.  It
+    carries its own source identity, archive mapping and digest so an update
+    cannot silently reuse the current version's archive or a caller path.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or frozenset(value) != _V2_RUNTIME_UPDATE_KEYS:
+        raise ProductionCatalogError("invalid_runtime_update_candidate")
+    version = _v2_text(value.get("version"), "runtime_candidate_version", max_length=96)
+    revision = _v2_text(value.get("revision"), "runtime_candidate_revision", max_length=128)
+    source_identity = _v2_text(value.get("source_identity"), "runtime_candidate_source_identity", max_length=256)
+    primary = _v2_source(value.get("primary_source"), source_identity)
+    if value.get("source_verification") != "verified" or primary["verification_state"] != "verified":
+        raise ProductionCatalogError("runtime_candidate_source_unverified")
+    integrity = _v2_integrity(value.get("integrity"), "runtime_candidate")
+    if integrity.get("verification") != "verified":
+        raise ProductionCatalogError("runtime_candidate_integrity_required")
+    archive_prefix, archive_leaves = _v2_runtime_archive_mapping(
+        value,
+        required_leaves=required_leaves,
+        disposition="AUTO_INSTALL_READY",
+        strategy="portable_archive",
+    )
+    estimated_disk_size = _v2_estimate(value.get("estimated_disk_size"), "runtime_candidate_disk_size")
+    if not isinstance(estimated_disk_size, int) or estimated_disk_size <= 0:
+        raise ProductionCatalogError("invalid_runtime_candidate_disk_size")
+    return {
+        "version": version,
+        "revision": revision,
+        "source_identity": source_identity,
+        "source_verification": "verified",
+        "primary_source": primary,
+        "integrity": integrity,
+        "archive_prefix": archive_prefix,
+        "archive_leaves": archive_leaves,
+        "estimated_disk_size": estimated_disk_size,
+    }
+
+
 def _v2_authentication(value: object) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ProductionCatalogError("invalid_authentication")
@@ -406,6 +453,7 @@ def _validate_v2_runtime(item: object) -> dict[str, Any]:
         disposition=disposition,
         strategy=strategy,
     )
+    update_candidate = _v2_runtime_update_candidate(item.get("update_candidate"), required_leaves=normalized_leaves)
     source_identity = _v2_text(item.get("source_identity"), "source_identity", nullable=True, max_length=256)
     primary = None if item.get("primary_source") is None else _v2_source(item.get("primary_source"), source_identity)
     fallbacks = _v2_sources(item.get("trusted_fallback_sources"), source_identity)
@@ -430,6 +478,7 @@ def _validate_v2_runtime(item: object) -> dict[str, Any]:
         "root_class": root_class,
         "required_leaves": normalized_leaves, "modules": [_v2_id(value, "module_id") for value in modules],
         "archive_prefix": archive_prefix, "archive_leaves": archive_leaves,
+        "update_candidate": update_candidate,
         "disposition": disposition, "install_strategy": strategy, "primary_source": primary,
         "trusted_fallback_sources": fallbacks, "source_identity": source_identity, "source_verification": source_verification,
         "latest_upstream_revision": _v2_nullable_revision(item.get("latest_upstream_revision"), "latest_upstream_revision"),

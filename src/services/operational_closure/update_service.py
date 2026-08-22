@@ -13,11 +13,14 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import tempfile
 import time
 from typing import Any
 
 from src.platform.paths import HubPaths, get_paths
+from src.services.component_installer.downloader import DownloadError, TrustedDownloader
+from src.services.component_installer.policy import trusted_source
 from src.services.component_installer.receipts import CatalogBindingContext, ReceiptError
 
 from .source_availability import SOURCE_STATUSES, SourceAvailabilityService, source_status_projection
@@ -354,13 +357,46 @@ class UpdateResolver:
         binding, binding_error = self._catalog_binding(str(plan.get("component_id")), str(plan.get("component_type")), plan.get("_record") if isinstance(plan.get("_record"), Mapping) else {})
         if binding is None:
             return {"status": "unavailable", "code": binding_error or "catalog_binding_unavailable", "execution": "not_run", "dry_run": True, "next_action": "Refresh the server-owned catalog context and create a new update plan."}
-        result = ComponentUpdateExecutor(paths=self.paths).apply(
-            plan,
-            confirmed=True,
-            catalog_binding=binding,
-            current_record=plan.get("_record") if isinstance(plan.get("_record"), Mapping) else None,
-            binding_provider=self._current_execution_binding,
-        )
+        download_root: Path | None = None
+        try:
+            execution_plan = dict(plan)
+            if plan.get("component_type") == "runtime":
+                candidate = plan.get("update_candidate")
+                primary = candidate.get("primary_source") if isinstance(candidate, Mapping) else None
+                source = primary.get("url") if isinstance(primary, Mapping) else None
+                integrity = candidate.get("integrity") if isinstance(candidate, Mapping) else None
+                expected_size = integrity.get("size_bytes") if isinstance(integrity, Mapping) else None
+                expected_hash = integrity.get("sha256") if isinstance(integrity, Mapping) else None
+                estimated_disk = candidate.get("estimated_disk_size") if isinstance(candidate, Mapping) else None
+                if not trusted_source(source, fixture_mode=False) or not isinstance(expected_size, int) or expected_size <= 0 or not isinstance(expected_hash, str) or len(expected_hash) != 64:
+                    return {"status": "unavailable", "code": "trusted_source_metadata_required", "execution": "not_run", "dry_run": True}
+                try:
+                    free = int(shutil.disk_usage(self.paths.data_root).free)
+                except OSError:
+                    free = 0
+                safety = 256 * 1024 * 1024
+                required = expected_size + int(estimated_disk or 0) + safety
+                if free < required:
+                    return {"status": "unavailable", "code": "insufficient_disk", "execution": "not_run", "dry_run": True}
+                download_root = self.paths.temp_root / "v8-runtime-update-download" / plan_id
+                download_root.mkdir(parents=True, exist_ok=True)
+                downloaded = TrustedDownloader(staging_root=download_root, max_bytes=required).download(
+                    str(source), f"{plan.get('component_id', 'runtime')}.zip", expected_sha256=expected_hash, expected_size=expected_size,
+                    disk_free_bytes=free, disk_safety_bytes=safety,
+                )
+                execution_plan["_candidate_archive"] = downloaded.staged_path
+            result = ComponentUpdateExecutor(paths=self.paths).apply(
+                execution_plan,
+                confirmed=True,
+                catalog_binding=binding,
+                current_record=plan.get("_record") if isinstance(plan.get("_record"), Mapping) else None,
+                binding_provider=self._current_execution_binding,
+            )
+        except DownloadError as exc:
+            return {"status": "failed", "code": exc.code, "execution": "not_run", "dry_run": False}
+        finally:
+            if download_root is not None and download_root.exists() and not download_root.is_symlink():
+                shutil.rmtree(download_root, ignore_errors=True)
         if result.get("status") == "completed" and isinstance(plan.get("component_id"), str):
             self._applied_plans[plan["component_id"]] = dict(plan)
         return result
