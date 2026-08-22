@@ -16,6 +16,7 @@ import re
 import secrets
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -40,6 +41,7 @@ _SQLITE_INT64_MIN = -(1 << 63)
 _SQLITE_INT64_MAX = (1 << 63) - 1
 _UINT64_MAX = (1 << 64) - 1
 _MAX_BACKUP_BYTES = 128 * 1024 * 1024
+_BACKUP_COPY_TIMEOUT_SECONDS = 5.0
 
 _COMPONENT_TRANSITIONS = {
     "planned": frozenset({"executing", "blocked", "cancelled"}),
@@ -72,6 +74,10 @@ class TransactionStoreError(RuntimeError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+class _BackupCopyTimedOut(RuntimeError):
+    """Private signal used to bound SQLite's busy-retry backup loop."""
 
 
 def _now() -> str:
@@ -350,9 +356,19 @@ class V8TransactionStore:
         except sqlite3.Error as exc:
             raise TransactionStoreError("transaction_backup_unavailable") from exc
         try:
-            source.backup(target)
+            deadline = time.monotonic() + _BACKUP_COPY_TIMEOUT_SECONDS
+
+            def progress(_status: int, _remaining: int, _total: int) -> None:
+                if time.monotonic() >= deadline:
+                    raise _BackupCopyTimedOut
+
+            # SQLite's default backup loop retries a busy source indefinitely.
+            # Use page-sized progress callbacks so a writer-held EXCLUSIVE lock
+            # becomes one finite, path-free unavailable result instead of a
+            # stuck backup worker.
+            source.backup(target, pages=128, progress=progress, sleep=0.05)
             target.execute("PRAGMA synchronous=FULL")
-        except sqlite3.Error as exc:
+        except (_BackupCopyTimedOut, sqlite3.Error) as exc:
             raise TransactionStoreError("transaction_backup_unavailable") from exc
         finally:
             target.close()

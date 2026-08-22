@@ -10,6 +10,7 @@ import hashlib
 from pathlib import Path
 import sqlite3
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -156,6 +157,25 @@ class V8TransactionBackupRestoreTests(unittest.TestCase):
             result = self.store.backup_to(snapshot)
         self.assertEqual(result["status"], "completed")
         self.assertTrue(snapshot.is_file())
+
+    def test_exclusive_sqlite_lock_times_out_without_public_backup_or_source_mutation(self) -> None:
+        self._published_artifact("b")
+        before = self.live.read_bytes()
+        snapshot = self.root / "locked.sqlite3"
+        locker = sqlite3.connect(self.live, timeout=0.25, isolation_level=None)
+        try:
+            locker.execute("BEGIN EXCLUSIVE")
+            started = time.monotonic()
+            with self.assertRaises(TransactionStoreError) as raised:
+                self.store.backup_to(snapshot)
+            elapsed = time.monotonic() - started
+        finally:
+            locker.rollback()
+            locker.close()
+        self.assertEqual(raised.exception.code, "transaction_backup_unavailable")
+        self.assertLess(elapsed, 8.0)
+        self.assertFalse(snapshot.exists())
+        self.assertEqual(self.live.read_bytes(), before)
 
 
 if __name__ == "__main__":
