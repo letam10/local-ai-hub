@@ -5,46 +5,10 @@ waves:
   wave0:
     name: storage_transaction_authority
     status: reviewed_with_wave2_production_extension
-    owners:
-      storage_authority: src/platform/storage_authority.py
-      transaction_store: src/services/transaction_store.py
-      output_authority: src/services/output_authority.py
-      production_transaction_extension: src/services/v8_transaction_extensions.py
-      production_output_authority: src/services/output_authority_v8.py
-    invariants:
-      - fixed_server_owned_mutable_roots
-      - no_reparse_or_symlink_authority
-      - no_raw_public_path
-      - reservation_before_producer
-      - exact_transaction_reservation_job_binding
-      - staged_artifacts_are_private
-      - public_artifacts_use_copy_once_managed_objects
-      - final_public_commit_is_last_mandatory_persistence
-      - cleanup_requires_exact_file_identity
-      - aborted_staged_metadata_cleanup_converges
     windows_acceptance: deferred
   wave1:
     name: durable_component_lifecycle
     status: reviewed_and_extended_through_wave3
-    owner: src/services/component_lifecycle_v8.py
-    production_api: src/services/api/components.py
-    depends_on:
-      - wave0.transaction_store
-      - existing_component_installer
-      - existing_model_manager
-      - existing_runtime_manager
-    invariants:
-      - server_owned_plan_only
-      - opaque_durable_operation_id
-      - explicit_confirmation
-      - finite_operation_state_machine
-      - terminal_operation_not_reexecuted
-      - restart_without_plan_fails_closed
-      - committed_does_not_imply_operational
-    wave3_extensions:
-      - native_import_plan_has_durable_operation
-      - composite_bundle_plan_has_durable_operation
-      - planned_operation_cancel_is_durable
     deferred:
       - native_selection_restart_resumability
       - executing_operation_cancel_bridge
@@ -52,50 +16,13 @@ waves:
   wave2:
     name: production_callsite_migration
     status: reaudited_and_publication_boundary_hardened_windows_acceptance_pending
-    owners:
-      artifact_compatibility: src/services/artifact_access_v8.py
-      output_bridge: src/services/v8_output_bridge.py
-      durable_engine: src/services/job_manager/v8_engine.py
-      component_api: src/services/api/components.py
-    invariants:
-      - new_worker_output_has_single_v8_publication_authority
-      - legacy_output_scope_is_safety_only
-      - publication_rechecks_candidate_ownership
-      - reservation_alone_never_proves_output_ownership
-      - historical_v7_artifacts_remain_readable
-      - production_durable_engine_reserves_before_adapter
-      - component_plan_id_maps_to_durable_operation
-      - no_main_merge_or_release
     windows_acceptance: deferred
   wave3:
     name: component_enablement_control_plane
     status: reaudited_source_correctness_closed_real_lifecycle_pending
-    owners:
-      lifecycle: src/services/component_lifecycle_v8.py
-      component_api: src/services/api/components.py
-      component_routes: src/services/api/routes/component_v8.py
-      source_acceptance: src/services/component_enablement_v8.py
-    invariants:
-      - import_and_bundle_use_opaque_durable_operations
-      - source_acceptance_is_catalog_only
-      - reference_existing_never_implies_hub_download
-      - transport_routes_use_application_context_bindings
-      - no_provider_request_during_acceptance
-      - no_implicit_license_acceptance
-      - catalog_disposition_required_for_auto_install
-      - model_auto_install_not_implicitly_enabled
-      - committed_does_not_imply_operational
   wave4:
     name: windows_real_lifecycle_and_product_ux
     status: source_product_ux_reaudited_windows_real_lifecycle_pending
-    source_owners:
-      api_context: src/services/api/context.py
-      component_routes: src/services/api/routes/component_v8.py
-      component_feature: src/ui/features/components/index.js
-      component_renderer: src/ui/features/components/render.js
-      component_control_plane: src/ui/features/components/v8_control_plane.js
-      ui_mount: src/ui/index.html
-      tests: tests/test_v8_wave4_product_ux.py
     source_invariants:
       - opaque_operation_ids_only
       - bounded_operation_list
@@ -107,11 +34,10 @@ waves:
       - truthful_reference_existing_and_manual_install_labels
       - no_product_ux_polling
       - no_page_load_download_or_install
-      - reference_existing_is_non_installing
     windows_acceptance: deferred
   wave5:
-    name: acceptance_and_release
-    status: source_preflight_implemented_release_execution_blocked
+    name: acceptance_gate
+    status: source_preflight_reaudited_and_hardened_windows_acceptance_pending
     source_owners:
       gate_contract: architecture/v8_acceptance_gates.json
       preflight: scripts/v8_acceptance_gate.py
@@ -122,30 +48,48 @@ waves:
       - linux_ci_never_claims_windows_acceptance
       - local_evidence_must_bind_exact_source_commit
       - local_evidence_schema_is_bounded_and_path_free
-      - every_pass_gate_requires_report_sha256
+      - every_pass_gate_requires_actual_local_report
+      - actual_report_sha256_must_match_declared_digest
+      - pass_report_binds_gate_platform_and_source_commit
+      - report_checks_are_finite_and_true
       - version_tag_and_main_merge_are_user_approved_only
-      - historical_v7_release_manifest_is_not_rewritten_as_v8
-      - v8_release_provenance_must_be_separately_reviewed
       - source_preflight_is_read_only
     required_local_gates: 12
+    windows_acceptance: deferred
+  wave6:
+    name: release_provenance_preparation
+    status: source_policy_implemented_release_identity_not_approved
+    source_owners:
+      release_policy: architecture/v8_release_policy.json
+      provenance_preflight: scripts/v8_release_provenance.py
+      tests: tests/test_v8_wave6_release_provenance.py
+      documentation: docs/V8_WAVE6_RELEASE_PROVENANCE_PREPARATION.md
+    source_invariants:
+      - v8_release_policy_is_generation_specific
+      - release_branch_is_feature_local_ai_hub_v8
+      - stable_release_version_major_is_8
+      - release_tag_matches_exact_version
+      - release_tags_are_immutable
+      - candidate_identity_requires_explicit_user_approval
+      - candidate_dry_run_performs_no_writes
+      - historical_v7_release_evidence_is_immutable
+      - product_version_activation_is_separate
+    release_identity: awaiting_user_approval
     release_execution: blocked
-    blocked_until:
-      - wave4_windows_real_lifecycle_acceptance
-      - v8_release_provenance_review
 source_validation:
-  github_actions_run: 699
-  tracked_files: 728
-  v8_tests: 33
-  acceptance_source_preflight: pass_with_expected_release_blockers
-  javascript_syntax: pass
-  diff_check: pass
+  latest_required:
+    - ci_validate
+    - v8_unit_tests
+    - v8_release_policy_source_preflight
+    - v8_acceptance_source_preflight
+    - javascript_syntax
+    - diff_check
 release_blockers:
   - local_windows_evidence_required
-  - product_version_still_v7_1_0
-  - release_branch_still_feature_v7_operational_closure
-  - intended_tag_still_v7_series
-  - historical_release_manifest_still_v7
-  - v8_release_provenance_not_reviewed
+  - v8_release_identity_approval_required
+  - v8_product_version_activation_not_performed
+  - strict_release_preflight_not_passed
+  - user_main_merge_tag_release_approval_required
 deferred_local_acceptance:
   - windows_reparse_junction_and_handle_race_acceptance
   - full_local_artifact_callsite_inventory
