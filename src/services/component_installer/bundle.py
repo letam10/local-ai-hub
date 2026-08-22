@@ -176,7 +176,32 @@ class ComponentBundleService:
             if key in plan
         }
 
-    def _rollback_new_steps(self, installed: list[tuple[str, str]]) -> tuple[bool, list[dict[str, Any]]]:
+    @staticmethod
+    def _progress(progress: Any | None, method: str, *args: Any) -> bool:
+        """Persist a lifecycle milestone before a side effect when available.
+
+        Direct V7 compatibility callers do not provide a progress journal and
+        retain the existing synchronous behavior.  V8 callers use the return
+        value as a fail-closed gate: a journal write failure prevents a new
+        install or an otherwise ambiguous rollback deletion.
+        """
+
+        if progress is None:
+            return True
+        callback = getattr(progress, method, None)
+        if not callable(callback):
+            return False
+        try:
+            return callback(*args) is True
+        except Exception:
+            return False
+
+    def _rollback_new_steps(
+        self,
+        installed: list[tuple[int, str, str]],
+        *,
+        progress: Any | None = None,
+    ) -> tuple[bool, list[dict[str, Any]]]:
         """Compensate only components installed by this confirmation attempt.
 
         Existing/shared dependencies are represented as ``reused`` and never
@@ -187,13 +212,30 @@ class ComponentBundleService:
 
         results: list[dict[str, Any]] = []
         complete = True
-        for node_type, node_id in reversed(installed):
+        for step_index, node_type, node_id in reversed(installed):
+            if not self._progress(progress, "rollback_pending", step_index):
+                complete = False
+                results.append(
+                    {
+                        "component_id": node_id,
+                        "component_type": node_type,
+                        "status": "manual_review",
+                        "code": "bundle_journal_unavailable",
+                        "execution": "not_run",
+                    }
+                )
+                continue
             try:
                 plan = self.installer.plan_maintenance(node_id, action="uninstall")
                 result = self.installer.confirm_maintenance(plan["plan_id"], confirmed=True)
             except Exception:
                 result = {"status": "failed", "code": "bundle_rollback_exception", "execution": "not_run"}
             succeeded = isinstance(result, Mapping) and result.get("status") == "completed"
+            if succeeded and not self._progress(progress, "rolled_back", step_index):
+                succeeded = False
+                result = {"status": "failed", "code": "bundle_journal_unavailable", "execution": "not_run"}
+            if not succeeded:
+                self._progress(progress, "manual_review", step_index)
             complete = complete and succeeded
             results.append(
                 {
@@ -215,9 +257,10 @@ class ComponentBundleService:
         code: object,
         execution: object,
         steps: list[dict[str, Any]],
-        installed: list[tuple[str, str]],
+        installed: list[tuple[int, str, str]],
+        progress: Any | None = None,
     ) -> dict[str, Any]:
-        rolled_back, rollback_steps = self._rollback_new_steps(installed)
+        rolled_back, rollback_steps = self._rollback_new_steps(installed, progress=progress)
         if not rolled_back:
             return {
                 "status": "manual_review",
@@ -240,22 +283,36 @@ class ComponentBundleService:
             "next_action": "The newly installed bundle steps were rolled back; resolve the failed dependency and create a fresh bundle plan.",
         }
 
-    def confirm(self, plan_id: str, *, confirmed: bool = False) -> dict[str, Any]:
+    def confirm(self, plan_id: str, *, confirmed: bool = False, progress: Any | None = None) -> dict[str, Any]:
         plan = self._plans.get(plan_id)
         if not isinstance(plan, Mapping):
             return {"status": "error", "code": "unknown_component_bundle_plan", "execution": "not_run"}
         if not confirmed:
             return {"status": "waiting_confirmation", "plan_id": plan_id, "execution": "not_run", "dry_run": True}
         results: list[dict[str, Any]] = []
-        newly_installed: list[tuple[str, str]] = []
-        for node_type, node_id in plan.get("nodes", []):
+        newly_installed: list[tuple[int, str, str]] = []
+        for expected_index, (node_type, node_id) in enumerate(plan.get("nodes", [])):
             current = self.installer._inspect(node_id, node_type)
             step = next((item for item in plan.get("steps", []) if item.get("component_id") == node_id and item.get("component_type") == node_type), None)
             if not isinstance(step, Mapping):
                 return {"status": "conflict", "code": "bundle_step_missing", "plan_id": plan_id, "execution": "not_run"}
+            step_index = step.get("step_index")
+            if type(step_index) is not int or step_index != expected_index:
+                return {"status": "conflict", "code": "bundle_step_invalid", "plan_id": plan_id, "execution": "not_run"}
             if _state_fingerprint(current) != step.get("state_fingerprint"):
                 return {"status": "conflict", "code": "stale_component_bundle_plan", "plan_id": plan_id, "component_id": node_id, "execution": "not_run", "next_action": "Create a fresh bundle plan."}
             if current.get("status") in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"}:
+                if not self._progress(progress, "reused", step_index):
+                    return self._failure_with_rollback(
+                        plan_id=plan_id,
+                        component_id=node_id,
+                        status="unavailable",
+                        code="bundle_journal_unavailable",
+                        execution="not_run",
+                        steps=results,
+                        installed=newly_installed,
+                        progress=progress,
+                    )
                 results.append({"component_id": node_id, "component_type": node_type, "status": "reused", "state": current.get("status"), "execution": "completed"})
                 continue
             if not step.get("auto_install_supported"):
@@ -267,11 +324,24 @@ class ComponentBundleService:
                     execution="not_run",
                     steps=results,
                     installed=newly_installed,
+                    progress=progress,
+                )
+            if not self._progress(progress, "installing", step_index):
+                return self._failure_with_rollback(
+                    plan_id=plan_id,
+                    component_id=node_id,
+                    status="unavailable",
+                    code="bundle_journal_unavailable",
+                    execution="not_run",
+                    steps=results,
+                    installed=newly_installed,
+                    progress=progress,
                 )
             try:
                 child = self.installer.plan_install(node_id, component_type=node_type, variant=str(plan.get("variant") or "default"))
                 applied = self.installer.confirm_plan(child["plan_id"], confirmed=True)
             except Exception:
+                self._progress(progress, "manual_review", step_index)
                 return self._failure_with_rollback(
                     plan_id=plan_id,
                     component_id=node_id,
@@ -280,9 +350,11 @@ class ComponentBundleService:
                     execution="not_run",
                     steps=results,
                     installed=newly_installed,
+                    progress=progress,
                 )
             results.append({"component_id": node_id, "component_type": node_type, "status": applied.get("status"), "state": applied.get("state"), "code": applied.get("code"), "execution": applied.get("execution", "not_run")})
             if applied.get("status") != "completed":
+                self._progress(progress, "manual_review", step_index)
                 return self._failure_with_rollback(
                     plan_id=plan_id,
                     component_id=node_id,
@@ -291,8 +363,20 @@ class ComponentBundleService:
                     execution=applied.get("execution", "not_run"),
                     steps=results,
                     installed=newly_installed,
+                    progress=progress,
                 )
-            newly_installed.append((node_type, node_id))
+            newly_installed.append((step_index, node_type, node_id))
+            if not self._progress(progress, "installed", step_index):
+                return self._failure_with_rollback(
+                    plan_id=plan_id,
+                    component_id=node_id,
+                    status="unavailable",
+                    code="bundle_journal_unavailable",
+                    execution="not_run",
+                    steps=results,
+                    installed=newly_installed,
+                    progress=progress,
+                )
         return {"status": "completed", "plan_id": plan_id, "component_id": plan["component_id"], "state": "INSTALLED_UNVERIFIED", "execution": "completed", "dry_run": False, "steps": results, "next_action": "Refresh the component snapshot and run the bounded adapter verification."}
 
 

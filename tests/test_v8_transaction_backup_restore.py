@@ -11,6 +11,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from src.services.transaction_store import (
     SCHEMA_VERSION,
@@ -144,6 +145,17 @@ class V8TransactionBackupRestoreTests(unittest.TestCase):
         self.assertIsNotNone(snap.public_artifact(first_artifact))
         self.assertEqual(len(snap.list_public_artifacts()), 1)
         self.assertEqual(len(self.store.list_public_artifacts()), 2)
+
+    def test_backup_uses_read_only_source_connection(self) -> None:
+        self._published_artifact("a")
+        snapshot = self.root / "readonly-source.sqlite3"
+        # _connect() configures a write-capable SQLite connection.  A backup
+        # must not invoke it against the live Config journal merely to take a
+        # coherent snapshot.
+        with patch.object(V8TransactionStore, "_connect", side_effect=AssertionError("write connection forbidden")):
+            result = self.store.backup_to(snapshot)
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(snapshot.is_file())
 
 
 if __name__ == "__main__":

@@ -102,7 +102,13 @@ class _FakeBundle:
             "component_id": component_id,
             "component_type": component_type,
             "variant": variant,
-            "steps": [{"step_index": 0, "component_id": component_id, "component_type": component_type, "action": "install"}],
+            "steps": [{
+                "step_index": 0,
+                "component_id": component_id,
+                "component_type": component_type,
+                "action": "install",
+                "state_fingerprint": _fingerprint(f"{component_type}:{component_id}:state"),
+            }],
             "preserve_existing_dependencies": True,
             "shared_dependency_policy": "deduplicate_and_preserve_referenced",
             "status": "planned",
@@ -116,7 +122,8 @@ class _FakeBundle:
         value = self.plans.get(plan_id)
         return dict(value) if value is not None else None
 
-    def confirm(self, plan_id: str, *, confirmed: bool) -> dict[str, object]:
+    def confirm(self, plan_id: str, *, confirmed: bool, progress: object = None) -> dict[str, object]:
+        del progress
         self.confirm_calls += 1
         return {
             "status": "completed",

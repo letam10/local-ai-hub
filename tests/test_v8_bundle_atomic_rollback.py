@@ -2,20 +2,33 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import tempfile
 from typing import Any
 import unittest
 
 from src.services.component_installer.bundle import ComponentBundleService
+from src.services.component_lifecycle_v8 import ComponentLifecycleCoordinator
+from src.services.transaction_store import V8TransactionStore
 
 
 class _Installer:
-    def __init__(self, *, existing_runtime: bool = False, rollback_fails: bool = False, model_raises: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        existing_runtime: bool = False,
+        rollback_fails: bool = False,
+        model_raises: bool = False,
+        crash_before_model_inspect: bool = False,
+        states: dict[tuple[str, str], str] | None = None,
+    ) -> None:
         self.states = {
             ("runtime", "demo-runtime"): "INSTALLED_UNVERIFIED" if existing_runtime else "UNAVAILABLE",
             ("model", "demo-model"): "UNAVAILABLE",
-        }
+        } if states is None else states
         self.rollback_fails = rollback_fails
         self.model_raises = model_raises
+        self.crash_before_model_inspect = crash_before_model_inspect
         self.install_calls: list[tuple[str, str]] = []
         self.rollback_calls: list[tuple[str, str]] = []
         self._plans: dict[str, dict[str, str]] = {}
@@ -41,6 +54,12 @@ class _Installer:
         }
 
     def _inspect(self, component_id: str, component_type: str) -> dict[str, str]:
+        if (
+            self.crash_before_model_inspect
+            and (component_type, component_id) == ("model", "demo-model")
+            and self.states[("runtime", "demo-runtime")] == "INSTALLED_UNVERIFIED"
+        ):
+            raise SystemExit("synthetic process interruption")
         return {"status": self.states[(component_type, component_id)]}
 
     @staticmethod
@@ -135,6 +154,78 @@ class V8BundleAtomicRollbackTests(unittest.TestCase):
         self.assertEqual(result["code"], "bundle_step_exception")
         self.assertEqual(installer.rollback_calls, [("runtime", "demo-runtime")])
         self.assertEqual(installer.states[("runtime", "demo-runtime")], "UNAVAILABLE")
+
+    def test_completed_compensation_is_durable_and_not_replayed_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            store = V8TransactionStore(Path(raw) / "control.sqlite3")
+            installer = _Installer()
+            lifecycle = ComponentLifecycleCoordinator(
+                installer=installer,
+                store=store,
+                bundle_service=ComponentBundleService(installer),
+            )
+            planned = lifecycle.plan_bundle("demo-model", component_type="model")
+            operation_id = str(planned["operation_id"])
+
+            result = lifecycle.confirm_operation(operation_id, confirmed=True)
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(installer.rollback_calls, [("runtime", "demo-runtime")])
+            self.assertEqual(
+                [item["phase"] for item in store.component_bundle_steps(operation_id)],
+                ["rolled_back", "manual_review"],
+            )
+
+            restarted = ComponentLifecycleCoordinator(
+                installer=_Installer(states=installer.states),
+                store=V8TransactionStore(Path(raw) / "control.sqlite3"),
+                bundle_service=ComponentBundleService(_Installer(states=installer.states)),
+            )
+            reconciliation = restarted.reconcile_startup()
+            self.assertEqual(reconciliation, {"blocked": 0, "retained": 1})
+            self.assertEqual(installer.rollback_calls, [("runtime", "demo-runtime")])
+
+    def test_restart_with_interrupted_new_step_is_manual_review_without_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "control.sqlite3"
+            installer = _Installer(crash_before_model_inspect=True)
+            lifecycle = ComponentLifecycleCoordinator(
+                installer=installer,
+                store=V8TransactionStore(path),
+                bundle_service=ComponentBundleService(installer),
+            )
+            planned = lifecycle.plan_bundle("demo-model", component_type="model")
+            operation_id = str(planned["operation_id"])
+
+            with self.assertRaises(SystemExit):
+                lifecycle.confirm_operation(operation_id, confirmed=True)
+            self.assertEqual(installer.states[("runtime", "demo-runtime")], "INSTALLED_UNVERIFIED")
+            self.assertEqual(lifecycle.inspect_operation(operation_id)["state"], "executing")
+            self.assertEqual(
+                [item["phase"] for item in lifecycle.store.component_bundle_steps(operation_id)],
+                ["installed", "pending"],
+            )
+
+            restarted_installer = _Installer(states=installer.states)
+            restarted = ComponentLifecycleCoordinator(
+                installer=restarted_installer,
+                store=V8TransactionStore(path),
+                bundle_service=ComponentBundleService(restarted_installer),
+            )
+            reconciliation = restarted.reconcile_startup()
+            self.assertEqual(reconciliation, {"blocked": 1, "retained": 0})
+            recovered = restarted.inspect_operation(operation_id)
+            self.assertIsNotNone(recovered)
+            assert recovered is not None
+            self.assertEqual(recovered["state"], "blocked")
+            self.assertEqual(recovered["result_code"], "bundle_restart_manual_review")
+            self.assertEqual(restarted_installer.rollback_calls, [])
+            self.assertEqual(restarted_installer.states[("runtime", "demo-runtime")], "INSTALLED_UNVERIFIED")
+            self.assertEqual(
+                [item["phase"] for item in restarted.store.component_bundle_steps(operation_id)],
+                ["manual_review", "pending"],
+            )
+            self.assertEqual(restarted.reconcile_startup(), {"blocked": 0, "retained": 1})
+            self.assertEqual(restarted_installer.rollback_calls, [])
 
 
 if __name__ == "__main__":

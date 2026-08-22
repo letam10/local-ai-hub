@@ -8,6 +8,7 @@ reservation/job/transaction binding has been proven.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import os
@@ -49,6 +50,22 @@ _COMPONENT_TRANSITIONS = {
     "blocked": frozenset(),
     "cancelled": frozenset(),
 }
+
+# A component-bundle journal intentionally uses the existing opaque component
+# operation as its parent.  It records only component identities and state
+# fingerprints that were already server-owned by the bundle plan; no source,
+# destination, selection, or runtime handle is persisted here.
+_BUNDLE_STEP_PHASES = frozenset(
+    {
+        "pending",
+        "reused",
+        "installing",
+        "installed",
+        "rollback_pending",
+        "rolled_back",
+        "manual_review",
+    }
+)
 
 
 class TransactionStoreError(RuntimeError):
@@ -221,8 +238,21 @@ class V8TransactionStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS component_bundle_steps(
+                    operation_id TEXT NOT NULL,
+                    step_index INTEGER NOT NULL CHECK(step_index >= 0 AND step_index < 64),
+                    component_id TEXT NOT NULL,
+                    component_type TEXT NOT NULL CHECK(component_type IN ('model','runtime')),
+                    state_fingerprint TEXT NOT NULL,
+                    phase TEXT NOT NULL CHECK(phase IN ('pending','reused','installing','installed','rollback_pending','rolled_back','manual_review')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(operation_id, step_index),
+                    FOREIGN KEY(operation_id) REFERENCES component_operations(operation_id) ON DELETE RESTRICT
+                );
                 CREATE INDEX IF NOT EXISTS idx_artifact_visibility ON artifact_objects(visibility, created_at);
                 CREATE INDEX IF NOT EXISTS idx_component_operations ON component_operations(component_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_component_bundle_steps ON component_bundle_steps(operation_id, step_index);
                 """
             )
             row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
@@ -341,7 +371,12 @@ class V8TransactionStore:
         temporary = self._temporary_sibling(target, prefix="backup")
         try:
             with self._lock:
-                source = self._connect()
+                # A backup is a read-only observation of the live journal.
+                # Opening it through the ordinary write connection would run
+                # journal-mode pragmas against a real Config database merely
+                # to create a snapshot.  SQLite's backup API supports a
+                # read-only source, so keep the source leaf untouched.
+                source = self._readonly_connection(self.path)
                 try:
                     self._copy_sqlite(source, temporary)
                 finally:
@@ -823,6 +858,109 @@ class V8TransactionStore:
             if item is not None:
                 result.append(item)
         return result
+
+    def create_component_bundle_journal(
+        self,
+        operation_id: str,
+        *,
+        steps: list[Mapping[str, Any]],
+    ) -> None:
+        """Persist the exact server-owned bundle step set before execution.
+
+        This is deliberately separate from the in-memory V7 plan.  It gives a
+        restarted V8 coordinator just enough evidence to compensate a step
+        that was durably observed as newly installed, without re-running the
+        original plan or guessing about a step that was interrupted mid-call.
+        """
+
+        if not isinstance(operation_id, str) or _OPERATION_ID.fullmatch(operation_id) is None:
+            raise TransactionStoreError("invalid_operation_id")
+        if not isinstance(steps, list) or not 1 <= len(steps) <= 64:
+            raise TransactionStoreError("invalid_component_bundle_steps")
+        prepared: list[tuple[int, str, str, str]] = []
+        for index, step in enumerate(steps):
+            if not isinstance(step, Mapping):
+                raise TransactionStoreError("invalid_component_bundle_steps")
+            step_index = step.get("step_index")
+            component_id = step.get("component_id")
+            component_type = step.get("component_type")
+            fingerprint = step.get("state_fingerprint")
+            if (
+                type(step_index) is not int
+                or step_index != index
+                or not isinstance(component_id, str)
+                or _COMPONENT_ID.fullmatch(component_id) is None
+                or component_type not in {"model", "runtime"}
+                or not isinstance(fingerprint, str)
+                or _FINGERPRINT.fullmatch(fingerprint) is None
+            ):
+                raise TransactionStoreError("invalid_component_bundle_steps")
+            prepared.append((step_index, component_id, str(component_type), fingerprint))
+        timestamp = _now()
+        with self._write() as db:
+            operation = db.execute(
+                "SELECT action,state FROM component_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if operation is None or operation["action"] != "bundle" or operation["state"] != "planned":
+                raise TransactionStoreError("invalid_component_bundle_operation")
+            existing = db.execute(
+                "SELECT 1 FROM component_bundle_steps WHERE operation_id=? LIMIT 1", (operation_id,)
+            ).fetchone()
+            if existing is not None:
+                raise TransactionStoreError("component_bundle_journal_exists")
+            db.executemany(
+                """
+                INSERT INTO component_bundle_steps(
+                    operation_id,step_index,component_id,component_type,state_fingerprint,phase,created_at,updated_at
+                ) VALUES(?,?,?,?,?,'pending',?,?)
+                """,
+                [(operation_id, index, component_id, component_type, fingerprint, timestamp, timestamp)
+                 for index, component_id, component_type, fingerprint in prepared],
+            )
+
+    def transition_component_bundle_step(
+        self,
+        operation_id: str,
+        *,
+        step_index: int,
+        expected_phase: str,
+        target_phase: str,
+    ) -> bool:
+        if not isinstance(operation_id, str) or _OPERATION_ID.fullmatch(operation_id) is None:
+            raise TransactionStoreError("invalid_operation_id")
+        if type(step_index) is not int or not 0 <= step_index < 64:
+            raise TransactionStoreError("invalid_component_bundle_step")
+        if expected_phase not in _BUNDLE_STEP_PHASES or target_phase not in _BUNDLE_STEP_PHASES:
+            raise TransactionStoreError("invalid_component_bundle_phase")
+        timestamp = _now()
+        with self._write() as db:
+            row = db.execute(
+                "SELECT phase FROM component_bundle_steps WHERE operation_id=? AND step_index=?",
+                (operation_id, step_index),
+            ).fetchone()
+            if row is None or row["phase"] != expected_phase:
+                return False
+            db.execute(
+                """
+                UPDATE component_bundle_steps SET phase=?,updated_at=?
+                WHERE operation_id=? AND step_index=? AND phase=?
+                """,
+                (target_phase, timestamp, operation_id, step_index, expected_phase),
+            )
+        return True
+
+    def component_bundle_steps(self, operation_id: str) -> list[dict[str, Any]]:
+        if not isinstance(operation_id, str) or _OPERATION_ID.fullmatch(operation_id) is None:
+            return []
+        with self._read() as db:
+            rows = db.execute(
+                """
+                SELECT step_index,component_id,component_type,state_fingerprint,phase
+                FROM component_bundle_steps WHERE operation_id=? ORDER BY step_index ASC
+                """,
+                (operation_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
 
 __all__ = ["SCHEMA_VERSION", "TransactionStoreError", "V8TransactionStore"]

@@ -76,6 +76,53 @@ class ComponentLifecycleError(RuntimeError):
         self.code = code
 
 
+class _BundleProgress:
+    """Durable, fail-closed milestones for one V8 bundle confirmation.
+
+    The journal is written before an install and before a compensating
+    uninstall.  A process restart is intentionally *not* allowed to infer
+    ownership from a component name and delete it: ambiguous in-flight steps
+    become manual review instead.
+    """
+
+    def __init__(self, store: V8TransactionStore, operation_id: str) -> None:
+        self._store = store
+        self._operation_id = operation_id
+
+    def _transition(self, step_index: int, expected: tuple[str, ...], target: str) -> bool:
+        for phase in expected:
+            if self._store.transition_component_bundle_step(
+                self._operation_id,
+                step_index=step_index,
+                expected_phase=phase,
+                target_phase=target,
+            ):
+                return True
+        return False
+
+    def reused(self, step_index: int) -> bool:
+        return self._transition(step_index, ("pending",), "reused")
+
+    def installing(self, step_index: int) -> bool:
+        return self._transition(step_index, ("pending",), "installing")
+
+    def installed(self, step_index: int) -> bool:
+        return self._transition(step_index, ("installing",), "installed")
+
+    def rollback_pending(self, step_index: int) -> bool:
+        return self._transition(step_index, ("installed", "installing"), "rollback_pending")
+
+    def rolled_back(self, step_index: int) -> bool:
+        return self._transition(step_index, ("rollback_pending",), "rolled_back")
+
+    def manual_review(self, step_index: int) -> bool:
+        return self._transition(
+            step_index,
+            ("pending", "installing", "installed", "rollback_pending"),
+            "manual_review",
+        )
+
+
 def _safe_code(value: object, fallback: str) -> str:
     if isinstance(value, str):
         candidate = re.sub(r"[^a-z0-9_-]+", "_", value.strip().lower()).strip("_")
@@ -258,7 +305,29 @@ class ComponentLifecycleCoordinator:
         variant: str = "default",
     ) -> dict[str, Any]:
         plan = self.bundle_service().plan(component_id, component_type=component_type, variant=variant)
-        return self._register(plan, component_id=component_id, component_type=component_type, action="bundle")
+        public = self._register(plan, component_id=component_id, component_type=component_type, action="bundle")
+        operation_id = public.get("operation_id")
+        steps = plan.get("steps")
+        if not isinstance(operation_id, str) or not isinstance(steps, list):
+            raise ComponentLifecycleError("plan_contract_incomplete")
+        try:
+            self.store.create_component_bundle_journal(operation_id, steps=steps)
+        except TransactionStoreError as exc:
+            self.store.transition_component_operation(
+                operation_id,
+                expected_state="planned",
+                target_state="blocked",
+                result_code="bundle_journal_unavailable",
+            )
+            return {
+                **public,
+                "status": "unavailable",
+                "code": "bundle_journal_unavailable",
+                "operation_state": "blocked",
+                "execution": "not_run",
+                "dry_run": True,
+            }
+        return public
 
     def plan_maintenance(
         self,
@@ -322,7 +391,11 @@ class ComponentLifecycleCoordinator:
         elif action == "import":
             value = self.installer.confirm_import(plan_id, confirmed=True)
         elif action == "bundle":
-            value = self.bundle_service().confirm(plan_id, confirmed=True)
+            value = self.bundle_service().confirm(
+                plan_id,
+                confirmed=True,
+                progress=_BundleProgress(self.store, str(operation["operation_id"])),
+            )
         elif action in {"repair", "update", "uninstall"}:
             value = self.installer.confirm_maintenance(plan_id, confirmed=True, catalog_binding=catalog_binding)
         else:
@@ -500,6 +573,23 @@ class ComponentLifecycleCoordinator:
                 continue
             operation_id = str(operation.get("operation_id") or "")
             if not operation_id:
+                continue
+            if state == "executing" and operation.get("action") == "bundle":
+                # The durable journal distinguishes untouched/reused steps
+                # from steps that might have crossed a process boundary.  Do
+                # not guess that a component name is still ours and uninstall
+                # it after restart; mark such steps for bounded manual review.
+                for step in self.store.component_bundle_steps(operation_id):
+                    phase = step.get("phase")
+                    if phase in {"installing", "installed", "rollback_pending"}:
+                        _BundleProgress(self.store, operation_id).manual_review(int(step["step_index"]))
+                if self.store.transition_component_operation(
+                    operation_id,
+                    expected_state="executing",
+                    target_state="blocked",
+                    result_code="bundle_restart_manual_review",
+                ):
+                    blocked += 1
                 continue
             plan_exists = state == "planned" and self._plan_exists(operation)
             if plan_exists:
