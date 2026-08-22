@@ -259,6 +259,70 @@ class V8StorageTransactionAuthorityTests(unittest.TestCase):
         self.assertIsNone(published)
         self.assertEqual(self.store.list_public_artifacts(), [])
 
+    def test_replacement_after_commit_callback_is_revoked_without_deleting_foreign_bytes(self) -> None:
+        authority = self._authority()
+        job_id = _job("5")
+        reservation = authority.begin_reservation(job_id)
+        producer = self.data / "Output" / "post-commit-replacement.bin"
+        producer.write_bytes(b"owned bytes")
+        original_commit = self.store.commit_output_transaction
+
+        def commit_then_replace(transaction_id: str, reservation_id: str, committing_job_id: str):
+            published = original_commit(transaction_id, reservation_id, committing_job_id)
+            self.assertIsNotNone(published)
+            assert published is not None
+            lease = authority.storage.lease("output", create=True)
+            managed = authority.storage.resolve_relative(
+                lease,
+                self.store.internal_artifact(str(published[0]["id"]))["object_key"],
+                require_exists=True,
+            )
+            replacement = managed.with_name("foreign-post-commit.bin")
+            replacement.write_bytes(b"foreign post-commit bytes")
+            replacement.replace(managed)
+            return published
+
+        with patch.object(self.store, "commit_output_transaction", side_effect=commit_then_replace):
+            published = authority.publish_owned_candidates(
+                reservation_id=reservation,
+                job_id=job_id,
+                candidates=[producer],
+                provenance=_provenance(job_id),
+            )
+
+        self.assertIsNone(published)
+        self.assertEqual(self.store.list_public_artifacts(), [])
+        managed = self.data / "Output" / ".hub-v8" / "objects"
+        replacements = list(managed.rglob("foreign-post-commit.bin")) if managed.exists() else []
+        self.assertEqual(len(replacements), 1)
+        self.assertEqual(replacements[0].read_bytes(), b"foreign post-commit bytes")
+
+    def test_publication_rollback_is_idempotent_and_removes_index_rows(self) -> None:
+        job_id = _job("6")
+        reservation = self.store.create_output_reservation(job_id)
+        transaction = self.store.create_output_transaction(reservation, job_id)
+        artifact_id = self.store.stage_artifact(
+            transaction_id=transaction,
+            reservation_id=reservation,
+            job_id=job_id,
+            object_id="obj_" + "6" * 32,
+            object_key=".hub-v8/objects/66/obj_" + "6" * 32,
+            name="result.bin",
+            media_type="application/octet-stream",
+            size_bytes=1,
+            sha256=hashlib.sha256(b"x").hexdigest(),
+            file_device=1,
+            file_inode=2,
+            file_mtime_ns=3,
+            provenance=_provenance(job_id),
+        )
+
+        self.assertTrue(self.store.rollback_output_transaction(transaction, reservation, job_id))
+        self.assertTrue(self.store.rollback_output_transaction(transaction, reservation, job_id))
+        self.assertIsNone(self.store.internal_artifact(artifact_id))
+        self.assertIsNone(self.store.public_artifact(artifact_id))
+        self.assertEqual(self.store.list_public_artifacts(), [])
+
     def test_disk_full_during_managed_copy_aborts_without_public_artifact(self) -> None:
         authority = self._authority()
         job_id = _job("4")

@@ -322,12 +322,32 @@ class OutputAuthority:
                     raise OutputAuthorityError("transaction_authorization_failed")
                 lease.assert_current()
                 published = self.store.commit_output_transaction(transaction_id, reservation_id, job_id)
-                return published if isinstance(published, list) and len(published) == len(prepared) else None
+                if not isinstance(published, list) or len(published) != len(prepared):
+                    raise OutputAuthorityError("publication_incomplete")
+                # Keep the publication hold active while checking the
+                # identity recorded for every managed object.  On POSIX the
+                # pathname can be replaced despite O_NOFOLLOW; the storage
+                # context performs a second check on exit and this explicit
+                # check lets us fail before returning a public result.
+                for artifact_id, _relative, _identity in prepared:
+                    row = self.store.internal_artifact(artifact_id)
+                    if row is None:
+                        raise OutputAuthorityError("published_artifact_missing")
+                    self._validate_managed_row(lease, row)
+                return published
         except (OutputAuthorityError, StorageAuthorityError, TransactionStoreError, OSError, ValueError):
             try:
-                self.store.abort_output_transaction(transaction_id, reservation_id, job_id)
+                # ``commit_output_transaction`` may already have made rows
+                # public when a POSIX replacement is detected while the hold
+                # context exits.  Roll back the journal/index in one write
+                # transaction; cleanup below remains identity-attested and
+                # therefore preserves any foreign replacement bytes.
+                self.store.rollback_output_transaction(transaction_id, reservation_id, job_id)
             except TransactionStoreError:
-                pass
+                try:
+                    self.store.abort_output_transaction(transaction_id, reservation_id, job_id)
+                except TransactionStoreError:
+                    pass
             for _artifact_id, relative, identity in prepared:
                 self._cleanup_object(lease, relative, identity)
             return None

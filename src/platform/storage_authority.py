@@ -313,6 +313,25 @@ class StorageAuthority:
             if not expected.same_file_state(FileIdentity.from_stat(current_stat)):
                 raise StorageAuthorityError("managed_leaf_identity_changed")
             yield fd
+            # POSIX ``O_NOFOLLOW`` protects the object opened by ``fd`` but
+            # does not stop another process from replacing the pathname with
+            # ``rename(2)`` while the handle is held.  Revalidate both the
+            # handle and the managed pathname after the caller's publication
+            # boundary so a pathname replacement can never be reported as a
+            # successful public commit.  Windows' deny-share handle still
+            # provides the stronger prevention guarantee; this check is the
+            # cross-platform detection/rollback boundary.
+            if not expected.same_file_state(FileIdentity.from_stat(os.fstat(fd))):
+                raise StorageAuthorityError("managed_leaf_identity_changed")
+            lease.assert_current()
+            final_stat = self._lstat(candidate)
+            if (
+                final_stat is None
+                or not stat.S_ISREG(final_stat.st_mode)
+                or is_reparse_point(candidate)
+                or not expected.same_file_state(FileIdentity.from_stat(final_stat))
+            ):
+                raise StorageAuthorityError("managed_leaf_identity_changed")
         except StorageAuthorityError:
             raise
         except (AttributeError, ImportError, OSError, TypeError, ValueError):

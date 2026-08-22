@@ -39,7 +39,7 @@ Job
 
 `transaction_id`, `reservation_id` và `job_id` phải khớp cùng một tuple. Một transaction hợp lệ không thể được publish bằng reservation/job khác.
 
-Publication dùng hai bước nội bộ: `preparing → authorized → committed`. Artifact ở `staged` không xuất hiện trong public query. Final commit đổi artifact sang `published`, transaction sang `committed` và reservation sang `published` trong cùng một SQLite transaction. Không có mandatory manifest write sau public commit.
+Publication dùng hai bước nội bộ: `preparing → authorized → committed`. Artifact ở `staged` không xuất hiện trong public query. Final commit đổi artifact sang `published`, transaction sang `committed` và reservation sang `published` trong cùng một SQLite transaction. Storage hold revalidate identity khi boundary đóng; nếu POSIX rename/replace được phát hiện sau SQLite commit, một compensating transaction xoá public index rows và chuyển journal về `aborted` trước khi caller nhận success. Cleanup vẫn identity-attested và không xoá foreign bytes. Không có mandatory manifest write sau public commit.
 
 ## Immutable managed object
 

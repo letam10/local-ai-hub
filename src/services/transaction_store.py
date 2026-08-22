@@ -754,6 +754,46 @@ class V8TransactionStore:
             )
         return True
 
+    def rollback_output_transaction(self, transaction_id: str, reservation_id: str, job_id: str) -> bool:
+        """Compensate a publication whose final identity proof failed.
+
+        A POSIX pathname can be replaced after an open handle is acquired.  A
+        caller therefore may discover the mismatch only while leaving the
+        final publication hold, after SQLite has made the rows visible.  This
+        narrow compensating transaction removes the public index rows and
+        marks both journal records aborted; it never deletes the managed file
+        itself.  Repeated reconciliation is intentionally idempotent.
+        """
+
+        transaction_id = self._require_transaction_id(transaction_id)
+        reservation_id = self._require_reservation_id(reservation_id)
+        job_id = self._require_job_id(job_id)
+        timestamp = _now()
+        with self._write() as db:
+            transaction = db.execute(
+                "SELECT state FROM output_transactions WHERE transaction_id=? AND reservation_id=? AND job_id=?",
+                (transaction_id, reservation_id, job_id),
+            ).fetchone()
+            reservation = db.execute(
+                "SELECT state FROM output_reservations WHERE reservation_id=? AND job_id=?",
+                (reservation_id, job_id),
+            ).fetchone()
+            if transaction is None or reservation is None:
+                return False
+            db.execute(
+                "DELETE FROM artifact_objects WHERE transaction_id=? AND reservation_id=? AND job_id=?",
+                (transaction_id, reservation_id, job_id),
+            )
+            db.execute(
+                "UPDATE output_transactions SET state='aborted', updated_at=? WHERE transaction_id=? AND reservation_id=? AND job_id=?",
+                (timestamp, transaction_id, reservation_id, job_id),
+            )
+            db.execute(
+                "UPDATE output_reservations SET state='aborted', updated_at=? WHERE reservation_id=? AND job_id=?",
+                (timestamp, reservation_id, job_id),
+            )
+        return True
+
     def abort_reservation(self, reservation_id: str, job_id: str) -> bool:
         reservation_id = self._require_reservation_id(reservation_id)
         job_id = self._require_job_id(job_id)
