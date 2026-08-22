@@ -23,6 +23,8 @@ jobs:
           python-version: "3.12"
       - name: Validate tracked repository files
         run: python scripts/ci_validate.py
+      - name: Run V8 foundation contract tests
+        run: python -m unittest discover -s tests -p "test_v8_*.py"
       - name: Check pull request whitespace
         if: github.event_name == 'pull_request'
         run: git diff --check "${{ github.event.pull_request.base.sha }}" HEAD
