@@ -72,7 +72,15 @@ class _FakeInstaller:
         value = self.plans.get(plan_id)
         return dict(value) if value is not None else None
 
-    def confirm_plan(self, plan_id: str, *, confirmed: bool, catalog_binding: object = None) -> dict[str, object]:
+    def confirm_plan(
+        self,
+        plan_id: str,
+        *,
+        confirmed: bool,
+        cancel_event: object = None,
+        catalog_binding: object = None,
+    ) -> dict[str, object]:
+        del cancel_event
         self.confirm_calls += 1
         return {
             "status": "completed",

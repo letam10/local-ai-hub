@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import re
+import threading
 from typing import Any
 
 from src.services.transaction_store import TransactionStoreError, V8TransactionStore
@@ -141,6 +142,12 @@ class ComponentLifecycleCoordinator:
         self.installer = installer
         self.store = store or V8TransactionStore.for_paths(getattr(installer, "paths", None))
         self._bundle_service = bundle_service
+        # This is intentionally process-local: it binds an executing V8
+        # operation only to the cancellation primitive created by its own
+        # installer invocation.  Durable records never contain a callable,
+        # PID or guessed component job ID.
+        self._operation_cancel_events: dict[str, threading.Event] = {}
+        self._operation_cancel_lock = threading.RLock()
 
     def bundle_service(self) -> Any:
         if self._bundle_service is None:
@@ -297,11 +304,17 @@ class ComponentLifecycleCoordinator:
         operation: Mapping[str, Any],
         *,
         catalog_binding: Any | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
         plan_id = str(operation["plan_id"])
         action = str(operation["action"])
         if action == "install":
-            value = self.installer.confirm_plan(plan_id, confirmed=True, catalog_binding=catalog_binding)
+            value = self.installer.confirm_plan(
+                plan_id,
+                confirmed=True,
+                cancel_event=cancel_event,
+                catalog_binding=catalog_binding,
+            )
         elif action == "verify":
             value = self.installer.confirm_verify(plan_id, confirmed=True, catalog_binding=catalog_binding)
         elif action == "reuse":
@@ -378,10 +391,23 @@ class ComponentLifecycleCoordinator:
                 "execution": "not_run",
             }
 
+        action = str(operation.get("action") or "")
+        cancel_event = threading.Event() if action == "install" else None
+        if cancel_event is not None:
+            with self._operation_cancel_lock:
+                self._operation_cancel_events[operation_id] = cancel_event
         try:
-            result = self._delegate(operation, catalog_binding=catalog_binding)
+            result = self._delegate(
+                operation,
+                catalog_binding=catalog_binding,
+                cancel_event=cancel_event,
+            )
         except Exception:
             result = {"status": "error", "code": "component_executor_exception"}
+        finally:
+            if cancel_event is not None:
+                with self._operation_cancel_lock:
+                    self._operation_cancel_events.pop(operation_id, None)
 
         target, code = self._terminal_target(result)
         if target == "committed":
@@ -410,16 +436,36 @@ class ComponentLifecycleCoordinator:
         return public
 
     def cancel_operation(self, operation_id: str) -> dict[str, Any]:
-        """Cancel only a not-yet-executing operation.
+        """Request cancellation only through a matching owned active bridge.
 
-        Running V7 installer/bundle cancellation uses a separate process-local
-        contract and is intentionally not guessed from the durable journal.
+        Planned work transitions durably to ``cancelled``.  An executing install
+        is never force-stopped from a durable operation ID: cancellation is
+        forwarded only to the exact process-local event created for that
+        invocation.  Other executing action types remain fail-closed.
         """
 
         operation = self.store.component_operation(operation_id)
         if operation is None:
             return {"status": "error", "code": "unknown_component_operation", "execution": "not_run"}
         state = str(operation.get("state") or "")
+        if state == "executing":
+            with self._operation_cancel_lock:
+                event = self._operation_cancel_events.get(operation_id)
+            if event is None:
+                return {
+                    "status": "conflict",
+                    "code": "component_operation_not_cancellable",
+                    "operation": operation,
+                    "execution": "not_run",
+                }
+            event.set()
+            return {
+                "status": "cancelling",
+                "code": "component_operation_cancellation_requested",
+                "operation": operation,
+                "execution": "running",
+                "next_action": "The owned installer will stop at its next bounded cancellation point.",
+            }
         if state != "planned":
             return {
                 "status": "conflict",

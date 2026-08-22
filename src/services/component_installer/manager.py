@@ -401,7 +401,14 @@ class ComponentInstaller:
             "next_action": "Confirm this exact plan or choose a managed manual-import flow.",
         }
 
-    def confirm_plan(self, plan_id: str, *, confirmed: bool = False, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def confirm_plan(
+        self,
+        plan_id: str,
+        *,
+        confirmed: bool = False,
+        cancel_event: threading.Event | None = None,
+        catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         internal = self._plans.get(plan_id)
         if not internal:
             return {"status": "error", "code": "unknown_install_plan"}
@@ -418,7 +425,12 @@ class ComponentInstaller:
         dependency_block = next((item for item in internal.get("dependencies", []) if item.get("status") not in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"}), None)
         if dependency_block is not None:
             return {"status": "unavailable", "code": "dependency_unavailable", "plan_id": plan_id, "execution": "not_run", "dependency": {key: dependency_block.get(key) for key in ("kind", "component_id", "status", "disposition")}, "next_action": "Review or install the exact server-owned dependency before confirming this bundle."}
-        return self.apply_plan(plan_id, confirmed=True, catalog_binding=current_binding)
+        return self.apply_plan(
+            plan_id,
+            confirmed=True,
+            cancel_event=cancel_event,
+            catalog_binding=current_binding,
+        )
 
     def apply_plan(self, plan_id: str, *, confirmed: bool = False, cancel_event: Any | None = None, catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Execute a complete trusted one-leaf plan through bounded staging.

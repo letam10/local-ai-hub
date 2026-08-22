@@ -72,7 +72,15 @@ class FakeInstaller:
             return {"status": "error", "code": "unknown_plan"}
         return dict(self.next_result)
 
-    def confirm_plan(self, plan_id: str, *, confirmed: bool, catalog_binding: object = None) -> dict[str, object]:
+    def confirm_plan(
+        self,
+        plan_id: str,
+        *,
+        confirmed: bool,
+        cancel_event: object = None,
+        catalog_binding: object = None,
+    ) -> dict[str, object]:
+        del cancel_event
         return self._confirm(plan_id)
 
     def confirm_verify(self, plan_id: str, *, confirmed: bool, catalog_binding: object = None) -> dict[str, object]:
