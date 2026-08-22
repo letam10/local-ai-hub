@@ -1,12 +1,13 @@
-"""V8 Wave 5 source preflight tests.
+"""V8 Wave 5 acceptance preflight tests.
 
-The suite validates only the tracked acceptance contract and synthetic bounded
-evidence. It never treats Linux CI as Windows acceptance and never creates a
+The suite validates tracked contracts and synthetic bounded evidence/report
+bundles only. It never treats Linux CI as Windows acceptance and never creates a
 version, tag, installer, release artifact, runtime or model workload.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -14,6 +15,7 @@ import unittest
 
 from scripts.v8_acceptance_gate import (
     EVIDENCE_SCHEMA_VERSION,
+    REPORT_SCHEMA_VERSION,
     AcceptanceGateError,
     current_head,
     evaluate,
@@ -24,48 +26,91 @@ from scripts.v8_acceptance_gate import (
 
 
 class V8Wave5AcceptanceGateTests(unittest.TestCase):
-    def _evidence(self, repo: Path, *, source_commit: str | None = None, status: str = "PASS") -> dict[str, object]:
+    def _write_bundle(self, repo: Path, root: Path, *, source_commit: str | None = None, status: str = "PASS", tamper_digest: bool = False) -> Path:
         contract = load_gate_contract(repo / "architecture" / "v8_acceptance_gates.json")
-        digest = "a" * 64
-        return {
+        source = source_commit or current_head(repo)
+        reports = root / "reports"
+        reports.mkdir(parents=True, exist_ok=True)
+        gates: dict[str, dict[str, object]] = {}
+        for item in contract["gates"]:
+            if item["required"] is not True:
+                continue
+            gate_id = item["gate_id"]
+            digest: str | None = None
+            if status == "PASS":
+                report = {
+                    "schema_version": REPORT_SCHEMA_VERSION,
+                    "gate_id": gate_id,
+                    "status": "PASS",
+                    "platform": contract["required_platform"],
+                    "source_commit": source,
+                    "checks": {"synthetic_contract_check": True},
+                }
+                raw = json.dumps(report, sort_keys=True).encode("utf-8")
+                (reports / f"{gate_id}.json").write_bytes(raw)
+                digest = hashlib.sha256(raw).hexdigest()
+                if tamper_digest:
+                    digest = ("0" if digest[0] != "0" else "1") + digest[1:]
+            gates[gate_id] = {"status": status, "report_sha256": digest}
+        evidence = {
             "schema_version": EVIDENCE_SCHEMA_VERSION,
             "evidence_class": contract["required_evidence_class"],
             "platform": contract["required_platform"],
-            "source_commit": source_commit or current_head(repo),
-            "gates": {
-                item["gate_id"]: {"status": status, "report_sha256": digest if status == "PASS" else None}
-                for item in contract["gates"]
-                if item["required"] is True
-            },
+            "source_commit": source,
+            "gates": gates,
         }
+        evidence_path = root / "evidence.json"
+        evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+        return evidence_path
 
-    def test_source_preflight_is_valid_but_release_provenance_remains_v7(self) -> None:
+    def test_source_preflight_is_valid_but_release_identity_requires_user_approval(self) -> None:
         repo = Path(__file__).resolve().parents[1]
         source = source_preflight(repo)
-        provenance = release_provenance_snapshot()
+        provenance = release_provenance_snapshot(repo)
         self.assertTrue(source["valid"])
         self.assertEqual(source["missing_source_files"], [])
-        self.assertFalse(provenance["generation_ready"])
-        self.assertEqual(provenance["product_version"], "7.1.0")
-        self.assertEqual(provenance["release_branch"], "feature/v7-operational-closure")
-        self.assertTrue(str(provenance["intended_tag"]).startswith("v7."))
+        self.assertTrue(provenance["contract_valid"])
+        self.assertEqual(provenance["generation"], "V8")
+        self.assertEqual(provenance["release_branch"], "feature/local-ai-hub-v8")
+        self.assertFalse(provenance["identity_approved"])
+        self.assertIsNone(provenance["candidate_version"])
+        self.assertIsNone(provenance["candidate_tag"])
 
         result = evaluate(repo_root=repo)
         self.assertFalse(result["release_ready"])
-        self.assertIn("V8_RELEASE_PROVENANCE_NOT_REVIEWED", result["blockers"])
+        self.assertIn("V8_RELEASE_IDENTITY_APPROVAL_REQUIRED", result["blockers"])
         self.assertIn("LOCAL_WINDOWS_EVIDENCE_REQUIRED", result["blockers"])
 
-    def test_synthetic_all_pass_evidence_cannot_override_unreviewed_v8_provenance(self) -> None:
+    def test_all_pass_evidence_reports_are_verified_but_cannot_override_release_identity_gate(self) -> None:
         repo = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as temp:
-            evidence_path = Path(temp) / "evidence.json"
-            evidence_path.write_text(json.dumps(self._evidence(repo), sort_keys=True), encoding="utf-8")
+            evidence_path = self._write_bundle(repo, Path(temp))
             result = evaluate(evidence_path=evidence_path, repo_root=repo)
         self.assertTrue(result["local_evidence"]["valid"])
+        self.assertTrue(result["local_evidence"]["reports_verified"])
         self.assertTrue(result["local_evidence"]["source_commit_matches"])
         self.assertEqual(result["local_evidence"]["pending_gates"], [])
         self.assertFalse(result["release_ready"])
-        self.assertEqual(result["blockers"], ["V8_RELEASE_PROVENANCE_NOT_REVIEWED"])
+        self.assertEqual(result["blockers"], ["V8_RELEASE_IDENTITY_APPROVAL_REQUIRED"])
+
+    def test_declared_pass_without_local_report_is_rejected(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            evidence_path = self._write_bundle(repo, root)
+            first = next((root / "reports").iterdir())
+            first.unlink()
+            result = evaluate(evidence_path=evidence_path, repo_root=repo)
+        self.assertFalse(result["local_evidence"]["valid"])
+        self.assertIn("EVIDENCE_REPORT_MISSING", result["blockers"])
+
+    def test_declared_report_digest_must_match_actual_file(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp:
+            evidence_path = self._write_bundle(repo, Path(temp), tamper_digest=True)
+            result = evaluate(evidence_path=evidence_path, repo_root=repo)
+        self.assertFalse(result["local_evidence"]["valid"])
+        self.assertIn("EVIDENCE_REPORT_DIGEST_MISMATCH", result["blockers"])
 
     def test_evidence_is_bound_to_exact_source_commit(self) -> None:
         repo = Path(__file__).resolve().parents[1]
@@ -73,20 +118,20 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
         if current_head(repo) == wrong:
             wrong = "1" * 40
         with tempfile.TemporaryDirectory() as temp:
-            evidence_path = Path(temp) / "evidence.json"
-            evidence_path.write_text(json.dumps(self._evidence(repo, source_commit=wrong), sort_keys=True), encoding="utf-8")
+            evidence_path = self._write_bundle(repo, Path(temp), source_commit=wrong)
             result = evaluate(evidence_path=evidence_path, repo_root=repo)
         self.assertTrue(result["local_evidence"]["valid"])
+        self.assertTrue(result["local_evidence"]["reports_verified"])
         self.assertFalse(result["local_evidence"]["source_commit_matches"])
         self.assertIn("EVIDENCE_SOURCE_COMMIT_MISMATCH", result["blockers"])
-        self.assertFalse(result["release_ready"])
 
-    def test_evidence_schema_rejects_unbounded_or_path_like_extra_fields(self) -> None:
+    def test_evidence_schema_rejects_path_like_extra_fields(self) -> None:
         repo = Path(__file__).resolve().parents[1]
-        evidence = self._evidence(repo)
-        evidence["raw_path"] = r"D:\\LocalAIHub\\Reports\\acceptance.json"
         with tempfile.TemporaryDirectory() as temp:
-            evidence_path = Path(temp) / "evidence.json"
+            root = Path(temp)
+            evidence_path = self._write_bundle(repo, root)
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence["raw_path"] = r"D:\\LocalAIHub\\Reports\\acceptance.json"
             evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
             result = evaluate(evidence_path=evidence_path, repo_root=repo)
         self.assertFalse(result["local_evidence"]["valid"])
