@@ -200,7 +200,20 @@ class V7JobOutputTransactionTests(unittest.TestCase):
                 }},
             }), encoding="utf-8")
             self.assertIsNone(artifact_store.inspect_job_output_scope(job_id))
-            self.assertEqual(artifact_store.reconcile_job_output_scopes(active_job_ids=set()), {"cleaned": 0, "manual_review": 0})
+            reconciled = artifact_store.reconcile_job_output_scopes(active_job_ids=set())
+            self.assertEqual(reconciled["cleaned"], 0)
+            self.assertEqual(reconciled["manual_review"], 0)
+            # V8 may extend the historical result with bounded V8 cleanup
+            # counters; corrupt V7 state must remain a no-op either way.
+            for key in (
+                "v8_aborted_transactions",
+                "v8_removed_objects",
+                "v8_dropped_rows",
+                "v8_manual_review",
+                "v8_aborted_reservations",
+            ):
+                if key in reconciled:
+                    self.assertEqual(reconciled[key], 0)
 
 
 if __name__ == "__main__":
