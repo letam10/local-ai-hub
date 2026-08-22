@@ -205,15 +205,25 @@ Sau checkpoint trên, V8 đã bổ sung các source/test package nhỏ, reviewab
   foreign trước cleanup không bị xóa. Crash child acceptance phủ reserve,
   producer, staged, authorized và post-commit recovery.
 
-Evidence partial exact-head trước commit tài liệu này có 3 PASS:
-`artifact_callsite_inventory`, `native_picker_restart` và
-`executing_operation_cancel`. Các gate khác vẫn ghi BLOCKED vì toàn bộ ma trận
-chưa đủ (không phải vì thiếu report), đặc biệt Windows filesystem sharing/disk
-full, bundle restart/idempotence, live component operational evidence, shell
-open artifact, product UX/i18n/a11y, V8 BackupManager flow, crash copy/cleanup
-phases, packaging identity và runtime/model/GPU approval. Evidence phải được
-regenerate sau mỗi source commit; strict release không được suy diễn từ phần
-PASS này.
+Historical evidence at source `529e3108227ddde64aab7197febd4e72ff504b9f`
+verified four PASS reports by their actual bytes/digests:
+
+- `artifact_callsite_inventory` —
+  `7a723e65191a3a99799401cae4b3acc6e2925de4abc38a6258d1da29f890f9fb`;
+- `native_picker_restart` —
+  `6b467b9466fbaee00d791c482a626f11f66172707b71ecbe675311b416a0c5a4`;
+- `executing_operation_cancel` —
+  `057df3d370b304d1cf7bccb0bb5cbfff9ac71e451db916b969d86a4732eaf974`;
+- `bundle_atomic_rollback` —
+  `f407af04fecafca179979279387a14cf4e024c311912e51b33decc77559ab1ee`.
+
+Eight gates remain BLOCKED because their full acceptance matrix is not yet
+complete, not because a report is absent: Windows filesystem sharing/physical
+disk-full/AV matrix, real component operational lifecycle, shell open-artifact,
+product UX/i18n/a11y, V8 BackupManager lock/read-only/interruption flow,
+packaging identity, remaining crash cleanup phases, and runtime/model/GPU
+approval. Evidence must be regenerated after every source commit; strict
+release cannot be inferred from these partial PASS reports.
 
 ## 8. Real component lifecycle — CHƯA LÀM
 
