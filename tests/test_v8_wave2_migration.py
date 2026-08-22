@@ -146,13 +146,16 @@ class V8Wave2MigrationTests(unittest.TestCase):
         install_v8_artifact_compatibility()
 
         job_id = _job("b")
+        no_reservation = output / "no-reservation.bin"
+        no_reservation.write_bytes(b"refused")
         producer = output / "producer.bin"
-        producer.write_bytes(b"owned")
         with patch.object(artifact_store, "OUTPUT_ROOT", output), patch.object(artifact_store, "INDEX_PATH", legacy_index):
             self.assertIsNone(
-                artifact_store.register_worker_outputs([producer], provenance=_provenance(job_id))
+                artifact_store.register_worker_outputs([no_reservation], provenance=_provenance(job_id))
             )
+            no_reservation.unlink()
             self.assertIsNotNone(artifact_store.begin_job_output_scope(job_id))
+            producer.write_bytes(b"owned")
             prepared = artifact_store.prepare_job_output_scope(
                 job_id, {"status": "completed", "output": str(producer)}
             )
