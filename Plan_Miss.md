@@ -175,6 +175,40 @@ Kết luận hiện tại: local evidence phải ghi đúng PASS/BLOCKED theo so
 cuối cùng; strict release vẫn BLOCKED. Không coi source/static fixture pass là
 Windows production, desktop product, model-runtime hay release readiness.
 
+### 7B. Tiến độ tiếp theo sau source remediation — partial evidence được xác minh
+
+Sau checkpoint trên, V8 đã bổ sung các source/test package nhỏ, reviewable:
+
+- V8 SQLite backup/restore dùng SQLite backup API, validate integrity/schema
+  trước restore, không overwrite backup leaf đang tồn tại và giữ journal live
+  khi snapshot corrupt/schema mismatch.
+- Direct `HubJobManager` và `V8DurableWorkEngine` local-adapter proof reserve
+  trước producer, publish object V8 detached/path-free; V6 write fixture gọi
+  tường minh `LegacyDurableWorkEngine`, còn production alias giữ V8 authority.
+- Native selection test phủ cancel/missing, expiry, wrong type, reparse, đổi
+  file sau selection và restart stale token; stale token không tự rediscover.
+- Composite bundle rollback chỉ uninstall component mới do lần confirm hiện tại
+  cài; shared dependency có sẵn được preserve. Rollback failure là
+  `manual_review`, không claim atomic success.
+- Executing install cancellation được bind vào đúng process-local cancel event
+  của invocation; operation không có owned bridge bị refuse, không force-kill.
+- Loopback V8/V7 artifact GET/HEAD/range, concurrent reads và restart đã chạy
+  trên 127.0.0.1:8765. WebView2 lifecycle smoke pass sau khi second instance
+  singleton refusal được coi là behavior đúng thay vì tạo app/API thứ hai.
+- V8 cleanup Windows dùng handle-bound identity-attested deletion; replacement
+  foreign trước cleanup không bị xóa. Crash child acceptance phủ reserve,
+  producer, staged, authorized và post-commit recovery.
+
+Evidence partial exact-head trước commit tài liệu này có 3 PASS:
+`artifact_callsite_inventory`, `native_picker_restart` và
+`executing_operation_cancel`. Các gate khác vẫn ghi BLOCKED vì toàn bộ ma trận
+chưa đủ (không phải vì thiếu report), đặc biệt Windows filesystem sharing/disk
+full, bundle restart/idempotence, live component operational evidence, shell
+open artifact, product UX/i18n/a11y, V8 BackupManager flow, crash copy/cleanup
+phases, packaging identity và runtime/model/GPU approval. Evidence phải được
+regenerate sau mỗi source commit; strict release không được suy diễn từ phần
+PASS này.
+
 ## 8. Real component lifecycle — CHƯA LÀM
 
 Từng vertical slice trên controlled Windows root:
