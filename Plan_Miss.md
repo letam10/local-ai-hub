@@ -181,15 +181,21 @@ Sau checkpoint trên, V8 đã bổ sung các source/test package nhỏ, reviewab
 
 - V8 SQLite backup/restore dùng SQLite backup API, validate integrity/schema
   trước restore, không overwrite backup leaf đang tồn tại và giữ journal live
-  khi snapshot corrupt/schema mismatch.
+  khi snapshot corrupt/schema mismatch. Nguồn của `backup_to()` được mở
+  read-only; backup trên journal Config thật có thể kiểm chứng không đổi
+  source bytes/identity trong lúc tạo snapshot ở root task-owned.
 - Direct `HubJobManager` và `V8DurableWorkEngine` local-adapter proof reserve
   trước producer, publish object V8 detached/path-free; V6 write fixture gọi
   tường minh `LegacyDurableWorkEngine`, còn production alias giữ V8 authority.
 - Native selection test phủ cancel/missing, expiry, wrong type, reparse, đổi
   file sau selection và restart stale token; stale token không tự rediscover.
 - Composite bundle rollback chỉ uninstall component mới do lần confirm hiện tại
-  cài; shared dependency có sẵn được preserve. Rollback failure là
-  `manual_review`, không claim atomic success.
+  cài; shared dependency có sẵn được preserve. Milestone `pending`/`reused`/
+  `installing`/`installed`/`rollback_pending`/`rolled_back` được journal theo
+  V8 operation trước side effect. Rollback failure hoặc restart giữa step sẽ
+  thành `manual_review`, không suy diễn ownership theo component name để
+  uninstall dữ liệu/user installation; compensation hoàn tất không được
+  replay khi restart.
 - Executing install cancellation được bind vào đúng process-local cancel event
   của invocation; operation không có owned bridge bị refuse, không force-kill.
 - Loopback V8/V7 artifact GET/HEAD/range, concurrent reads và restart đã chạy
