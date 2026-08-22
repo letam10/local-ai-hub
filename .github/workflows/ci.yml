@@ -25,6 +25,8 @@ jobs:
         run: python scripts/ci_validate.py
       - name: Run V8 foundation contract tests
         run: python -m unittest discover -s tests -p "test_v8_*.py"
+      - name: Run V8 release policy source preflight
+        run: python scripts/v8_release_provenance.py --source-only
       - name: Run V8 acceptance source preflight
         run: python scripts/v8_acceptance_gate.py --source-only
       - name: Check V8 Components JavaScript syntax
