@@ -138,7 +138,7 @@ class V8DurableWorkEngine(LegacyDurableWorkEngine):
     ) -> dict[str, Any] | None:
         """Publish Hub-produced bytes through reservation-bound V8 authority."""
 
-        del media_type, disk_safety_bytes
+        del disk_safety_bytes
         if not isinstance(job_id, str) or _JOB_ID.fullmatch(job_id) is None or not isinstance(content, bytes):
             return None
         try:
@@ -167,6 +167,7 @@ class V8DurableWorkEngine(LegacyDurableWorkEngine):
             job_id=job_id,
             content=content,
             name=name,
+            media_type=media_type,
             provenance=provenance,
         )
         return self._record_artifact(job_id, artifact) if isinstance(artifact, dict) else None
