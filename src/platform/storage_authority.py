@@ -1,0 +1,259 @@
+"""Fixed-root filesystem authority for Local AI Hub V8.
+
+This module deliberately works with lexical paths first and refuses symlink,
+junction and reparse-point authority. It is a control-plane primitive: callers
+receive a short-lived root lease and must not cache raw workstation paths in
+public state.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import os
+from pathlib import Path
+import stat
+
+from src.platform.paths import HubPaths, get_paths, is_reparse_point
+
+
+_MUTABLE_ROOTS = frozenset(
+    {
+        "config",
+        "models",
+        "environments",
+        "runtime",
+        "output",
+        "cache",
+        "temp",
+        "logs",
+        "reports",
+        "backups",
+    }
+)
+
+
+class StorageAuthorityError(ValueError):
+    """Fixed-code storage-authority refusal."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class FileIdentity:
+    device: int
+    inode: int
+    size_bytes: int
+    mtime_ns: int
+    mode: int
+
+    @classmethod
+    def from_stat(cls, value: os.stat_result) -> "FileIdentity":
+        return cls(
+            device=int(getattr(value, "st_dev", 0) or 0),
+            inode=int(getattr(value, "st_ino", 0) or 0),
+            size_bytes=int(value.st_size),
+            mtime_ns=int(getattr(value, "st_mtime_ns", 0) or 0),
+            mode=int(value.st_mode),
+        )
+
+    def same_object(self, other: "FileIdentity") -> bool:
+        return self.device == other.device and self.inode == other.inode and self.mode == other.mode
+
+    def same_file_state(self, other: "FileIdentity") -> bool:
+        return self.same_object(other) and self.size_bytes == other.size_bytes and self.mtime_ns == other.mtime_ns
+
+
+@dataclass(frozen=True)
+class RootLease:
+    authority: "StorageAuthority"
+    root_key: str
+    path: Path
+    identity: FileIdentity
+
+    def assert_current(self) -> None:
+        current = self.authority._directory_identity(self.path)
+        if not self.identity.same_object(current):
+            raise StorageAuthorityError("managed_root_identity_changed")
+        self.authority._assert_existing_chain(self.path)
+
+
+class StorageAuthority:
+    """Own all V8 mutable roots from one server-derived ``HubPaths`` value."""
+
+    def __init__(self, paths: HubPaths | None = None) -> None:
+        self.paths = paths or get_paths()
+
+    @staticmethod
+    def _absolute(value: Path | str) -> Path:
+        return Path(value).expanduser().absolute()
+
+    @staticmethod
+    def _safe_relative(value: Path | str) -> Path:
+        if not isinstance(value, (str, Path)):
+            raise StorageAuthorityError("invalid_relative_path")
+        text = str(value)
+        if not text or len(text) > 512 or "\x00" in text or ":" in text:
+            raise StorageAuthorityError("invalid_relative_path")
+        normalized = text.replace("\\", "/")
+        candidate = Path(normalized)
+        if candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
+            raise StorageAuthorityError("unsafe_relative_path")
+        return candidate
+
+    @staticmethod
+    def _lstat(path: Path) -> os.stat_result | None:
+        try:
+            return path.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise StorageAuthorityError("path_unreadable") from exc
+
+    def _assert_existing_chain(self, path: Path) -> None:
+        """Reject every existing ancestor that can redirect path authority."""
+
+        current = self._absolute(path)
+        chain: list[Path] = []
+        while True:
+            chain.append(current)
+            if current.parent == current:
+                break
+            current = current.parent
+        for item in reversed(chain):
+            info = self._lstat(item)
+            if info is None:
+                continue
+            if stat.S_ISLNK(info.st_mode) or is_reparse_point(item):
+                raise StorageAuthorityError("reparse_authority_refused")
+
+    @staticmethod
+    def _assert_lexical_child(root: Path, candidate: Path) -> None:
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise StorageAuthorityError("managed_path_escape") from exc
+
+    def _root_path(self, root_key: str) -> Path:
+        if root_key not in _MUTABLE_ROOTS:
+            raise StorageAuthorityError("unknown_managed_root")
+        return self._absolute(self.paths.roots()[root_key])
+
+    def _mkdir_chain(self, target: Path) -> None:
+        """Create missing directories only after all existing ancestors are safe."""
+
+        target = self._absolute(target)
+        self._assert_existing_chain(target)
+        missing: list[Path] = []
+        current = target
+        while self._lstat(current) is None:
+            missing.append(current)
+            if current.parent == current:
+                break
+            current = current.parent
+        for item in reversed(missing):
+            self._assert_existing_chain(item.parent)
+            try:
+                item.mkdir()
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise StorageAuthorityError("managed_root_create_failed") from exc
+            self._assert_existing_chain(item)
+            info = self._lstat(item)
+            if info is None or not stat.S_ISDIR(info.st_mode):
+                raise StorageAuthorityError("managed_root_unavailable")
+
+    def _directory_identity(self, path: Path) -> FileIdentity:
+        self._assert_existing_chain(path)
+        info = self._lstat(path)
+        if info is None or not stat.S_ISDIR(info.st_mode) or is_reparse_point(path):
+            raise StorageAuthorityError("managed_root_unavailable")
+        return FileIdentity.from_stat(info)
+
+    def lease(self, root_key: str, *, create: bool = False) -> RootLease:
+        """Acquire a short-lived identity lease for one fixed mutable root."""
+
+        root = self._root_path(root_key)
+        data_root = self._absolute(self.paths.data_root)
+        self._assert_lexical_child(data_root, root)
+        self._assert_existing_chain(data_root)
+        if create:
+            self._mkdir_chain(data_root)
+            self._mkdir_chain(root)
+        identity = self._directory_identity(root)
+        return RootLease(self, root_key, root, identity)
+
+    def resolve_relative(
+        self,
+        lease: RootLease,
+        relative: Path | str,
+        *,
+        require_exists: bool = False,
+        expect_file: bool | None = None,
+    ) -> Path:
+        if not isinstance(lease, RootLease) or lease.authority is not self:
+            raise StorageAuthorityError("invalid_root_lease")
+        lease.assert_current()
+        safe = self._safe_relative(relative)
+        candidate = self._absolute(lease.path / safe)
+        self._assert_lexical_child(lease.path, candidate)
+        self._assert_existing_chain(candidate)
+        if require_exists:
+            info = self._lstat(candidate)
+            if info is None or is_reparse_point(candidate):
+                raise StorageAuthorityError("managed_leaf_unavailable")
+            if expect_file is True and not stat.S_ISREG(info.st_mode):
+                raise StorageAuthorityError("managed_leaf_not_file")
+            if expect_file is False and not stat.S_ISDIR(info.st_mode):
+                raise StorageAuthorityError("managed_leaf_not_directory")
+        return candidate
+
+    def mkdir_relative(self, lease: RootLease, relative: Path | str) -> Path:
+        target = self.resolve_relative(lease, relative, require_exists=False)
+        self._mkdir_chain(target)
+        lease.assert_current()
+        info = self._lstat(target)
+        if info is None or not stat.S_ISDIR(info.st_mode) or is_reparse_point(target):
+            raise StorageAuthorityError("managed_directory_unavailable")
+        return target
+
+    def file_identity(self, lease: RootLease, relative: Path | str) -> FileIdentity:
+        candidate = self.resolve_relative(lease, relative, require_exists=True, expect_file=True)
+        info = self._lstat(candidate)
+        if info is None:
+            raise StorageAuthorityError("managed_leaf_unavailable")
+        return FileIdentity.from_stat(info)
+
+    def file_identity_path(self, lease: RootLease, candidate: Path | str) -> tuple[Path, Path, FileIdentity]:
+        """Validate an existing regular file and return path, relative key and identity."""
+
+        raw = self._absolute(candidate)
+        self._assert_lexical_child(lease.path, raw)
+        relative = raw.relative_to(lease.path)
+        path = self.resolve_relative(lease, relative, require_exists=True, expect_file=True)
+        info = self._lstat(path)
+        if info is None:
+            raise StorageAuthorityError("managed_leaf_unavailable")
+        return path, relative, FileIdentity.from_stat(info)
+
+    def unlink_if_identity(self, lease: RootLease, relative: Path | str, expected: FileIdentity) -> bool:
+        """Delete only a regular Hub-owned leaf whose exact identity still matches."""
+
+        try:
+            candidate = self.resolve_relative(lease, relative, require_exists=True, expect_file=True)
+            current = self.file_identity(lease, relative)
+        except StorageAuthorityError:
+            return False
+        if not expected.same_file_state(current):
+            return False
+        try:
+            candidate.unlink()
+        except OSError:
+            return False
+        lease.assert_current()
+        return True
+
+
+__all__ = ["FileIdentity", "RootLease", "StorageAuthority", "StorageAuthorityError"]

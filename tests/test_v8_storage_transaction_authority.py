@@ -1,0 +1,191 @@
+"""Synthetic V8 Wave 0 storage/transaction authority regressions.
+
+No network, runtime, model, GPU or external application is used.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+import tempfile
+import unittest
+
+from src.platform.paths import HubPaths
+from src.platform.storage_authority import StorageAuthorityError
+from src.services.output_authority import OutputAuthority, OutputAuthorityError
+from src.services.transaction_store import V8TransactionStore
+
+
+def _job(char: str) -> str:
+    return "jobv5_" + char * 32
+
+
+def _provenance(job_id: str) -> dict[str, object]:
+    return {
+        "job_id": job_id,
+        "job_spec_fingerprint": hashlib.sha256(job_id.encode("utf-8")).hexdigest(),
+        "adapter_id": "test.synthetic.v8",
+        "attempt": 1,
+        "status": "completed",
+    }
+
+
+class V8StorageTransactionAuthorityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.app = self.root / "app"
+        self.data = self.root / "data"
+        self.app.mkdir()
+        self.data.mkdir()
+        self.paths = HubPaths(app_root=self.app, data_root=self.data)
+        self.store_path = self.root / "journal.sqlite3"
+        self.store = V8TransactionStore(self.store_path)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _authority(self) -> OutputAuthority:
+        return OutputAuthority(paths=self.paths, store=self.store)
+
+    def test_output_root_reparse_is_refused_before_reservation(self) -> None:
+        external = self.root / "external"
+        external.mkdir()
+        output = self.data / "Output"
+        try:
+            output.symlink_to(external, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("Directory symlinks are unavailable on this test host.")
+        authority = self._authority()
+        with self.assertRaises((StorageAuthorityError, OutputAuthorityError)):
+            authority.begin_reservation(_job("a"))
+        self.assertEqual(list(external.iterdir()), [])
+        self.assertEqual(self.store.list_public_artifacts(), [])
+
+    def test_transaction_cannot_publish_under_another_reservation_or_job(self) -> None:
+        job_a = _job("a")
+        job_b = _job("b")
+        reservation_a = self.store.create_output_reservation(job_a)
+        reservation_b = self.store.create_output_reservation(job_b)
+        transaction = self.store.create_output_transaction(reservation_a, job_a)
+        digest = hashlib.sha256(b"payload").hexdigest()
+        artifact_id = self.store.stage_artifact(
+            transaction_id=transaction,
+            reservation_id=reservation_a,
+            job_id=job_a,
+            object_id="obj_" + "c" * 32,
+            object_key=".hub-v8/objects/cc/obj_" + "c" * 32,
+            name="result.bin",
+            media_type="application/octet-stream",
+            size_bytes=7,
+            sha256=digest,
+            file_device=1,
+            file_inode=2,
+            file_mtime_ns=3,
+            provenance=_provenance(job_a),
+        )
+        self.assertIsNone(self.store.commit_output_transaction(transaction, reservation_b, job_b))
+        self.assertIsNone(self.store.public_artifact(artifact_id))
+        self.assertEqual(self.store.list_public_artifacts(), [])
+        self.assertTrue(self.store.authorize_output_transaction(transaction, reservation_a, job_a))
+        published = self.store.commit_output_transaction(transaction, reservation_a, job_a)
+        self.assertIsNotNone(published)
+        assert published is not None
+        self.assertEqual([item["id"] for item in published], [artifact_id])
+
+    def test_staged_artifact_is_not_public_before_final_commit(self) -> None:
+        job_id = _job("d")
+        reservation = self.store.create_output_reservation(job_id)
+        transaction = self.store.create_output_transaction(reservation, job_id)
+        artifact_id = self.store.stage_artifact(
+            transaction_id=transaction,
+            reservation_id=reservation,
+            job_id=job_id,
+            object_id="obj_" + "d" * 32,
+            object_key=".hub-v8/objects/dd/obj_" + "d" * 32,
+            name="result.bin",
+            media_type="application/octet-stream",
+            size_bytes=1,
+            sha256=hashlib.sha256(b"x").hexdigest(),
+            file_device=1,
+            file_inode=2,
+            file_mtime_ns=3,
+            provenance=_provenance(job_id),
+        )
+        self.assertIsNone(self.store.public_artifact(artifact_id))
+        self.assertEqual(self.store.list_public_artifacts(), [])
+        self.assertTrue(self.store.authorize_output_transaction(transaction, reservation, job_id))
+        self.assertIsNone(self.store.public_artifact(artifact_id))
+        self.assertEqual(self.store.list_public_artifacts(), [])
+
+    def test_public_artifact_is_detached_from_mutable_producer_path(self) -> None:
+        authority = self._authority()
+        job_id = _job("e")
+        reservation = authority.begin_reservation(job_id)
+        producer = self.data / "Output" / "producer.bin"
+        producer.write_bytes(b"original producer bytes")
+        published = authority.publish_owned_candidates(
+            reservation_id=reservation,
+            job_id=job_id,
+            candidates=[producer],
+            provenance=_provenance(job_id),
+        )
+        self.assertIsNotNone(published)
+        assert published is not None
+        artifact_id = str(published[0]["id"])
+        resolved = authority.resolve(artifact_id)
+        self.assertIsNotNone(resolved)
+        assert resolved is not None
+        self.assertNotEqual(resolved, producer)
+        self.assertEqual(resolved.read_bytes(), b"original producer bytes")
+
+        producer.unlink()
+        producer.write_bytes(b"foreign replacement")
+        resolved_after = authority.resolve(artifact_id)
+        self.assertIsNotNone(resolved_after)
+        assert resolved_after is not None
+        self.assertEqual(resolved_after.read_bytes(), b"original producer bytes")
+
+    def test_managed_object_replacement_fails_closed(self) -> None:
+        authority = self._authority()
+        job_id = _job("f")
+        reservation = authority.begin_reservation(job_id)
+        producer = self.data / "Output" / "producer.bin"
+        producer.write_bytes(b"immutable bytes")
+        published = authority.publish_owned_candidates(
+            reservation_id=reservation,
+            job_id=job_id,
+            candidates=[producer],
+            provenance=_provenance(job_id),
+        )
+        self.assertIsNotNone(published)
+        assert published is not None
+        artifact_id = str(published[0]["id"])
+        managed = authority.resolve(artifact_id)
+        self.assertIsNotNone(managed)
+        assert managed is not None
+        managed.unlink()
+        managed.write_bytes(b"foreign bytes")
+        self.assertIsNone(authority.resolve(artifact_id))
+        self.assertIsNone(authority.describe(artifact_id))
+        self.assertEqual(authority.list_public(), [])
+
+    def test_foreign_job_cannot_use_owner_reservation(self) -> None:
+        authority = self._authority()
+        owner = _job("1")
+        foreign = _job("2")
+        reservation = authority.begin_reservation(owner)
+        producer = self.data / "Output" / "foreign-attempt.bin"
+        producer.write_bytes(b"data")
+        result = authority.publish_owned_candidates(
+            reservation_id=reservation,
+            job_id=foreign,
+            candidates=[producer],
+            provenance=_provenance(foreign),
+        )
+        self.assertIsNone(result)
+        self.assertEqual(authority.list_public(), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

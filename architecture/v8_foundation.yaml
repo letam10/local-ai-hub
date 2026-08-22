@@ -1,0 +1,44 @@
+schema_version: v8-foundation.v1
+branch: feature/local-ai-hub-v8
+base_generation: V7
+waves:
+  wave0:
+    name: storage_transaction_authority
+    status: foundation_implemented
+    owners:
+      storage_authority: src/platform/storage_authority.py
+      transaction_store: src/services/transaction_store.py
+      output_authority: src/services/output_authority.py
+    invariants:
+      - fixed_server_owned_mutable_roots
+      - no_reparse_or_symlink_authority
+      - no_raw_public_path
+      - reservation_before_producer
+      - exact_transaction_reservation_job_binding
+      - staged_artifacts_are_private
+      - public_artifacts_use_copy_once_managed_objects
+      - final_public_commit_is_last_mandatory_persistence
+      - cleanup_requires_exact_file_identity
+    legacy_activation: deferred
+  wave1:
+    name: component_lifecycle
+    status: planned
+    owner: src/services/component_lifecycle_v8.py
+    depends_on:
+      - wave0.transaction_store
+      - existing_component_installer
+      - existing_model_manager
+      - existing_runtime_manager
+deferred_local_acceptance:
+  - migrate_v7_job_output_callsites_to_v8_output_authority
+  - windows_reparse_junction_and_handle_race_acceptance
+  - production_startup_wiring
+  - real_component_download_install_repair_update
+  - runtime_smoke
+  - model_inference
+prohibited_in_foundation:
+  - raw_browser_paths
+  - arbitrary_download_urls
+  - startup_model_download
+  - driver_or_cuda_mutation
+  - automatic_main_merge
