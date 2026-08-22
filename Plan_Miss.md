@@ -281,6 +281,45 @@ release cannot be inferred from these partial PASS reports.
   actual backup-route confirm/cancel checks. No release or runtime claim is
   implied by the source/fixture result.
 
+### 7E. Latest local evidence checkpoint — five truthful PASS gates
+
+At executable source checkpoint
+`b72e49bbf04f42d79591d372ae2a1a646a2d4985`, the local Windows evidence
+bundle verified five report byte digests against the exact commit:
+
+- `artifact_callsite_inventory` —
+  `c2016a500fd1fe0d6cfcd43b43d71227e4306468131cf7805682991b6fcf6f29`;
+- `native_picker_restart` —
+  `bc5baa1177b288015e1301e6de8d9c15770e95cf389428fac7a768b3f95444e1`;
+- `executing_operation_cancel` —
+  `7d29dfd1edf14ace470dc1aaaccc143c61bf5f449bd49d1e001062dc5f9d7307`;
+- `bundle_atomic_rollback` —
+  `1d746da5a4b801d609094f043a760ae8d98c0d6c9ae706346e840b2bd0dae69e`;
+- `loopback_api` —
+  `5a8d1f98922fe3e0ae7aed30e935154c087c129852053dc1c8d10f44be8fd8fe`.
+
+The remaining gates are explicitly `BLOCKED`, not synthetic PASS:
+
+- `windows_filesystem`: root/reparse/lease/replacement, concurrent producer,
+  zero-share Windows handle and bounded ENOSPC probes pass on task-owned roots;
+  AV/indexer and physical-volume-full coverage is still missing.
+- `real_component_lifecycle` and `runtime_smoke`: the reviewed FFmpeg leaf is
+  a legacy reparse-backed runtime; no migration/reference-existing authority
+  or V8-managed smoke target exists.
+- `webview2_product_ux`: native close/reopen/tray/cancel/listener lifecycle
+  smoke passes, but the full operation, keyboard, a11y, five-language and
+  HiDPI matrix is not yet automated or observed.
+- `sqlite_backup_restore`: archive/restore/lock/failure/controlled route tests
+  pass; full WAL/concurrent/read-only/interruption/restart acceptance remains.
+- `packaging_upgrade`: staging is dry-run only and a V8 release identity is
+  intentionally unapproved.
+- `crash_recovery`: output transaction child-crash reconciliation passes, but
+  the full job/component/bundle/database/desktop exact-owned-process matrix is
+  incomplete.
+
+Evidence is local and untracked. Any later source commit must regenerate its
+report bundle before it can be used for release evaluation.
+
 ## 8. Real component lifecycle — CHƯA LÀM
 
 Từng vertical slice trên controlled Windows root:
