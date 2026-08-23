@@ -26,6 +26,30 @@ import { createAnimesrRenderer } from "./features/animesr/render.js";
 import { createProjectsRenderer } from "./features/projects/render.js";
 import { createImageMaskRenderer } from "./features/image_mask/render.js";
 
+// Compatibility pass for legacy templates that still emit a fixed text node
+// without a data-i18n marker. Exact text nodes only: server-owned names,
+// identifiers, reasons and artifact metadata are never traversed.
+const LEGACY_STATIC_COPY = Object.freeze([
+  "CONTROL PLANE", "Dashboard", "Readiness metrics", "Hub API", "Module plan",
+  "Static readiness snapshot", "Preflight is read-only; install/download is not_run",
+  "Review the server snapshot", "Check readiness", "Review module health and attention.",
+  "Choose a route", "Open an existing Hub workspace.", "Run from Jobs", "Keep progress and artifacts in Hub.",
+  "Readiness snapshot needs review", "Job needs review", "No server-owned module evidence.",
+  "SERVER-OWNED VOLUME", "Available", "Unavailable", "Total", "Free", "Used", "Low space", "Next action",
+  "Storage projection unavailable", "C:/ and D:/ figures are not available in this snapshot.",
+  "Low-space warning", "review storage before new writes.", "Volume statistics are unavailable; no figures are shown.",
+  "Verify that the volume is mounted and readable, then refresh storage.", "VISION", "DOCUMENTS", "SPEECH", "VOICE",
+  "IMAGE", "MEDIA", "VIDEO AI", "VISION WORKFLOW", "VIDEO WORKFLOW", "Load Input", "Detect / Segment / OCR",
+  "Preview & Export", "Transcript queue", "Projects, Assets & Recipes", "Asset Library", "Prompts & Recipes",
+  "Compare Board", "Workflow Gallery", "All", "Active", "Attention", "Completed", "Component Operations",
+  "No V8 operation", "Model", "Category", "Size", "Status / action", "Import Model", "Check Update",
+]);
+
+const localizeLegacyMarkup = (html) => LEGACY_STATIC_COPY.reduce((result, key) => {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return result.replace(new RegExp(`>(\\s*)${escaped}(\\s*)<`, "g"), (_match, prefix, suffix) => `>${prefix}${uiTextHtml(key)}${suffix}<`);
+}, String(html || ""));
+
 const renderDashboardFeature = createDashboardRenderer({
   uiTextHtml, escapeHtml, formatGb, readinessSnapshot, jobRecoverySnapshot, readinessStatus,
   safeReadinessModules, statusPill, readinessStatusLabel, textKey, mediaEvidencePanel,
@@ -94,20 +118,20 @@ export function renderPage(route, state) {
   };
   const nodeScope = Object.prototype.hasOwnProperty.call(nodeCopy, pageRoute) ? pageRoute : null;
   if (pageRoute === "image" && activeTab(state, "image") === "advanced") {
-    return `${imageModuleTabs(state)}${renderComfyAdvancedV5(state)}`;
+    return localizeLegacyMarkup(`${imageModuleTabs(state)}${renderComfyAdvancedV5(state)}`);
   }
   if (pageRoute === "image" && activeTab(state, "image") === "studio") {
-    return `${imageModuleTabs(state)}${renderImageMaskStudio(state)}`;
+    return localizeLegacyMarkup(`${imageModuleTabs(state)}${renderImageMaskStudio(state)}`);
   }
   if (pageRoute === "image" && activeTab(state, "image") === "nodes") {
-    return `${heading("ADVANCED WORKFLOW", "Image AI Hub Nodes", "Kéo socket trực tiếp, typed sockets, minimap, multi-select và live preview.")}${imageModuleTabs(state)}${nodeStudio("image", nodeCopy.image)}`;
+    return localizeLegacyMarkup(`${heading("ADVANCED WORKFLOW", "Image AI Hub Nodes", "Kéo socket trực tiếp, typed sockets, minimap, multi-select và live preview.")}${imageModuleTabs(state)}${nodeStudio("image", nodeCopy.image)}`);
   }
   if (pageRoute === "image") {
-    return `${imageModuleTabs(state)}${renderImageQuickV5(state)}`;
+    return localizeLegacyMarkup(`${imageModuleTabs(state)}${renderImageQuickV5(state)}`);
   }
   if (nodeScope && activeTab(state, nodeScope) === "nodes") {
-    return `${heading("ADVANCED WORKFLOW", `${nodeScope === "sam2" ? "SAM2" : nodeScope === "animesr" ? "AnimeSR" : nodeScope === "media" ? "Media" : "Image AI"} Nodes`, "Node editor chạy offline trong cửa sổ Local AI Hub.")}${moduleTabs(state, nodeScope)}${nodeStudio(nodeScope, nodeCopy[nodeScope])}`;
+    return localizeLegacyMarkup(`${heading("ADVANCED WORKFLOW", `${nodeScope === "sam2" ? "SAM2" : nodeScope === "animesr" ? "AnimeSR" : nodeScope === "media" ? "Media" : "Image AI"} Nodes`, "Node editor chạy offline trong cửa sổ Local AI Hub.")}${moduleTabs(state, nodeScope)}${nodeStudio(nodeScope, nodeCopy[nodeScope])}`);
   }
   const page = (pages[pageRoute] || renderDashboard)(state);
-  return nodeScope ? `${moduleTabs(state, nodeScope)}${page}` : page;
+  return localizeLegacyMarkup(nodeScope ? `${moduleTabs(state, nodeScope)}${page}` : page);
 }
