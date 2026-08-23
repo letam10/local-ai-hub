@@ -596,7 +596,7 @@ V8, rồi xóa đúng ba ref tạm bằng non-force deletion. Không xóa branch
 - Release activation/provenance package cần review riêng.
 - Strict release preflight phải PASS trước bất kỳ tag/release action nào.
 
-## 16. Final technical release-candidate checkpoint — exact source `9abcb29`
+## 16. Final technical release-candidate checkpoint — exact final HEAD `e882ec4`
 
 Checkpoint này đóng CI correctness và local technical handoff; nó không kích
 hoạt release. Source fix duy nhất sau `afa08bd` là projection artifact durable
@@ -604,8 +604,9 @@ trong `src/ui/shared/rendering.js`, kèm regression trong
 `tests/test_v5_job_recovery_artifact_ui.py`. Jobs UI giờ dùng cùng sanitizer
 bounded cho record durable và hiển thị đúng opaque preview/open controls.
 
-- Exact source head trước handoff docs: `9abcb290d70bb6549740dbfbb17b48674348db81`
-  trên `feature/local-ai-hub-v8`; source parent là `afa08bd`.
+- Exact final HEAD sau khi commit handoff này: `e882ec40510ec1c2534dc271dd3f4b33a80bcb08`
+  trên `feature/local-ai-hub-v8`; source-fix parent là
+  `9abcb290d70bb6549740dbfbb17b48674348db81`, source baseline là `afa08bd`.
 - Windows filesystem re-audit: 7/7 adversarial tests PASS, gồm child-process
   zero-share, root/ancestor replacement, nested reparse, foreign producer và
   injected ENOSPC. AV/indexer và physical-volume-full vẫn được đại diện bằng
@@ -619,11 +620,11 @@ bounded cho record durable và hiển thị đúng opaque preview/open controls.
   authorized/committed/copy, component journal, bundle journal, SQLite
   before-backup/after-archive và desktop listener. Reconcile/blocked/manual
   review, archive hash/sidecar và listener release đều PASS trong
-  `Temp/V8_Crash_Matrix_afa08bd/crash_matrix.json`.
+  `Temp/V8_Crash_Matrix_afa08bd/run_1787444405/crash_matrix.json`.
 - Packaging candidate chỉ là staging local, chưa publish: version `8.0.0`,
   intended tag `v8.0.0`, `published=false`, `release_activation=false`,
   `real_tag_created=false`. ZIP:
-  `Temp/V8_Candidate_afa08bd/candidate_8.0.0-release/artifacts/LocalAIHub-Core-Win64-v8.0.0.zip`,
+  `Temp/V8_Candidate_e882ec4/candidate_8.0.0-final/artifacts/LocalAIHub-Core-Win64-v8.0.0.zip`,
   55,079,626 bytes, SHA-256
   `ef6e596f25aa5e7a9f697822309c39cb16c651ac6e806c48c12da6b1a7c2911d`.
   Candidate validation chứng minh APP_ROOT/DATA_ROOT separation, portable
@@ -635,14 +636,16 @@ bounded cho record durable và hiển thị đúng opaque preview/open controls.
   component / bundle / SQLite support 26 PASS, JS syntax và `ci_validate.py`
   PASS (743 tracked files). Source-only provenance với candidate input
   `8.0.0/v8.0.0` trả `candidate_available`, writes=false.
-- Exact-head evidence sẽ bind sau commit handoff tại
-  `Temp/V8_Acceptance/<final-head>/evidence.json`; verifier bắt buộc
+- Exact-head evidence tại
+  `Temp/V8_Acceptance/e882ec40510ec1c2534dc271dd3f4b33a80bcb08/evidence.json`
+  đã được regenerate sau commit handoff; verifier trả
   `source_commit_matches=true`, `reports_verified=true`, 12/12 PASS. Chỉ
   `V8_RELEASE_IDENTITY_APPROVAL_REQUIRED` còn lại; `candidate_version/tag`
   trong tracked release policy vẫn null và product version vẫn 7.1.0.
-- GitHub Actions trên source head `9abcb29`: push run `32607218284` PASS và
-  PR run `32607220068` PASS. Sau commit section này, phải chờ Actions mới trên
-  exact final HEAD và rebind evidence một lần nữa.
+- GitHub Actions của source-fix head `9abcb29` đã PASS ở push run
+  `32607218284` và PR run `32607220068`. Commit handoff `e882ec4` phải được
+  push và chờ cặp Actions mới PASS trên exact final HEAD trước khi coi vòng
+  này hoàn tất.
 
 Release-only approvals vẫn cần người dùng: chọn/đổi product version, tạo
 thật tag `v8.0.0`, activation/build/publish release, và merge PR #102 vào
