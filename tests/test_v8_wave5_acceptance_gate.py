@@ -63,7 +63,7 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
         evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
         return evidence_path
 
-    def test_source_preflight_is_valid_but_release_identity_requires_user_approval(self) -> None:
+    def test_source_preflight_reports_prepared_release_identity(self) -> None:
         repo = Path(__file__).resolve().parents[1]
         source = source_preflight(repo)
         provenance = release_provenance_snapshot(repo)
@@ -72,13 +72,14 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
         self.assertTrue(provenance["contract_valid"])
         self.assertEqual(provenance["generation"], "V8")
         self.assertEqual(provenance["release_branch"], "feature/local-ai-hub-v8")
-        self.assertFalse(provenance["identity_approved"])
-        self.assertIsNone(provenance["candidate_version"])
-        self.assertIsNone(provenance["candidate_tag"])
+        self.assertTrue(provenance["identity_approved"])
+        self.assertEqual(provenance["candidate_version"], "8.0.0")
+        self.assertEqual(provenance["candidate_tag"], "v8.0.0")
+        self.assertTrue(provenance["product_version_matches"])
+        self.assertTrue(provenance["tag_available"])
 
         result = evaluate(repo_root=repo)
         self.assertFalse(result["release_ready"])
-        self.assertIn("V8_RELEASE_IDENTITY_APPROVAL_REQUIRED", result["blockers"])
         self.assertIn("LOCAL_WINDOWS_EVIDENCE_REQUIRED", result["blockers"])
 
     def test_all_pass_evidence_reports_are_verified_but_cannot_override_release_identity_gate(self) -> None:
@@ -90,8 +91,8 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
         self.assertTrue(result["local_evidence"]["reports_verified"])
         self.assertTrue(result["local_evidence"]["source_commit_matches"])
         self.assertEqual(result["local_evidence"]["pending_gates"], [])
-        self.assertFalse(result["release_ready"])
-        self.assertEqual(result["blockers"], ["V8_RELEASE_IDENTITY_APPROVAL_REQUIRED"])
+        self.assertTrue(result["release_ready"])
+        self.assertEqual(result["blockers"], [])
 
     def test_declared_pass_without_local_report_is_rejected(self) -> None:
         repo = Path(__file__).resolve().parents[1]

@@ -18,18 +18,18 @@ from scripts.v8_release_provenance import (
 
 
 class V8Wave6ReleaseProvenanceTests(unittest.TestCase):
-    def test_tracked_policy_is_v8_but_identity_is_not_user_approved(self) -> None:
+    def test_tracked_policy_is_v8_with_prepared_user_approved_identity(self) -> None:
         repo = Path(__file__).resolve().parents[1]
         policy = load_release_policy(repo / "architecture" / "v8_release_policy.json")
         snapshot = release_policy_snapshot(repo)
         self.assertEqual(policy["generation"], "V8")
         self.assertEqual(policy["release_branch"], "feature/local-ai-hub-v8")
-        self.assertEqual(policy["approval"]["identity"], "required")
-        self.assertIsNone(policy["version_policy"]["candidate_version"])
-        self.assertIsNone(policy["tag_policy"]["candidate_tag"])
-        self.assertFalse(snapshot["identity_approved"])
-        self.assertFalse(snapshot["activation_ready"])
-        self.assertIn("V8_RELEASE_IDENTITY_APPROVAL_REQUIRED", snapshot["blockers"])
+        self.assertEqual(policy["approval"]["identity"], "approved")
+        self.assertEqual(policy["version_policy"]["candidate_version"], "8.0.0")
+        self.assertEqual(policy["tag_policy"]["candidate_tag"], "v8.0.0")
+        self.assertTrue(snapshot["identity_approved"])
+        self.assertTrue(snapshot["activation_ready"])
+        self.assertEqual(snapshot["blockers"], [])
 
     def test_candidate_dry_run_accepts_matching_unoccupied_v8_identity_without_writing(self) -> None:
         repo = Path(__file__).resolve().parents[1]
