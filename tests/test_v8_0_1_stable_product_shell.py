@@ -129,6 +129,11 @@ class StableProductShellTests(unittest.TestCase):
             self.assertEqual(result["areas"]["Models"]["bytes"], len(b"sentinel"))
             self.assertEqual(result["data_location_class"], "persistent_configured")
 
+    def test_production_api_default_port_remains_8765(self) -> None:
+        from src.app.main import PORT
+
+        self.assertEqual(PORT, 8765)
+
     def test_corrupt_pointer_fails_closed_without_python_fallback(self) -> None:
         root, _data, _pointer = self._fixture()
         (root / "current.json").write_text("{\"version\":\"8.0.1\",\"payload_relative\":\"C:/dev\"}", encoding="utf-8")
