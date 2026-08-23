@@ -794,3 +794,11 @@ self-contained/runtime-readiness claim is valid until the user closes or
 otherwise authorizes handling of that external listener and the shortcut
 smoke is rerun. No tag, main merge, release publish, GPU/model/provider
 workload, or user-data relocation was performed.
+
+The later exact-head runtime-bundle remediation (commit `2839a93`) excludes
+pip-generated `Lib/site-packages/bin` console helpers whose shebang metadata
+contained a developer system-Python path. Its rebuilt candidate contains
+3,549 files and 3,044 runtime files with no such path match. The already
+materialized external installation is intentionally not destructively cleaned
+or replaced-for-removal in this checkpoint; the candidate remediation is
+ready for a separately authorized reinstall/cleanup decision.
