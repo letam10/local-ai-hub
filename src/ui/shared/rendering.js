@@ -443,6 +443,11 @@ const jobRecoverySnapshot = (state) => {
     const actionId = safeJobId(item.id);
     const jobSource = item.source === "durable" ? "durable" : "hot";
     const detail = jobSource === "hot" ? hotDetails.get(actionId) || hotDetails.get(id) : null;
+    const durableArtifacts = jobSource === "durable" ? safeJobArtifacts(item.artifacts) : [];
+    const durableProvenance = jobSource === "durable" ? safeJobProvenance(item.provenance) : [];
+    const durableLifecycle = jobSource === "durable" && item.lifecycle && typeof item.lifecycle === "object" && !Array.isArray(item.lifecycle)
+      ? safeUiText(item.lifecycle.state || item.lifecycle_status, "")
+      : safeUiText(item.lifecycle_status, "");
     const status = safeJobStatus(item.status);
     const progress = Number.isInteger(item.progress) && item.progress >= 0 && item.progress <= 100 ? item.progress : 0;
     return [{
@@ -456,16 +461,16 @@ const jobRecoverySnapshot = (state) => {
       resumable: item.resumable === true,
       reason: safeUiText(item.reason),
       nextAction: safeUiText(item.next_action, "Review the job state and create a new task when recovery is unavailable."),
-      lifecycle: detail?.lifecycle || "",
+      lifecycle: detail?.lifecycle || durableLifecycle,
       lifecycleNote: detail?.message || "",
       contractVersion: detail?.contractVersion || "",
       createdAt: detail?.createdAt || "",
       startedAt: detail?.startedAt || "",
       updatedAt: detail?.updatedAt || "",
       finishedAt: detail?.finishedAt || "",
-      artifactsPublished: detail?.artifactsPublished === true,
-      artifacts: detail?.artifacts || [],
-      provenance: detail?.provenance || [],
+      artifactsPublished: detail?.artifactsPublished === true || durableArtifacts.length > 0,
+      artifacts: detail?.artifacts || durableArtifacts,
+      provenance: detail?.provenance || durableProvenance,
     }];
   });
   const candidateKey = (item) => `${textKey(item.source)}|${textKey(item.id)}|${textKey(item.status)}|${textKey(item.tool)}`;
