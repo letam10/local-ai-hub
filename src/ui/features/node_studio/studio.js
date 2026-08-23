@@ -23,6 +23,7 @@ import {
   saveNodeDraft,
 } from "../../api.js";
 import { workflowLibraryEntry } from "../../workflow_library.js";
+import { currentLanguage, translateText } from "../../i18n.js";
 
 // LiteGraph.js is intentionally pinned and served from /ui/vendor.  This file
 // is the Hub adapter: it maps mature canvas-editor state to the Hub DAG API.
@@ -37,6 +38,52 @@ const TYPE_COLORS = {
   TEXT: "#6c8cff", NUMBER: "#a9c6ff", BOOLEAN: "#e5d66a", MODEL: "#e291c7", METADATA: "#8794ad",
 };
 const CATEGORY_COLORS = { utility: "#6c8cff", image: "#cf7cff", vision: "#42c6a0", media: "#f1ad5f", video: "#f17c8e", annotation: "#8794ad" };
+const NODE_COPY = Object.freeze({
+  "Node Guide": "Hướng dẫn Node",
+  "Node Guide · Hướng dẫn toàn diện Hub Nodes & Typed Workflow": "Hướng dẫn Node · Hướng dẫn toàn diện Hub Nodes & Typed Workflow",
+  "Status truthful": "Trạng thái trung thực",
+  "Safe artifact preview": "Xem trước artifact an toàn",
+  "Parameters": "Thông số",
+  "Validation": "Kiểm tra",
+  "Dirty / downstream": "Thay đổi / phụ thuộc",
+  "Cache": "Bộ nhớ đệm",
+  "Progress": "Tiến độ",
+  "Error": "Lỗi",
+  "valid": "hợp lệ",
+  "dirty": "có thay đổi",
+  "clean": "sạch",
+  "hit": "có trong bộ nhớ đệm",
+  "miss": "không có trong bộ nhớ đệm",
+  "none": "không có",
+  "not_run": "chưa chạy",
+  "operational": "sẵn sàng",
+  "partial": "một phần",
+  "unavailable": "chưa khả dụng",
+  "No artifact output yet": "Chưa có artifact đầu ra",
+  "Partial output": "Đầu ra một phần",
+  "Preview unavailable": "Bản xem trước chưa khả dụng",
+  "No artifact from failed run": "Không có artifact từ lần chạy thất bại",
+  "No native preview": "Không có bản xem trước gốc",
+  "Artifact": "Artifact",
+  "Type": "Loại",
+  "Size": "Kích thước",
+  "Open preview": "Mở bản xem trước",
+  "Mask": "Mask",
+  "Escaped metadata only; this artifact type is not rendered as media.": "Chỉ hiển thị metadata đã thoát; loại artifact này không được dựng thành media.",
+  "Preview unavailable in this node snapshot; no safe artifact was published.": "Bản xem trước chưa khả dụng trong snapshot node này; chưa có artifact an toàn được công bố.",
+  "Video grade": "Hiệu chỉnh video",
+  "Logo overlay": "Phủ logo",
+  "Encode": "Mã hóa",
+  "No compatible node port matches this search.": "Không có cổng node tương thích với tìm kiếm này.",
+  "Media operation scope is not applied to this workspace; no execution is claimed.": "Phạm vi thao tác media không áp dụng cho workspace này; không tuyên bố thực thi.",
+  "Exact media evidence is published for video grade, logo overlay and encode; opening Node Studio does not execute a worker.": "Đã công bố bằng chứng media chính xác cho hiệu chỉnh video, phủ logo và mã hóa; mở Node Studio không chạy worker.",
+  "No exact media evidence is verified in this server snapshot; scoped nodes remain partial and no execution is claimed.": "Snapshot máy chủ chưa xác minh bằng chứng media chính xác; các node trong phạm vi vẫn là một phần và không tuyên bố thực thi.",
+});
+const nodeText = (value) => {
+  const key = String(value ?? "");
+  const translated = translateText(key);
+  return translated !== key ? translated : currentLanguage() === "vi" ? (NODE_COPY[key] || key) : key;
+};
 const NODE_UI_STATE_VERSION = 1;
 const NODE_UI_STATE_PREFIX = `${LOCAL_PREFIX}:ui:v${NODE_UI_STATE_VERSION}`;
 const OPAQUE_ARTIFACT_ID = /^artifact_[a-f0-9]{32}$/;
@@ -319,19 +366,19 @@ function artifactPreviewState(value) {
 
 function artifactPreviewButton(artifact) {
   const metadata = JSON.stringify({ media_type: artifact.mediaType, ...(artifact.sizeBytes === null ? {} : { size_bytes: artifact.sizeBytes }) });
-  return `<button class="button button--compact" type="button" data-preview-artifact="${escapeHtml(artifact.id)}" data-artifact-url="${escapeHtml(artifact.url)}" data-artifact-name="${escapeHtml(artifact.name)}" data-artifact-type="${escapeHtml(artifact.mediaType)}" data-artifact-mask="${String(artifact.mask)}" data-artifact-meta="${escapeHtml(metadata)}">Open preview</button>`;
+  return `<button class="button button--compact" type="button" data-preview-artifact="${escapeHtml(artifact.id)}" data-artifact-url="${escapeHtml(artifact.url)}" data-artifact-name="${escapeHtml(artifact.name)}" data-artifact-type="${escapeHtml(artifact.mediaType)}" data-artifact-mask="${String(artifact.mask)}" data-artifact-meta="${escapeHtml(metadata)}">${escapeHtml(nodeText("Open preview"))}</button>`;
 }
 
 function artifactPreviewItem(artifact) {
-  const label = artifact.mask ? `Mask · ${artifact.mediaType}` : artifact.mediaType;
+  const label = artifact.mask ? `${nodeText("Mask")} · ${artifact.mediaType}` : artifact.mediaType;
   const media = artifact.kind === "image"
     ? `<img class="graph-preview-image${artifact.mask ? " graph-preview-image--mask" : ""}" src="${escapeHtml(artifact.url)}" alt="${escapeHtml(artifact.name)}" loading="lazy" />`
     : artifact.kind === "video"
       ? `<video class="graph-preview-media" controls preload="metadata" src="${escapeHtml(artifact.url)}">Video preview unavailable in this browser.</video>`
       : artifact.kind === "audio"
         ? `<audio class="graph-preview-media" controls preload="metadata" src="${escapeHtml(artifact.url)}">Audio preview unavailable in this browser.</audio>`
-        : `<div class="graph-preview-fallback"><strong>No native preview</strong><p>Escaped metadata only; this artifact type is not rendered as media.</p></div>`;
-  return `<article class="graph-preview-card" data-artifact-id="${escapeHtml(artifact.id)}"><div class="graph-preview-card__head"><strong>${escapeHtml(artifact.name)}</strong><span class="tag">${escapeHtml(label)}</span></div>${media}<dl class="graph-preview-meta"><div><dt>Artifact</dt><dd>${escapeHtml(artifact.id)}</dd></div><div><dt>Type</dt><dd>${escapeHtml(label)}</dd></div><div><dt>Size</dt><dd>${artifact.sizeBytes === null ? "unavailable" : `${escapeHtml(String(artifact.sizeBytes))} bytes`}</dd></div></dl><div class="graph-preview-card__actions">${artifactPreviewButton(artifact)}</div></article>`;
+        : `<div class="graph-preview-fallback"><strong>${escapeHtml(nodeText("No native preview"))}</strong><p>${escapeHtml(nodeText("Escaped metadata only; this artifact type is not rendered as media."))}</p></div>`;
+  return `<article class="graph-preview-card" data-artifact-id="${escapeHtml(artifact.id)}"><div class="graph-preview-card__head"><strong>${escapeHtml(artifact.name)}</strong><span class="tag">${escapeHtml(label)}</span></div>${media}<dl class="graph-preview-meta"><div><dt>${escapeHtml(nodeText("Artifact"))}</dt><dd>${escapeHtml(artifact.id)}</dd></div><div><dt>${escapeHtml(nodeText("Type"))}</dt><dd>${escapeHtml(label)}</dd></div><div><dt>${escapeHtml(nodeText("Size"))}</dt><dd>${artifact.sizeBytes === null ? escapeHtml(nodeText("unavailable")) : `${escapeHtml(String(artifact.sizeBytes))} bytes`}</dd></div></dl><div class="graph-preview-card__actions">${artifactPreviewButton(artifact)}</div></article>`;
 }
 
 export function renderArtifactPreviewMarkup(collection, state = {}) {
@@ -340,9 +387,9 @@ export function renderArtifactPreviewMarkup(collection, state = {}) {
     : collectArtifactProjections(collection);
   const items = Array.isArray(collected.items) ? collected.items : [];
   const previewState = artifactPreviewState(state?.status);
-  const [title, message] = ARTIFACT_PREVIEW_STATE_COPY[previewState];
+  const [title, message] = ARTIFACT_PREVIEW_STATE_COPY[previewState].map(nodeText);
   const summary = `<div class="graph-preview-summary" data-artifact-state="${escapeHtml(previewState)}"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(message)}</span></div>`;
-  if (!items.length) return `${summary}<p class="graph-empty graph-preview-empty">Preview unavailable in this node snapshot; no safe artifact was published.</p>`;
+  if (!items.length) return `${summary}<p class="graph-empty graph-preview-empty">${escapeHtml(nodeText("Preview unavailable in this node snapshot; no safe artifact was published."))}</p>`;
   const truncation = collected.truncated ? `<p class="graph-preview-truncated">Showing the first ${MAX_PREVIEW_ARTIFACTS} safe artifacts; additional output metadata is unavailable.</p>` : "";
   return `${summary}<div class="graph-preview-list" aria-label="Node output artifacts">${items.map(artifactPreviewItem).join("")}</div>${truncation}`;
 }
@@ -549,9 +596,9 @@ class HubGraphEditor {
   }
 
   operationScopeSummary() {
-    if (this.scope !== "media") return "Media operation scope is not applied to this workspace; no execution is claimed.";
-    if (this.operationScope.evidenceVerified) return "Exact media evidence is published for video grade, logo overlay and encode; opening Node Studio does not execute a worker.";
-    return "No exact media evidence is verified in this server snapshot; scoped nodes remain partial and no execution is claimed.";
+    if (this.scope !== "media") return nodeText("Media operation scope is not applied to this workspace; no execution is claimed.");
+    if (this.operationScope.evidenceVerified) return nodeText("Exact media evidence is published for video grade, logo overlay and encode; opening Node Studio does not execute a worker.");
+    return nodeText("No exact media evidence is verified in this server snapshot; scoped nodes remain partial and no execution is claimed.");
   }
 
   operationEvidenceMarkup(definition = null) {
@@ -755,6 +802,10 @@ class HubGraphEditor {
         this.size = [230, Math.max(82, 42 + Math.max((captured.inputs || []).length, (captured.outputs || []).length) * 22)];
       }
       HubLiteNode.title = captured.title;
+      // LiteGraph defaults unselected titles to #999 even on bright category
+      // bars.  Use one high-contrast ink color for every category; selected
+      // nodes still use LiteGraph's existing white selected-title color.
+      HubLiteNode.title_text_color = "#07111f";
       HubLiteNode.desc = captured.description;
       HubLiteNode.prototype.onDrawForeground = function drawHubNodeForeground(ctx) {
         if (this.hubStatus && this.hubStatus !== "completed") {
@@ -797,7 +848,7 @@ class HubGraphEditor {
           <div class="graph-editor__toolbar-group"><select data-graph-preset aria-label="Preset workflow"><option value="">Chọn template…</option>${this.presets.map((item) => `<option value="${escapeHtml(item.id)}" title="${escapeHtml(item.description || "")}">${escapeHtml(item.title)}${item.stage ? ` · ${escapeHtml(item.stage)}` : ""}</option>`).join("")}</select><button class="button" type="button" data-graph-action="save-local">Lưu local</button><button class="button" type="button" data-graph-action="export">Export JSON</button><label class="button graph-editor__import">Import JSON<input type="file" data-graph-import accept="application/json,.json" /></label></div>
         </div>
         <div class="graph-editor__options"><label><input type="checkbox" data-graph-option="auto" ${this.autoPreview ? "checked" : ""} /> Preview tự động (Auto Preview)</label><label><input type="checkbox" data-graph-option="draft" ${this.draft ? "checked" : ""} /> Draft ảnh</label><span>Bấm node để cộng dồn lựa chọn · Ctrl/Shift cũng cộng dồn · kéo nhóm để di chuyển · kéo vùng để chọn · bấm nền trống, Esc hoặc Xóa chọn để bỏ chọn</span></div>
-        <div class="graph-editor__statusbar"><span data-graph-validation>Chưa kiểm tra workflow.</span><span class="graph-editor__availability">${this.availability.counts?.operational || 0} sẵn sàng · ${this.availability.counts?.partial || 0} partial · ${this.availability.counts?.unavailable || 0} unavailable</span><span class="graph-operation-scope-status" data-graph-operation-evidence role="status">${escapeHtml(this.operationScopeSummary())}</span></div>
+        <div class="graph-editor__statusbar"><span data-graph-validation>Chưa kiểm tra workflow.</span><span class="graph-editor__availability">${this.availability.counts?.operational || 0} ${escapeHtml(nodeText("operational"))} · ${this.availability.counts?.partial || 0} ${escapeHtml(nodeText("partial"))} · ${this.availability.counts?.unavailable || 0} ${escapeHtml(nodeText("unavailable"))}</span><span class="graph-operation-scope-status" data-graph-operation-evidence role="status">${escapeHtml(this.operationScopeSummary())}</span></div>
         <div class="graph-editor__panel-controls" role="toolbar" aria-label="Node Studio panels">
           <button class="button button--compact" type="button" data-graph-action="toggle-palette" aria-expanded="${String(this.panelState.palette !== "collapsed")}">Palette</button>
           <button class="button button--compact" type="button" data-graph-action="toggle-inspector" aria-expanded="${String(this.panelState.inspector !== "collapsed")}">Inspector</button>
@@ -805,10 +856,10 @@ class HubGraphEditor {
           <button class="button button--compact" type="button" data-graph-action="cycle-palette-width">Palette width</button>
           <button class="button button--compact" type="button" data-graph-action="cycle-inspector-width">Inspector width</button>
           <button class="button button--compact" type="button" data-graph-action="toggle-preview">Preview size</button>
-          <button class="button button--compact" type="button" data-graph-action="toggle-guide" aria-expanded="${String(this.panelState.guide)}">Node Guide</button>
+          <button class="button button--compact" type="button" data-graph-action="toggle-guide" aria-expanded="${String(this.panelState.guide)}">${escapeHtml(nodeText("Node Guide"))}</button>
         </div>
         <details class="graph-guide" data-graph-guide ${this.panelState.guide ? "open" : ""}>
-          <summary>Node Guide · Hướng dẫn toàn diện Hub Nodes & Typed Workflow</summary>
+          <summary>${escapeHtml(nodeText("Node Guide · Hướng dẫn toàn diện Hub Nodes & Typed Workflow"))}</summary>
           <div class="graph-guide__content">
             <div class="graph-guide__section">
               <strong>1. Khái niệm Typed Sockets & Dữ liệu</strong>
@@ -1138,7 +1189,7 @@ class HubGraphEditor {
       return !query || haystack.includes(query);
     });
     const results = state.element.querySelector("[data-graph-picker-results]");
-    if (results) results.innerHTML = matches.length ? matches.map(({ candidate, index }) => `<button class="button button--compact" type="button" role="option" data-graph-picker-candidate="${index}" title="${escapeHtml(candidate.definition.description || "")}">${escapeHtml(candidate.definition.title)} · ${escapeHtml(candidate.port.label || candidate.port.name)} <small>${escapeHtml(candidate.definition.availability?.status || candidate.definition.status || "operational")}</small></button>`).join("") : `<p class="graph-empty">No compatible node port matches this search.</p>`;
+    if (results) results.innerHTML = matches.length ? matches.map(({ candidate, index }) => `<button class="button button--compact" type="button" role="option" data-graph-picker-candidate="${index}" title="${escapeHtml(candidate.definition.description || "")}">${escapeHtml(candidate.definition.title)} · ${escapeHtml(candidate.port.label || candidate.port.name)} <small>${escapeHtml(nodeText(candidate.definition.availability?.status || candidate.definition.status || "operational"))}</small></button>`).join("") : `<p class="graph-empty">${escapeHtml(nodeText("No compatible node port matches this search."))}</p>`;
     const rejected = state.element.querySelector("[data-graph-picker-rejected]");
     if (rejected) {
       const reasons = state.candidates.rejected.slice(0, 4).map((item) => `${item.definition.title} · ${item.port.label || item.port.name}: ${item.reason}`);
@@ -1330,8 +1381,8 @@ class HubGraphEditor {
     const progress = state.progress === undefined || state.progress === null ? "not_run" : Number.isFinite(Number(state.progress)) ? `${Math.max(0, Math.min(100, Number(state.progress)))}%` : "unavailable";
     const error = state.error ? String(state.error).slice(0, 240) : "none";
     const statusRows = [["Validation", validation], ["Dirty / downstream", dirty], ["Cache", cache], ["Progress", progress], ["Error", error]]
-      .map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
-    this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(definition?.category || "node")}</span><h3>${escapeHtml(definition?.title || node.hubType)}</h3><p>${escapeHtml(definition?.description || "")}</p></div><div class="graph-node-state" data-status="${escapeHtml(displayStatus)}"><b>${escapeHtml(displayStatus)}</b><span>${escapeHtml(displayMessage)}</span></div></div>${action ? `<div class="graph-action-hint"><strong>Bước tiếp theo</strong><span>${escapeHtml(action)}</span></div>` : ""}<section class="graph-inspector__section"><strong>Status truthful</strong><dl class="graph-status-list">${statusRows}</dl></section>${preview ? `<section class="graph-inspector__section"><strong>Safe artifact preview</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>Thông số</strong>${(definition?.properties || []).map((property) => propertyControl(node, property)).join("") || `<p class="graph-empty">Node này không có property.</p>`}</section>`;
+      .map(([label, value]) => `<div><dt>${escapeHtml(nodeText(label))}</dt><dd>${escapeHtml(nodeText(value))}</dd></div>`).join("");
+    this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(definition?.category || "node")}</span><h3>${escapeHtml(definition?.title || node.hubType)}</h3><p>${escapeHtml(definition?.description || "")}</p></div><div class="graph-node-state" data-status="${escapeHtml(displayStatus)}"><b>${escapeHtml(nodeText(displayStatus))}</b><span>${escapeHtml(displayMessage)}</span></div></div>${action ? `<div class="graph-action-hint"><strong>${escapeHtml(nodeText("Bước tiếp theo"))}</strong><span>${escapeHtml(action)}</span></div>` : ""}<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Status truthful"))}</strong><dl class="graph-status-list">${statusRows}</dl></section>${preview ? `<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Safe artifact preview"))}</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Parameters"))}</strong>${(definition?.properties || []).map((property) => propertyControl(node, property)).join("") || `<p class="graph-empty">Node này không có property.</p>`}</section>`;
     if (this.scope === "media") {
       this.inspectorElement.querySelector(".graph-inspector__head")?.insertAdjacentHTML("afterend", this.operationEvidenceMarkup(operationEvidence ? definition : null));
       const inspectorState = this.inspectorElement.querySelector(".graph-node-state");

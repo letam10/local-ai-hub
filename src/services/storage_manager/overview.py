@@ -27,6 +27,8 @@ from src.shared.paths.registry import (
 
 _CACHE_SECONDS = 120.0
 _LOW_SPACE_BYTES = 20 * 1024**3
+_DIRECTORY_SCAN_MAX_ENTRIES = 12_000
+_DIRECTORY_SCAN_MAX_DEPTH = 24
 _OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
 _OLLAMA_TIMEOUT_SECONDS = 0.5
 _VOLUME_ALLOWLIST = (
@@ -74,33 +76,110 @@ def _is_reparse_point(entry: os.DirEntry[str]) -> bool:
         return True
 
 
-def _directory_size(path: Path) -> int:
-    if not path.exists():
-        return 0
-    if path.is_file():
-        try:
-            return path.stat().st_size
-        except OSError:
-            return 0
+def _directory_size_report(path: Path) -> dict[str, Any]:
+    """Return a bounded, path-free size projection for one managed root.
+
+    The storage page is a read-only overview, not a recursive inventory.  A
+    historical implementation walked every file under Temp/Models/Runtime and
+    could keep ``GET /api/storage`` blocked for minutes on a real installation
+    containing payloads, caches and preserved task worktrees.  Keep the scan
+    finite and report a partial total when the budget is reached; callers can
+    still show a useful number without claiming that the entire tree was read.
+    Reparse points and non-regular entries are never followed.
+    """
+
+    def unavailable(reason: str) -> dict[str, Any]:
+        return {
+            "bytes": 0,
+            "gb": 0.0,
+            "status": "unavailable",
+            "complete": False,
+            "entries_scanned": 0,
+            "reason": reason,
+            "next_action": "Review the managed storage root before retrying.",
+        }
+
+    try:
+        root_stat = path.stat(follow_symlinks=False)
+        if getattr(root_stat, "st_file_attributes", 0) & 0x400 or path.is_symlink():
+            return unavailable("Managed storage root is a reparse point and was not scanned.")
+        if path.is_file():
+            size = path.stat(follow_symlinks=False).st_size
+            return {
+                "bytes": size,
+                "gb": round(size / (1024**3), 3),
+                "status": "available",
+                "complete": True,
+                "entries_scanned": 1,
+                "reason": "Managed storage size was read from a regular file.",
+                "next_action": "No action is required; refresh after external storage changes.",
+            }
+        if not path.is_dir():
+            return unavailable("Managed storage root is not a regular directory.")
+    except OSError:
+        return unavailable("Managed storage root is unavailable or cannot be read.")
+
     total = 0
-    stack = [path]
+    entries_scanned = 0
+    truncated = False
+    stack: list[tuple[Path, int]] = [(path, 0)]
     while stack:
-        current = stack.pop()
-        try:
-            with os.scandir(current) as entries:
-                for entry in entries:
-                    try:
-                        if _is_reparse_point(entry):
-                            continue
-                        if entry.is_dir(follow_symlinks=False):
-                            stack.append(Path(entry.path))
-                        else:
-                            total += entry.stat(follow_symlinks=False).st_size
-                    except OSError:
-                        continue
-        except OSError:
+        current, depth = stack.pop()
+        if depth > _DIRECTORY_SCAN_MAX_DEPTH:
+            truncated = True
             continue
-    return total
+        try:
+            entries = os.scandir(current)
+        except OSError:
+            truncated = True
+            continue
+        with entries:
+            for entry in entries:
+                if entries_scanned >= _DIRECTORY_SCAN_MAX_ENTRIES:
+                    truncated = True
+                    break
+                entries_scanned += 1
+                try:
+                    if _is_reparse_point(entry):
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        if depth < _DIRECTORY_SCAN_MAX_DEPTH:
+                            stack.append((Path(entry.path), depth + 1))
+                        else:
+                            truncated = True
+                        continue
+                    if entry.is_file(follow_symlinks=False):
+                        total += entry.stat(follow_symlinks=False).st_size
+                    else:
+                        truncated = True
+                except OSError:
+                    truncated = True
+        if entries_scanned >= _DIRECTORY_SCAN_MAX_ENTRIES:
+            break
+
+    if truncated:
+        status = "partial"
+        reason = "Storage size is a bounded partial scan; deeper entries were not read."
+        next_action = "Refresh storage after external changes; the displayed total is not a full inventory."
+    else:
+        status = "available"
+        reason = "Managed storage size was read from the fixed server-owned root."
+        next_action = "No action is required; refresh after external storage changes."
+    return {
+        "bytes": total,
+        "gb": round(total / (1024**3), 3),
+        "status": status,
+        "complete": not truncated,
+        "entries_scanned": entries_scanned,
+        "reason": reason,
+        "next_action": next_action,
+    }
+
+
+def _directory_size(path: Path) -> int:
+    """Compatibility helper for model summaries; never performs an unbounded walk."""
+
+    return int(_directory_size_report(path)["bytes"])
 
 
 def _bytes_record(value: int) -> dict[str, Any]:
@@ -317,11 +396,25 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
         "Temp": temp_root,
         "Logs": log_root,
     }
-    areas = {name: _bytes_record(_directory_size(path)) for name, path in roots.items()}
+    area_reports = {name: _directory_size_report(path) for name, path in roots.items()}
+    areas = {
+        name: {
+            **report,
+            "bytes": int(report["bytes"]),
+            "gb": float(report["gb"]),
+        }
+        for name, report in area_reports.items()
+    }
     legacy = _legacy_records()
     volumes = _volume_projection()
     result = {
-        "status": "completed",
+        "status": "completed" if all(report["complete"] for report in area_reports.values()) else "partial",
+        "scan": {
+            "status": "completed" if all(report["complete"] for report in area_reports.values()) else "partial",
+            "max_entries": _DIRECTORY_SCAN_MAX_ENTRIES,
+            "max_depth": _DIRECTORY_SCAN_MAX_DEPTH,
+            "reason": "All managed roots were scanned within the bounded budget." if all(report["complete"] for report in area_reports.values()) else "One or more managed roots exceeded the bounded scan budget; partial totals are shown.",
+        },
         "disk": {
             "total_bytes": total,
             "free_bytes": free,
