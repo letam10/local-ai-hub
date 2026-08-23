@@ -159,6 +159,8 @@ def _commit_at_tag(repo_root: Path, tag: str) -> str | None:
 def release_policy_snapshot(repo_root: Path = ROOT, *, phase: str = "pre_tag", expected_commit: str | None = None) -> dict[str, Any]:
     if phase not in {"pre_tag", "post_tag"}:
         raise ReleasePolicyError("RELEASE_PHASE_INVALID")
+    if expected_commit is not None and re.fullmatch(r"[0-9a-f]{40,64}", expected_commit) is None:
+        raise ReleasePolicyError("RELEASE_EXPECTED_COMMIT_INVALID")
     policy = load_release_policy(repo_root / "architecture" / "v8_release_policy.json")
     version = policy["version_policy"]["candidate_version"]
     tag = policy["tag_policy"]["candidate_tag"]
