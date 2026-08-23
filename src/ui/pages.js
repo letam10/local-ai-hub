@@ -42,6 +42,12 @@ const LEGACY_STATIC_COPY = Object.freeze([
   "IMAGE", "MEDIA", "VIDEO AI", "VISION WORKFLOW", "VIDEO WORKFLOW", "Load Input", "Detect / Segment / OCR",
   "Preview & Export", "Transcript queue", "Projects, Assets & Recipes", "Asset Library", "Prompts & Recipes",
   "Compare Board", "Workflow Gallery", "All", "Active", "Attention", "Completed", "Component Operations",
+  "Diagnostics subsystem is healthy.", "Diagnostics subsystem is unavailable.", "Diagnostics subsystem state is unknown.",
+  "Diagnostics subsystem needs attention.", "No action required.", "Review the managed diagnostic source manually.",
+  "Review the bounded diagnostic details.", "Review the managed subsystem state before retrying.",
+  "Volume statistics are available from the server-owned allowlist.", "No action is required; refresh after external storage changes.",
+  "The server recovery snapshot has jobs that need review.", "Open Jobs to review the server-owned recovery state.",
+  "No bounded media acceptance invocation was recorded.", "Keep media operations partial until a separately authorized bounded acceptance is recorded.",
   "No V8 operation", "Model", "Category", "Size", "Status / action", "Import Model", "Check Update",
 ]);
 

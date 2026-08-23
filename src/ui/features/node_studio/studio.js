@@ -78,13 +78,58 @@ const NODE_COPY = Object.freeze({
   "Media operation scope is not applied to this workspace; no execution is claimed.": "Phạm vi thao tác media không áp dụng cho workspace này; không tuyên bố thực thi.",
   "Exact media evidence is published for video grade, logo overlay and encode; opening Node Studio does not execute a worker.": "Đã công bố bằng chứng media chính xác cho hiệu chỉnh video, phủ logo và mã hóa; mở Node Studio không chạy worker.",
   "No exact media evidence is verified in this server snapshot; scoped nodes remain partial and no execution is claimed.": "Snapshot máy chủ chưa xác minh bằng chứng media chính xác; các node trong phạm vi vẫn là một phần và không tuyên bố thực thi.",
+  "NODE WORKFLOW": "WORKFLOW NODE",
+  "Recent": "Gần đây",
+  "Recent workflows": "Workflow gần đây",
+  "Run Graph": "Chạy Graph",
+  "Export JSON": "Xuất JSON",
+  "Import JSON": "Nhập JSON",
+  "Preview indicator (manual; no auto-run)": "Chỉ báo preview (thủ công; không tự chạy)",
+  "Palette": "Bảng node",
+  "Inspector": "Bảng kiểm tra",
+  "Canvas focus": "Tập trung canvas",
+  "Palette width": "Độ rộng bảng node",
+  "Inspector width": "Độ rộng bảng kiểm tra",
+  "Preview size": "Kích thước preview",
+  "Fit": "Vừa khung",
+  "Minimap graph": "Minimap graph",
+  "Open preview": "Mở bản xem trước",
+  "Inspector / Live preview": "Bảng kiểm tra / Preview trực tiếp",
+  "No properties": "Node này không có thuộc tính.",
 });
-const nodeText = (value) => {
-  const key = String(value ?? "");
-  const translated = translateText(key);
-  return translated !== key ? translated : currentLanguage() === "vi" ? (NODE_COPY[key] || key) : key;
+const NODE_STATIC_TEXT = Object.freeze([
+  "NODE WORKFLOW", "Recent", "Recent workflows", "Export JSON", "Import JSON", "Preview indicator (manual; no auto-run)",
+  "Palette", "Inspector", "Canvas focus", "Palette width", "Inspector width", "Preview size", "Fit", "Minimap graph",
+  "Inspector / Live preview", "Open preview",
+]);
+const localizeNodeStaticMarkup = (root) => {
+  if (!root?.ownerDocument) return;
+  // Keep the helper usable in the browser and in the pure Node/data-URL test
+  // harness, where the global NodeFilter constructor is not exposed.
+  const showText = root.ownerDocument.defaultView?.NodeFilter?.SHOW_TEXT ?? 4;
+  const walker = root.ownerDocument.createTreeWalker(root, showText);
+  const nodes = [];
+  let current;
+  while ((current = walker.nextNode())) nodes.push(current);
+  nodes.forEach((textNode) => {
+    const value = textNode.nodeValue || "";
+    const key = value.trim();
+    if (!NODE_STATIC_TEXT.includes(key)) return;
+    const leading = value.slice(0, value.indexOf(key));
+    const trailing = value.slice(value.indexOf(key) + key.length);
+    textNode.nodeValue = `${leading}${nodeText(key)}${trailing}`;
+  });
 };
 const NODE_UI_STATE_VERSION = 1;
+const nodeText = (value) => {
+  const key = String(value ?? "");
+  // Pure helper tests evaluate the bounded renderer without the page module's
+  // i18n imports; keep that contract deterministic while using the real
+  // translators whenever the full browser module is loaded.
+  const translated = typeof translateText === "function" ? translateText(key) : key;
+  const language = typeof currentLanguage === "function" ? currentLanguage() : "en";
+  return translated !== key ? translated : language === "vi" ? (NODE_COPY[key] || key) : key;
+};
 const NODE_UI_STATE_PREFIX = `${LOCAL_PREFIX}:ui:v${NODE_UI_STATE_VERSION}`;
 const OPAQUE_ARTIFACT_ID = /^artifact_[a-f0-9]{32}$/;
 const SAFE_ARTIFACT_URL = /^\/api\/artifacts\/artifact_[a-f0-9]{32}$/;
@@ -962,6 +1007,7 @@ class HubGraphEditor {
     this.resizeObserver = new ResizeObserver(() => this.resizeCanvas());
     this.resizeObserver.observe(this.canvasElement.parentElement);
     this.resizeCanvas();
+    localizeNodeStaticMarkup(this.root);
   }
 
   bindEvents() {
@@ -1358,10 +1404,12 @@ class HubGraphEditor {
     const nodes = this.selectedNodes();
     if (!nodes.length) {
       this.inspectorElement.innerHTML = `<div class="graph-inspector__empty"><strong>Inspector / Live preview</strong><p>Chọn node để chỉnh thông số và xem output. Kết nối trực tiếp từ socket sang socket.</p><div class="graph-type-legend">${Object.entries(TYPE_COLORS).map(([type, color]) => `<span><i style="--node-color:${color}"></i>${type}</span>`).join("")}</div><p>Minimap, pan/zoom, undo/redo và layout do canvas xử lý.</p></div>`;
+      localizeNodeStaticMarkup(this.inspectorElement);
       return;
     }
     if (nodes.length > 1) {
       this.inspectorElement.innerHTML = `<div class="graph-inspector__empty"><strong>${nodes.length} node đang được chọn</strong><p>Kéo các node cùng lúc, dùng Delete để xóa hoặc Ctrl+Z để hoàn tác.</p></div>`;
+      localizeNodeStaticMarkup(this.inspectorElement);
       return;
     }
     const node = nodes[0];
@@ -1389,6 +1437,7 @@ class HubGraphEditor {
       inspectorState?.setAttribute("data-operation-scope-status", operationEvidence?.status || this.operationScope.status);
       inspectorState?.setAttribute("data-operation-scope-verified", String(operationEvidence?.evidenceVerified || this.operationScope.evidenceVerified === true));
     }
+    localizeNodeStaticMarkup(this.inspectorElement);
   }
 
   renderArtifactPreview(collection, state = {}) {
