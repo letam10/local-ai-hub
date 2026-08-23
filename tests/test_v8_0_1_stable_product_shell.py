@@ -257,10 +257,22 @@ class PostTagProvenanceTests(unittest.TestCase):
     def test_post_tag_accepts_existing_exact_tag_while_pre_tag_refuses_it(self) -> None:
         root, commit = self._repo()
         subprocess.run(["git", "-C", str(root), "tag", "v8.0.1"], check=True)
-        pre = release_policy_snapshot(root, phase="pre_tag", expected_commit=commit)
-        post = release_policy_snapshot(root, phase="post_tag", expected_commit=commit)
+        pre = release_policy_snapshot(
+            root,
+            phase="pre_tag",
+            expected_commit=commit,
+            requested_version="8.0.1",
+            requested_tag="v8.0.1",
+        )
+        post = release_policy_snapshot(
+            root,
+            phase="post_tag",
+            expected_commit=commit,
+            requested_version="8.0.1",
+            requested_tag="v8.0.1",
+        )
         self.assertFalse(pre["tag_available"])
-        self.assertIn("V8_RELEASE_TAG_UNAVAILABLE", pre["blockers"])
+        self.assertIn("RELEASE_TAG_ALREADY_EXISTS", pre["blockers"])
         self.assertTrue(post["tag_available"])
         self.assertTrue(post["tag_verified"])
         self.assertTrue(post["activation_ready"])
@@ -273,9 +285,15 @@ class PostTagProvenanceTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(root), "commit", "-m", "later"], check=True, capture_output=True)
         wrong = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
         subprocess.run(["git", "-C", str(root), "tag", "v8.0.1", wrong], check=True)
-        post = release_policy_snapshot(root, phase="post_tag", expected_commit=commit)
+        post = release_policy_snapshot(
+            root,
+            phase="post_tag",
+            expected_commit=commit,
+            requested_version="8.0.1",
+            requested_tag="v8.0.1",
+        )
         self.assertFalse(post["tag_verified"])
-        self.assertIn("V8_RELEASE_TAG_MISMATCH", post["blockers"])
+        self.assertIn("RELEASE_TAG_TARGET_MISMATCH", post["blockers"])
 
 
 if __name__ == "__main__":

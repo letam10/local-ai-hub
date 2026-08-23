@@ -64,7 +64,9 @@ the cancel action is offered only for a verified API process owned by this
 desktop. API-down, malformed, or externally owned state is `unknown` with no
 fabricated count and no global cancellation.
 
-The release provenance helper has explicit `pre_tag` and `post_tag` modes.
-Pre-tag validation requires an unoccupied candidate tag; post-tag validation
-accepts only an existing immutable tag peeled to the exact expected commit.
-Historical V7 manifests and tags remain outside this V8.0.1 preparation.
+The release provenance helper has an `integration` mode (the default) plus
+explicit `pre_tag` and `post_tag` modes. Integration and ordinary merge CI do
+not inspect or require a tag. Pre-tag validation requires an explicitly
+requested, unoccupied candidate tag; post-tag validation accepts only an
+existing immutable tag peeled to the exact expected commit. Historical V7
+manifests and tags remain outside this V8.0.1 preparation.

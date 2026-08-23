@@ -70,7 +70,7 @@ Strict local acceptance:
 python scripts/v8_acceptance_gate.py --strict-release --evidence <acceptance-root>\evidence.json
 ```
 
-Source-only có thể exit 0 khi source contract hợp lệ nhưng `release_ready=false`; đó là trạng thái đúng nếu Windows evidence hoặc release identity còn thiếu.
+Source-only có thể exit 0 khi source contract hợp lệ nhưng `merge_ready=false`; đó là trạng thái đúng nếu Windows evidence còn thiếu. Integration CI không yêu cầu tag. `release_ready` chỉ có ý nghĩa ở `pre_tag`/`post_tag`, còn `tagged_release_ready` chỉ PASS sau khi tag hiện hữu trỏ đúng exact commit.
 
 ## Wave 5 re-audit finding
 

@@ -155,18 +155,44 @@ def current_head(repo_root: Path = ROOT) -> str:
     return value
 
 
-def release_provenance_snapshot(repo_root: Path = ROOT, *, phase: str = "pre_tag", expected_commit: str | None = None) -> dict[str, Any]:
+def release_provenance_snapshot(
+    repo_root: Path = ROOT,
+    *,
+    phase: str = "integration",
+    expected_commit: str | None = None,
+    requested_version: str | None = None,
+    requested_tag: str | None = None,
+) -> dict[str, Any]:
     """Compatibility name for the V8 release-policy snapshot."""
     try:
-        return release_policy_snapshot(repo_root, phase=phase, expected_commit=expected_commit)
+        return release_policy_snapshot(
+            repo_root,
+            phase=phase,
+            expected_commit=expected_commit,
+            requested_version=requested_version,
+            requested_tag=requested_tag,
+        )
     except ReleasePolicyError as exc:
         raise AcceptanceGateError("V8_RELEASE_PROVENANCE_CONTRACT_INVALID") from exc
 
 
-def source_preflight(repo_root: Path = ROOT, *, phase: str = "pre_tag", expected_commit: str | None = None) -> dict[str, Any]:
+def source_preflight(
+    repo_root: Path = ROOT,
+    *,
+    phase: str = "integration",
+    expected_commit: str | None = None,
+    requested_version: str | None = None,
+    requested_tag: str | None = None,
+) -> dict[str, Any]:
     contract = load_gate_contract(repo_root / "architecture" / "v8_acceptance_gates.json")
     missing = [name for name in REQUIRED_SOURCE_FILES if not (repo_root / name).is_file()]
-    provenance = release_provenance_snapshot(repo_root, phase=phase, expected_commit=expected_commit)
+    provenance = release_provenance_snapshot(
+        repo_root,
+        phase=phase,
+        expected_commit=expected_commit,
+        requested_version=requested_version,
+        requested_tag=requested_tag,
+    )
     return {
         "status": "completed",
         "valid": not missing and provenance.get("contract_valid") is True,
@@ -248,9 +274,23 @@ def _verify_pass_reports(evidence: Mapping[str, Any], evidence_path: Path) -> No
         )
 
 
-def evaluate(*, evidence_path: Path | None = None, repo_root: Path = ROOT, phase: str = "pre_tag", expected_commit: str | None = None) -> dict[str, Any]:
+def evaluate(
+    *,
+    evidence_path: Path | None = None,
+    repo_root: Path = ROOT,
+    phase: str = "integration",
+    expected_commit: str | None = None,
+    requested_version: str | None = None,
+    requested_tag: str | None = None,
+) -> dict[str, Any]:
     contract = load_gate_contract(repo_root / "architecture" / "v8_acceptance_gates.json")
-    source = source_preflight(repo_root, phase=phase, expected_commit=expected_commit)
+    source = source_preflight(
+        repo_root,
+        phase=phase,
+        expected_commit=expected_commit,
+        requested_version=requested_version,
+        requested_tag=requested_tag,
+    )
     head = current_head(repo_root)
     blockers: list[str] = []
     if source["valid"] is not True:
@@ -267,8 +307,9 @@ def evaluate(*, evidence_path: Path | None = None, repo_root: Path = ROOT, phase
         "passed": 0,
         "pending_gates": [item["gate_id"] for item in contract["gates"] if item["required"] is True],
     }
+    evidence_blockers: list[str] = []
     if evidence_path is None:
-        blockers.append("LOCAL_WINDOWS_EVIDENCE_REQUIRED")
+        evidence_blockers.append("LOCAL_WINDOWS_EVIDENCE_REQUIRED")
     else:
         try:
             evidence = _validate_evidence(_load_json(evidence_path), contract)
@@ -283,23 +324,40 @@ def evaluate(*, evidence_path: Path | None = None, repo_root: Path = ROOT, phase
                 "pending_gates": pending,
             })
             if not source_matches:
-                blockers.append("EVIDENCE_SOURCE_COMMIT_MISMATCH")
+                evidence_blockers.append("EVIDENCE_SOURCE_COMMIT_MISMATCH")
             if pending:
-                blockers.append("LOCAL_WINDOWS_GATES_INCOMPLETE")
+                evidence_blockers.append("LOCAL_WINDOWS_GATES_INCOMPLETE")
         except AcceptanceGateError as exc:
-            blockers.append(exc.code)
+            evidence_blockers.append(exc.code)
 
-    blockers = list(dict.fromkeys(blockers))
-    release_ready = not blockers
+    technical_blockers = list(dict.fromkeys([*source.get("release_provenance", {}).get("technical_blockers", []), "SOURCE_PREFLIGHT_FAILED"] if source["valid"] is not True else source.get("release_provenance", {}).get("technical_blockers", [])))
+    technical_ready = not technical_blockers
+    merge_blockers = list(dict.fromkeys([*technical_blockers, *evidence_blockers]))
+    merge_ready = not merge_blockers
+    release_blockers = list(dict.fromkeys([*merge_blockers, *[str(item) for item in provenance.get("blockers", []) if isinstance(item, str)]]))
+    release_ready = bool(phase in {"pre_tag", "post_tag"} and not release_blockers)
+    tagged_release_ready = bool(phase == "post_tag" and release_ready)
+    blockers = release_blockers if phase in {"pre_tag", "post_tag"} else merge_blockers
+    if phase == "integration":
+        status = "merge_ready" if merge_ready else ("technical_ready" if technical_ready else "blocked")
+    else:
+        status = "release_ready" if release_ready else "blocked"
     return {
         "schema_version": "v8-acceptance-preflight.v2",
-        "status": "release_ready" if release_ready else "blocked",
+        "status": status,
         "execution": "not_run",
         "dry_run": True,
         "source_commit": head,
         "source_preflight": source,
         "local_evidence": evidence_summary,
+        "phase": phase,
+        "technical_ready": technical_ready,
+        "merge_ready": merge_ready,
         "release_ready": release_ready,
+        "tagged_release_ready": tagged_release_ready,
+        "technical_blockers": technical_blockers,
+        "merge_blockers": merge_blockers,
+        "release_blockers": release_blockers,
         "blockers": blockers,
     }
 
@@ -309,20 +367,29 @@ def main() -> int:
     parser.add_argument("--evidence", type=Path, default=None, help="Local evidence.json; PASS reports are read from sibling reports/<gate_id>.json and no path is emitted.")
     parser.add_argument("--source-only", action="store_true", help="Validate tracked source contracts without claiming release readiness.")
     parser.add_argument("--strict-release", action="store_true", help="Return success only when every release gate is satisfied.")
-    parser.add_argument("--phase", choices=("pre_tag", "post_tag"), default="pre_tag", help="Release identity phase.")
+    parser.add_argument("--phase", choices=("integration", "pre_tag", "post_tag"), default="integration", help="Release identity phase.")
     parser.add_argument("--expected-commit", default=None, help="Expected commit for post-tag verification.")
+    parser.add_argument("--candidate-version", default=None, help="Explicit version for pre-tag/post-tag validation.")
+    parser.add_argument("--candidate-tag", default=None, help="Explicit tag for pre-tag/post-tag validation.")
     args = parser.parse_args()
     if args.source_only and args.strict_release:
         print(json.dumps({"status": "invalid", "code": "CLI_MODE_CONFLICT", "execution": "not_run", "dry_run": True}, sort_keys=True))
         return 2
     try:
-        result = evaluate(evidence_path=args.evidence, phase=args.phase, expected_commit=args.expected_commit)
+        result = evaluate(
+            evidence_path=args.evidence,
+            phase=args.phase,
+            expected_commit=args.expected_commit,
+            requested_version=args.candidate_version,
+            requested_tag=args.candidate_tag,
+        )
     except AcceptanceGateError as exc:
         print(json.dumps({"status": "blocked", "code": exc.code, "execution": "not_run", "dry_run": True}, sort_keys=True))
         return 1
     print(json.dumps(result, ensure_ascii=True, sort_keys=True, indent=2))
     if args.strict_release:
-        return 0 if result["release_ready"] is True else 1
+        ready = result["merge_ready"] if args.phase == "integration" else result["release_ready"]
+        return 0 if ready is True else 1
     return 0 if result["source_preflight"]["valid"] is True else 1
 
 

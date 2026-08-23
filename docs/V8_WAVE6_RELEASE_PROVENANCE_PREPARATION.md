@@ -29,10 +29,10 @@ The policy fixes these invariants:
   metadata (`feature/local-ai-hub-v8`); it is not the current checkout,
   temporary PR branch, or release authorization authority;
 - stable release version must be SemVer major 8;
-- tag must match the version exactly as `v<version>` and start with `v8.`;
+- an explicitly requested tag must match its version exactly as `v<version>` and start with `v8.`;
 - release tags are immutable;
-- candidate version/tag are selected in the tracked policy only after explicit
-  user preparation approval;
+- a candidate version may be prepared without selecting a tag; a tag is only
+  bound when a pre-tag or post-tag check receives it explicitly;
 - release identity approval is explicit and separate from tag creation, main
   merge, and publication approval;
 - historical V7 release evidence is immutable;
@@ -43,12 +43,33 @@ The policy fixes these invariants:
 A proposed release identity can be checked without writing anything:
 
 ```powershell
-python scripts/v8_release_provenance.py --candidate-version 8.0.0 --candidate-tag v8.0.0
+python scripts/v8_release_provenance.py --candidate-version 8.0.0 --candidate-tag v8.0.0 --phase pre_tag --expected-commit <commit>
 ```
 
-This command only validates syntax/policy and checks that the proposed tag is not already occupied in the local Git repository. It does not change tracked files or refs.
+This explicit pre-tag command only validates syntax/policy and checks that the
+requested tag is not already occupied in the local Git repository. It does not
+change tracked files or refs. The default `integration` phase does not inspect
+tag refs at all.
 
 `8.0.0 / v8.0.0` in the example is **not an approved release identity**. It is an example input only.
+
+## 3A. Independent integration and tag phases
+
+The verifier has three explicit phases:
+
+- `integration` (the default) validates tracked source/product contracts and
+  exact-commit readiness. It ignores whether any historical, unrelated, or
+  planned tag exists. This is the phase used by ordinary branch and main CI.
+- `pre_tag` requires an explicit version, tag, and expected source commit. It
+  fails closed when the requested immutable tag already exists.
+- `post_tag` requires the same explicit identity and commit, then verifies that
+  the existing tag peels to that exact commit.
+
+The result keeps separate `technical_ready`, `merge_ready`, `release_ready`,
+and `tagged_release_ready` fields. `release_ready` is never inferred from a
+normal integration pass, and a tag is never required for merge readiness.
+`release_branch` remains generation/integration-line metadata only; exact
+commit/tree and immutable tag-target checks are the trust authority.
 
 ## 4. Wave 5 re-audit hardening
 

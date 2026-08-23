@@ -10,7 +10,7 @@
   "tag_policy": {
     "prefix": "v8.",
     "immutable": true,
-    "candidate_tag": "v8.0.1"
+    "candidate_tag": null
   },
   "approval": {
     "identity": "approved",
