@@ -662,9 +662,9 @@ GitHub Release.
   `feature/local-ai-hub-v8`; origin/main không đi trước và không có divergence.
 - Identity preparation commit: `768b9d0ce61ee8a9a2116b5eaf412daf8ad6af8c`,
   `chore(v8): prepare 8.0.0 release identity`.
-- Release-candidate handoff commit: `0401157aec4a9d6e539f764d3973ad90a2b4552e`;
-  exact final tip must always be read back from the branch after any later
-  synchronized handoff update.
+- Release-candidate handoff commits include
+  `0401157aec4a9d6e539f764d3973ad90a2b4552e`; the exact final tip is always
+  read back from the branch and is never hard-coded into evidence paths.
 - Tracked identity files: `src/shared/version.py` (`PRODUCT_VERSION=8.0.0`),
   `architecture/v8_release_policy.json`
   (`candidate_version=8.0.0`, `candidate_tag=v8.0.0`,
@@ -673,24 +673,24 @@ GitHub Release.
 - Provenance dry-run ở identity HEAD: `contract_valid=true`,
   `product_version_matches=true`, `tag_available=true`,
   `execution=not_run`, `writes_performed=false`; không có blocker kỹ thuật.
-- Exact-head evidence đã rebind deterministic từ evidence PASS của
-  `409e4f6` vì thay đổi chỉ là release identity/policy; evidence mới ở
-  `Temp/V8_Acceptance/0401157aec4a9d6e539f764d3973ad90a2b4552e/evidence.json`
-  trả `source_commit_matches=true`, `reports_verified=true`, `passed=12`,
-  `pending_gates=[]`. `rebind_metadata.json` ghi rõ không tái tuyên bố rerun
-  physical gates.
-- Candidate unpublished mới được dựng lại từ release-candidate handoff HEAD,
-  không dùng lại ZIP
-  cũ: `LocalAIHub-Core-Win64-v8.0.0.zip`, 55,079,627 bytes,
+- Exact-head evidence is always at
+  `Temp/V8_Acceptance/<final-head>/evidence.json`; the latest verifier must
+  return `source_commit_matches=true`, `reports_verified=true`, `passed=12`,
+  `pending_gates=[]`. The rebind metadata records that release-identity/docs
+  changes do not claim a physical gate rerun.
+- Candidate unpublished is always rebuilt under
+  `Temp/V8_Candidate_<final-head>/` from the final branch tip, never reused
+  from an older HEAD. The current deterministic candidate is
+  `LocalAIHub-Core-Win64-v8.0.0.zip`, 55,079,627 bytes,
   SHA-256 `6d49296083c0d517ecdfab1096bcf72b2d6669186c233e9d055876d3f5f08fd2`,
   metadata `published=false`, `release_activation=false`,
   `real_tag_created=false`. Portable launch (Python 3.12), task-owned shortcut,
   upgrade, rollback và uninstall/reinstall preservation đều PASS; Config,
   Output, Models, Projects sentinel không bị thay đổi.
 - V8 Windows full suite: 90 PASS; `scripts/ci_validate.py`: 743 tracked files,
-  no forbidden artifacts/unmasked secrets. Nếu có thêm tracked handoff commit,
-  phải rebuild candidate và regenerate evidence lại từ exact final branch tip;
-  không được dùng lại evidence/candidate của HEAD cũ.
+  no forbidden artifacts/unmasked secrets. No further tracked handoff commit is
+  expected before the irreversible activation decision; if one is required,
+  rebuild candidate and regenerate evidence again from its exact final tip.
 - Remaining irreversible operations, chưa được thực hiện: real tag
   `v8.0.0`, merge PR #102 vào `main`, GitHub Release publish. PR #102 vẫn
   OPEN+DRAFT; `PLAN.md` vẫn untracked và không được đưa vào commit.
