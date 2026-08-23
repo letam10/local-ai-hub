@@ -23,6 +23,16 @@ jobs:
           python-version: "3.12"
       - name: Validate tracked repository files
         run: python scripts/ci_validate.py
+      - name: Run V8 foundation contract tests
+        run: python -m unittest discover -s tests -p "test_v8_*.py"
+      - name: Run V8 release policy source preflight
+        run: python scripts/v8_release_provenance.py --source-only
+      - name: Run V8 acceptance source preflight
+        run: python scripts/v8_acceptance_gate.py --source-only
+      - name: Check V8 Components JavaScript syntax
+        run: |
+          node --check src/ui/features/components/render.js
+          node --check src/ui/features/components/v8_control_plane.js
       - name: Check pull request whitespace
         if: github.event_name == 'pull_request'
         run: git diff --check "${{ github.event.pull_request.base.sha }}" HEAD

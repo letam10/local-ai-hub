@@ -23,10 +23,10 @@ import stat
 import time
 from typing import Any
 
-from src.platform.paths import ComponentPathError, HubPaths, get_paths, resolve_component_root
+from src.platform.paths import ComponentPathError, HubPaths, get_paths, resolve_component_leaf, resolve_component_root
 from src.services.component_installer.receipts import CatalogBindingContext, V2_CATALOG_SCHEMA
 
-from .catalog import ProductionCatalog, ProductionCatalogError
+from .catalog import ProductionCatalog, ProductionCatalogError, license_is_auto_install_ready
 from .runtime_executor import RuntimeArchiveExecutor
 from .model_executor import ModelArchiveExecutor
 from src.services.component_installer.downloader import DownloadError, TrustedDownloader
@@ -141,6 +141,50 @@ class ComponentLifecycle:
         value["maintenance_actions"] = ["repair", "update", "uninstall"]
         return value
 
+    def _auto_install_ready(self, record: Mapping[str, Any]) -> bool:
+        """Keep the executable lifecycle aligned with V8 source acceptance."""
+
+        if record.get("disposition") != "AUTO_INSTALL_READY":
+            return False
+        # Legacy V1 fixture catalogs predate the V8 review field. Only V2
+        # records are production eligibility inputs for this lifecycle path.
+        if self.catalog.catalog_schema_version != V2_CATALOG_SCHEMA:
+            return True
+        return license_is_auto_install_ready(record)
+
+    def _runtime_install_target_code(self, record: Mapping[str, Any]) -> str | None:
+        """Refuse before download when a portable runtime target is ambiguous.
+
+        Installation never overwrites a prior runtime.  In particular, a
+        junction at a catalog leaf must not be followed merely because a new
+        archive has already been downloaded to staging.
+        """
+
+        if self.catalog.catalog_schema_version != V2_CATALOG_SCHEMA:
+            return None
+        try:
+            runtime_id = record.get("runtime_id")
+            root_class = record.get("root_class")
+            if not isinstance(runtime_id, str) or not isinstance(root_class, str):
+                return "runtime_target_unsafe"
+            root = resolve_component_root(
+                self.paths,
+                runtime_id,
+                "runtime",
+                root_class,
+                require_exists=False,
+            )
+            leaves = record.get("required_leaves")
+            if not isinstance(leaves, list) or not leaves:
+                return "runtime_target_unsafe"
+            for relative in leaves:
+                target = resolve_component_leaf(root, relative, require_exists=False)
+                if target.exists():
+                    return "runtime_target_exists_manual_review"
+            return None
+        except (ComponentPathError, OSError, TypeError, ValueError):
+            return "runtime_target_unsafe"
+
     def plan_one_click(self, component_id: str) -> dict[str, Any]:
         kind, record = self._record(component_id)
         binding = self._catalog_binding(kind, record)
@@ -158,8 +202,9 @@ class ComponentLifecycle:
         if kind == "model" and runtime_id:
             dependencies.append({"kind": "runtime", "id": runtime_id, "status": runtime["status"] if runtime else "UNAVAILABLE"})
         dependencies.append({"kind": kind, "id": component_id, "status": current["status"]})
-        can_install = record.get("disposition") == "AUTO_INSTALL_READY"
-        action = "Download & Install" if can_install else ("Authorize & Install" if record.get("disposition") == "AUTH_REQUIRED" else "Review License" if record.get("disposition") == "LICENSE_REQUIRED" else "Import Model" if kind == "model" else "Review Runtime")
+        target_code = self._runtime_install_target_code(record) if kind == "runtime" else None
+        can_install = self._auto_install_ready(record) and target_code is None
+        action = "Download & Install" if can_install else ("Authorize & Install" if record.get("disposition") == "AUTH_REQUIRED" else "Review License" if record.get("disposition") in {"LICENSE_REQUIRED", "AUTO_INSTALL_READY"} else "Import Model" if kind == "model" else "Review Runtime")
         body = {"schema_version": "v7-component-install-plan.v1", "component_id": component_id, "component_type": kind, "catalog_fingerprint": self.catalog.fingerprint, "dependencies": dependencies, "expected_state": current["status"], "action": action, "disposition": record.get("disposition"), "estimated_download_size_bytes": int(record.get("estimated_download_size", 0)), "estimated_disk_size_bytes": int(record.get("estimated_disk_size", 0)), "preserve_existing": True, "execution": "not_run", "dry_run": True}
         plan_id = "v7_plan_" + secrets.token_hex(16)
         # Keep the normalized catalog record server-side only; the public plan
@@ -167,7 +212,10 @@ class ComponentLifecycle:
         plan = {**body, "record": record, "plan_id": plan_id, "plan_fingerprint": _fingerprint(body), "_catalog_binding": binding, "created_at": int(time.time())}
         self._plans[plan_id] = plan
         status = "planned" if can_install and current["status"] != "INSTALLED" else "manual_review" if current["status"] != "INSTALLED" else "already_installed"
-        return {**body, "plan_id": plan_id, "plan_fingerprint": plan["plan_fingerprint"], "status": status, "reason": "Server-owned dependency plan; no download or write occurred." if status == "planned" else "The catalog or existing owner state requires explicit review.", "next_action": action}
+        reason = "Server-owned dependency plan; no download or write occurred." if status == "planned" else "The catalog or existing owner state requires explicit review."
+        if target_code is not None:
+            reason = "The fixed managed runtime target is existing or unsafe; no archive download is permitted."
+        return {**body, "plan_id": plan_id, "plan_fingerprint": plan["plan_fingerprint"], "status": status, "reason": reason, "next_action": action}
 
     def lookup_plan(self, plan_id: str) -> dict[str, Any] | None:
         value = self._plans.get(plan_id)
@@ -186,6 +234,11 @@ class ComponentLifecycle:
             return self._binding_refusal(plan_id, binding_error or "stale_binding")
         if plan.get("disposition") != "AUTO_INSTALL_READY":
             return {"status": "unavailable", "code": "manual_review_required", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": "Use the explicitly documented import/license/authentication flow."}
+        if not self._auto_install_ready(record):
+            return {"status": "unavailable", "code": "license_review_required", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": "Review the tracked license contract before creating a new install plan."}
+        target_code = self._runtime_install_target_code(record) if plan.get("component_type") == "runtime" else None
+        if target_code is not None:
+            return {"status": "unavailable", "code": target_code, "plan_id": plan_id, "execution": "not_run", "dry_run": True, "next_action": "Inspect or repair the existing managed runtime only through a separately reviewed maintenance plan."}
         dependency_block = next((item for item in plan.get("dependencies", []) if item.get("kind") == "runtime" and item.get("id") != plan.get("component_id") and item.get("status") not in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"}), None)
         if dependency_block is not None:
             return {"status": "unavailable", "code": "dependency_unavailable", "plan_id": plan_id, "execution": "not_run", "dry_run": True, "dependency": {key: dependency_block.get(key) for key in ("kind", "id", "status")}, "next_action": "Install or reuse the server-owned runtime dependency before this component."}
@@ -273,7 +326,22 @@ class ComponentLifecycle:
         current = self._inspect_component(component_id, kind, record, catalog_binding=binding)
         body = {"schema_version": "v7-component-maintenance-plan.v1", "component_id": component_id, "component_type": kind, "action": action, "catalog_fingerprint": self.catalog.fingerprint, "expected_state": current["status"], "preserve_existing": True, "execution": "not_run", "dry_run": True}
         plan_id = "v7_maintenance_" + secrets.token_hex(16)
-        plan = {**body, "plan_id": plan_id, "plan_fingerprint": _fingerprint(body), "_catalog_binding": binding}
+        # Keep the execution-bound fields private but complete.  The V8
+        # maintenance executor validates the exact record/revision/strategy
+        # before it may repair or remove a fixed runtime leaf; a public plan
+        # must never be treated as authority merely because its component ID
+        # matches.
+        plan = {
+            **body,
+            "plan_id": plan_id,
+            "plan_fingerprint": _fingerprint(body),
+            "_catalog_binding": binding,
+            "_record": dict(record),
+            "_record_revision": record.get("revision"),
+            "_install_strategy": record.get("install_strategy"),
+            "_latest_supported_revision": record.get("latest_supported_revision", record.get("revision")),
+            "_candidate_fingerprint": _fingerprint(record.get("update_candidate")) if isinstance(record.get("update_candidate"), Mapping) else None,
+        }
         self._plans[plan_id] = plan
         return {**body, "plan_id": plan_id, "plan_fingerprint": plan["plan_fingerprint"], "status": "planned", "reason": "Maintenance is plan-only until a separately confirmed manager executor is available.", "next_action": "Review the exact existing receipt and dependency impact."}
 

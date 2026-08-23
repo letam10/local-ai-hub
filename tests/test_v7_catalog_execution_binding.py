@@ -55,6 +55,7 @@ class V7CatalogExecutionBindingTests(unittest.TestCase):
             "install_strategy": "portable_archive",
             "disposition": "AUTO_INSTALL_READY",
             "source_identity": source,
+            "license": {"state": "apache-2.0", "spdx_id": "Apache-2.0", "url": "https://example.invalid/license"},
             "primary_source": {"url": "https://github.com/example/demo/archive.zip"},
             "integrity": {"verification": "verified", "size_bytes": 128, "sha256": "b" * 64},
             "estimated_disk_size": 128,
@@ -318,6 +319,46 @@ class V7CatalogExecutionBindingTests(unittest.TestCase):
         self.assertEqual(result["status"], "conflict")
         self.assertEqual(result["code"], "stale_binding")
         self.assertFalse(executor.called)
+
+    def test_v2_review_required_license_refuses_before_downloader(self) -> None:
+        record = self._runtime_record()
+        record["license"] = {"state": "review_required", "spdx_id": None, "url": None}
+        catalog = SimpleNamespace(
+            catalog_schema_version="v7-production-catalog.v2",
+            catalog_version="2026.08.21",
+            fingerprint="a" * 64,
+            models={},
+            runtimes={"demo-runtime": record},
+        )
+        lifecycle = ComponentLifecycle(paths=self.paths, catalog=catalog)
+        plan = lifecycle.plan_one_click("demo-runtime")
+        self.assertEqual(plan["status"], "manual_review")
+        with patch("src.services.productization.lifecycle.TrustedDownloader", side_effect=AssertionError("license refusal reached downloader")):
+            refused = lifecycle.confirm(plan["plan_id"], confirmed=True)
+        self.assertEqual(refused["status"], "unavailable")
+        self.assertEqual(refused["code"], "license_review_required")
+        self.assertEqual(refused["execution"], "not_run")
+
+    def test_v2_existing_runtime_leaf_refuses_before_archive_download(self) -> None:
+        record = self._runtime_record()
+        target = self.paths.runtime_root / "bin" / "demo.exe"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"pre-existing runtime")
+        catalog = SimpleNamespace(
+            catalog_schema_version="v7-production-catalog.v2",
+            catalog_version="2026.08.21",
+            fingerprint="a" * 64,
+            models={},
+            runtimes={"demo-runtime": record},
+        )
+        lifecycle = ComponentLifecycle(paths=self.paths, catalog=catalog)
+        plan = lifecycle.plan_one_click("demo-runtime")
+        self.assertEqual(plan["status"], "manual_review")
+        with patch("src.services.productization.lifecycle.TrustedDownloader", side_effect=AssertionError("existing target reached downloader")):
+            refused = lifecycle.confirm(plan["plan_id"], confirmed=True)
+        self.assertEqual(refused["status"], "unavailable")
+        self.assertEqual(refused["code"], "runtime_target_exists_manual_review")
+        self.assertEqual(target.read_bytes(), b"pre-existing runtime")
 
 
 if __name__ == "__main__":

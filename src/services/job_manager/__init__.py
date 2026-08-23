@@ -11,7 +11,16 @@ from .contracts import (
     ResourceRequest,
     validate_job_spec,
 )
-from .durable import DurableJobContext, DurableWorkEngine, ServerOwnedAdapterRegistry
+from .durable import (
+    DurableJobContext,
+    DurableWorkEngine as LegacyDurableWorkEngine,
+    ServerOwnedAdapterRegistry,
+)
+from .v8_engine import V8DurableWorkEngine
+
+# Production package imports use the V8 output-migrated engine. The legacy
+# class remains explicitly named for compatibility tests and forensic review.
+DurableWorkEngine = V8DurableWorkEngine
 
 
 __all__ = [
@@ -24,7 +33,9 @@ __all__ = [
     "ExecutionDescriptor",
     "JobContractError",
     "JobSpec",
+    "LegacyDurableWorkEngine",
     "ResourceRequest",
     "ServerOwnedAdapterRegistry",
+    "V8DurableWorkEngine",
     "validate_job_spec",
 ]

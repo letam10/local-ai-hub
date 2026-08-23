@@ -1,0 +1,29 @@
+{
+  "schema_version": "v8-release-policy.v1",
+  "generation": "V8",
+  "release_branch": "feature/local-ai-hub-v8",
+  "version_policy": {
+    "major": 8,
+    "format": "semver-stable",
+    "candidate_version": "8.0.0"
+  },
+  "tag_policy": {
+    "prefix": "v8.",
+    "immutable": true,
+    "candidate_tag": "v8.0.0"
+  },
+  "approval": {
+    "identity": "approved",
+    "version_change": "user_approved_only",
+    "tag_creation": "user_approved_only",
+    "main_merge": "user_approved_only"
+  },
+  "activation": {
+    "requires_all_windows_gates": true,
+    "requires_exact_source_commit": true,
+    "requires_product_version_match": true,
+    "requires_release_identity_approval": true,
+    "requires_unoccupied_tag": true,
+    "historical_v7_release_evidence_immutable": true
+  }
+}

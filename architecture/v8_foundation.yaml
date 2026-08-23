@@ -1,0 +1,116 @@
+schema_version: v8-foundation.v1
+branch: feature/local-ai-hub-v8
+base_generation: V7
+waves:
+  wave0:
+    name: storage_transaction_authority
+    status: reviewed_with_wave2_production_extension
+    windows_acceptance: deferred
+  wave1:
+    name: durable_component_lifecycle
+    status: reviewed_and_extended_through_wave3
+    deferred:
+      - native_selection_restart_resumability
+      - executing_operation_cancel_bridge
+      - atomic_multi_component_bundle_rollback
+  wave2:
+    name: production_callsite_migration
+    status: reaudited_and_publication_boundary_hardened_windows_acceptance_pending
+    windows_acceptance: deferred
+  wave3:
+    name: component_enablement_control_plane
+    status: reaudited_source_correctness_closed_real_lifecycle_pending
+  wave4:
+    name: windows_real_lifecycle_and_product_ux
+    status: source_product_ux_reaudited_windows_real_lifecycle_pending
+    source_invariants:
+      - opaque_operation_ids_only
+      - bounded_operation_list
+      - planned_operation_requires_explicit_confirm_or_cancel
+      - public_component_type_and_action_are_finite
+      - invalid_public_component_metadata_fails_closed
+      - component_control_plane_mount_is_idempotent
+      - source_acceptance_is_truthful_and_path_free
+      - truthful_reference_existing_and_manual_install_labels
+      - no_product_ux_polling
+      - no_page_load_download_or_install
+    windows_acceptance: deferred
+  wave5:
+    name: acceptance_gate
+    status: source_preflight_reaudited_and_hardened_windows_acceptance_pending
+    source_owners:
+      gate_contract: architecture/v8_acceptance_gates.json
+      preflight: scripts/v8_acceptance_gate.py
+      tests: tests/test_v8_wave5_acceptance_gate.py
+      documentation: docs/V8_WAVE5_ACCEPTANCE_RELEASE.md
+      handoff: Plan_Miss.md
+    source_invariants:
+      - linux_ci_never_claims_windows_acceptance
+      - local_evidence_must_bind_exact_source_commit
+      - local_evidence_schema_is_bounded_and_path_free
+      - every_pass_gate_requires_actual_local_report
+      - actual_report_sha256_must_match_declared_digest
+      - pass_report_binds_gate_platform_and_source_commit
+      - report_checks_are_finite_and_true
+      - version_tag_and_main_merge_are_user_approved_only
+      - source_preflight_is_read_only
+    required_local_gates: 12
+    windows_acceptance: deferred
+  wave6:
+    name: release_provenance_preparation
+    status: source_policy_implemented_release_identity_not_approved
+    source_owners:
+      release_policy: architecture/v8_release_policy.json
+      provenance_preflight: scripts/v8_release_provenance.py
+      tests: tests/test_v8_wave6_release_provenance.py
+      documentation: docs/V8_WAVE6_RELEASE_PROVENANCE_PREPARATION.md
+    source_invariants:
+      - v8_release_policy_is_generation_specific
+      - release_branch_is_feature_local_ai_hub_v8
+      - stable_release_version_major_is_8
+      - release_tag_matches_exact_version
+      - release_tags_are_immutable
+      - candidate_identity_requires_explicit_user_approval
+      - candidate_dry_run_performs_no_writes
+      - historical_v7_release_evidence_is_immutable
+      - product_version_activation_is_separate
+    release_identity: awaiting_user_approval
+    release_execution: blocked
+source_validation:
+  latest_required:
+    - ci_validate
+    - v8_unit_tests
+    - v8_release_policy_source_preflight
+    - v8_acceptance_source_preflight
+    - javascript_syntax
+    - diff_check
+release_blockers:
+  - local_windows_evidence_required
+  - v8_release_identity_approval_required
+  - v8_product_version_activation_not_performed
+  - strict_release_preflight_not_passed
+  - user_main_merge_tag_release_approval_required
+deferred_local_acceptance:
+  - windows_reparse_junction_and_handle_race_acceptance
+  - full_local_artifact_callsite_inventory
+  - loopback_api_and_desktop_acceptance
+  - native_selection_restart_resumability
+  - executing_operation_cancel_bridge
+  - atomic_multi_component_bundle_rollback
+  - per_component_provider_license_hash_review
+  - real_component_download_install_repair_update_rollback_uninstall
+  - webview2_operation_ui_interaction_and_accessibility
+  - installer_shortcut_upgrade_preservation
+  - crash_recovery
+  - runtime_smoke
+  - model_inference
+  - v8_control_database_backup_restore
+prohibited_in_source_control_plane:
+  - raw_browser_paths
+  - arbitrary_download_urls
+  - provider_network_probe
+  - startup_model_download
+  - implicit_license_acceptance
+  - driver_or_cuda_mutation
+  - automatic_main_merge
+  - automatic_tag_or_release

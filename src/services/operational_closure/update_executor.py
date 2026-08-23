@@ -19,7 +19,8 @@ import tempfile
 import time
 from typing import Any
 
-from src.platform.paths import ComponentPathError, HubPaths, resolve_component_root
+from src.platform.paths import ComponentPathError, HubPaths, resolve_component_leaf, resolve_component_root
+from src.services.component_installer.archive import ArchiveSafetyError, safe_extract_archive
 from src.services.component_installer.downloader import DownloadError, TrustedDownloader
 from src.services.component_installer.receipts import CatalogBindingContext, ReceiptError, read_receipts, source_identity, write_component_receipt
 
@@ -219,6 +220,48 @@ def _safe_model_root(paths: HubPaths, component_id: str) -> Path | None:
         return None
 
 
+def _runtime_slot(root: Path, required_leaves: object) -> tuple[Path, str] | None:
+    """Return one shared runtime slot without touching unrelated legacy leaves."""
+
+    if not isinstance(required_leaves, list) or not required_leaves:
+        return None
+    try:
+        leaves = [Path(value) for value in required_leaves if isinstance(value, str)]
+        if len(leaves) != len(required_leaves):
+            return None
+        common = Path(os.path.commonpath([str(value.parent) for value in leaves])).as_posix()
+        if not common or common == ".":
+            return None
+        slot = resolve_component_leaf(root, common, require_exists=False)
+        return slot, common
+    except (ComponentPathError, OSError, ValueError):
+        return None
+
+
+def _copy_tree(source_root: Path, destination_root: Path) -> bool:
+    """Copy an archive-derived tree while refusing reparses and non-files."""
+
+    if not source_root.is_dir() or _is_reparse(source_root):
+        return False
+    try:
+        destination_root.mkdir(parents=True, exist_ok=False)
+        for item in source_root.rglob("*"):
+            if _is_reparse(item):
+                return False
+            relative = item.relative_to(source_root)
+            target = destination_root / relative
+            if item.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif item.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, target)
+            else:
+                return False
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -257,6 +300,220 @@ def _clone_tree_preserving_files(source_root: Path, destination_root: Path) -> b
         return True
     except (OSError, ValueError):
         return False
+
+
+class RuntimeUpdateExecutor:
+    """Activate a catalog-pinned runtime candidate in an isolated slot."""
+
+    def __init__(self, *, paths: HubPaths) -> None:
+        self.paths = paths
+
+    @staticmethod
+    def _refusal(code: str) -> dict[str, Any]:
+        return {"status": "unavailable", "code": code, "execution": "not_run", "dry_run": True}
+
+    @staticmethod
+    def _candidate_integrity(candidate: Mapping[str, Any]) -> tuple[int | None, str | None]:
+        integrity = candidate.get("integrity")
+        if not isinstance(integrity, Mapping) or integrity.get("verification") != "verified":
+            return None, None
+        size = integrity.get("size_bytes")
+        digest = integrity.get("sha256")
+        return (size if isinstance(size, int) and size > 0 else None, digest if isinstance(digest, str) and len(digest) == 64 else None)
+
+    @staticmethod
+    def _archive_source(plan: Mapping[str, Any]) -> Path | None:
+        value = plan.get("_candidate_archive")
+        return value if isinstance(value, Path) else None
+
+    def _slot_and_versions(self, record: Mapping[str, Any], runtime_id: str) -> tuple[Path, Path, Path] | None:
+        try:
+            root = resolve_component_root(self.paths, runtime_id, "runtime", record.get("root_class"), require_exists=False)
+        except (ComponentPathError, OSError, ValueError):
+            return None
+        slot_info = _runtime_slot(root, record.get("required_leaves"))
+        if slot_info is None:
+            return None
+        slot, _common = slot_info
+        versions = root / ".v8-versions" / runtime_id
+        if _safe_leaf(root, Path(".v8-versions") .as_posix()) is None or _is_reparse(versions):
+            return None
+        return root, slot, versions
+
+    def apply(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        confirmed: bool,
+        catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None,
+        current_record: Mapping[str, Any] | None = None,
+        binding_provider: Any | None = None,
+    ) -> dict[str, Any]:
+        if not confirmed:
+            return {"status": "waiting_confirmation", "execution": "not_run", "dry_run": True}
+        if plan.get("component_type") != "runtime":
+            return self._refusal("runtime_update_component_mismatch")
+        candidate = plan.get("update_candidate")
+        runtime_id = plan.get("component_id")
+        if not isinstance(candidate, Mapping) or not isinstance(runtime_id, str):
+            return self._refusal("update_candidate_unavailable")
+        binding, record, binding_error = resolve_execution_binding(
+            plan,
+            catalog_binding=catalog_binding,
+            current_record=current_record,
+            binding_provider=binding_provider,
+        )
+        if binding is None or not isinstance(record, Mapping):
+            return binding_refusal(binding_error or "catalog_binding_stale", component_id=runtime_id)
+        archive = self._archive_source(plan)
+        expected_size, expected_hash = self._candidate_integrity(candidate)
+        if archive is None or expected_size is None or expected_hash is None or not archive.is_file() or _is_reparse(archive):
+            return self._refusal("update_candidate_unavailable")
+        try:
+            if archive.stat().st_size != expected_size or _sha256(archive) != expected_hash.casefold():
+                return {"status": "failed", "code": "update_candidate_checksum_mismatch", "execution": "not_run"}
+        except OSError:
+            return self._refusal("update_candidate_unavailable")
+        slots = self._slot_and_versions(record, runtime_id)
+        if slots is None:
+            return self._refusal("unsafe_runtime_update_root")
+        root, slot, versions = slots
+        if not slot.is_dir() or _is_reparse(slot):
+            return self._refusal("runtime_not_installed")
+        stage = self.paths.temp_root / "v8-runtime-update" / runtime_id
+        extract_root = stage / "extract"
+        candidate_slot = stage / "candidate-slot"
+        required = [str(value) for value in record.get("required_leaves", []) if isinstance(value, str)]
+        archive_prefix = candidate.get("archive_prefix")
+        archive_leaves = candidate.get("archive_leaves")
+        if not isinstance(archive_prefix, str) or not isinstance(archive_leaves, Mapping) or len(required) != len(record.get("required_leaves", [])):
+            return self._refusal("runtime_update_mapping_invalid")
+        previous = versions / str(plan.get("installed_revision") or record.get("revision") or "previous")
+        try:
+            if _safe_leaf(self.paths.temp_root, stage.relative_to(self.paths.temp_root).as_posix()) is None:
+                return self._refusal("unsafe_runtime_update_stage")
+            if _safe_leaf(root, Path(".v8-versions").as_posix()) is None or _safe_leaf(versions.parent, previous.name) is None:
+                return self._refusal("unsafe_runtime_update_versions")
+            if previous.exists() or _is_reparse(previous):
+                return self._refusal("runtime_rollback_slot_exists")
+            stage.mkdir(parents=True, exist_ok=False)
+            safe_extract_archive(archive, extract_root, max_bytes=max(int(candidate.get("estimated_disk_size") or 1), 1))
+            if not _copy_tree(slot, candidate_slot):
+                return self._refusal("runtime_update_preserve_failed")
+            slot_root = _runtime_slot(root, record.get("required_leaves"))
+            if slot_root is None:
+                return self._refusal("unsafe_runtime_update_root")
+            _slot, common = slot_root
+            for target_relative in required:
+                archive_leaf = archive_leaves.get(target_relative)
+                if not isinstance(archive_leaf, str):
+                    return self._refusal("runtime_update_mapping_invalid")
+                source = _safe_leaf(extract_root, f"{archive_prefix}/{archive_leaf}")
+                target_relative_to_slot = Path(target_relative).relative_to(Path(common)).as_posix()
+                target = _safe_leaf(candidate_slot, target_relative_to_slot)
+                if source is None or target is None or not source.is_file() or _is_reparse(source):
+                    return self._refusal("runtime_update_archive_leaf_invalid")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                if not target.is_file() or _is_reparse(target) or target.stat().st_size != source.stat().st_size or _sha256(target) != _sha256(source):
+                    return self._refusal("runtime_update_stage_mismatch")
+            binding, record, binding_error = resolve_execution_binding(
+                plan,
+                catalog_binding=binding,
+                current_record=record,
+                binding_provider=binding_provider,
+            )
+            if binding is None:
+                return binding_refusal(binding_error or "catalog_binding_stale", component_id=runtime_id)
+            versions.mkdir(parents=True, exist_ok=True)
+            if _is_reparse(versions):
+                return self._refusal("unsafe_runtime_update_versions")
+            os.rename(slot, previous)
+            try:
+                os.rename(candidate_slot, slot)
+            except OSError:
+                os.rename(previous, slot)
+                return {"status": "failed", "code": "runtime_update_activation_failed", "execution": "not_run"}
+            candidate_revision = candidate.get("revision")
+            receipt = {
+                "component_id": runtime_id,
+                "component_type": "runtime",
+                "catalog_schema": binding.catalog_schema,
+                "catalog_revision": binding.catalog_revision,
+                "catalog_fingerprint": binding.catalog_fingerprint,
+                "source_identity": binding.source_identity,
+                "root_class": record.get("root_class", "runtime_root"),
+                "location_class": record.get("root_class", "runtime_root"),
+                "leaves": [{"relative_path": path, "observed_size_bytes": int((_safe_leaf(root, path) or Path()).stat().st_size), "observed_mtime_ns": int((_safe_leaf(root, path) or Path()).stat().st_mtime_ns), "verification_level": "unverified"} for path in required],
+                "recorded_at": int(time.time()),
+                "verified_at": None,
+                "state": "INSTALLED_UNVERIFIED",
+                "source": "catalog_candidate",
+                "operational": False,
+                "bundle_revision": str(candidate_revision or "candidate"),
+                "previous_version": str(plan.get("installed_revision") or record.get("revision") or "previous"),
+                "rollback_candidate": True,
+            }
+            write_component_receipt(self.paths.config_root, runtime_id, receipt, catalog_binding=binding)
+            return {"status": "completed", "execution": "completed", "dry_run": False, "component_id": runtime_id, "state": "INSTALLED_UNVERIFIED", "rollback_available": True, "next_action": "Run the bounded runtime verification before operational promotion."}
+        except (OSError, ValueError, ArchiveSafetyError, ReceiptError):
+            try:
+                if slot.exists() and previous.exists() and not _is_reparse(slot) and not _is_reparse(previous):
+                    quarantine = versions / f"failed-{int(time.time() * 1000)}"
+                    os.rename(slot, quarantine)
+                    os.rename(previous, slot)
+            except OSError:
+                pass
+            return {"status": "failed", "code": "runtime_update_activation_failed", "execution": "not_run"}
+        finally:
+            if stage.exists() and not _is_reparse(stage):
+                shutil.rmtree(stage, ignore_errors=True)
+
+    def rollback(
+        self,
+        component_id: str,
+        *,
+        catalog_binding: CatalogBindingContext | Mapping[str, Any] | None = None,
+        current_record: Mapping[str, Any] | None = None,
+        binding_provider: Any | None = None,
+        plan: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            receipts = read_receipts(self.paths.config_root)
+            receipt = receipts.get("records", {}).get(component_id)
+            if not isinstance(receipt, Mapping) or not receipt.get("rollback_candidate"):
+                return self._refusal("rollback_unavailable")
+            binding, record, binding_error = resolve_execution_binding(
+                plan or {"component_id": component_id, "component_type": "runtime", "_record": current_record, "_catalog_binding": catalog_binding, "_record_revision": (current_record or {}).get("revision"), "_install_strategy": (current_record or {}).get("install_strategy"), "_latest_supported_revision": (current_record or {}).get("latest_supported_revision", (current_record or {}).get("revision")), "_candidate_fingerprint": _fingerprint((current_record or {}).get("update_candidate"))},
+                catalog_binding=catalog_binding,
+                current_record=current_record,
+                binding_provider=binding_provider,
+            )
+            if binding is None or not isinstance(record, Mapping):
+                return binding_refusal(binding_error or "catalog_binding_stale", component_id=component_id)
+            slots = self._slot_and_versions(record, component_id)
+            previous_name = receipt.get("previous_version")
+            if slots is None or not isinstance(previous_name, str):
+                return self._refusal("rollback_candidate_missing")
+            root, slot, versions = slots
+            previous = versions / previous_name
+            backup = versions / f"active-{int(time.time() * 1000)}"
+            if not previous.is_dir() or _is_reparse(previous) or _is_reparse(slot) or backup.exists():
+                return self._refusal("rollback_candidate_missing")
+            os.rename(slot, backup)
+            try:
+                os.rename(previous, slot)
+            except OSError:
+                os.rename(backup, slot)
+                return {"status": "failed", "code": "runtime_rollback_activation_failed", "execution": "not_run"}
+            restored = dict(receipt)
+            restored["bundle_revision"] = previous_name
+            restored["rollback_candidate"] = False
+            restored["previous_version"] = None
+            write_component_receipt(self.paths.config_root, component_id, restored, catalog_binding=binding)
+            return {"status": "completed", "execution": "completed", "dry_run": False, "component_id": component_id, "state": "INSTALLED_UNVERIFIED"}
+        except (OSError, ReceiptError, ValueError):
+            return {"status": "failed", "code": "runtime_rollback_activation_failed", "execution": "not_run"}
 
 
 class ComponentUpdateExecutor:
@@ -318,6 +575,14 @@ class ComponentUpdateExecutor:
     ) -> dict[str, Any]:
         if not confirmed:
             return {"status": "waiting_confirmation", "execution": "not_run", "dry_run": True}
+        if plan.get("component_type") == "runtime":
+            return RuntimeUpdateExecutor(paths=self.paths).apply(
+                plan,
+                confirmed=confirmed,
+                catalog_binding=catalog_binding,
+                current_record=current_record,
+                binding_provider=binding_provider,
+            )
         if plan.get("component_type") != "model":
             return {"status": "unavailable", "code": "runtime_candidate_executor_required", "execution": "not_run", "dry_run": True}
         candidate = plan.get("update_candidate")
@@ -447,6 +712,14 @@ class ComponentUpdateExecutor:
         binding_provider: Any | None = None,
         plan: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if current_record is not None and current_record.get("runtime_id") == component_id:
+            return RuntimeUpdateExecutor(paths=self.paths).rollback(
+                component_id,
+                catalog_binding=catalog_binding,
+                current_record=current_record,
+                binding_provider=binding_provider,
+                plan=plan,
+            )
         receipts = read_receipts(self.paths.config_root)
         receipt = receipts["records"].get(component_id)
         if not isinstance(receipt, Mapping) or not receipt.get("rollback_candidate"):
@@ -525,4 +798,4 @@ class ComponentUpdateExecutor:
             return {"status": "failed", "code": "rollback_activation_failed", "execution": "not_run"}
 
 
-__all__ = ["ComponentUpdateExecutor"]
+__all__ = ["ComponentUpdateExecutor", "RuntimeUpdateExecutor"]

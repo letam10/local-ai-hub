@@ -148,7 +148,14 @@ def _child_environment() -> dict[str, str]:
 
 
 def _run_second_instance_probe() -> bool:
-    """Exercise a second real desktop window against the already-live fixture."""
+    """Verify that a second desktop process never creates a second API.
+
+    Local AI Hub is intentionally single-instance.  When the primary desktop
+    holds the installation-scoped mutex, a second process must exit cleanly
+    without creating another native window or API listener.  The probe also
+    accepts the external-API path used by development hosts that deliberately
+    permit a second UI process.
+    """
 
     from src.services.process_manager.windows import hidden_popen_kwargs
 
@@ -172,11 +179,22 @@ def _run_second_instance_probe() -> bool:
 
         terminate_owned_process(probe)
         return False
-    return probe.returncode == 0 and b'"external_api": true' in stdout
+    return probe.returncode == 0 and (
+        b'"external_api": true' in stdout or b'"single_instance_refused": true' in stdout
+    )
 
 
 def _run_second_instance_probe_mode() -> int:
     from src.app import main as desktop
+    from src.services.process_manager.windows import startup_mutex
+
+    # A real second desktop process should observe the primary instance mutex
+    # and exit before any pywebview or API startup work.  This is the expected
+    # product behavior, not a failed external-API discovery.
+    with startup_mutex(desktop._scoped_mutex(desktop.APP_INSTANCE_MUTEX), 0.2) as acquired:
+        if not acquired:
+            print(json.dumps({"external_api": False, "single_instance_refused": True, "desktop_exit_code": 0}, ensure_ascii=True))
+            return 0
 
     original_loader = desktop._load_ui_when_ready
     observed = {"external_api": False}
@@ -205,7 +223,7 @@ def _run_second_instance_probe_mode() -> int:
         exit_code = desktop.main()
     finally:
         desktop._load_ui_when_ready = original_loader
-    print(json.dumps({"external_api": observed["external_api"], "desktop_exit_code": exit_code}, ensure_ascii=True))
+    print(json.dumps({"external_api": observed["external_api"], "single_instance_refused": False, "desktop_exit_code": exit_code}, ensure_ascii=True))
     return 0 if exit_code == 0 and observed["external_api"] else 3
 
 

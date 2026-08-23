@@ -43,7 +43,7 @@ _V3_REQUIRED_KEYS = frozenset({
     "source_identity", "root_class", "location_class", "leaves", "recorded_at", "verified_at",
     "state", "source", "operational",
 })
-_V3_OPTIONAL_KEYS = frozenset({"previous_version", "rollback_candidate"})
+_V3_OPTIONAL_KEYS = frozenset({"bundle_revision", "previous_version", "rollback_candidate"})
 V1_CATALOG_SCHEMAS = frozenset({"model-catalog.v1", "runtime-catalog.v1"})
 V2_CATALOG_SCHEMA = "v7-production-catalog.v2"
 _CATALOG_SCHEMAS = V1_CATALOG_SCHEMAS | {V2_CATALOG_SCHEMA}
@@ -342,6 +342,9 @@ def _validate_v3_record(component_id: str, value: object) -> dict[str, Any]:
     previous_version = value.get("previous_version")
     if previous_version is not None:
         previous_version = _safe_text(previous_version)
+    bundle_revision = value.get("bundle_revision")
+    if bundle_revision is not None:
+        bundle_revision = _safe_text(bundle_revision)
     rollback_candidate = value.get("rollback_candidate", False)
     if not isinstance(rollback_candidate, bool):
         raise ReceiptError("receipt_invalid_rollback_flag")
@@ -362,6 +365,7 @@ def _validate_v3_record(component_id: str, value: object) -> dict[str, Any]:
         "state": state,
         "source": source_kind,
         "operational": False,
+        "bundle_revision": bundle_revision,
         "previous_version": previous_version,
         "rollback_candidate": rollback_candidate,
     }
@@ -495,6 +499,7 @@ def _legacy_to_v3_record(component_id: str, receipt: Mapping[str, Any]) -> dict[
         "state": state,
         "source": source,
         "operational": False,
+        "bundle_revision": receipt.get("bundle_revision"),
         "previous_version": receipt.get("previous_version"),
         "rollback_candidate": False if receipt.get("rollback_candidate") is None else receipt.get("rollback_candidate", False),
     }

@@ -140,6 +140,28 @@ process.stdout.write(html);
         self.assertNotIn("[object Object]", html)
         self.assertNotRegex(html, UNSAFE_DISPLAY_PATTERN)
 
+    def test_durable_records_render_their_safe_artifacts(self) -> None:
+        state = self._state()
+        durable = dict(state["durableJobs"][0])
+        durable["artifacts"] = [dict(item) for item in fixture._artifact_records[:1]]
+        state["productization"] = {
+            "jobs": {
+                "status": "ready",
+                "execution": "not_run",
+                "dry_run": True,
+                "counts": {"active": 0, "attention": 0, "interrupted": 0, "recoverable": 0, "total": 1},
+                "records": [durable],
+            }
+        }
+        html = self._render("jobs", state)
+        artifact = durable["artifacts"][0]
+        self.assertIn("Artifact preview", html)
+        self.assertIn(artifact["name"], html)
+        self.assertIn(artifact["id"], html)
+        self.assertIn('data-preview-artifact="' + artifact["id"] + '"', html)
+        self.assertIn('data-open-artifact="' + artifact["id"] + '"', html)
+        self.assertNotIn("Artifact preview unavailable", html)
+
     def test_duplicate_canonical_records_are_deterministically_deduped(self) -> None:
         state = self._state()
         productization = json.loads(json.dumps(state["productization"]))

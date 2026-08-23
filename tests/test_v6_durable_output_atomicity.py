@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from src.services import artifact_store
 from src.services.api.jobs import DurableJobStore, DurableStoreHealthError
-from src.services.job_manager import DurableWorkEngine
+from src.services.job_manager import LegacyDurableWorkEngine
 from src.services.job_manager.durable import public_durable_artifacts
 from src.services.job_manager.durable_adapters import build_production_registry
 
@@ -58,7 +58,7 @@ class V6DurableOutputAtomicityTests(unittest.TestCase):
                 self.assertIsNotNone(source_public)
                 source_id = source_public["id"]
                 store = DurableJobStore(root / "durable.json")
-                engine = DurableWorkEngine(store, build_production_registry(), gpu_slots=0)
+                engine = LegacyDurableWorkEngine(store, build_production_registry(), gpu_slots=0)
                 job = engine.submit(video_spec(source_id))
                 job_id = job["id"]
                 store.update(job_id, {"status": "completed", "state_history": ["queued", "completed"]})

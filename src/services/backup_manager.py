@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
 import tempfile
 import threading
@@ -25,15 +26,18 @@ from pathlib import Path
 from typing import Any
 
 from src.shared.paths.registry import CONFIG_ROOT
+from src.services.transaction_store import TransactionStoreError, V8TransactionStore
 
 
 BACKUP_SCHEMA_VERSION = 1
 DATA_CLASSES = ("settings", "creative_workspace", "workflow_library", "node_studio_drafts")
+V8_DATA_CLASSES = (*DATA_CLASSES, "v8_transaction_store")
 
-_MAX_BACKUP_SIZE_BYTES = 50 * 1024 * 1024
+_MAX_BACKUP_SIZE_BYTES = 160 * 1024 * 1024
 _MAX_MEMBER_COUNT = 200
-_MAX_DECOMPRESSED_SIZE_BYTES = 100 * 1024 * 1024
+_MAX_DECOMPRESSED_SIZE_BYTES = 160 * 1024 * 1024
 _MAX_MEMBER_SIZE_BYTES = 8 * 1024 * 1024
+_MAX_V8_SNAPSHOT_BYTES = 128 * 1024 * 1024
 _MAX_MANIFEST_SIZE_BYTES = 256 * 1024
 _MAX_SOURCE_FILE_BYTES = 8 * 1024 * 1024
 _MAX_PLAN_ENTRIES = 64
@@ -41,6 +45,7 @@ _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 _FIXED_MEMBERS = frozenset({"settings.json", "creative_workspace.json", "workflow_library.json"})
 _DRAFT_MEMBER_RE = re.compile(r"^drafts/(?:node_studio_draft_|draft_)[A-Za-z0-9_.-]{1,96}\.json$")
+_V8_SQLITE_MEMBER = "v8/v8_control.sqlite3"
 _BACKUP_ID_RE = re.compile(r"^backup_[A-Za-z0-9_-]{1,160}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MANIFEST_KEYS = frozenset({"schema_version", "created_at", "hub_backup_version", "included_data_classes", "files"})
@@ -286,11 +291,19 @@ def _safe_member(member: object) -> bool:
     parts = member.split("/")
     if any(part in {"", ".", ".."} for part in parts):
         return False
-    return member in _FIXED_MEMBERS or _DRAFT_MEMBER_RE.fullmatch(member) is not None
+    return member in _FIXED_MEMBERS or member == _V8_SQLITE_MEMBER or _DRAFT_MEMBER_RE.fullmatch(member) is not None
+
+
+def _member_limit(member: str) -> int:
+    return _MAX_V8_SNAPSHOT_BYTES if member == _V8_SQLITE_MEMBER else _MAX_MEMBER_SIZE_BYTES
 
 
 def _public_member(member: str) -> str:
-    return member if member in _FIXED_MEMBERS else "drafts"
+    if member in _FIXED_MEMBERS:
+        return member
+    if member == _V8_SQLITE_MEMBER:
+        return "v8_transaction_store"
+    return "drafts"
 
 
 def _public_category(member: str) -> str:
@@ -298,7 +311,7 @@ def _public_category(member: str) -> str:
         "settings.json": "settings",
         "creative_workspace.json": "creative_workspace",
         "workflow_library.json": "workflow_library",
-    }.get(member, "drafts")
+    }.get(member, "v8_transaction_store" if member == _V8_SQLITE_MEMBER else "drafts")
 
 
 def _public_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
@@ -307,7 +320,7 @@ def _public_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": manifest.get("schema_version"),
         "hub_backup_version": manifest.get("hub_backup_version"),
-        "included_data_classes": list(DATA_CLASSES),
+        "included_data_classes": list(manifest.get("included_data_classes", DATA_CLASSES)),
         "member_count": len(files) if isinstance(files, Mapping) else 0,
         "categories": sorted({_public_category(str(member)) for member in members}),
     }
@@ -377,18 +390,25 @@ def _collect_files_guarded(config_guard: _Guard) -> dict[str, tuple[Path, _Guard
     return result
 
 
-def _compute_state_fingerprint() -> str:
+def _compute_state_fingerprint(config_guard: _Guard) -> str:
     try:
-        root_guard = _guard(CONFIG_ROOT, kind="dir", allow_missing=False)
-        files = _collect_files_guarded(root_guard)
+        if not _guard_same(config_guard):
+            raise _StorageUnsafe
+        files = _collect_files_guarded(config_guard)
         digest = hashlib.sha256()
         for member in sorted(files):
             path, guard = files[member]
             content = _read_bounded(path, guard, _MAX_SOURCE_FILE_BYTES)
             digest.update(member.encode("utf-8"))
             digest.update(_sha256_bytes(content).encode("ascii"))
+        v8_path = _lexical(config_guard.path / "v8_control.sqlite3")
+        v8_guard = _guard(v8_path, kind="file", anchor=config_guard.path, allow_missing=True)
+        if v8_guard.target_identity is not None:
+            V8TransactionStore.validate_snapshot(v8_path)
+            digest.update(_V8_SQLITE_MEMBER.encode("utf-8"))
+            digest.update(_sha256_file(v8_path, v8_guard, _MAX_V8_SNAPSHOT_BYTES).encode("ascii"))
         return digest.hexdigest()
-    except _StorageUnsafe:
+    except (_StorageUnsafe, TransactionStoreError):
         return ""
 
 
@@ -446,7 +466,7 @@ def _parse_archive_manifest(archive: zipfile.ZipFile) -> dict[str, Any]:
         name = info.filename
         if name != "manifest.json" and not _safe_member(name):
             raise _ManifestInvalid
-        if not _zip_info_is_safe(info) or info.file_size > _MAX_MEMBER_SIZE_BYTES:
+        if not _zip_info_is_safe(info) or info.file_size > (_MAX_MANIFEST_SIZE_BYTES if name == "manifest.json" else _member_limit(name)):
             raise _ManifestInvalid
         total += int(info.file_size)
         if total > _MAX_DECOMPRESSED_SIZE_BYTES:
@@ -477,7 +497,7 @@ def _parse_archive_manifest(archive: zipfile.ZipFile) -> dict[str, Any]:
     if type(version) is not str or not re.fullmatch(r"[0-9]+\.[0-9]+", version):
         raise _ManifestInvalid
     included = manifest.get("included_data_classes")
-    if type(included) is not list or included != list(DATA_CLASSES):
+    if type(included) is not list or included not in (list(DATA_CLASSES), list(V8_DATA_CLASSES)):
         raise _ManifestInvalid
     files = manifest.get("files")
     if type(files) is not dict or len(files) > _MAX_PLAN_ENTRIES:
@@ -490,10 +510,13 @@ def _parse_archive_manifest(archive: zipfile.ZipFile) -> dict[str, Any]:
         size_bytes = meta.get("size_bytes")
         if type(sha256) is not str or _SHA256_RE.fullmatch(sha256) is None:
             raise _ManifestInvalid
-        if type(size_bytes) is not int or isinstance(size_bytes, bool) or not 0 <= size_bytes <= _MAX_MEMBER_SIZE_BYTES:
+        if type(size_bytes) is not int or isinstance(size_bytes, bool) or not 0 <= size_bytes <= _member_limit(member):
             raise _ManifestInvalid
         expected_names.add(member)
     if set(names) != expected_names:
+        raise _ManifestInvalid
+    has_v8_snapshot = _V8_SQLITE_MEMBER in files
+    if has_v8_snapshot != (included == list(V8_DATA_CLASSES)):
         raise _ManifestInvalid
     for member, meta in files.items():
         content = archive.read(member)
@@ -579,16 +602,33 @@ class BackupManager:
         temporary: Path | None = None
         temporary_guard: _Guard | None = None
         backup_guard: _Guard | None = None
+        v8_snapshot: Path | None = None
+        v8_snapshot_guard: _Guard | None = None
         try:
             with self._lock:
                 config_guard = self._config_guard()
                 backup_guard = self._ensure_backup_dir(config_guard)
                 files = _collect_files_guarded(config_guard)
+                v8_path, v8_guard = self._v8_target_guard(config_guard)
+                v8_content: bytes | None = None
+                if v8_guard.target_identity is not None:
+                    # Never package raw live SQLite bytes.  The transaction
+                    # store's read-only SQLite backup API supplies one
+                    # coherent, schema-validated image instead.
+                    v8_snapshot = backup_guard.path / f".v8-backup-{secrets.token_hex(12)}.sqlite3"
+                    missing_snapshot = _guard(v8_snapshot, kind="file", anchor=backup_guard.path, allow_missing=True)
+                    if missing_snapshot.target_identity is not None:
+                        raise _StorageUnsafe
+                    V8TransactionStore(v8_path, initialize=False).backup_to(v8_snapshot)
+                    v8_snapshot_guard = _guard(v8_snapshot, kind="file", anchor=backup_guard.path, allow_missing=False)
+                    V8TransactionStore.validate_snapshot(v8_snapshot)
+                    V8TransactionStore._remove_owned_sqlite_sidecars(v8_snapshot)
+                    v8_content = _read_bounded(v8_snapshot, v8_snapshot_guard, _MAX_V8_SNAPSHOT_BYTES)
                 manifest: dict[str, Any] = {
                     "schema_version": BACKUP_SCHEMA_VERSION,
                     "created_at": _now_iso(),
                     "hub_backup_version": "1.0",
-                    "included_data_classes": list(DATA_CLASSES),
+                    "included_data_classes": list(V8_DATA_CLASSES if v8_content is not None else DATA_CLASSES),
                     "files": {},
                 }
                 with tempfile.NamedTemporaryFile(dir=backup_guard.path, prefix=".backup-", suffix=".zip.tmp", delete=False) as handle:
@@ -599,6 +639,11 @@ class BackupManager:
                         content = _safe_json(path, guard)
                         manifest["files"][member] = {"sha256": _sha256_bytes(content), "size_bytes": len(content)}
                         archive.writestr(member, content)
+                    if v8_content is not None:
+                        if v8_snapshot_guard is None or not _guard_same(v8_snapshot_guard):
+                            raise _StorageUnsafe
+                        manifest["files"][_V8_SQLITE_MEMBER] = {"sha256": _sha256_bytes(v8_content), "size_bytes": len(v8_content)}
+                        archive.writestr(_V8_SQLITE_MEMBER, v8_content)
                     archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
                 _fsync(temporary)
                 temporary_guard = _guard(temporary, kind="file", anchor=backup_guard.path, allow_missing=False)
@@ -613,11 +658,13 @@ class BackupManager:
                 if not _guard_same(config_guard) or not _guard_same(backup_guard) or published.target_identity is None:
                     raise _StorageUnsafe
                 return {"accepted": True, "backup_id": self._backup_id_for_file(target), "manifest": _public_manifest(manifest)}
-        except (_StorageUnsafe, OSError, ValueError, TypeError, zipfile.BadZipFile, OverflowError):
+        except (_StorageUnsafe, OSError, ValueError, TypeError, zipfile.BadZipFile, OverflowError, TransactionStoreError):
             return _failure("backup_create_failed")
         finally:
             if temporary is not None:
                 _remove_temp_file(temporary, temporary_guard, backup_guard)
+            if v8_snapshot is not None:
+                _remove_temp_file(v8_snapshot, v8_snapshot_guard, backup_guard)
 
     def _inspect_backup_internal(self, backup_id: str | Path) -> dict[str, Any]:
         try:
@@ -662,10 +709,14 @@ class BackupManager:
         target = _lexical(config_guard.path / target_name)
         return target, _guard(target, kind="file", anchor=config_guard.path, allow_missing=True)
 
+    def _v8_target_guard(self, config_guard: _Guard) -> tuple[Path, _Guard]:
+        target = _lexical(config_guard.path / "v8_control.sqlite3")
+        return target, _guard(target, kind="file", anchor=config_guard.path, allow_missing=True)
+
     def _state_fingerprint(self, config_guard: _Guard) -> str:
         if not _guard_same(config_guard):
             raise _StorageUnsafe
-        value = _compute_state_fingerprint()
+        value = _compute_state_fingerprint(config_guard)
         if not value:
             raise _StorageUnsafe
         return value
@@ -681,21 +732,36 @@ class BackupManager:
             manifest = inspected["manifest"]
             entries: list[dict[str, Any]] = []
             changes: list[dict[str, Any]] = []
-            category_counts = {"settings": 0, "creative_workspace": 0, "workflow_library": 0, "drafts": 0}
+            category_counts = {"settings": 0, "creative_workspace": 0, "workflow_library": 0, "drafts": 0, "v8_transaction_store": 0}
             try:
                 backup_epoch = datetime.fromisoformat(str(manifest["created_at"])).timestamp()
             except (TypeError, ValueError, OverflowError):
                 raise _StorageUnsafe
             for member, meta in manifest["files"].items():
-                target, target_guard = self._member_target_guard(member, config_guard)
+                if member == _V8_SQLITE_MEMBER:
+                    target, target_guard = self._v8_target_guard(config_guard)
+                    # A V8 control journal is an existing, server-owned
+                    # authority.  Backup restore never bootstraps a missing
+                    # live journal from an archive.
+                    if target_guard.target_identity is None:
+                        raise _StorageUnsafe
+                    V8TransactionStore.validate_snapshot(target)
+                    prior_bytes: bytes | None = None
+                    prior_digest: str | None = _sha256_file(target, target_guard, _MAX_V8_SNAPSHOT_BYTES)
+                    action = "overwrite"
+                    if target_guard.target_identity.mtime_ns / 1_000_000_000 > backup_epoch + 5:
+                        action = "skip_newer"
+                else:
+                    target, target_guard = self._member_target_guard(member, config_guard)
+                    prior_bytes = _read_bounded(target, target_guard, _MAX_MEMBER_SIZE_BYTES) if target_guard.target_identity is not None else None
+                    prior_digest = None
+                    action = "create" if target_guard.target_identity is None else "overwrite"
+                    if target_guard.target_identity is not None and target_guard.target_identity.mtime_ns / 1_000_000_000 > backup_epoch + 5:
+                        action = "skip_newer"
                 prior_identity = target_guard.target_identity
-                prior_bytes = _read_bounded(target, target_guard, _MAX_MEMBER_SIZE_BYTES) if prior_identity is not None else None
-                action = "create" if prior_identity is None else "overwrite"
-                if prior_identity is not None and prior_identity.mtime_ns / 1_000_000_000 > backup_epoch + 5:
-                    action = "skip_newer"
                 category_counts[_public_category(member)] += 1
                 changes.append({"member": _public_member(member), "action": action, "size_bytes": int(meta["size_bytes"]), "reason": "Review the fixed Config member before confirmation."})
-                entries.append({"member": member, "action": action, "target": target, "prior_identity": prior_identity, "prior_bytes": prior_bytes})
+                entries.append({"member": member, "action": action, "target": target, "prior_identity": prior_identity, "prior_bytes": prior_bytes, "prior_digest": prior_digest})
             if len(entries) > _MAX_PLAN_ENTRIES or not _guard_same(config_guard):
                 raise _StorageUnsafe
             plan_id = f"plan_{hashlib.sha256(os.urandom(16)).hexdigest()[:24]}"
@@ -818,7 +884,16 @@ class BackupManager:
                         expected_bytes = entry.get("prior_bytes")
                         if target_guard.target_identity != expected_identity:
                             raise _StorageUnsafe
-                        if expected_identity is not None and _read_bounded(target, target_guard, _MAX_MEMBER_SIZE_BYTES) != expected_bytes:
+                        if member == _V8_SQLITE_MEMBER:
+                            expected_digest = entry.get("prior_digest")
+                            if (
+                                not isinstance(expected_digest, str)
+                                or expected_identity is None
+                                or _sha256_file(target, target_guard, _MAX_V8_SNAPSHOT_BYTES) != expected_digest
+                            ):
+                                raise _StorageUnsafe
+                            V8TransactionStore.validate_snapshot(target)
+                        elif expected_identity is not None and _read_bounded(target, target_guard, _MAX_MEMBER_SIZE_BYTES) != expected_bytes:
                             raise _StorageUnsafe
                         self._ensure_parent(target, config_guard)
                         content = archive.read(member)
@@ -831,10 +906,13 @@ class BackupManager:
                             stream.flush()
                             os.fsync(stream.fileno())
                         staged_guard = _guard(stage, kind="file", anchor=stage_root, allow_missing=False)
+                        if member == _V8_SQLITE_MEMBER:
+                            V8TransactionStore.validate_snapshot(stage)
+                            V8TransactionStore._remove_owned_sqlite_sidecars(stage)
                         staged.append({"entry": entry, "target_guard": target_guard, "stage": stage, "stage_guard": staged_guard})
                 if not _guard_same(config_guard) or not _guard_same(archive_guard) or not _guard_same(stage_guard):
                     raise _StorageUnsafe
-                for item in staged:
+                for item in (item for item in staged if item["entry"]["member"] != _V8_SQLITE_MEMBER):
                     entry = item["entry"]
                     target = entry["target"]
                     current = _guard(target, kind="file", anchor=config_guard.path, allow_missing=True)
@@ -850,12 +928,33 @@ class BackupManager:
                     final = _guard(target, kind="file", anchor=config_guard.path, allow_missing=False)
                     if final.target_identity != item["stage_guard"].target_identity:
                         raise _StorageUnsafe
+                for item in (item for item in staged if item["entry"]["member"] == _V8_SQLITE_MEMBER):
+                    entry = item["entry"]
+                    target = entry["target"]
+                    current = _guard(target, kind="file", anchor=config_guard.path, allow_missing=False)
+                    expected_digest = entry.get("prior_digest")
+                    if (
+                        current.target_identity != entry.get("prior_identity")
+                        or not isinstance(expected_digest, str)
+                        or _sha256_file(target, current, _MAX_V8_SNAPSHOT_BYTES) != expected_digest
+                        or not _guard_same(item["stage_guard"])
+                    ):
+                        raise _StorageUnsafe
+                    if not _guard_same(config_guard) or not _guard_same(archive_guard):
+                        raise _StorageUnsafe
+                    V8TransactionStore.validate_snapshot(item["stage"])
+                    V8TransactionStore._remove_owned_sqlite_sidecars(item["stage"])
+                    V8TransactionStore(target, initialize=False).restore_from(item["stage"])
+                    final = _guard(target, kind="file", anchor=config_guard.path, allow_missing=False)
+                    if final.target_identity is None or not _guard_same(config_guard) or not _guard_same(archive_guard):
+                        raise _StorageUnsafe
+                    V8TransactionStore.validate_snapshot(target)
                 applied_members = [item["entry"]["member"] for item in staged]
                 result = {"accepted": True, "applied": [_public_member(member) for member in applied_members], "skipped": [item["member"] for item in plan.get("changes", []) if item.get("action") == "skip_newer"], "verified": True}
                 with _PLANS_LOCK:
                     _RESTORE_PLANS.pop(plan_id, None)
                 return result
-        except (_StorageUnsafe, OSError, ValueError, TypeError, zipfile.BadZipFile, RuntimeError, EOFError, KeyError):
+        except (_StorageUnsafe, OSError, ValueError, TypeError, zipfile.BadZipFile, RuntimeError, EOFError, KeyError, TransactionStoreError):
             if applied:
                 try:
                     rollback_guard = self._config_guard()
@@ -875,13 +974,19 @@ class BackupManager:
         try:
             config_guard = self._config_guard()
             members = result.get("applied")
-            if not isinstance(members, list) or any(member == "drafts" or not _safe_member(member) for member in members):
+            if not isinstance(members, list) or any(member == "drafts" or (member != "v8_transaction_store" and not _safe_member(member)) for member in members):
                 raise _StorageUnsafe
             for member in members:
+                if member == "v8_transaction_store":
+                    target, guard = self._v8_target_guard(config_guard)
+                    if guard.target_identity is None or not _guard_same(guard):
+                        raise _StorageUnsafe
+                    V8TransactionStore.validate_snapshot(target)
+                    continue
                 target, guard = self._member_target_guard(member, config_guard)
                 if guard.target_identity is None or not _guard_same(guard):
                     raise _StorageUnsafe
                 _strict_json(_read_bounded(target, guard, _MAX_MEMBER_SIZE_BYTES))
             return {"valid": True, "errors": []}
-        except (_StorageUnsafe, OSError, ValueError, TypeError, _ManifestInvalid):
+        except (_StorageUnsafe, OSError, ValueError, TypeError, _ManifestInvalid, TransactionStoreError):
             return {"valid": False, "errors": ["restore_verification_unavailable"]}

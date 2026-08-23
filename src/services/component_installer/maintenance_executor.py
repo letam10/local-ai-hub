@@ -401,6 +401,8 @@ class MaintenanceExecutor:
             candidate = record.get("update_candidate")
             if not isinstance(candidate, Mapping):
                 return {"status": "unavailable", "code": "update_candidate_required", "execution": "not_run", "next_action": "Run Check Update and confirm an immutable candidate plan before activation."}
+            if component_type == "runtime":
+                return {"status": "unavailable", "code": "update_candidate_required", "execution": "not_run", "next_action": "Run Check Update and confirm the catalog-pinned runtime archive before activation."}
             # The maintenance route is still plan-first/stale-state checked;
             # the actual candidate activation stays in the dedicated update
             # executor so rollback and source identity remain centralized.
