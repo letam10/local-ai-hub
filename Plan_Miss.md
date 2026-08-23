@@ -802,3 +802,43 @@ contained a developer system-Python path. Its rebuilt candidate contains
 materialized external installation is intentionally not destructively cleaned
 or replaced-for-removal in this checkpoint; the candidate remediation is
 ready for a separately authorized reinstall/cleanup decision.
+
+## 20. V8.0.1 API identity and self-contained fallback remediation
+
+This checkpoint records the authorized remediation of the occupied-default-port
+blocker without stopping or reusing the user-owned API process. The source fix is
+committed on `fix/v8.0.1-stable-product-shell` and the final branch SHA is always
+read back from Git rather than copied into evidence.
+
+- The API health contract now exposes bounded identity fields: product ID and
+  version, API protocol, opaque installation ID, AppUserModel ID, process owner,
+  and the actual loopback bind. No local paths, secrets, or raw process details
+  are returned.
+- Startup classifies absent, compatible same-install, LocalAIHub-incompatible,
+  and foreign HTTP listeners. It never treats an arbitrary HTTP 200 or a 7.1.0
+  API as compatible with 8.0.1, and it never terminates a foreign listener.
+- When the default port is occupied by an incompatible/foreign listener, the
+  bundled API selects a free loopback session port, passes the selected port and
+  bind through the child environment, and the UI displays the actual endpoint.
+  The session port is not persisted as installation state and the mutex is
+  scoped to installation plus selected port.
+- Focused identity/collision tests and the complete V8 discovery suite pass on
+  the source-fix tip; push and PR workflows passed on that exact tip. The
+  production shortcut smoke was rerun while the preserved external listener
+  remained alive: bundled API health reported product 8.0.1, protocol v8-api.v1,
+  the bundled process owner and a fallback loopback port; close released only
+  the owned listener and left the external process unchanged. A second-instance
+  check produced one owned API and no duplicate listener.
+- The installed payload was rebuilt from the source-fix candidate and stale
+  system-Python helper files were removed only after exact old-manifest/hash
+  comparison. Unknown generated cache files were preserved. The persistent data
+  root remains `D:\LocalAIHub`; the simulated 8.0.1 to test payload to 8.0.1
+  pointer rollback is complete and the task-owned test payload is gone.
+- Desktop and Start Menu shortcuts remain immutable and point to the stable
+  installed executable with no arguments and the embedded application icon.
+  No main/tag/release operation or model/GPU/runtime workload was performed.
+
+The tracked handoff commit itself is the source of the next exact-head evidence
+binding. Candidate packaging, acceptance metadata, CI readback and PR status
+must use the final branch SHA after this commit; historical evidence remains
+labelled with its original source commit and is not rewritten.
