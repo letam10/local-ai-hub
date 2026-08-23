@@ -694,3 +694,58 @@ GitHub Release.
 - Remaining irreversible operations, chưa được thực hiện: real tag
   `v8.0.0`, merge PR #102 vào `main`, GitHub Release publish. PR #102 vẫn
   OPEN+DRAFT; `PLAN.md` vẫn untracked và không được đưa vào commit.
+
+## 18. V8.0.1 stable product shell remediation — preparation only
+
+Starting source is the immutable V8.0.0 merge commit `c98b8388`. Work is
+isolated on the dedicated `fix/v8.0.1-stable-product-shell` branch; the
+canonical checkout and its untracked `PLAN.md` remain untouched. This pass
+does not create `v8.0.1`, change `main`, repair the user's Desktop/Start Menu
+links, or publish a release.
+
+Tracked product identity now prepares `8.0.1` / `v8.0.1`, while approval state
+remains `required` until a separate user-authorized release activation. V7
+release manifests/tags are historical and unchanged. The installed shell
+contract is documented in `docs/operations/V8_0_1_STABLE_PRODUCT_SHELL.md`.
+
+Implemented source contracts:
+
+- stable windowed `LocalAIHub.exe` bootstrap with AppUserModelID
+  `LocalAIHub.Desktop`, bundled-runtime-only launch, bounded product,
+  installation and current-pointer manifests, full no-reparse chain checks,
+  manifest-hash verification and atomic pointer activation;
+- separate installed `APP_ROOT` / persistent `DATA_ROOT` resolution, dynamic
+  storage/config authority and path-free storage projections;
+- typed owned-job close verification (`unknown` never becomes a fake count),
+  truthful cancel availability, and readiness topbar state derived from the
+  same API status source;
+- canonical `LA` SVG plus deterministic 16/24/32/48/64/128/256 ICO, shared by
+  shortcut/installer/tray/WebView paths where the host API supports it;
+- development-only Temp data launcher, stable-only shortcut repair, staged
+  versioned payload builder, and installer code that writes installation
+  configuration at install time while preserving persistent data.
+
+Bounded evidence on the private branch:
+
+- focused stable-shell/storage/close/provenance suite: 14 PASS;
+- V8 suite excluding the occupied fixed-port loopback test: 102 PASS;
+  the complete 103-test discovery has one environment failure because another
+  user-owned `pythonw.exe` already listens on `127.0.0.1:8765`; it was not
+  stopped or altered;
+- startup, lifecycle, storage, UI, shortcut, and compatibility subset: 88
+  PASS; JS syntax and Python compilation PASS; `scripts/ci_validate.py` PASS
+  with 743 tracked files and no unmasked secrets/forbidden artifacts;
+- task-owned launcher build completed as a validation executable (8,207,698
+  bytes, SHA-256
+  `ebad247cb37c9ed2add74a46d791d60b4d1edefedbbe6773af8eefdf27542d72`). A
+  staged candidate layout and inventory were validated with `execution=not_run`;
+  no official package or production runtime claim is made because the reviewed
+  portable Core runtime is not installed in the repository data roots.
+
+Release provenance source-only validation reports `contract_valid=true` and
+`product_version_matches=true`; the only release blocker is the explicit
+`V8_RELEASE_IDENTITY_APPROVAL_REQUIRED`. No V8.0.1 tag, shortcut migration,
+installer run, GitHub release, GPU/model/provider workload, or user-data
+operation was performed. Before delivery, rerun the final bounded gates,
+commit/push the branch and open a DRAFT PR; stop before any production
+shortcut repair or irreversible release action.
