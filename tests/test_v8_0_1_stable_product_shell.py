@@ -72,14 +72,25 @@ class StableProductShellTests(unittest.TestCase):
         self.assertEqual(plan.environment["LOCALAIHUB_DATA_ROOT"], str(data))
         self.assertEqual(plan.environment["LOCALAIHUB_INSTALL_ROOT"], str(root))
 
-    def test_product_pointer_must_match_product_manifest_version(self) -> None:
+    def test_product_shell_version_may_retain_stable_identity_during_payload_update(self) -> None:
         root, _data, _pointer = self._fixture()
-        product = json.loads((root / "product.json").read_text(encoding="utf-8"))
-        product["version"] = "8.0.2"
-        (root / "product.json").write_text(json.dumps(product), encoding="utf-8")
-        with self.assertRaises(StableShellError) as caught:
-            resolve_launch_plan(root, allow_test_root=True)
-        self.assertEqual(caught.exception.code, "PRODUCT_POINTER_VERSION_MISMATCH")
+        payload = root / "versions" / "8.0.2-testpayload"
+        (payload / "app" / "src" / "app").mkdir(parents=True)
+        (payload / "runtime" / "Python312").mkdir(parents=True)
+        (payload / "app" / "src" / "app" / "launcher.py").write_text("# update\n", encoding="utf-8")
+        (payload / "runtime" / "Python312" / "pythonw.exe").write_bytes(b"updated-runtime")
+        manifest = {
+            "schema_version": "v8.0.1-version-manifest.v1", "product_id": "LocalAIHub",
+            "version": "8.0.2-testpayload", "app_relative": "app", "runtime_relative": "runtime/Python312/pythonw.exe",
+            "entrypoint": "src.app.launcher",
+        }
+        manifest_path = payload / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+        atomic_activate_pointer(root, version="8.0.2-testpayload", manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest())
+        plan = resolve_launch_plan(root, allow_test_root=True)
+        self.assertEqual(plan.version, "8.0.2-testpayload")
+        self.assertEqual(json.loads((root / "product.json").read_text(encoding="utf-8"))["version"], "8.0.1")
+        self.assertEqual(plan.environment["PYTHONNOUSERSITE"], "1")
 
     def test_stable_candidate_staging_builds_versioned_payload_without_source_root_install(self) -> None:
         with tempfile.TemporaryDirectory(prefix="lah-801-stage-") as temp:
@@ -97,14 +108,21 @@ class StableProductShellTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(source), "commit", "-m", "fixture"], check=True, capture_output=True)
             runtime = root / "pythonw.exe"
             runtime.write_bytes(b"runtime")
+            runtime_root = root / "runtime-root"
+            (runtime_root / "Lib" / "site-packages").mkdir(parents=True)
+            (runtime_root / "pythonw.exe").write_bytes(b"runtime")
+            (runtime_root / "python312.zip").write_bytes(b"stdlib")
             launcher = root / "LocalAIHub.exe"
             launcher.write_bytes(b"launcher")
             install = root / "Temp" / "stable-product"
             data = root / "data"
-            result = stage_product(install, runtime_pythonw=runtime, launcher=launcher, data_root=data, source_root=source, allow_test_root=True)
+            result = stage_product(install, runtime_pythonw=runtime, runtime_root=runtime_root, launcher=launcher, data_root=data, source_root=source, allow_test_root=True)
             self.assertEqual(result["version"], "8.0.1")
             self.assertTrue((install / "LocalAIHub.exe").is_file())
             self.assertTrue((install / "versions" / "8.0.1" / "app" / "src" / "app" / "launcher.py").is_file())
+            runtime_manifest = json.loads((install / "versions" / "8.0.1" / "runtime" / "Python312" / "runtime-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(runtime_manifest["provider"], "python.org")
+            self.assertEqual({item["name"] for item in runtime_manifest["files"]}, {"pythonw.exe", "python312.zip"})
             self.assertFalse((install / "src").exists())
             plan = resolve_launch_plan(install, allow_test_root=True)
             self.assertEqual(plan.version, "8.0.1")

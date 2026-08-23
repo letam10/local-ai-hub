@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 from typing import Any
 
@@ -144,9 +145,9 @@ def _safe_relative(value: object, *, allow_slash: bool = True) -> str:
 
 
 def _safe_version(value: object) -> str:
-    if not isinstance(value, str) or len(value) > VERSION_ID_MAX or not value.replace(".", "").isalnum():
+    if not isinstance(value, str) or len(value) > VERSION_ID_MAX or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value) is None:
         raise StableShellError("VERSION_INVALID")
-    if value.startswith(".") or value.endswith(".") or ".." in value:
+    if value.startswith((".", "-")) or value.endswith((".", "-")) or ".." in value or "--" in value:
         raise StableShellError("VERSION_INVALID")
     return value
 
@@ -234,8 +235,6 @@ def resolve_launch_plan(app_root: Path, *, allow_test_root: bool = False) -> Lau
     product = load_product_manifest(root)
     pointer = load_current_pointer(root)
     version = str(pointer["version"])
-    if product.get("version") != version:
-        raise StableShellError("PRODUCT_POINTER_VERSION_MISMATCH")
     payload_root = _under(root, str(pointer["payload_relative"]))
     manifest_path = _under(payload_root, "manifest.json", require_file=True)
     if _sha256(manifest_path) != pointer["manifest_sha256"]:
@@ -258,6 +257,8 @@ def resolve_launch_plan(app_root: Path, *, allow_test_root: bool = False) -> Lau
         "LOCALAIHUB_APP_ROOT": str(app_payload),
         "LOCALAIHUB_DATA_ROOT": str(installation.data_root),
         "PYTHONPATH": str(app_payload),
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONUTF8": "1",
     })
     return LaunchPlan(root, installation.data_root, version, payload_root, app_payload, runtime_pythonw, (str(runtime_pythonw), "-m", "src.app.launcher"), environment)
 

@@ -36,6 +36,9 @@ from src.shared.version import PRODUCT_VERSION
 
 
 MAX_FILES = 100_000
+MAX_RUNTIME_FILES = 50_000
+MAX_RUNTIME_BYTES = 1_000_000_000
+CORE_RUNTIME_MANIFEST_SCHEMA = "v8.0.1-core-runtime.v1"
 SOURCE_PREFIXES = (
     "src/", "scripts/", "architecture/", "workflows/", "extensions/",
     "asset_catalog/", "creative_recipes/", "Hub/", "MCP/", "Services/",
@@ -99,6 +102,47 @@ def _copy_regular(source: Path, destination: Path) -> None:
     shutil.copy2(source, destination)
 
 
+def _copy_runtime_tree(source_root: Path, destination_root: Path) -> list[dict[str, Any]]:
+    """Copy a complete reviewed runtime tree without following reparse entries."""
+
+    source = source_root.absolute()
+    if not source.is_dir() or source.is_symlink():
+        raise StableProductBuildError("BUNDLED_RUNTIME_ROOT_REQUIRED")
+    _reject_reparse(source, "RUNTIME_REPARSE")
+    destination_root.mkdir(parents=True, exist_ok=False)
+    records: list[dict[str, Any]] = []
+    total_bytes = 0
+    for current, directories, filenames in os.walk(source, topdown=True, followlinks=False):
+        current_path = Path(current)
+        _reject_reparse(current_path, "RUNTIME_REPARSE")
+        safe_directories: list[str] = []
+        for name in sorted(directories):
+            candidate = current_path / name
+            _reject_reparse(candidate, "RUNTIME_REPARSE")
+            if not candidate.is_dir():
+                raise StableProductBuildError("RUNTIME_DIRECTORY_INVALID")
+            safe_directories.append(name)
+        directories[:] = safe_directories
+        for name in sorted(filenames):
+            source_file = current_path / name
+            _reject_reparse(source_file, "RUNTIME_REPARSE")
+            if not source_file.is_file():
+                raise StableProductBuildError("RUNTIME_FILE_INVALID")
+            relative = source_file.relative_to(source).as_posix()
+            size = source_file.stat().st_size
+            total_bytes += size
+            if len(records) >= MAX_RUNTIME_FILES or total_bytes > MAX_RUNTIME_BYTES:
+                raise StableProductBuildError("RUNTIME_BOUNDS_EXCEEDED")
+            destination = destination_root / Path(relative)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            _reject_reparse(destination.parent, "DESTINATION_REPARSE")
+            _copy_regular(source_file, destination)
+            records.append({"name": relative, "size": size, "sha256": _sha256(destination)})
+    if not any(record["name"].casefold() == "pythonw.exe" for record in records):
+        raise StableProductBuildError("BUNDLED_RUNTIME_REQUIRED")
+    return records
+
+
 def _git_files(source_root: Path) -> list[str]:
     import subprocess
 
@@ -159,6 +203,8 @@ def stage_product(
     output_root: Path,
     *,
     runtime_pythonw: Path,
+    runtime_root: Path | None = None,
+    runtime_metadata: Path | None = None,
     launcher: Path,
     data_root: Path,
     source_root: Path = ROOT,
@@ -188,15 +234,43 @@ def stage_product(
 
     payload = output / "versions" / version
     app_payload = payload / "app"
-    runtime_payload = payload / "runtime" / "Python312" / "pythonw.exe"
+    runtime_payload_root = payload / "runtime" / "Python312"
+    runtime_payload = runtime_payload_root / "pythonw.exe"
     payload.mkdir(parents=True, exist_ok=False)
     for relative in _git_files(source):
         _copy_regular(source / relative, app_payload / relative)
-    _copy_regular(runtime, runtime_payload)
+    if runtime_root is None:
+        _copy_regular(runtime, runtime_payload)
+        runtime_inventory = [{"name": "pythonw.exe", "size": runtime_payload.stat().st_size, "sha256": _sha256(runtime_payload)}]
+    else:
+        runtime_inventory = _copy_runtime_tree(runtime_root, runtime_payload_root)
+        if not runtime_payload.is_file():
+            raise StableProductBuildError("BUNDLED_RUNTIME_REQUIRED")
     _copy_regular(launcher, output / "LocalAIHub.exe")
     icon = source / "distribution" / "assets" / ICON_NAME
     _copy_regular(icon, output / ICON_NAME)
 
+    runtime_metadata_value: dict[str, Any] = {
+        "schema_version": CORE_RUNTIME_MANIFEST_SCHEMA,
+        "provider": "python.org",
+        "source_url": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip",
+        "version": "3.12.10",
+        "platform": "win-amd64",
+        "license": "PSF-2.0",
+        "archive": "python-3.12.10-embed-amd64.zip",
+        "archive_size": 11133606,
+        "archive_sha256": "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3",
+        "files": runtime_inventory,
+    }
+    if runtime_metadata is not None:
+        try:
+            loaded_metadata = json.loads(runtime_metadata.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            raise StableProductBuildError("RUNTIME_METADATA_INVALID") from None
+        if not isinstance(loaded_metadata, dict) or loaded_metadata.get("schema_version") != CORE_RUNTIME_MANIFEST_SCHEMA:
+            raise StableProductBuildError("RUNTIME_METADATA_INVALID")
+        runtime_metadata_value = loaded_metadata | {"files": runtime_inventory}
+    _write_new_json(runtime_payload_root / "runtime-manifest.json", runtime_metadata_value)
     manifest = {
         "schema_version": VERSION_MANIFEST_SCHEMA,
         "product_id": PRODUCT_ID,
@@ -237,7 +311,7 @@ def stage_product(
         "pointer": pointer,
         "file_count": len(inventory),
         "inventory_sha256": hashlib.sha256(_canonical({"files": inventory})).hexdigest(),
-        "runtime": "bundled_pythonw",
+        "runtime": runtime_metadata_value,
         "execution": "not_run",
         "dry_run": True,
     }
@@ -247,12 +321,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Stage a task-owned stable Local AI Hub product candidate.")
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--runtime-pythonw", type=Path, required=True)
+    parser.add_argument("--runtime-root", type=Path)
+    parser.add_argument("--runtime-metadata", type=Path)
     parser.add_argument("--launcher", type=Path, required=True)
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--source-root", type=Path, default=ROOT)
     args = parser.parse_args()
     try:
-        print(json.dumps(stage_product(args.output_root, runtime_pythonw=args.runtime_pythonw, launcher=args.launcher, data_root=args.data_root, source_root=args.source_root), sort_keys=True, indent=2))
+        print(json.dumps(stage_product(args.output_root, runtime_pythonw=args.runtime_pythonw, runtime_root=args.runtime_root, runtime_metadata=args.runtime_metadata, launcher=args.launcher, data_root=args.data_root, source_root=args.source_root), sort_keys=True, indent=2))
         return 0
     except StableProductBuildError as exc:
         print(json.dumps({"status": "blocked", "code": exc.code, "execution": "not_run", "dry_run": True}, sort_keys=True))
