@@ -533,10 +533,10 @@ class DiagnosticsCenter:
     def jobs_store_state(self) -> dict[str, Any]:
         """Report jobs store health (count by status)."""
         try:
-            from src.services.job_manager import manager as jm
-            jobs = jm.job_manager.list_jobs(statuses=None, limit=1000)
+            from src.services.api.jobs import list_jobs
+            jobs = list_jobs(limit=1000)
             counts: dict[str, int] = {}
-            for job in (jobs.get("jobs") or []):
+            for job in jobs:
                 s = str(job.get("status", "unknown"))
                 counts[s] = counts.get(s, 0) + 1
             return {
