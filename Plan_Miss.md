@@ -863,3 +863,20 @@ with `approval.identity=approved`. This does not authorize tag creation, main
 merge, or release publication. Historical V7/V8.0.0 release evidence remains
 immutable. Final pre-tag provenance is expected to be activation-ready with no
 blockers once exact-head acceptance is rerun.
+
+## 22. V8 release phase-governance correction — integration is tag-independent
+
+The release verifier now treats `integration` as its default phase. It validates
+the tracked source/product contract and exact commit without reading or requiring
+any tag, including historical or unrelated tags. `release_branch` remains the
+V8 generation/integration-line metadata and is not current-checkout or release
+authorization authority.
+
+`pre_tag` and `post_tag` require an explicit version, tag, and expected commit:
+pre-tag refuses an already-existing requested tag, while post-tag requires the
+existing tag to peel to the exact expected commit. Candidate version and planned
+tag are intentionally decoupled in tracked policy, so a version can be prepared
+before a user selects a tag. Acceptance results expose separate
+`technical_ready`, `merge_ready`, `release_ready`, and `tagged_release_ready`
+fields; a normal integration pass never implies a tagged release. Historical
+V7/V8.0.0 tags/evidence remain immutable.

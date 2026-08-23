@@ -74,13 +74,16 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
         self.assertEqual(provenance["release_branch"], "feature/local-ai-hub-v8")
         self.assertTrue(provenance["identity_approved"])
         self.assertEqual(provenance["candidate_version"], "8.0.1")
-        self.assertEqual(provenance["candidate_tag"], "v8.0.1")
+        self.assertIsNone(provenance["candidate_tag"])
         self.assertTrue(provenance["product_version_matches"])
-        self.assertTrue(provenance["tag_available"])
+        self.assertTrue(provenance["technical_ready"])
+        self.assertTrue(provenance["merge_ready"])
+        self.assertIsNone(provenance["tag_exists"])
 
         result = evaluate(repo_root=repo)
         self.assertFalse(result["release_ready"])
-        self.assertIn("LOCAL_WINDOWS_EVIDENCE_REQUIRED", result["blockers"])
+        self.assertTrue(result["technical_ready"])
+        self.assertFalse(result["merge_ready"])
         self.assertIn("LOCAL_WINDOWS_EVIDENCE_REQUIRED", result["blockers"])
 
     def test_all_pass_evidence_reports_are_verified_and_release_ready(self) -> None:
@@ -92,7 +95,9 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
         self.assertTrue(result["local_evidence"]["reports_verified"])
         self.assertTrue(result["local_evidence"]["source_commit_matches"])
         self.assertEqual(result["local_evidence"]["pending_gates"], [])
-        self.assertTrue(result["release_ready"])
+        self.assertFalse(result["release_ready"])
+        self.assertTrue(result["technical_ready"])
+        self.assertTrue(result["merge_ready"])
         self.assertEqual(result["blockers"], [])
 
     def test_declared_pass_without_local_report_is_rejected(self) -> None:
