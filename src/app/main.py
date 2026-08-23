@@ -14,6 +14,7 @@ import hashlib
 import inspect
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -26,6 +27,8 @@ from src.services.process_manager.managed import terminate_owned_process
 from src.services.process_manager.windows import popen_hidden, startup_mutex
 from src.services.runtime_manager.core_resolver import CoreRuntimeResolver
 from src.platform.paths import get_paths
+from src.shared.runtime_identity import APP_USER_MODEL_ID, API_PROTOCOL_VERSION, PRODUCT_ID, api_identity
+from src.shared.version import PRODUCT_VERSION
 
 from .desktop_lifecycle import DesktopCloseController
 from .tray import WindowsTray
@@ -39,6 +42,10 @@ APP_INSTANCE_MUTEX = r"Local\LocalAIHub.AppInstance.v1"
 _api_process: subprocess.Popen[object] | None = None
 _api_process_lock = threading.RLock()
 _shutdown_started = False
+API_PROBE_ABSENT = "absent"
+API_PROBE_COMPATIBLE = "compatible_owned_or_reusable"
+API_PROBE_LOCAL_INCOMPATIBLE = "localaihub_incompatible"
+API_PROBE_FOREIGN = "foreign_unknown"
 
 
 def _canonical_icon_path() -> str | None:
@@ -80,25 +87,73 @@ def _ui_url() -> str:
     return f"{_api_base_url()}/ui/"
 
 
-def _scoped_mutex(base: str) -> str:
+def _scoped_mutex(base: str, *, port: int | None = None) -> str:
     """Keep single-instance semantics per installation, not per Windows user."""
 
     try:
         paths = get_paths(app_root=ROOT)
-        if paths.legacy_single_root_mode:
-            return base
         digest = hashlib.sha256(str(paths.data_root).casefold().encode("utf-8")).hexdigest()[:16]
-        return f"{base}.{digest}"
+        suffix = f".{int(port)}" if port is not None else ""
+        if paths.legacy_single_root_mode and not suffix:
+            return base
+        return f"{base}.{digest}{suffix}"
     except OSError:
         return base
 
 
-def _api_ready() -> bool:
+def _expected_api_identity() -> dict[str, str]:
+    paths = get_paths(app_root=ROOT)
+    value = api_identity(product_version=PRODUCT_VERSION, app_root=paths.app_root, data_root=paths.data_root)
+    return {key: str(item) for key, item in value.items()}
+
+
+def _classify_api_identity(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return API_PROBE_FOREIGN
+    if payload.get("product_id") != PRODUCT_ID:
+        return API_PROBE_FOREIGN
+    expected = _expected_api_identity()
+    required = ("product_id", "product_version", "api_protocol_version", "app_user_model_id", "process_owner", "installation_id")
+    if any(payload.get(key) != expected[key] for key in required):
+        return API_PROBE_LOCAL_INCOMPATIBLE
+    return API_PROBE_COMPATIBLE
+
+
+def _probe_api(port: int | None = None) -> tuple[str, dict[str, object]]:
+    selected = _configured_port() if port is None else int(port)
     try:
-        with urllib.request.urlopen(f"{_api_base_url()}/health", timeout=0.35) as response:
-            return response.status == 200
-    except OSError:
-        return False
+        with urllib.request.urlopen(f"http://{HOST}:{selected}/health", timeout=0.35) as response:
+            if response.status != 200:
+                return API_PROBE_FOREIGN, {}
+            raw = response.read(128 * 1024 + 1)
+            if len(raw) > 128 * 1024:
+                return API_PROBE_FOREIGN, {}
+            payload = json.loads(raw.decode("utf-8"))
+            return _classify_api_identity(payload), payload if isinstance(payload, dict) else {}
+    except urllib.error.HTTPError:
+        return API_PROBE_FOREIGN, {}
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        return API_PROBE_ABSENT, {}
+
+
+def _api_ready() -> bool:
+    return _probe_api()[0] == API_PROBE_COMPATIBLE
+
+
+def _free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        probe.bind((HOST, 0))
+        return int(probe.getsockname()[1])
+
+
+def _select_api_port() -> tuple[int, str]:
+    configured = _configured_port()
+    state, _payload = _probe_api(configured)
+    if state in {API_PROBE_ABSENT, API_PROBE_COMPATIBLE}:
+        return configured, state
+    return _free_loopback_port(), state
 
 
 def _wait_for_api(deadline: float) -> bool:
@@ -112,11 +167,17 @@ def _wait_for_api(deadline: float) -> bool:
 def ensure_api(timeout_seconds: float = 20.0) -> subprocess.Popen[object] | None:
     """Return the API handle only when this desktop shell started it."""
 
-    if _api_ready():
+    selected_port, probe_state = _select_api_port()
+    # This is session state only; never persist a collision fallback as the
+    # machine default. All desktop/UI requests use the same selected port.
+    os.environ["LOCALAIHUB_PORT"] = str(selected_port)
+    os.environ["LOCALAIHUB_BIND_HOST"] = HOST
+    if probe_state == API_PROBE_COMPATIBLE:
         return None
     deadline = time.monotonic() + timeout_seconds
-    with startup_mutex(_scoped_mutex(API_STARTUP_MUTEX), max(0.0, deadline - time.monotonic())) as acquired:
-        if _api_ready():
+    with startup_mutex(_scoped_mutex(API_STARTUP_MUTEX, port=selected_port), max(0.0, deadline - time.monotonic())) as acquired:
+        current_state, _payload = _probe_api(selected_port)
+        if current_state == API_PROBE_COMPATIBLE:
             return None
         if not acquired:
             if _wait_for_api(deadline):
@@ -143,6 +204,9 @@ def ensure_api(timeout_seconds: float = 20.0) -> subprocess.Popen[object] | None
         child_env = dict(os.environ)
         child_env["PYTHONPATH"] = str(ROOT)
         child_env["LOCALAIHUB_APP_ROOT"] = str(ROOT)
+        child_env["LOCALAIHUB_PORT"] = str(selected_port)
+        child_env["LOCALAIHUB_BIND_HOST"] = HOST
+        child_env["PYTHONNOUSERSITE"] = "1"
         # Do not collapse a split installation back into legacy single-root
         # mode.  The parent-selected LOCALAIHUB_DATA_ROOT is retained; an old
         # LOCALAIHUB_ROOT override is removed from the child environment.

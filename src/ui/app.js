@@ -127,6 +127,7 @@ const nav = document.querySelector("#sidebar-nav");
 const topStatus = document.querySelector("#top-status");
 const diskMetric = document.querySelector("#disk-metric");
 const gpuMetric = document.querySelector("#gpu-metric");
+const apiEndpoint = document.querySelector("#api-endpoint");
 const jobSummary = document.querySelector("#job-summary");
 const toastRegion = document.querySelector("#toast-region");
 const snapshotStatus = document.querySelector("#snapshot-status");
@@ -599,6 +600,7 @@ const updateTopbar = () => {
   topStatus.textContent = `${formatStatus(readiness)} · Workflow trực tiếp`;
   diskMetric.textContent = disk.free_bytes ? `Ổ đĩa ${formatGb(disk.free_bytes)} trống` : "Ổ đĩa —";
   gpuMetric.textContent = gpu.name ? `GPU ${gpu.name}` : "GPU chưa phát hiện";
+  if (apiEndpoint) apiEndpoint.textContent = `API ${window.location.host || "127.0.0.1"}`;
   const recovery = jobRecoverySnapshot(state);
   jobSummary.textContent = `Jobs: ${recovery.counts.active} active · ${recovery.counts.total} records`;
 };
