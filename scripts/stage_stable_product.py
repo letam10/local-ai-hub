@@ -39,6 +39,7 @@ MAX_FILES = 100_000
 MAX_RUNTIME_FILES = 50_000
 MAX_RUNTIME_BYTES = 1_000_000_000
 CORE_RUNTIME_MANIFEST_SCHEMA = "v8.0.1-core-runtime.v1"
+RUNTIME_EXCLUDED_PREFIXES = ("Lib/site-packages/bin/",)
 SOURCE_PREFIXES = (
     "src/", "scripts/", "architecture/", "workflows/", "extensions/",
     "asset_catalog/", "creative_recipes/", "Hub/", "MCP/", "Services/",
@@ -129,6 +130,8 @@ def _copy_runtime_tree(source_root: Path, destination_root: Path) -> list[dict[s
             if not source_file.is_file():
                 raise StableProductBuildError("RUNTIME_FILE_INVALID")
             relative = source_file.relative_to(source).as_posix()
+            if any(relative.startswith(prefix) for prefix in RUNTIME_EXCLUDED_PREFIXES):
+                continue
             size = source_file.stat().st_size
             total_bytes += size
             if len(records) >= MAX_RUNTIME_FILES or total_bytes > MAX_RUNTIME_BYTES:

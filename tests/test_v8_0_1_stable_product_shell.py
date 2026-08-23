@@ -112,6 +112,8 @@ class StableProductShellTests(unittest.TestCase):
             (runtime_root / "Lib" / "site-packages").mkdir(parents=True)
             (runtime_root / "pythonw.exe").write_bytes(b"runtime")
             (runtime_root / "python312.zip").write_bytes(b"stdlib")
+            (runtime_root / "Lib" / "site-packages" / "bin").mkdir()
+            (runtime_root / "Lib" / "site-packages" / "bin" / "uvicorn.exe").write_bytes(b"#!C:\\Users\\TAM\\AppData\\Local\\Programs\\Python\\Python312\\python.exe")
             launcher = root / "LocalAIHub.exe"
             launcher.write_bytes(b"launcher")
             install = root / "Temp" / "stable-product"
@@ -123,6 +125,7 @@ class StableProductShellTests(unittest.TestCase):
             runtime_manifest = json.loads((install / "versions" / "8.0.1" / "runtime" / "Python312" / "runtime-manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(runtime_manifest["provider"], "python.org")
             self.assertEqual({item["name"] for item in runtime_manifest["files"]}, {"pythonw.exe", "python312.zip"})
+            self.assertFalse((install / "versions" / "8.0.1" / "runtime" / "Python312" / "Lib" / "site-packages" / "bin").exists())
             self.assertFalse((install / "src").exists())
             plan = resolve_launch_plan(install, allow_test_root=True)
             self.assertEqual(plan.version, "8.0.1")
