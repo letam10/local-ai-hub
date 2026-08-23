@@ -31,6 +31,7 @@ from src.shared.runtime_identity import APP_USER_MODEL_ID, API_PROTOCOL_VERSION,
 from src.shared.version import PRODUCT_VERSION
 
 from .desktop_lifecycle import DesktopCloseController
+from .stable_shell import StableShellError, resolve_launch_plan
 from .tray import WindowsTray
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -46,6 +47,18 @@ API_PROBE_ABSENT = "absent"
 API_PROBE_COMPATIBLE = "compatible_owned_or_reusable"
 API_PROBE_LOCAL_INCOMPATIBLE = "localaihub_incompatible"
 API_PROBE_FOREIGN = "foreign_unknown"
+API_STARTUP_EXITED = "API_STARTUP_EXITED"
+API_IDENTITY_MISMATCH = "API_IDENTITY_MISMATCH"
+API_STARTUP_TIMEOUT = "API_STARTUP_TIMEOUT"
+API_BUNDLED_RUNTIME_UNAVAILABLE = "API_BUNDLED_RUNTIME_UNAVAILABLE"
+API_STARTUP_FAILED = "API_STARTUP_FAILED"
+_STARTUP_ERROR_MESSAGES = {
+    API_STARTUP_EXITED: "Dịch vụ API bundled đã thoát trong khi khởi động. Mở Diagnostics để xem chi tiết.",
+    API_IDENTITY_MISMATCH: "Dịch vụ API không thuộc installation này. Mở Diagnostics để xem chi tiết.",
+    API_STARTUP_TIMEOUT: "Dịch vụ API không sẵn sàng trong thời gian giới hạn. Mở Diagnostics để xem chi tiết.",
+    API_BUNDLED_RUNTIME_UNAVAILABLE: "Payload runtime bundled không hợp lệ hoặc không còn tồn tại. Mở Diagnostics để xem chi tiết.",
+    API_STARTUP_FAILED: "Không thể khởi động dịch vụ API. Mở Diagnostics để xem chi tiết.",
+}
 
 
 def _canonical_icon_path() -> str | None:
@@ -103,7 +116,12 @@ def _scoped_mutex(base: str, *, port: int | None = None) -> str:
 
 def _expected_api_identity() -> dict[str, str]:
     paths = get_paths(app_root=ROOT)
-    value = api_identity(product_version=PRODUCT_VERSION, app_root=paths.app_root, data_root=paths.data_root)
+    value = api_identity(
+        product_version=PRODUCT_VERSION,
+        installation_root=os.environ.get("LOCALAIHUB_INSTALL_ROOT"),
+        app_root=paths.app_root,
+        data_root=paths.data_root,
+    )
     return {key: str(item) for key, item in value.items()}
 
 
@@ -156,12 +174,54 @@ def _select_api_port() -> tuple[int, str]:
     return _free_loopback_port(), state
 
 
-def _wait_for_api(deadline: float) -> bool:
+def _wait_for_api(deadline: float, process: subprocess.Popen[object] | None = None) -> bool:
     while time.monotonic() < deadline:
         if _api_ready():
             return True
+        if process is not None and process.poll() is not None:
+            return False
         time.sleep(0.2)
     return False
+
+
+def _installed_launch_plan() -> object | None:
+    installation_root = os.environ.get("LOCALAIHUB_INSTALL_ROOT")
+    if not installation_root:
+        return None
+    try:
+        return resolve_launch_plan(Path(installation_root))
+    except (OSError, ValueError, StableShellError) as exc:
+        raise RuntimeError(API_BUNDLED_RUNTIME_UNAVAILABLE) from exc
+
+
+def _startup_log_path() -> Path:
+    return get_paths(app_root=ROOT).log_root / "api_startup.log"
+
+
+def _record_startup_diagnostic(
+    code: str,
+    *,
+    selected_port: int,
+    probe_state: str,
+    runtime_class: str,
+    child_exit_code: int | None = None,
+) -> None:
+    value = {
+        "schema_version": "v8-api-startup-diagnostic.v1",
+        "code": code,
+        "selected_port": int(selected_port),
+        "probe_class": str(probe_state)[:64],
+        "runtime_class": str(runtime_class)[:64],
+        "child_exit_code": child_exit_code if isinstance(child_exit_code, int) else None,
+        "identity_match": code not in {API_IDENTITY_MISMATCH},
+    }
+    try:
+        path = _startup_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n")
+    except (OSError, ValueError):
+        pass
 
 
 def ensure_api(timeout_seconds: float = 20.0) -> subprocess.Popen[object] | None:
@@ -182,46 +242,72 @@ def ensure_api(timeout_seconds: float = 20.0) -> subprocess.Popen[object] | None
         if not acquired:
             if _wait_for_api(deadline):
                 return None
-            raise RuntimeError(f"Local AI Hub API startup lock timed out at {_api_base_url()}.")
-        # Resolve the same Core interpreter used by the desktop launcher.  An
-        # explicit environment override remains a development-only escape
-        # hatch, but is accepted only when it is a regular file under a
-        # bounded trusted root; arbitrary client paths never enter the API.
-        candidate = CoreRuntimeResolver(paths=get_paths(app_root=ROOT)).resolve_python()
-        override = os.environ.get("LOCALAIHUB_PYTHON")
-        if candidate is None and override:
-            override_path = Path(override).expanduser()
+            current_state, _payload = _probe_api(selected_port)
+            code = API_IDENTITY_MISMATCH if current_state in {API_PROBE_LOCAL_INCOMPATIBLE, API_PROBE_FOREIGN} else API_STARTUP_TIMEOUT
+            _record_startup_diagnostic(code, selected_port=selected_port, probe_state=current_state, runtime_class="unknown")
+            raise RuntimeError(code)
+        process: subprocess.Popen[object] | None = None
+        success = False
+        runtime_class = "development_python"
+        try:
             try:
-                if override_path.is_file() and not override_path.is_symlink():
-                    candidate = override_path.resolve()
-            except OSError:
-                candidate = None
-        if candidate is None:
-            raise RuntimeError("Local AI Hub Core Python is unavailable; run scripts/bootstrap_core.ps1 first.")
-        python = str(candidate)
-        log_path = ROOT / "Logs" / "api_server.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        child_env = dict(os.environ)
-        child_env["PYTHONPATH"] = str(ROOT)
-        child_env["LOCALAIHUB_APP_ROOT"] = str(ROOT)
-        child_env["LOCALAIHUB_PORT"] = str(selected_port)
-        child_env["LOCALAIHUB_BIND_HOST"] = HOST
-        child_env["PYTHONNOUSERSITE"] = "1"
-        # Do not collapse a split installation back into legacy single-root
-        # mode.  The parent-selected LOCALAIHUB_DATA_ROOT is retained; an old
-        # LOCALAIHUB_ROOT override is removed from the child environment.
-        child_env.pop("LOCALAIHUB_ROOT", None)
-        with log_path.open("a", encoding="utf-8") as log:
-            process = popen_hidden(
-                [python, "-m", "src.services.api.api_server"],
-                cwd=ROOT,
-                env=child_env,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-            )
-        if _wait_for_api(deadline):
-            return process if process.poll() is None else None
-    raise RuntimeError(f"Local AI Hub API did not become ready at {_api_base_url()}.")
+                launch_plan = _installed_launch_plan()
+            except RuntimeError as exc:
+                code = str(exc) if str(exc) in _STARTUP_ERROR_MESSAGES else API_BUNDLED_RUNTIME_UNAVAILABLE
+                _record_startup_diagnostic(code, selected_port=selected_port, probe_state=probe_state, runtime_class="installed_bundled")
+                raise
+            if launch_plan is not None:
+                python = str(launch_plan.runtime_pythonw)
+                runtime_class = "installed_bundled"
+                child_env = dict(launch_plan.environment)
+                cwd = launch_plan.app_payload
+            else:
+                # Development/legacy mode retains the fixed Core resolver.
+                candidate = CoreRuntimeResolver(paths=get_paths(app_root=ROOT)).resolve_python()
+                override = os.environ.get("LOCALAIHUB_PYTHON")
+                if candidate is None and override:
+                    override_path = Path(override).expanduser()
+                    try:
+                        if override_path.is_file() and not override_path.is_symlink():
+                            candidate = override_path.resolve()
+                    except OSError:
+                        candidate = None
+                if candidate is None:
+                    code = API_BUNDLED_RUNTIME_UNAVAILABLE if os.environ.get("LOCALAIHUB_INSTALL_ROOT") else API_STARTUP_FAILED
+                    _record_startup_diagnostic(code, selected_port=selected_port, probe_state=probe_state, runtime_class=runtime_class)
+                    raise RuntimeError(code)
+                python = str(candidate)
+                runtime_class = "development_python" if override else "core_environment"
+                child_env = dict(os.environ)
+                child_env["LOCALAIHUB_APP_ROOT"] = str(ROOT)
+                cwd = ROOT
+            child_env["PYTHONPATH"] = str(cwd)
+            child_env["LOCALAIHUB_PORT"] = str(selected_port)
+            child_env["LOCALAIHUB_BIND_HOST"] = HOST
+            child_env["PYTHONNOUSERSITE"] = "1"
+            child_env.pop("LOCALAIHUB_ROOT", None)
+            log_path = _startup_log_path()
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as log:
+                process = popen_hidden(
+                    [python, "-m", "src.services.api.api_server"],
+                    cwd=cwd,
+                    env=child_env,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                )
+            if _wait_for_api(deadline, process=process):
+                if process.poll() is None:
+                    success = True
+                    return process
+            exit_code = process.poll()
+            current_state, _payload = _probe_api(selected_port)
+            code = API_STARTUP_EXITED if exit_code is not None else API_IDENTITY_MISMATCH if current_state in {API_PROBE_LOCAL_INCOMPATIBLE, API_PROBE_FOREIGN} else API_STARTUP_TIMEOUT
+            _record_startup_diagnostic(code, selected_port=selected_port, probe_state=current_state, runtime_class=runtime_class, child_exit_code=exit_code)
+            raise RuntimeError(code)
+        finally:
+            if process is not None and not success:
+                terminate_owned_process(process)
 
 
 def _remember_owned_api(process: subprocess.Popen[object] | None) -> None:
@@ -531,10 +617,12 @@ def _loading_html() -> str:
 
 
 def _error_html(message: str) -> str:
-    safe = html.escape(message)
+    code = message if message in _STARTUP_ERROR_MESSAGES else API_STARTUP_FAILED
+    safe = html.escape(_STARTUP_ERROR_MESSAGES[code])
+    code_label = html.escape(code)
     return f"""<!doctype html><html lang=\"vi\"><meta charset=\"utf-8\"><title>Local AI Hub</title>
     <style>html,body{{margin:0;height:100%;background:#0b1020;color:#edf2ff;font-family:Segoe UI,system-ui,sans-serif}}main{{height:100%;display:grid;place-content:center;text-align:center;gap:14px;padding:32px}}p{{max-width:620px;color:#efb2bd;line-height:1.5}}</style>
-    <main><strong>Không thể khởi động Local AI Hub</strong><p>{safe}</p></main></html>"""
+    <main><strong>Không thể khởi động Local AI Hub</strong><p data-error-code=\"{code_label}\">{safe}</p></main></html>"""
 
 
 def _close_prompt_html(detail: dict[str, object]) -> str:

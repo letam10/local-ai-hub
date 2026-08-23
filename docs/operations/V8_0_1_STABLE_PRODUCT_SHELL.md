@@ -70,3 +70,12 @@ not inspect or require a tag. Pre-tag validation requires an explicitly
 requested, unoccupied candidate tag; post-tag validation accepts only an
 existing immutable tag peeled to the exact expected commit. Historical V7
 manifests and tags remain outside this V8.0.1 preparation.
+
+## Payload repair authority
+
+The stable `LocalAIHub.exe` launcher is the immutable installation entrypoint.
+Repairs and updates replace only the validated version payload behind
+`current.json`; they never repoint shortcuts to a source branch or rebuild the
+launcher solely to update application code. Installed startup uses the active
+payload's bundled `pythonw.exe`, while the stable installation root and
+persistent `DATA_ROOT` remain the identity and storage authorities.
