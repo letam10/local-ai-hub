@@ -205,6 +205,7 @@ class StableProductShellTests(unittest.TestCase):
         self.assertIn("INSTALLED_PRODUCT_MANIFEST_REQUIRED", source)
         self.assertIn("LocalAIHub.exe", source)
         self.assertIn("IconLocation", source)
+        self.assertIn("Join-Path $root", source)
         self.assertNotIn("Get-Command pythonw", source)
         self.assertNotIn("wscript.exe", source)
         self.assertNotIn("LocalAIHub.vbs", source)

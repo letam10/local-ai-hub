@@ -59,7 +59,7 @@ foreach ($location in $locationsToRepair) {
     $shortcut.Arguments = ''
     $shortcut.WorkingDirectory = $root
     $shortcut.Description = 'Local AI Hub stable installed product'
-    $shortcut.IconLocation = "$($product.Icon),0"
+    $shortcut.IconLocation = "$(Join-Path $root ([string]$product.Icon)),0"
     $shortcut.Save()
     Write-Output "UPDATED $link -> $($product.Launcher)"
 }
