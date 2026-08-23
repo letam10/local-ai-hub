@@ -748,4 +748,49 @@ Release provenance source-only validation reports `contract_valid=true` and
 installer run, GitHub release, GPU/model/provider workload, or user-data
 operation was performed. Before delivery, rerun the final bounded gates,
 commit/push the branch and open a DRAFT PR; stop before any production
-shortcut repair or irreversible release action.
+ shortcut repair or irreversible release action.
+
+## 19. V8.0.1 real product installation closure — installed, shortcut repaired, smoke blocked
+
+This checkpoint continues the stable-shell branch from the V8.0.0 merge
+without changing `main`, creating `v8.0.1`, or publishing a release. The
+dedicated branch reached the final source tip recorded by Git after the
+installation-handoff commit; the exact SHA is read back from the branch and
+is not inferred from this document.
+
+- The loopback harness now chooses a task-owned free loopback port while the
+  production default remains `8765`; the complete V8 discovery passed **105
+  tests** despite a pre-existing listener on `127.0.0.1:8765`.
+- The candidate uses the official CPython `3.12.10` Windows x64 embeddable
+  runtime from `python.org`, archive SHA-256
+  `4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3`,
+  license `PSF-2.0`, and a deterministic PyPI wheelhouse manifest. The
+  embedded runtime has `PYTHONNOUSERSITE=1`, a bounded internal `../../app`
+  path, and imports `webview`/`mcp` with an empty `PATH`.
+- The final task-owned candidate was rebuilt from the branch tip with 3,565
+  files and a bundled runtime. The stable launcher SHA-256 is
+  `4509019776122ccfedd5a9d5ffec4d8ed0e0d2b57281eb9a0a69dae3c37838c1`.
+  Isolated API launch returned `healthy`, version `8.0.1`, `active_jobs=0`;
+  simulated `8.0.1 -> 8.0.2-testpayload -> 8.0.1` pointer update/rollback
+  preserved the launcher SHA and removed only the task-owned fake payload.
+- The one-time per-user installation was materialized at
+  `%LOCALAPPDATA%\Programs\LocalAIHub` with `DATA_ROOT=D:\LocalAIHub`.
+  Desktop and Start Menu now contain `Local AI Hub.lnk`; both target the
+  stable EXE, have empty arguments, the installed working directory, and
+  `LocalAIHub.exe,0` as the embedded LA icon. Before the repair no matching
+  shortcut existed; bounded before/after metadata is preserved under the
+  task-owned Temp evidence area.
+- GitHub push and PR validation both passed on the exact final source tip
+  after each source fix. The DRAFT PR remains open.
+
+The production shortcut smoke is **BLOCKED**, not a PASS: an already-running
+user-owned process `pythonw.exe -m src.services.api.api_server` from the
+system Python installation owns `127.0.0.1:8765` (PID was preserved). The
+installed shortcut launches the bundled `LocalAIHub.exe` and bundled
+`pythonw.exe`, but the application reuses the pre-existing API listener, so
+the observed `/health` response is version `7.1.0`, not a self-contained
+`8.0.1` API. Codex did not stop or modify that process. No production
+self-contained/runtime-readiness claim is valid until the user closes or
+otherwise authorizes handling of that external listener and the shortcut
+smoke is rerun. No tag, main merge, release publish, GPU/model/provider
+workload, or user-data relocation was performed.
