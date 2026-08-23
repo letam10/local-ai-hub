@@ -322,17 +322,19 @@ const showDesktopClosePrompt = (detail = {}) => {
   layer.setAttribute("aria-labelledby", "desktop-close-title");
   const card = document.createElement("div");
   card.className = "desktop-close-prompt__card";
-  const eyebrow = document.createElement("span"); eyebrow.className = "eyebrow"; eyebrow.textContent = "JOBS ĐANG HOẠT ĐỘNG";
+  const verified = detail.verification === "verified" && Number.isInteger(detail.active_jobs) && detail.active_jobs >= 0;
+  const canCancel = verified && detail.can_cancel === true && detail.active_jobs > 0;
+  const eyebrow = document.createElement("span"); eyebrow.className = "eyebrow"; eyebrow.textContent = verified && detail.active_jobs > 0 ? "JOBS ĐANG HOẠT ĐỘNG" : "KHÔNG THỂ XÁC MINH TÁC VỤ";
   const title = document.createElement("h2"); title.id = "desktop-close-title"; title.textContent = "Bạn muốn xử lý Local AI Hub thế nào?";
   const copy = document.createElement("p");
-  const count = Number(detail.active_jobs || 0);
-  copy.textContent = count > 0
+  const count = verified ? detail.active_jobs : 0;
+  copy.textContent = verified && count > 0
     ? `${count} job đang chờ, chuẩn bị, chạy hoặc hủy. Hub không tự dừng worker đang hoạt động.`
-    : "Hub đang chờ xác nhận an toàn trước khi đóng.";
+    : "Hub chưa đóng vì chưa xác minh được trạng thái tác vụ.";
   const status = document.createElement("p"); status.className = `desktop-close-prompt__status ${detail.kind === "error" ? "is-error" : ""}`; status.setAttribute("role", "status"); status.textContent = detail.message || "Chọn một trong ba cách tiếp tục.";
   const actions = document.createElement("div"); actions.className = "desktop-close-prompt__actions";
   const returnButton = document.createElement("button"); returnButton.className = "button"; returnButton.type = "button"; returnButton.textContent = "Quay lại Hub";
-  const cancelButton = document.createElement("button"); cancelButton.className = "button button--danger"; cancelButton.type = "button"; cancelButton.textContent = "Hủy jobs và thoát";
+  const cancelButton = document.createElement("button"); cancelButton.className = "button button--danger"; cancelButton.type = "button"; cancelButton.textContent = "Hủy jobs và thoát"; cancelButton.hidden = !canCancel;
   const backgroundButton = document.createElement("button"); backgroundButton.className = "button button--primary"; backgroundButton.type = "button"; backgroundButton.textContent = "Giữ chạy nền vào khay";
   const lockChoicesWhileCancelling = () => {
     returnButton.disabled = true;
@@ -587,7 +589,14 @@ const updateTopbar = () => {
   const health = state.health || {};
   const disk = health.disk || {};
   const gpu = health.gpu || {};
-  topStatus.textContent = health.status ? `${formatStatus(health.status)} · Workflow trực tiếp` : "Đang khởi động API…";
+  const readiness = state.apiStatus === "error"
+    ? "unavailable"
+    : state.apiStatus === "loading"
+      ? "starting"
+      : state.apiStatus === "degraded"
+        ? "partial"
+        : (health.status || "ready");
+  topStatus.textContent = `${formatStatus(readiness)} · Workflow trực tiếp`;
   diskMetric.textContent = disk.free_bytes ? `Ổ đĩa ${formatGb(disk.free_bytes)} trống` : "Ổ đĩa —";
   gpuMetric.textContent = gpu.name ? `GPU ${gpu.name}` : "GPU chưa phát hiện";
   const recovery = jobRecoverySnapshot(state);

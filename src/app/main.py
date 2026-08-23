@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import html
 import hashlib
+import inspect
 import json
 import os
 import subprocess
@@ -38,6 +39,19 @@ APP_INSTANCE_MUTEX = r"Local\LocalAIHub.AppInstance.v1"
 _api_process: subprocess.Popen[object] | None = None
 _api_process_lock = threading.RLock()
 _shutdown_started = False
+
+
+def _canonical_icon_path() -> str | None:
+    """Return the installed product icon without falling back to Python/UI art."""
+
+    install_root = os.environ.get("LOCALAIHUB_INSTALL_ROOT")
+    if not install_root:
+        return None
+    candidate = Path(install_root) / "local-ai-hub.ico"
+    try:
+        return str(candidate) if candidate.is_file() and not candidate.is_symlink() else None
+    except OSError:
+        return None
 
 
 def _configured_port() -> int:
@@ -203,11 +217,19 @@ def _api_active_job_count() -> int:
     return max(0, int(value.get("active_jobs", 0)))
 
 
-def _prepare_owned_api_close() -> tuple[bool, int, str]:
+def _owned_api_active_job_count() -> int:
+    """Read active jobs only from the API process this desktop owns."""
+
+    if not _owns_live_api():
+        raise RuntimeError("External API owner")
+    return _api_active_job_count()
+
+
+def _prepare_owned_api_close() -> dict[str, object]:
     """Close job admission and recheck under the owned API's server lock."""
 
     if not _owns_live_api():
-        return True, 0, ""
+        return {"status": "ready_to_close", "verification": "verified", "active_jobs": 0, "can_cancel": False, "message": ""}
     request = urllib.request.Request(
         f"{_api_base_url()}/api/lifecycle/prepare-close",
         data=b"{}",
@@ -223,13 +245,19 @@ def _prepare_owned_api_close() -> tuple[bool, int, str]:
         except (UnicodeDecodeError, json.JSONDecodeError):
             value = {}
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return False, 1, f"Không thể khóa nhận job mới trước khi đóng: {exc}"
+        return {"status": "unknown", "verification": "unknown", "active_jobs": None, "can_cancel": False, "message": "Không thể xác minh trạng thái tác vụ; Hub chưa đóng để đảm bảo an toàn."}
     if not isinstance(value, dict):
-        return False, 1, "Phản hồi chuẩn bị đóng API không hợp lệ; Hub vẫn được giữ mở."
-    active = max(0, int(value.get("active_jobs", 0) or 0))
-    if value.get("status") == "ready_to_close":
-        return True, 0, str(value.get("message") or "")
-    return False, max(1, active), str(value.get("message") or "Hub phát hiện job đang hoạt động; cửa sổ vẫn được giữ mở.")
+        return {"status": "unknown", "verification": "unknown", "active_jobs": None, "can_cancel": False, "message": "Không thể xác minh trạng thái tác vụ; Hub chưa đóng để đảm bảo an toàn."}
+    raw_active = value.get("active_jobs")
+    if isinstance(raw_active, bool) or not isinstance(raw_active, int) or raw_active < 0:
+        return {"status": "unknown", "verification": "unknown", "active_jobs": None, "can_cancel": False, "message": "Không thể xác minh trạng thái tác vụ; Hub chưa đóng để đảm bảo an toàn."}
+    active = raw_active
+    status = value.get("status")
+    if status == "ready_to_close" and active == 0:
+        return {"status": "ready_to_close", "verification": "verified", "active_jobs": 0, "can_cancel": False, "message": str(value.get("message") or "")}
+    if status == "active_jobs" and active > 0:
+        return {"status": "active_jobs", "verification": "verified", "active_jobs": active, "can_cancel": True, "message": str(value.get("message") or "Hub đang có tác vụ hoạt động; cửa sổ vẫn được giữ mở.")}
+    return {"status": "unknown", "verification": "unknown", "active_jobs": None, "can_cancel": False, "message": "Không thể xác minh trạng thái tác vụ; Hub chưa đóng để đảm bảo an toàn."}
 
 
 def _cancel_api_jobs_and_wait(timeout_seconds: float) -> tuple[bool, str]:
@@ -283,7 +311,7 @@ class DesktopBridge:
     def _bind(self, window: object) -> None:
         self._window = window
         self._controller = DesktopCloseController(
-            _api_active_job_count,
+            _owned_api_active_job_count,
             _cancel_owned_api_jobs_and_wait,
             self._prompt_close,
             prepare_close=_prepare_owned_api_close,
@@ -448,11 +476,15 @@ def _error_html(message: str) -> str:
 def _close_prompt_html(detail: dict[str, object]) -> str:
     """Local fallback for a close prompt delivered during a WebView transition."""
 
-    count = max(0, int(detail.get("active_jobs", 0) or 0))
-    message = html.escape(str(detail.get("message") or "Chọn một trong ba cách tiếp tục an toàn."))
+    verified = detail.get("verification") == "verified" and isinstance(detail.get("active_jobs"), int) and not isinstance(detail.get("active_jobs"), bool)
+    count = max(0, int(detail.get("active_jobs", 0) or 0)) if verified else 0
+    message = html.escape(str(detail.get("message") or ("Chọn một trong ba cách tiếp tục an toàn." if verified else "Không thể xác minh trạng thái tác vụ; Hub chưa đóng để đảm bảo an toàn.")))
+    cancel_button = '<button class="danger" onclick="choose(\'cancel_jobs_and_exit\')">Hủy jobs và thoát</button>' if verified and bool(detail.get("can_cancel")) and count > 0 else ''
+    eyebrow = "JOBS ĐANG HOẠT ĐỘNG" if verified and count > 0 else "KHÔNG THỂ XÁC MINH TÁC VỤ"
+    copy = f"{count} job đang chờ, chuẩn bị, chạy hoặc hủy. Hub không tự dừng worker đang hoạt động." if verified and count > 0 else "Hub chưa đóng vì chưa xác minh được trạng thái tác vụ."
     return f"""<!doctype html><html lang="vi"><meta charset="utf-8"><title>Local AI Hub</title>
     <style>html,body{{margin:0;height:100%;background:#0b1020;color:#edf2ff;font-family:Segoe UI,system-ui,sans-serif}}main{{max-width:680px;margin:0 auto;height:100%;display:grid;align-content:center;gap:16px;padding:28px;box-sizing:border-box}}.eyebrow{{color:#80aaff;font-size:12px;letter-spacing:.12em}}p,small{{color:#b7c3df;line-height:1.55}}.actions{{display:flex;flex-wrap:wrap;gap:10px}}button{{border:1px solid #45639d;border-radius:9px;background:#182340;color:#edf2ff;padding:10px 14px;font:inherit;cursor:pointer}}button.primary{{background:#4d7dff;border-color:#80aaff}}button.danger{{background:#562737;border-color:#b95c71}}button:disabled{{opacity:.65;cursor:wait}}</style>
-    <main><span class="eyebrow">JOBS ĐANG HOẠT ĐỘNG</span><h1>Bạn muốn xử lý Local AI Hub thế nào?</h1><p>{count} job đang chờ, chuẩn bị, chạy hoặc hủy. Hub không tự dừng worker đang hoạt động.</p><p id="status">{message}</p><div class="actions"><button onclick="choose('return_to_hub')">Quay lại Hub</button><button class="danger" onclick="choose('cancel_jobs_and_exit')">Hủy jobs và thoát</button><button class="primary" onclick="choose('keep_running_in_background')">Giữ chạy nền vào khay</button></div><small>Chạy nền chỉ ẩn cửa sổ sau khi Windows đã tạo biểu tượng khay có lệnh Khôi phục và Thoát.</small></main>
+    <main><span class="eyebrow">{eyebrow}</span><h1>Bạn muốn xử lý Local AI Hub thế nào?</h1><p>{copy}</p><p id="status">{message}</p><div class="actions"><button onclick="choose('return_to_hub')">Quay lại Hub</button>{cancel_button}<button class="primary" onclick="choose('keep_running_in_background')">Giữ chạy nền vào khay</button></div><small>Chạy nền chỉ ẩn cửa sổ sau khi Windows đã tạo biểu tượng khay có lệnh Khôi phục và Thoát.</small></main>
     <script>async function choose(name){{const buttons=[...document.querySelectorAll('button')];const status=document.getElementById('status');const api=window.pywebview&&window.pywebview.api;if(!api||!api[name]){{status.textContent='Desktop bridge chưa sẵn sàng; Hub vẫn được giữ mở an toàn.';return}}buttons.forEach(button=>button.disabled=true);try{{const result=await api[name]();status.textContent=(result&&result.message)||'Đã nhận lựa chọn.';if(!result||result.status!=='pending')buttons.forEach(button=>button.disabled=false)}}catch(error){{status.textContent='Không thể xử lý lựa chọn: '+error;buttons.forEach(button=>button.disabled=false)}}}}</script></html>"""
 
 
@@ -507,16 +539,21 @@ def main() -> int:
 
         try:
             bridge = DesktopBridge()
-            window = webview.create_window(
-                "Local AI Hub",
-                html=_loading_html(),
-                width=min_w,
-                height=min_h,
-                min_size=(1280, 720),
-                resizable=True,
-                confirm_close=False,
-                js_api=bridge,
-            )
+            window_kwargs = {
+                "html": _loading_html(),
+                "width": min_w,
+                "height": min_h,
+                "min_size": (1280, 720),
+                "resizable": True,
+                "confirm_close": False,
+                "js_api": bridge,
+            }
+            # pywebview versions differ: newer hosts may accept an icon path,
+            # while the reviewed host does not. Never pass an unsupported kwarg
+            # and never substitute a system/Python icon.
+            if "icon" in inspect.signature(webview.create_window).parameters:
+                window_kwargs["icon"] = _canonical_icon_path()
+            window = webview.create_window("Local AI Hub", **window_kwargs)
             bridge._bind(window)
             window.events.closing += bridge._request_window_close
 

@@ -262,7 +262,7 @@ class StartupLifecycleTests(unittest.TestCase):
         window.load_html.side_effect = lambda _html: fallback_loaded.set()
         bridge._bind(window)
         with patch.object(desktop.time, "sleep", return_value=None):
-            bridge._prompt_close({"active_jobs": 2, "message": "Hãy chọn", "kind": "attention"})
+            bridge._prompt_close({"active_jobs": 2, "verification": "verified", "can_cancel": True, "message": "Hãy chọn", "kind": "attention"})
             self.assertTrue(fallback_loaded.wait(1))
         page = window.load_html.call_args.args[0]
         self.assertIn("Quay lại Hub", page)

@@ -96,15 +96,15 @@ class UiPolishTests(unittest.TestCase):
         self.assertIn("closeArtifactPreview();", self.app)
         self.assertEqual(self.app.count("let artifactPreviewOpener = null;"), 1)
 
-    def test_desktop_shortcut_fallback_requires_eligible_gui_python(self) -> None:
+    def test_desktop_shortcut_repair_requires_stable_installed_product(self) -> None:
         shortcut_script = (ROOT / "scripts" / "update_managed_shortcuts.ps1").read_text(encoding="utf-8")
-        self.assertIn("Get-Command pythonw.exe", shortcut_script)
-        self.assertIn("function Test-HubPythonwFallback", shortcut_script)
-        self.assertIn('"src.app.main", "src.services.api.api_server", "webview"', shortcut_script)
-        self.assertIn("MISSING_RUNTIME", shortcut_script)
-        self.assertIn("if ($missingRuntime)", shortcut_script)
-        self.assertIn("if (Test-Path -LiteralPath $pythonw -PathType Leaf)", shortcut_script)
-        self.assertIn("Test-HubPythonwFallback -PythonwPath $pythonw", shortcut_script)
+        self.assertIn("INSTALLED_PRODUCT_MANIFEST_REQUIRED", shortcut_script)
+        self.assertIn("LocalAIHub.exe", shortcut_script)
+        self.assertIn("IconLocation", shortcut_script)
+        self.assertNotIn("Get-Command pythonw.exe", shortcut_script)
+        self.assertNotIn("wscript.exe", shortcut_script)
+        self.assertNotIn("LocalAIHub.vbs", shortcut_script)
+        self.assertNotIn("LocalAIHub.cmd", shortcut_script)
 
 
 if __name__ == "__main__":

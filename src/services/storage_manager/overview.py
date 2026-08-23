@@ -13,6 +13,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from src.services.api.config import load_json
+from src.platform.paths import get_paths
 from src.shared.paths.registry import (
     CACHE_ROOT,
     LOG_ROOT,
@@ -36,6 +37,29 @@ _cache_lock = threading.Lock()
 _size_cache: tuple[float, dict[str, Any]] | None = None
 _volume_snapshot_cache: tuple[float, dict[str, Any]] | None = None
 _model_cache: tuple[float, list[dict[str, Any]]] | None = None
+
+
+def _managed_roots() -> tuple[Path, Path, Path, Path, Path, Path, Path, Path]:
+    """Resolve the installed DATA_ROOT authority at call time.
+
+    The registry constants are retained for legacy imports, but a split
+    installation may select its data root through installation.json or the
+    stable launch environment. Reading that authority here prevents a source
+    checkout or historical Temp install from producing a false zero-sized
+    storage card.
+    """
+
+    paths = get_paths()
+    return (
+        paths.data_root,
+        paths.models_root,
+        paths.environments_root,
+        paths.runtime_root,
+        paths.cache_root,
+        paths.output_root,
+        paths.temp_root,
+        paths.log_root,
+    )
 
 
 def _is_reparse_point(entry: os.DirEntry[str]) -> bool:
@@ -249,7 +273,8 @@ def invalidate_model_cache() -> None:
 
 
 def _legacy_records() -> list[dict[str, Any]]:
-    path = ROOT / "Config" / "layout_migration.local.json"
+    data_root, _models, _environments, _runtime, _cache, _output, _temp, _logs = _managed_roots()
+    path = data_root / "Config" / "layout_migration.local.json"
     try:
         value = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
@@ -276,20 +301,21 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
         if not force and _size_cache and now - _size_cache[0] < _CACHE_SECONDS:
             return _size_cache[1]
 
-    usage = os.statvfs(ROOT) if hasattr(os, "statvfs") else None
+    data_root, model_root, environments_root, runtime_root, cache_root, output_root, temp_root, log_root = _managed_roots()
+    usage = os.statvfs(data_root) if hasattr(os, "statvfs") else None
     if usage is not None:
         total = usage.f_blocks * usage.f_frsize
         free = usage.f_bavail * usage.f_frsize
     else:
-        total, _used, free = shutil.disk_usage(ROOT)
+        total, _used, free = shutil.disk_usage(data_root)
     roots = {
-        "Models": MODEL_ROOT,
-        "Environments": ROOT / "Environments",
-        "Runtime": RUNTIME_ROOT,
-        "Cache": CACHE_ROOT,
-        "Output": OUTPUT_ROOT,
-        "Temp": TEMP_ROOT,
-        "Logs": LOG_ROOT,
+        "Models": model_root,
+        "Environments": environments_root,
+        "Runtime": runtime_root,
+        "Cache": cache_root,
+        "Output": output_root,
+        "Temp": temp_root,
+        "Logs": log_root,
     }
     areas = {name: _bytes_record(_directory_size(path)) for name, path in roots.items()}
     legacy = _legacy_records()
@@ -313,6 +339,7 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
             "unverified": sum(1 for item in legacy if not item["managed"]),
         },
         "canonical_root": "LocalAIHub",
+        "data_location_class": "persistent_configured" if data_root != get_paths().app_root else "app_root",
     }
     with _cache_lock:
         _size_cache = (now, result)
@@ -325,6 +352,7 @@ def model_summary(*, force: bool = False) -> list[dict[str, Any]]:
     with _cache_lock:
         if not force and _model_cache and now - _model_cache[0] < _CACHE_SECONDS:
             return [dict(item) for item in _model_cache[1]]
+    _data_root, model_root, _environments, _runtime, _cache, _output, _temp, _logs = _managed_roots()
     value = load_json("model_registry.json", {})
     items = [item for item in value.get("models", []) if isinstance(item, dict)]
     ollama_sizes = _ollama_tag_sizes() if any(_is_ollama_model(item) for item in items) else {}
@@ -347,7 +375,7 @@ def model_summary(*, force: bool = False) -> list[dict[str, Any]]:
             else:
                 path = Path(os.path.expandvars(local_path))
                 installed = path.exists()
-                location = "managed model store" if path.is_relative_to(MODEL_ROOT) else "external managed"
+                location = "managed model store" if path.is_relative_to(model_root) else "external managed"
                 size = _directory_size(path) if installed else 0
             size_source = "filesystem"
         result.append({

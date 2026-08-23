@@ -1,90 +1,65 @@
 [CmdletBinding()]
 param(
     [switch]$Apply,
-    [switch]$IncludeLegacy
+    [string]$AppRoot,
+    [string[]]$Locations
 )
 
 $ErrorActionPreference = 'Stop'
-$root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$desktop = [Environment]::GetFolderPath('Desktop')
-$pythonw = Join-Path $root 'Environments\hub\Scripts\pythonw.exe'
 
-function Test-HubPythonwFallback {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$PythonwPath,
-        [Parameter(Mandatory = $true)]
-        [string]$HubRoot
-    )
-
-    if (-not (Test-Path -LiteralPath $PythonwPath -PathType Leaf)) { return $false }
-    $python = Join-Path (Split-Path -Parent $PythonwPath) 'python.exe'
-    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { return $false }
-    $probe = @'
-import importlib.util
-import pathlib
-import sys
-
-root = pathlib.Path(sys.argv[1]).resolve()
-sys.path.insert(0, str(root))
-required = ("src.app.main", "src.services.api.api_server", "webview")
-raise SystemExit(0 if all(importlib.util.find_spec(name) is not None for name in required) else 1)
-'@
-    & $python -c $probe $HubRoot 2>$null
-    return $LASTEXITCODE -eq 0
-}
-
-# A machine may use the system Python environment when the optional Hub
-# environment is not provisioned yet.  A PATH fallback is eligible only when
-# its paired interpreter can resolve the Hub desktop entry dependencies; an
-# arbitrary pythonw.exe must never create a silently broken shortcut.
-$missingRuntime = $false
-if (Test-Path -LiteralPath $pythonw -PathType Leaf) {
-    if (-not (Test-HubPythonwFallback -PythonwPath $pythonw -HubRoot $root)) {
-        $missingRuntime = $true
+function Get-InstalledRoot {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { $Value = $env:LOCALAIHUB_INSTALL_ROOT }
+    if ([string]::IsNullOrWhiteSpace($Value)) { throw 'INSTALLED_PRODUCT_ROOT_REQUIRED' }
+    $rawItem = Get-Item -LiteralPath $Value -Force -ErrorAction Stop
+    if ($rawItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'INSTALLED_PRODUCT_ROOT_REPARSE' }
+    $resolved = (Resolve-Path -LiteralPath $Value -ErrorAction Stop).Path
+    $normalized = $resolved.TrimEnd('\')
+    if ($normalized -match '(?i)\\Temp(?:\\|$)' -or $normalized -match '(?i)\\\.git(?:\\|$)' -or $normalized -match '(?i)\\(?:test|tests|worktree)(?:\\|$)') { throw 'INSTALLED_PRODUCT_ROOT_REFUSED' }
+    $cursor = Get-Item -LiteralPath $normalized -Force
+    while ($null -ne $cursor) {
+        if ($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'INSTALLED_PRODUCT_ROOT_REPARSE' }
+        if ($cursor.Parent -eq $null) { break }
+        $cursor = Get-Item -LiteralPath $cursor.Parent.FullName -Force
     }
-} else {
-    $systemPythonw = Get-Command pythonw.exe -ErrorAction SilentlyContinue
-    if ($systemPythonw -and (Test-HubPythonwFallback -PythonwPath $systemPythonw.Source -HubRoot $root)) {
-        $pythonw = $systemPythonw.Source
-    } else {
-        $missingRuntime = $true
-    }
-}
-if ($missingRuntime) {
-    Write-Output 'MISSING_RUNTIME Local AI Hub shortcut was not created: no Hub-capable pythonw.exe was verified.'
-    return
-}
-$shortcuts = @(
-    @{ locations = @($desktop, $root); name = 'Local AI Hub.lnk'; target = $pythonw; arguments = '-m src.app.main'; working = $root; description = 'Local AI Hub no-console desktop entry' }
-)
-if ($IncludeLegacy) {
-    $shortcuts += @(
-        @{ locations = @($desktop); name = 'Legacy SAM2 Mask Studio.lnk'; target = (Join-Path $root 'runtime\applications\SAM2-Mask-Studio\SAM2 Mask Studio.exe'); arguments = ''; working = (Join-Path $root 'runtime\applications\SAM2-Mask-Studio'); description = 'Advanced legacy Local AI Hub application' },
-        @{ locations = @($desktop); name = 'Legacy Anime Upscale Studio.lnk'; target = (Join-Path $root 'runtime\applications\Anime-Upscale-Studio\Anime Upscale Studio.exe'); arguments = ''; working = (Join-Path $root 'runtime\applications\Anime-Upscale-Studio'); description = 'Advanced legacy Local AI Hub application' },
-        @{ locations = @($desktop); name = 'Legacy Local Image Studio.lnk'; target = (Join-Path $root 'runtime\applications\FLUX-Klein-Studio\Local Image Studio.exe'); arguments = ''; working = (Join-Path $root 'runtime\applications\FLUX-Klein-Studio'); description = 'Advanced legacy Local AI Hub application' }
-    )
+    return $normalized
 }
 
+function Read-InstalledProduct {
+    param([string]$Root)
+    $productPath = Join-Path $Root 'product.json'
+    $installationPath = Join-Path $Root 'installation.json'
+    $launcherPath = Join-Path $Root 'LocalAIHub.exe'
+    $iconPath = Join-Path $Root 'local-ai-hub.ico'
+    if (-not (Test-Path -LiteralPath $productPath -PathType Leaf) -or -not (Test-Path -LiteralPath $installationPath -PathType Leaf) -or -not (Test-Path -LiteralPath $launcherPath -PathType Leaf) -or -not (Test-Path -LiteralPath $iconPath -PathType Leaf)) { throw 'INSTALLED_PRODUCT_MANIFEST_REQUIRED' }
+    $product = Get-Content -LiteralPath $productPath -Raw | ConvertFrom-Json
+    $installation = Get-Content -LiteralPath $installationPath -Raw | ConvertFrom-Json
+    if ($product.schema_version -ne 'v8.0.1-product.v1' -or $product.product_id -ne 'LocalAIHub' -or $product.launcher -ne 'LocalAIHub.exe' -or $product.icon -ne 'local-ai-hub.ico') { throw 'PRODUCT_MANIFEST_INVALID' }
+    if ($installation.schema_version -ne 'v8.0.1-installation.v1' -or $installation.product_id -ne 'LocalAIHub' -or $installation.launcher -ne 'LocalAIHub.exe') { throw 'INSTALLATION_MANIFEST_INVALID' }
+    if ([IO.Path]::GetFullPath([string]$installation.app_root).TrimEnd('\') -ne $Root.TrimEnd('\')) { throw 'INSTALLATION_ROOT_MISMATCH' }
+    return @{ Product = $product; Installation = $installation; Launcher = $launcherPath; Icon = $iconPath }
+}
+
+function Get-ShortcutLocations {
+    if ($Locations -and $Locations.Count -gt 0) { return $Locations }
+    return @([Environment]::GetFolderPath('Desktop'), (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'))
+}
+
+$root = Get-InstalledRoot -Value $AppRoot
+$product = Read-InstalledProduct -Root $root
+$locationsToRepair = Get-ShortcutLocations
 $shell = New-Object -ComObject WScript.Shell
-foreach ($shortcut in $shortcuts) {
-    if (-not (Test-Path -LiteralPath $shortcut.target -PathType Leaf)) {
-        Write-Output "SKIP $($shortcut.name): target is not present yet"
-        continue
-    }
-    foreach ($location in $shortcut.locations) {
-        $link = Join-Path $location $shortcut.name
-        if (-not $Apply) {
-            Write-Output "DRYRUN $link -> $($shortcut.target) $($shortcut.arguments)"
-            continue
-        }
-        $item = $shell.CreateShortcut($link)
-        $item.TargetPath = $shortcut.target
-        $item.Arguments = $shortcut.arguments
-        $item.WorkingDirectory = $shortcut.working
-        $item.Description = $shortcut.description
-        $item.IconLocation = "$pythonw,0"
-        $item.Save()
-        Write-Output "UPDATED $link -> $($shortcut.target) $($shortcut.arguments)"
-    }
+foreach ($location in $locationsToRepair) {
+    if ([string]::IsNullOrWhiteSpace($location)) { continue }
+    New-Item -ItemType Directory -Path $location -Force | Out-Null
+    $link = Join-Path $location 'Local AI Hub.lnk'
+    if (-not $Apply) { Write-Output "DRYRUN $link -> $($product.Launcher)"; continue }
+    $shortcut = $shell.CreateShortcut($link)
+    $shortcut.TargetPath = $product.Launcher
+    $shortcut.Arguments = ''
+    $shortcut.WorkingDirectory = $root
+    $shortcut.Description = 'Local AI Hub stable installed product'
+    $shortcut.IconLocation = "$($product.Icon),0"
+    $shortcut.Save()
+    Write-Output "UPDATED $link -> $($product.Launcher)"
 }

@@ -159,8 +159,9 @@ class V3IntegrationContractTests(unittest.TestCase):
         self.assertEqual((hub["minimum_width"], hub["minimum_height"]), (1280, 720))
         legacy = {"anime-upscale-studio", "sam2-mask-studio", "local-image-studio", "qwen-image-studio"}
         self.assertTrue(all(item.get("advanced_only") is True for item in applications if item["id"] in legacy))
-        self.assertIn("pythonw.exe", shortcut)
-        self.assertIn("$IncludeLegacy", shortcut)
+        self.assertIn("LocalAIHub.exe", shortcut)
+        self.assertIn("INSTALLED_PRODUCT_MANIFEST_REQUIRED", shortcut)
+        self.assertNotIn("pythonw.exe", shortcut)
 
 
 if __name__ == "__main__":

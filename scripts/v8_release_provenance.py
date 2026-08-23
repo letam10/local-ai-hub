@@ -146,14 +146,33 @@ def validate_candidate(version: str, tag: str, repo_root: Path = ROOT) -> dict[s
     }
 
 
-def release_policy_snapshot(repo_root: Path = ROOT) -> dict[str, Any]:
+def _commit_at_head(repo_root: Path) -> str | None:
+    code, output = _git(repo_root, "rev-parse", "HEAD")
+    return output if code == 0 and re.fullmatch(r"[0-9a-f]{40,64}", output) else None
+
+
+def _commit_at_tag(repo_root: Path, tag: str) -> str | None:
+    code, output = _git(repo_root, "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}")
+    return output if code == 0 and re.fullmatch(r"[0-9a-f]{40,64}", output) else None
+
+
+def release_policy_snapshot(repo_root: Path = ROOT, *, phase: str = "pre_tag", expected_commit: str | None = None) -> dict[str, Any]:
+    if phase not in {"pre_tag", "post_tag"}:
+        raise ReleasePolicyError("RELEASE_PHASE_INVALID")
     policy = load_release_policy(repo_root / "architecture" / "v8_release_policy.json")
     version = policy["version_policy"]["candidate_version"]
     tag = policy["tag_policy"]["candidate_tag"]
     identity_approved = bool(policy["approval"]["identity"] == "approved" and isinstance(version, str) and isinstance(tag, str))
     tag_is_available: bool | None = None
+    tag_verified = False
+    release_commit = expected_commit if isinstance(expected_commit, str) else _commit_at_head(repo_root)
     if isinstance(tag, str):
-        tag_is_available = tag_available(tag, repo_root)
+        if phase == "pre_tag":
+            tag_is_available = tag_available(tag, repo_root)
+        else:
+            target = _commit_at_tag(repo_root, tag)
+            tag_is_available = bool(target and release_commit and target == release_commit)
+            tag_verified = tag_is_available
     product_matches = bool(isinstance(version, str) and PRODUCT_VERSION == version)
     activation_ready = bool(identity_approved and product_matches and tag_is_available is True)
     blockers: list[str] = []
@@ -162,7 +181,7 @@ def release_policy_snapshot(repo_root: Path = ROOT) -> dict[str, Any]:
     if identity_approved and not product_matches:
         blockers.append("V8_PRODUCT_VERSION_ACTIVATION_REQUIRED")
     if identity_approved and tag_is_available is not True:
-        blockers.append("V8_RELEASE_TAG_UNAVAILABLE")
+        blockers.append("V8_RELEASE_TAG_UNAVAILABLE" if phase == "pre_tag" else "V8_RELEASE_TAG_MISMATCH")
     return {
         "schema_version": "v8-release-policy-snapshot.v1",
         "contract_valid": True,
@@ -170,10 +189,13 @@ def release_policy_snapshot(repo_root: Path = ROOT) -> dict[str, Any]:
         "release_branch": policy["release_branch"],
         "candidate_version": version,
         "candidate_tag": tag,
+        "phase": phase,
         "identity_approved": identity_approved,
         "product_version": PRODUCT_VERSION,
         "product_version_matches": product_matches,
         "tag_available": tag_is_available,
+        "tag_verified": tag_verified,
+        "release_commit": release_commit,
         "activation_ready": activation_ready,
         "blockers": blockers,
         "execution": "not_run",
@@ -184,6 +206,8 @@ def release_policy_snapshot(repo_root: Path = ROOT) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only V8 release identity/provenance preparation.")
     parser.add_argument("--source-only", action="store_true")
+    parser.add_argument("--phase", choices=("pre_tag", "post_tag"), default="pre_tag")
+    parser.add_argument("--expected-commit", default=None)
     parser.add_argument("--candidate-version", default=None)
     parser.add_argument("--candidate-tag", default=None)
     args = parser.parse_args()
@@ -194,7 +218,7 @@ def main() -> int:
             result = validate_candidate(args.candidate_version, args.candidate_tag)
             print(json.dumps(result, ensure_ascii=True, sort_keys=True, indent=2))
             return 0 if result["tag_available"] is True else 1
-        result = release_policy_snapshot()
+        result = release_policy_snapshot(phase=args.phase, expected_commit=args.expected_commit)
         print(json.dumps(result, ensure_ascii=True, sort_keys=True, indent=2))
         return 0 if result["contract_valid"] is True else 1
     except ReleasePolicyError as exc:

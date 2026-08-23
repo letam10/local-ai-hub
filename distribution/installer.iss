@@ -1,10 +1,10 @@
-; Inno Setup Script for Local AI Hub V7 Win64 Desktop Release
+; Inno Setup Script for Local AI Hub V8.0.1 Win64 Desktop Release
 ; Generated for deterministic, safe Windows desktop installation
 ; Preserves machine-local data (Models, Environments, runtime, Output, Config, Backups, Reports)
 
 #define MyAppName "Local AI Hub"
 #ifndef MyAppVersion
-#define MyAppVersion "7.1.0"
+#define MyAppVersion "8.0.1"
 #endif
 #define MyAppPublisher "Local AI Hub Project"
 #define MyAppURL "https://github.com/letam10/local-ai-hub"
@@ -41,34 +41,61 @@ Name: "english"; MessagesFile: "compiler:Default.isl"; LicenseFile: "..\LICENSES
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-; Core application source and distribution files (NEVER includes Models, Environments, runtime, or Output)
-Source: "..\src\*"; Excludes: "__pycache__;*.pyc"; DestDir: "{app}\src"; Flags: recursesubdirs createallsubdirs ignoreversion
-Source: "..\scripts\*"; Excludes: "__pycache__;*.pyc"; DestDir: "{app}\scripts"; Flags: recursesubdirs createallsubdirs ignoreversion
-Source: "..\distribution\*"; Excludes: "__pycache__;*.pyc;release_manifest.json"; DestDir: "{app}\distribution"; Flags: recursesubdirs createallsubdirs ignoreversion
-Source: "..\docs\*"; Excludes: "__pycache__;*.pyc"; DestDir: "{app}\docs"; Flags: recursesubdirs createallsubdirs ignoreversion
-Source: "..\workflows\*"; Excludes: "__pycache__;*.pyc"; DestDir: "{app}\workflows"; Flags: recursesubdirs createallsubdirs ignoreversion
-Source: "..\architecture\*"; Excludes: "__pycache__;*.pyc"; DestDir: "{app}\architecture"; Flags: recursesubdirs createallsubdirs ignoreversion
-Source: "..\requirements-hub.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dependencies.lock.json"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\LICENSES.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\AGENTS.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\Config\*.example.json"; DestDir: "{app}\Config"; Flags: ignoreversion
-Source: "..\LocalAIHub.vbs"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\LocalAIHub.cmd"; DestDir: "{app}"; Flags: ignoreversion
+; The installer consumes a task-built stable product candidate. Source code is
+; inside the versioned payload; user Models/Output/Config never enter {app}.
+Source: "..\dist\stable-product\LocalAIHub.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\stable-product\local-ai-hub.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\stable-product\product.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\stable-product\current.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\stable-product\versions\*"; DestDir: "{app}\versions"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\LocalAIHub.vbs"""; WorkingDir: "{app}"; Comment: "Local AI Hub Desktop Application"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\LocalAIHub.vbs"""; WorkingDir: "{app}"; Tasks: desktopicon; Comment: "Local AI Hub Desktop Application"
-
-[Run]
-Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\update_managed_shortcuts.ps1"" -Apply"; Flags: runhidden; Description: "Register Windows shortcuts"
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\LocalAIHub.exe"; WorkingDir: "{app}"; IconFilename: "{app}\LocalAIHub.exe"; Comment: "Local AI Hub stable installed product"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\LocalAIHub.exe"; WorkingDir: "{app}"; IconFilename: "{app}\LocalAIHub.exe"; Tasks: desktopicon; Comment: "Local AI Hub stable installed product"
 
 [UninstallDelete]
-Type: filesandordirs; Name: "{app}\src"
-Type: filesandordirs; Name: "{app}\distribution"
-Type: filesandordirs; Name: "{app}\docs"
+Type: filesandordirs; Name: "{app}\versions"
+Type: filesandordirs; Name: "{app}\staging"
+Type: files; Name: "{app}\LocalAIHub.exe"
+Type: files; Name: "{app}\local-ai-hub.ico"
+Type: files; Name: "{app}\product.json"
+Type: files; Name: "{app}\installation.json"
+Type: files; Name: "{app}\current.json"
 Type: files; Name: "{app}\requirements-hub.txt"
 Type: files; Name: "{app}\dependencies.lock.json"
-Type: files; Name: "{app}\LocalAIHub.vbs"
-Type: files; Name: "{app}\LocalAIHub.cmd"
+
+[Code]
+function JsonPath(const Value: string): string;
+begin
+  Result := Value;
+  StringChangeEx(Result, '\\', '\\\\', True);
+  StringChangeEx(Result, '"', '\\"', True);
+end;
+
+procedure WriteInstallationConfig;
+var
+  AppRoot, DataRoot, Payload: string;
+  Manifest: string;
+begin
+  AppRoot := ExpandConstant('{app}');
+  DataRoot := GetEnv('LOCALAIHUB_DATA_ROOT');
+  if DataRoot = '' then
+    DataRoot := ExpandConstant('{userappdata}\LocalAIHub\Data');
+  if not ForceDirectories(DataRoot) then
+    RaiseException('LOCALAIHUB_DATA_ROOT could not be created.');
+  Payload := '{' +
+    '"schema_version":"v8.0.1-installation.v1",' +
+    '"product_id":"LocalAIHub",' +
+    '"app_root":"' + JsonPath(AppRoot) + '",' +
+    '"data_root":"' + JsonPath(DataRoot) + '",' +
+    '"app_user_model_id":"LocalAIHub.Desktop",' +
+    '"launcher":"LocalAIHub.exe"}' + #13#10;
+  if not SaveStringToFile(AddBackslash(AppRoot) + 'installation.json', Payload, False) then
+    RaiseException('LOCALAIHUB_INSTALLATION_CONFIG_WRITE_FAILED.');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    WriteInstallationConfig;
+end;

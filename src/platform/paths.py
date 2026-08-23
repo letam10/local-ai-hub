@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import json
 
 
 ROOT_CLASSES = frozenset({"models_root", "runtime_root", "environments_root", "external_managed"})
@@ -102,13 +103,40 @@ def resolve_app_root(value: str | os.PathLike[str] | None = None) -> Path:
 
 
 def resolve_data_root(app_root: Path, value: str | os.PathLike[str] | None = None) -> Path:
-    """Resolve mutable data, preserving the current single-root installation."""
+    """Resolve mutable data from explicit/env/installed-product authority."""
 
     explicit = _resolved(value)
     if explicit is not None:
         return explicit
     configured = _resolved(os.environ.get("LOCALAIHUB_DATA_ROOT"))
-    return configured or app_root
+    if configured is not None:
+        return configured
+    install_root = _resolved(os.environ.get("LOCALAIHUB_INSTALL_ROOT"))
+    # An installed shell sets LOCALAIHUB_INSTALL_ROOT before importing the
+    # application. Without that explicit authority, do not scan arbitrary
+    # source/parent directories for installation.json; legacy checkout mode
+    # remains app_root and avoids touching unrelated files during reads.
+    if install_root is None:
+        return app_root
+    candidates = [install_root]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        config = candidate / "installation.json"
+        try:
+            raw = config.read_bytes()
+            if len(raw) > 128 * 1024:
+                continue
+            value = json.loads(raw.decode("utf-8"))
+            if not isinstance(value, dict) or value.get("schema_version") != "v8.0.1-installation.v1":
+                continue
+            configured_app = _resolved(value.get("app_root"))
+            data_root = _resolved(value.get("data_root"))
+            if configured_app == candidate and data_root is not None and all(part.casefold() not in {"temp", ".git"} for part in data_root.parts):
+                return data_root
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return app_root
 
 
 @dataclass(frozen=True)
@@ -184,6 +212,7 @@ class HubPaths:
         return {
             "mode": "legacy_single_root" if self.legacy_single_root_mode else "split_app_data",
             "root_keys": sorted(self.roots()),
+            "data_location_class": "persistent_configured" if not self.legacy_single_root_mode else "app_root",
         }
 
 
