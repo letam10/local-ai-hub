@@ -73,16 +73,17 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
         self.assertEqual(provenance["generation"], "V8")
         self.assertEqual(provenance["release_branch"], "feature/local-ai-hub-v8")
         self.assertTrue(provenance["identity_approved"])
-        self.assertEqual(provenance["candidate_version"], "8.0.0")
-        self.assertEqual(provenance["candidate_tag"], "v8.0.0")
+        self.assertEqual(provenance["candidate_version"], "8.0.1")
+        self.assertEqual(provenance["candidate_tag"], "v8.0.1")
         self.assertTrue(provenance["product_version_matches"])
         self.assertTrue(provenance["tag_available"])
 
         result = evaluate(repo_root=repo)
         self.assertFalse(result["release_ready"])
         self.assertIn("LOCAL_WINDOWS_EVIDENCE_REQUIRED", result["blockers"])
+        self.assertIn("LOCAL_WINDOWS_EVIDENCE_REQUIRED", result["blockers"])
 
-    def test_all_pass_evidence_reports_are_verified_but_cannot_override_release_identity_gate(self) -> None:
+    def test_all_pass_evidence_reports_are_verified_and_release_ready(self) -> None:
         repo = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as temp:
             evidence_path = self._write_bundle(repo, Path(temp))

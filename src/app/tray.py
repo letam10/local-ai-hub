@@ -12,6 +12,7 @@ import os
 import threading
 from collections.abc import Callable
 from ctypes import wintypes
+from pathlib import Path
 
 
 class WindowsTray:
@@ -28,6 +29,9 @@ class WindowsTray:
     _NIF_ICON = 0x0002
     _NIF_TIP = 0x0004
     _WS_EX_TOOLWINDOW = 0x00000080
+    _IMAGE_ICON = 1
+    _LR_LOADFROMFILE = 0x00000010
+    _LR_DEFAULTSIZE = 0x00000040
 
     def __init__(self, on_restore: Callable[[], None], on_exit: Callable[[], None]) -> None:
         self._on_restore = on_restore
@@ -173,6 +177,8 @@ class WindowsTray:
             user32.DispatchMessageW.restype = LRESULT
             shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
             shell32.Shell_NotifyIconW.restype = wintypes.BOOL
+            user32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+            user32.LoadImageW.restype = wintypes.HANDLE
 
             def show_menu(owner: wintypes.HWND) -> None:
                 menu = user32.CreatePopupMenu()
@@ -233,7 +239,13 @@ class WindowsTray:
             tray_icon.uID = 1
             tray_icon.uFlags = self._NIF_MESSAGE | self._NIF_ICON | self._NIF_TIP
             tray_icon.uCallbackMessage = self._CALLBACK
-            tray_icon.hIcon = user32.LoadIconW(None, ctypes.c_void_p(32512))  # IDI_APPLICATION
+            install_root = os.environ.get("LOCALAIHUB_INSTALL_ROOT")
+            icon_path = Path(install_root) / "local-ai-hub.ico" if install_root else None
+            if icon_path is None or not icon_path.is_file() or icon_path.is_symlink():
+                raise OSError("Canonical Local AI Hub icon is unavailable.")
+            tray_icon.hIcon = user32.LoadImageW(None, str(icon_path), self._IMAGE_ICON, 0, 0, self._LR_LOADFROMFILE | self._LR_DEFAULTSIZE)
+            if not tray_icon.hIcon:
+                raise OSError("Canonical Local AI Hub icon could not be loaded.")
             tray_icon.szTip = "Local AI Hub — jobs đang chạy"
             nid = tray_icon
             if not shell32.Shell_NotifyIconW(self._NIM_ADD, ctypes.byref(tray_icon)):

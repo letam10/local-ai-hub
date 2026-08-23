@@ -33,6 +33,14 @@ class V8LoopbackApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
+        # Never contend with the user's production/default listener. The
+        # production application remains 127.0.0.1:8765; this integration
+        # fixture owns an ephemeral loopback port and passes it to every
+        # request/cleanup helper.
+        self.port = self._free_test_port()
+        self._port_env = patch.dict(os.environ, {"LOCALAIHUB_PORT": str(self.port)}, clear=False)
+        self._port_env.start()
+        self.addCleanup(self._port_env.stop)
         self.paths = HubPaths(app_root=root / "app", data_root=root / "data")
         self.paths.app_root.mkdir()
         self.paths.data_root.mkdir()
@@ -50,6 +58,15 @@ class V8LoopbackApiTests(unittest.TestCase):
         self.server: api_server.HubHTTPServer | None = None
         self.thread: threading.Thread | None = None
 
+    @staticmethod
+    def _free_test_port() -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = int(probe.getsockname()[1])
+        if port == 8765:
+            return V8LoopbackApiTests._free_test_port()
+        return port
+
     def tearDown(self) -> None:
         if self.server is not None:
             self.server.shutdown()
@@ -60,9 +77,8 @@ class V8LoopbackApiTests(unittest.TestCase):
         api_server._api_router = self.previous_router
         self.temp.cleanup()
 
-    @staticmethod
-    def _request(method: str, path: str, *, headers: dict[str, str] | None = None) -> tuple[int, dict[str, str], bytes]:
-        connection = http.client.HTTPConnection("127.0.0.1", 8765, timeout=4)
+    def _request(self, method: str, path: str, *, headers: dict[str, str] | None = None) -> tuple[int, dict[str, str], bytes]:
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=4)
         connection.request(method, path, headers=headers or {})
         response = connection.getresponse()
         body = response.read()
@@ -70,11 +86,10 @@ class V8LoopbackApiTests(unittest.TestCase):
         connection.close()
         return result
 
-    @staticmethod
-    def _wait_for_port_free() -> bool:
+    def _wait_for_port_free(self) -> bool:
         for _ in range(25):
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-                if probe.connect_ex(("127.0.0.1", 8765)) != 0:
+                if probe.connect_ex(("127.0.0.1", self.port)) != 0:
                     return True
             time.sleep(0.05)
         return False
@@ -102,7 +117,7 @@ class V8LoopbackApiTests(unittest.TestCase):
             }
         )
         api_server._api_router = None
-        self.server = api_server.HubHTTPServer(("127.0.0.1", 8765), api_server.HubHandler)
+        self.server = api_server.HubHTTPServer(("127.0.0.1", self.port), api_server.HubHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         self.thread.start()
 
@@ -117,6 +132,7 @@ class V8LoopbackApiTests(unittest.TestCase):
         self.assertTrue(self._wait_for_port_free())
 
     def test_v8_and_legacy_artifacts_stream_over_restartable_loopback(self) -> None:
+        self.assertNotEqual(self.port, 8765)
         job_id = "jobv5_" + "a" * 32
         v8_payload = b"V8-opaque-artifact"
         v8 = self.bridge.publish_bytes(

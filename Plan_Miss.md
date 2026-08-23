@@ -694,3 +694,172 @@ GitHub Release.
 - Remaining irreversible operations, chưa được thực hiện: real tag
   `v8.0.0`, merge PR #102 vào `main`, GitHub Release publish. PR #102 vẫn
   OPEN+DRAFT; `PLAN.md` vẫn untracked và không được đưa vào commit.
+
+## 18. V8.0.1 stable product shell remediation — preparation only
+
+Starting source is the immutable V8.0.0 merge commit `c98b8388`. Work is
+isolated on the dedicated `fix/v8.0.1-stable-product-shell` branch; the
+canonical checkout and its untracked `PLAN.md` remain untouched. This pass
+does not create `v8.0.1`, change `main`, repair the user's Desktop/Start Menu
+links, or publish a release.
+
+Tracked product identity now prepares `8.0.1` / `v8.0.1`, while approval state
+remains `required` until a separate user-authorized release activation. V7
+release manifests/tags are historical and unchanged. The installed shell
+contract is documented in `docs/operations/V8_0_1_STABLE_PRODUCT_SHELL.md`.
+
+Implemented source contracts:
+
+- stable windowed `LocalAIHub.exe` bootstrap with AppUserModelID
+  `LocalAIHub.Desktop`, bundled-runtime-only launch, bounded product,
+  installation and current-pointer manifests, full no-reparse chain checks,
+  manifest-hash verification and atomic pointer activation;
+- separate installed `APP_ROOT` / persistent `DATA_ROOT` resolution, dynamic
+  storage/config authority and path-free storage projections;
+- typed owned-job close verification (`unknown` never becomes a fake count),
+  truthful cancel availability, and readiness topbar state derived from the
+  same API status source;
+- canonical `LA` SVG plus deterministic 16/24/32/48/64/128/256 ICO, shared by
+  shortcut/installer/tray/WebView paths where the host API supports it;
+- development-only Temp data launcher, stable-only shortcut repair, staged
+  versioned payload builder, and installer code that writes installation
+  configuration at install time while preserving persistent data.
+
+Bounded evidence on the private branch:
+
+- focused stable-shell/storage/close/provenance suite: 14 PASS;
+- V8 suite excluding the occupied fixed-port loopback test: 102 PASS;
+  the complete 103-test discovery has one environment failure because another
+  user-owned `pythonw.exe` already listens on `127.0.0.1:8765`; it was not
+  stopped or altered;
+- startup, lifecycle, storage, UI, shortcut, and compatibility subset: 88
+  PASS; JS syntax and Python compilation PASS; `scripts/ci_validate.py` PASS
+  with 743 tracked files and no unmasked secrets/forbidden artifacts;
+- task-owned launcher build completed as a validation executable (8,207,698
+  bytes, SHA-256
+  `ebad247cb37c9ed2add74a46d791d60b4d1edefedbbe6773af8eefdf27542d72`). A
+  staged candidate layout and inventory were validated with `execution=not_run`;
+  no official package or production runtime claim is made because the reviewed
+  portable Core runtime is not installed in the repository data roots.
+
+Release provenance source-only validation reports `contract_valid=true` and
+`product_version_matches=true`; the only release blocker is the explicit
+`V8_RELEASE_IDENTITY_APPROVAL_REQUIRED`. No V8.0.1 tag, shortcut migration,
+installer run, GitHub release, GPU/model/provider workload, or user-data
+operation was performed. Before delivery, rerun the final bounded gates,
+commit/push the branch and open a DRAFT PR; stop before any production
+ shortcut repair or irreversible release action.
+
+## 19. V8.0.1 real product installation closure — installed, shortcut repaired, smoke blocked
+
+This checkpoint continues the stable-shell branch from the V8.0.0 merge
+without changing `main`, creating `v8.0.1`, or publishing a release. The
+dedicated branch reached the final source tip recorded by Git after the
+installation-handoff commit; the exact SHA is read back from the branch and
+is not inferred from this document.
+
+- The loopback harness now chooses a task-owned free loopback port while the
+  production default remains `8765`; the complete V8 discovery passed **105
+  tests** despite a pre-existing listener on `127.0.0.1:8765`.
+- The candidate uses the official CPython `3.12.10` Windows x64 embeddable
+  runtime from `python.org`, archive SHA-256
+  `4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3`,
+  license `PSF-2.0`, and a deterministic PyPI wheelhouse manifest. The
+  embedded runtime has `PYTHONNOUSERSITE=1`, a bounded internal `../../app`
+  path, and imports `webview`/`mcp` with an empty `PATH`.
+- The final task-owned candidate was rebuilt from the branch tip with 3,565
+  files and a bundled runtime. The stable launcher SHA-256 is
+  `4509019776122ccfedd5a9d5ffec4d8ed0e0d2b57281eb9a0a69dae3c37838c1`.
+  Isolated API launch returned `healthy`, version `8.0.1`, `active_jobs=0`;
+  simulated `8.0.1 -> 8.0.2-testpayload -> 8.0.1` pointer update/rollback
+  preserved the launcher SHA and removed only the task-owned fake payload.
+- The one-time per-user installation was materialized at
+  `%LOCALAPPDATA%\Programs\LocalAIHub` with `DATA_ROOT=D:\LocalAIHub`.
+  Desktop and Start Menu now contain `Local AI Hub.lnk`; both target the
+  stable EXE, have empty arguments, the installed working directory, and
+  `LocalAIHub.exe,0` as the embedded LA icon. Before the repair no matching
+  shortcut existed; bounded before/after metadata is preserved under the
+  task-owned Temp evidence area.
+- GitHub push and PR validation both passed on the exact final source tip
+  after each source fix. The DRAFT PR remains open.
+
+The production shortcut smoke is **BLOCKED**, not a PASS: an already-running
+user-owned process `pythonw.exe -m src.services.api.api_server` from the
+system Python installation owns `127.0.0.1:8765` (PID was preserved). The
+installed shortcut launches the bundled `LocalAIHub.exe` and bundled
+`pythonw.exe`, but the application reuses the pre-existing API listener, so
+the observed `/health` response is version `7.1.0`, not a self-contained
+`8.0.1` API. Codex did not stop or modify that process. No production
+self-contained/runtime-readiness claim is valid until the user closes or
+otherwise authorizes handling of that external listener and the shortcut
+smoke is rerun. No tag, main merge, release publish, GPU/model/provider
+workload, or user-data relocation was performed.
+
+The later exact-head runtime-bundle remediation (commit `2839a93`) excludes
+pip-generated `Lib/site-packages/bin` console helpers whose shebang metadata
+contained a developer system-Python path. Its rebuilt candidate contains
+3,549 files and 3,044 runtime files with no such path match. The already
+materialized external installation is intentionally not destructively cleaned
+or replaced-for-removal in this checkpoint; the candidate remediation is
+ready for a separately authorized reinstall/cleanup decision.
+
+## 20. V8.0.1 API identity and self-contained fallback remediation
+
+This checkpoint records the authorized remediation of the occupied-default-port
+blocker without stopping or reusing the user-owned API process. The source fix is
+committed on `fix/v8.0.1-stable-product-shell` and the final branch SHA is always
+read back from Git rather than copied into evidence.
+
+- The API health contract now exposes bounded identity fields: product ID and
+  version, API protocol, opaque installation ID, AppUserModel ID, process owner,
+  and the actual loopback bind. No local paths, secrets, or raw process details
+  are returned.
+- Startup classifies absent, compatible same-install, LocalAIHub-incompatible,
+  and foreign HTTP listeners. It never treats an arbitrary HTTP 200 or a 7.1.0
+  API as compatible with 8.0.1, and it never terminates a foreign listener.
+- When the default port is occupied by an incompatible/foreign listener, the
+  bundled API selects a free loopback session port, passes the selected port and
+  bind through the child environment, and the UI displays the actual endpoint.
+  The session port is not persisted as installation state and the mutex is
+  scoped to installation plus selected port.
+- Focused identity/collision tests and the complete V8 discovery suite pass on
+  the source-fix tip; push and PR workflows passed on that exact tip. The
+  production shortcut smoke was rerun while the preserved external listener
+  remained alive: bundled API health reported product 8.0.1, protocol v8-api.v1,
+  the bundled process owner and a fallback loopback port; close released only
+  the owned listener and left the external process unchanged. A second-instance
+  check produced one owned API and no duplicate listener.
+- The installed payload was rebuilt from the source-fix candidate and stale
+  system-Python helper files were removed only after exact old-manifest/hash
+  comparison. Unknown generated cache files were preserved. The persistent data
+  root remains `D:\LocalAIHub`; the simulated 8.0.1 to test payload to 8.0.1
+  pointer rollback is complete and the task-owned test payload is gone.
+- Desktop and Start Menu shortcuts remain immutable and point to the stable
+  installed executable with no arguments and the embedded application icon.
+  No main/tag/release operation or model/GPU/runtime workload was performed.
+
+The tracked handoff commit itself is the source of the next exact-head evidence
+binding. Candidate packaging, acceptance metadata, CI readback and PR status
+must use the final branch SHA after this commit; historical evidence remains
+labelled with its original source commit and is not rewritten.
+
+## 21. V8.0.1 final release-readiness policy audit
+
+The V8 release policy keeps `release_branch=feature/local-ai-hub-v8` as
+generation/integration-line metadata. The provenance verifier does not compare
+that value with the current checkout branch and does not authorize a candidate
+from a branch-name match. The current candidate is intentionally prepared on
+`fix/v8.0.1-stable-product-shell`.
+
+Trust binding is exact and branch-independent: acceptance evidence and the
+candidate manifest bind the source commit/tree; post-tag provenance binds the
+peeled immutable tag target to the approved release commit; and a wrong tag
+target is rejected. A regression proves that an approved exact commit is
+accepted from a temporary review branch while the wrong-target tests remain
+fail-closed.
+
+The user-approved preparation identity is now tracked as `8.0.1` / `v8.0.1`
+with `approval.identity=approved`. This does not authorize tag creation, main
+merge, or release publication. Historical V7/V8.0.0 release evidence remains
+immutable. Final pre-tag provenance is expected to be activation-ready with no
+blockers once exact-head acceptance is rerun.

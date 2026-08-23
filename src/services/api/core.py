@@ -23,6 +23,7 @@ from src.services.tool_smoke import (
     runtime_evidence_passed,
     runtime_evidence_projection,
 )
+from src.shared.runtime_identity import api_identity
 
 from .config import BASE_DIR, component, components, hub_config, module_manager_config
 from .gpu import gpu_policy, query_gpu
@@ -511,12 +512,19 @@ def health(*, probe_gpu: bool = False) -> dict[str, Any]:
     except OSError:
         disk = None
     active = [item for item in list_jobs() if item.get("status") in {"queued", "starting", "running", "cancelling"}]
+    identity = api_identity(product_version=PRODUCT_VERSION)
+    bind_host = str(os.environ.get("LOCALAIHUB_BIND_HOST") or config.get("bind_host", "127.0.0.1"))
+    try:
+        bind_port = int(os.environ.get("LOCALAIHUB_PORT") or config.get("api_port", 8765))
+    except (TypeError, ValueError):
+        bind_port = 8765
     return {
         "status": "healthy",
         "service": "Local AI Hub",
         "version": PRODUCT_VERSION,
+        **identity,
         "time": _now(),
-        "bind": f"{config.get('bind_host', '127.0.0.1')}:{config.get('api_port', 8765)}",
+        "bind": f"{bind_host}:{bind_port}",
         "disk": disk,
         "gpu": query_gpu(probe=probe_gpu),
         "gpu_policy": gpu_policy(config),

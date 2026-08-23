@@ -5,12 +5,12 @@
   "version_policy": {
     "major": 8,
     "format": "semver-stable",
-    "candidate_version": "8.0.0"
+    "candidate_version": "8.0.1"
   },
   "tag_policy": {
     "prefix": "v8.",
     "immutable": true,
-    "candidate_tag": "v8.0.0"
+    "candidate_tag": "v8.0.1"
   },
   "approval": {
     "identity": "approved",

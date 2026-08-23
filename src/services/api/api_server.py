@@ -657,8 +657,18 @@ class HubHandler(BaseHTTPRequestHandler):
 
 def main() -> int:
     config = hub_config()
-    host = str(config.get("bind_host", "127.0.0.1"))
-    port = int(config.get("api_port", 8765))
+    # Desktop-selected session values take precedence over persistent config.
+    # The desktop only ever supplies loopback, and a fallback port is never
+    # persisted into machine configuration.
+    host = str(os.environ.get("LOCALAIHUB_BIND_HOST") or config.get("bind_host", "127.0.0.1"))
+    port_value = os.environ.get("LOCALAIHUB_PORT") or config.get("api_port", 8765)
+    try:
+        port = int(port_value)
+    except (TypeError, ValueError):
+        port = 8765
+    if host not in {"127.0.0.1", "localhost"} or not 1024 <= port <= 65535:
+        LOG.error("Local AI Hub requires a bounded loopback bind.")
+        return 1
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
         server = HubHTTPServer((host, port), HubHandler)

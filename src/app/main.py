@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import html
 import hashlib
+import inspect
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -25,6 +27,8 @@ from src.services.process_manager.managed import terminate_owned_process
 from src.services.process_manager.windows import popen_hidden, startup_mutex
 from src.services.runtime_manager.core_resolver import CoreRuntimeResolver
 from src.platform.paths import get_paths
+from src.shared.runtime_identity import APP_USER_MODEL_ID, API_PROTOCOL_VERSION, PRODUCT_ID, api_identity
+from src.shared.version import PRODUCT_VERSION
 
 from .desktop_lifecycle import DesktopCloseController
 from .tray import WindowsTray
@@ -38,6 +42,23 @@ APP_INSTANCE_MUTEX = r"Local\LocalAIHub.AppInstance.v1"
 _api_process: subprocess.Popen[object] | None = None
 _api_process_lock = threading.RLock()
 _shutdown_started = False
+API_PROBE_ABSENT = "absent"
+API_PROBE_COMPATIBLE = "compatible_owned_or_reusable"
+API_PROBE_LOCAL_INCOMPATIBLE = "localaihub_incompatible"
+API_PROBE_FOREIGN = "foreign_unknown"
+
+
+def _canonical_icon_path() -> str | None:
+    """Return the installed product icon without falling back to Python/UI art."""
+
+    install_root = os.environ.get("LOCALAIHUB_INSTALL_ROOT")
+    if not install_root:
+        return None
+    candidate = Path(install_root) / "local-ai-hub.ico"
+    try:
+        return str(candidate) if candidate.is_file() and not candidate.is_symlink() else None
+    except OSError:
+        return None
 
 
 def _configured_port() -> int:
@@ -66,25 +87,73 @@ def _ui_url() -> str:
     return f"{_api_base_url()}/ui/"
 
 
-def _scoped_mutex(base: str) -> str:
+def _scoped_mutex(base: str, *, port: int | None = None) -> str:
     """Keep single-instance semantics per installation, not per Windows user."""
 
     try:
         paths = get_paths(app_root=ROOT)
-        if paths.legacy_single_root_mode:
-            return base
         digest = hashlib.sha256(str(paths.data_root).casefold().encode("utf-8")).hexdigest()[:16]
-        return f"{base}.{digest}"
+        suffix = f".{int(port)}" if port is not None else ""
+        if paths.legacy_single_root_mode and not suffix:
+            return base
+        return f"{base}.{digest}{suffix}"
     except OSError:
         return base
 
 
-def _api_ready() -> bool:
+def _expected_api_identity() -> dict[str, str]:
+    paths = get_paths(app_root=ROOT)
+    value = api_identity(product_version=PRODUCT_VERSION, app_root=paths.app_root, data_root=paths.data_root)
+    return {key: str(item) for key, item in value.items()}
+
+
+def _classify_api_identity(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return API_PROBE_FOREIGN
+    if payload.get("product_id") != PRODUCT_ID:
+        return API_PROBE_FOREIGN
+    expected = _expected_api_identity()
+    required = ("product_id", "product_version", "api_protocol_version", "app_user_model_id", "process_owner", "installation_id")
+    if any(payload.get(key) != expected[key] for key in required):
+        return API_PROBE_LOCAL_INCOMPATIBLE
+    return API_PROBE_COMPATIBLE
+
+
+def _probe_api(port: int | None = None) -> tuple[str, dict[str, object]]:
+    selected = _configured_port() if port is None else int(port)
     try:
-        with urllib.request.urlopen(f"{_api_base_url()}/health", timeout=0.35) as response:
-            return response.status == 200
-    except OSError:
-        return False
+        with urllib.request.urlopen(f"http://{HOST}:{selected}/health", timeout=0.35) as response:
+            if response.status != 200:
+                return API_PROBE_FOREIGN, {}
+            raw = response.read(128 * 1024 + 1)
+            if len(raw) > 128 * 1024:
+                return API_PROBE_FOREIGN, {}
+            payload = json.loads(raw.decode("utf-8"))
+            return _classify_api_identity(payload), payload if isinstance(payload, dict) else {}
+    except urllib.error.HTTPError:
+        return API_PROBE_FOREIGN, {}
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        return API_PROBE_ABSENT, {}
+
+
+def _api_ready() -> bool:
+    return _probe_api()[0] == API_PROBE_COMPATIBLE
+
+
+def _free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        probe.bind((HOST, 0))
+        return int(probe.getsockname()[1])
+
+
+def _select_api_port() -> tuple[int, str]:
+    configured = _configured_port()
+    state, _payload = _probe_api(configured)
+    if state in {API_PROBE_ABSENT, API_PROBE_COMPATIBLE}:
+        return configured, state
+    return _free_loopback_port(), state
 
 
 def _wait_for_api(deadline: float) -> bool:
@@ -98,11 +167,17 @@ def _wait_for_api(deadline: float) -> bool:
 def ensure_api(timeout_seconds: float = 20.0) -> subprocess.Popen[object] | None:
     """Return the API handle only when this desktop shell started it."""
 
-    if _api_ready():
+    selected_port, probe_state = _select_api_port()
+    # This is session state only; never persist a collision fallback as the
+    # machine default. All desktop/UI requests use the same selected port.
+    os.environ["LOCALAIHUB_PORT"] = str(selected_port)
+    os.environ["LOCALAIHUB_BIND_HOST"] = HOST
+    if probe_state == API_PROBE_COMPATIBLE:
         return None
     deadline = time.monotonic() + timeout_seconds
-    with startup_mutex(_scoped_mutex(API_STARTUP_MUTEX), max(0.0, deadline - time.monotonic())) as acquired:
-        if _api_ready():
+    with startup_mutex(_scoped_mutex(API_STARTUP_MUTEX, port=selected_port), max(0.0, deadline - time.monotonic())) as acquired:
+        current_state, _payload = _probe_api(selected_port)
+        if current_state == API_PROBE_COMPATIBLE:
             return None
         if not acquired:
             if _wait_for_api(deadline):
@@ -129,6 +204,9 @@ def ensure_api(timeout_seconds: float = 20.0) -> subprocess.Popen[object] | None
         child_env = dict(os.environ)
         child_env["PYTHONPATH"] = str(ROOT)
         child_env["LOCALAIHUB_APP_ROOT"] = str(ROOT)
+        child_env["LOCALAIHUB_PORT"] = str(selected_port)
+        child_env["LOCALAIHUB_BIND_HOST"] = HOST
+        child_env["PYTHONNOUSERSITE"] = "1"
         # Do not collapse a split installation back into legacy single-root
         # mode.  The parent-selected LOCALAIHUB_DATA_ROOT is retained; an old
         # LOCALAIHUB_ROOT override is removed from the child environment.
@@ -203,11 +281,19 @@ def _api_active_job_count() -> int:
     return max(0, int(value.get("active_jobs", 0)))
 
 
-def _prepare_owned_api_close() -> tuple[bool, int, str]:
+def _owned_api_active_job_count() -> int:
+    """Read active jobs only from the API process this desktop owns."""
+
+    if not _owns_live_api():
+        raise RuntimeError("External API owner")
+    return _api_active_job_count()
+
+
+def _prepare_owned_api_close() -> dict[str, object]:
     """Close job admission and recheck under the owned API's server lock."""
 
     if not _owns_live_api():
-        return True, 0, ""
+        return {"status": "ready_to_close", "verification": "verified", "active_jobs": 0, "can_cancel": False, "message": ""}
     request = urllib.request.Request(
         f"{_api_base_url()}/api/lifecycle/prepare-close",
         data=b"{}",
@@ -223,13 +309,19 @@ def _prepare_owned_api_close() -> tuple[bool, int, str]:
         except (UnicodeDecodeError, json.JSONDecodeError):
             value = {}
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return False, 1, f"Không thể khóa nhận job mới trước khi đóng: {exc}"
+        return {"status": "unknown", "verification": "unknown", "active_jobs": None, "can_cancel": False, "message": "Không thể xác minh trạng thái tác vụ; Hub chưa đóng để đảm bảo an toàn."}
     if not isinstance(value, dict):
-        return False, 1, "Phản hồi chuẩn bị đóng API không hợp lệ; Hub vẫn được giữ mở."
-    active = max(0, int(value.get("active_jobs", 0) or 0))
-    if value.get("status") == "ready_to_close":
-        return True, 0, str(value.get("message") or "")
-    return False, max(1, active), str(value.get("message") or "Hub phát hiện job đang hoạt động; cửa sổ vẫn được giữ mở.")
+        return {"status": "unknown", "verification": "unknown", "active_jobs": None, "can_cancel": False, "message": "Không thể xác minh trạng thái tác vụ; Hub chưa đóng để đảm bảo an toàn."}
+    raw_active = value.get("active_jobs")
+    if isinstance(raw_active, bool) or not isinstance(raw_active, int) or raw_active < 0:
+        return {"status": "unknown", "verification": "unknown", "active_jobs": None, "can_cancel": False, "message": "Không thể xác minh trạng thái tác vụ; Hub chưa đóng để đảm bảo an toàn."}
+    active = raw_active
+    status = value.get("status")
+    if status == "ready_to_close" and active == 0:
+        return {"status": "ready_to_close", "verification": "verified", "active_jobs": 0, "can_cancel": False, "message": str(value.get("message") or "")}
+    if status == "active_jobs" and active > 0:
+        return {"status": "active_jobs", "verification": "verified", "active_jobs": active, "can_cancel": True, "message": str(value.get("message") or "Hub đang có tác vụ hoạt động; cửa sổ vẫn được giữ mở.")}
+    return {"status": "unknown", "verification": "unknown", "active_jobs": None, "can_cancel": False, "message": "Không thể xác minh trạng thái tác vụ; Hub chưa đóng để đảm bảo an toàn."}
 
 
 def _cancel_api_jobs_and_wait(timeout_seconds: float) -> tuple[bool, str]:
@@ -283,7 +375,7 @@ class DesktopBridge:
     def _bind(self, window: object) -> None:
         self._window = window
         self._controller = DesktopCloseController(
-            _api_active_job_count,
+            _owned_api_active_job_count,
             _cancel_owned_api_jobs_and_wait,
             self._prompt_close,
             prepare_close=_prepare_owned_api_close,
@@ -448,11 +540,15 @@ def _error_html(message: str) -> str:
 def _close_prompt_html(detail: dict[str, object]) -> str:
     """Local fallback for a close prompt delivered during a WebView transition."""
 
-    count = max(0, int(detail.get("active_jobs", 0) or 0))
-    message = html.escape(str(detail.get("message") or "Chọn một trong ba cách tiếp tục an toàn."))
+    verified = detail.get("verification") == "verified" and isinstance(detail.get("active_jobs"), int) and not isinstance(detail.get("active_jobs"), bool)
+    count = max(0, int(detail.get("active_jobs", 0) or 0)) if verified else 0
+    message = html.escape(str(detail.get("message") or ("Chọn một trong ba cách tiếp tục an toàn." if verified else "Không thể xác minh trạng thái tác vụ; Hub chưa đóng để đảm bảo an toàn.")))
+    cancel_button = '<button class="danger" onclick="choose(\'cancel_jobs_and_exit\')">Hủy jobs và thoát</button>' if verified and bool(detail.get("can_cancel")) and count > 0 else ''
+    eyebrow = "JOBS ĐANG HOẠT ĐỘNG" if verified and count > 0 else "KHÔNG THỂ XÁC MINH TÁC VỤ"
+    copy = f"{count} job đang chờ, chuẩn bị, chạy hoặc hủy. Hub không tự dừng worker đang hoạt động." if verified and count > 0 else "Hub chưa đóng vì chưa xác minh được trạng thái tác vụ."
     return f"""<!doctype html><html lang="vi"><meta charset="utf-8"><title>Local AI Hub</title>
     <style>html,body{{margin:0;height:100%;background:#0b1020;color:#edf2ff;font-family:Segoe UI,system-ui,sans-serif}}main{{max-width:680px;margin:0 auto;height:100%;display:grid;align-content:center;gap:16px;padding:28px;box-sizing:border-box}}.eyebrow{{color:#80aaff;font-size:12px;letter-spacing:.12em}}p,small{{color:#b7c3df;line-height:1.55}}.actions{{display:flex;flex-wrap:wrap;gap:10px}}button{{border:1px solid #45639d;border-radius:9px;background:#182340;color:#edf2ff;padding:10px 14px;font:inherit;cursor:pointer}}button.primary{{background:#4d7dff;border-color:#80aaff}}button.danger{{background:#562737;border-color:#b95c71}}button:disabled{{opacity:.65;cursor:wait}}</style>
-    <main><span class="eyebrow">JOBS ĐANG HOẠT ĐỘNG</span><h1>Bạn muốn xử lý Local AI Hub thế nào?</h1><p>{count} job đang chờ, chuẩn bị, chạy hoặc hủy. Hub không tự dừng worker đang hoạt động.</p><p id="status">{message}</p><div class="actions"><button onclick="choose('return_to_hub')">Quay lại Hub</button><button class="danger" onclick="choose('cancel_jobs_and_exit')">Hủy jobs và thoát</button><button class="primary" onclick="choose('keep_running_in_background')">Giữ chạy nền vào khay</button></div><small>Chạy nền chỉ ẩn cửa sổ sau khi Windows đã tạo biểu tượng khay có lệnh Khôi phục và Thoát.</small></main>
+    <main><span class="eyebrow">{eyebrow}</span><h1>Bạn muốn xử lý Local AI Hub thế nào?</h1><p>{copy}</p><p id="status">{message}</p><div class="actions"><button onclick="choose('return_to_hub')">Quay lại Hub</button>{cancel_button}<button class="primary" onclick="choose('keep_running_in_background')">Giữ chạy nền vào khay</button></div><small>Chạy nền chỉ ẩn cửa sổ sau khi Windows đã tạo biểu tượng khay có lệnh Khôi phục và Thoát.</small></main>
     <script>async function choose(name){{const buttons=[...document.querySelectorAll('button')];const status=document.getElementById('status');const api=window.pywebview&&window.pywebview.api;if(!api||!api[name]){{status.textContent='Desktop bridge chưa sẵn sàng; Hub vẫn được giữ mở an toàn.';return}}buttons.forEach(button=>button.disabled=true);try{{const result=await api[name]();status.textContent=(result&&result.message)||'Đã nhận lựa chọn.';if(!result||result.status!=='pending')buttons.forEach(button=>button.disabled=false)}}catch(error){{status.textContent='Không thể xử lý lựa chọn: '+error;buttons.forEach(button=>button.disabled=false)}}}}</script></html>"""
 
 
@@ -507,16 +603,21 @@ def main() -> int:
 
         try:
             bridge = DesktopBridge()
-            window = webview.create_window(
-                "Local AI Hub",
-                html=_loading_html(),
-                width=min_w,
-                height=min_h,
-                min_size=(1280, 720),
-                resizable=True,
-                confirm_close=False,
-                js_api=bridge,
-            )
+            window_kwargs = {
+                "html": _loading_html(),
+                "width": min_w,
+                "height": min_h,
+                "min_size": (1280, 720),
+                "resizable": True,
+                "confirm_close": False,
+                "js_api": bridge,
+            }
+            # pywebview versions differ: newer hosts may accept an icon path,
+            # while the reviewed host does not. Never pass an unsupported kwarg
+            # and never substitute a system/Python icon.
+            if "icon" in inspect.signature(webview.create_window).parameters:
+                window_kwargs["icon"] = _canonical_icon_path()
+            window = webview.create_window("Local AI Hub", **window_kwargs)
             bridge._bind(window)
             window.events.closing += bridge._request_window_close
 

@@ -155,18 +155,18 @@ def current_head(repo_root: Path = ROOT) -> str:
     return value
 
 
-def release_provenance_snapshot(repo_root: Path = ROOT) -> dict[str, Any]:
+def release_provenance_snapshot(repo_root: Path = ROOT, *, phase: str = "pre_tag", expected_commit: str | None = None) -> dict[str, Any]:
     """Compatibility name for the V8 release-policy snapshot."""
     try:
-        return release_policy_snapshot(repo_root)
+        return release_policy_snapshot(repo_root, phase=phase, expected_commit=expected_commit)
     except ReleasePolicyError as exc:
         raise AcceptanceGateError("V8_RELEASE_PROVENANCE_CONTRACT_INVALID") from exc
 
 
-def source_preflight(repo_root: Path = ROOT) -> dict[str, Any]:
+def source_preflight(repo_root: Path = ROOT, *, phase: str = "pre_tag", expected_commit: str | None = None) -> dict[str, Any]:
     contract = load_gate_contract(repo_root / "architecture" / "v8_acceptance_gates.json")
     missing = [name for name in REQUIRED_SOURCE_FILES if not (repo_root / name).is_file()]
-    provenance = release_provenance_snapshot(repo_root)
+    provenance = release_provenance_snapshot(repo_root, phase=phase, expected_commit=expected_commit)
     return {
         "status": "completed",
         "valid": not missing and provenance.get("contract_valid") is True,
@@ -248,9 +248,9 @@ def _verify_pass_reports(evidence: Mapping[str, Any], evidence_path: Path) -> No
         )
 
 
-def evaluate(*, evidence_path: Path | None = None, repo_root: Path = ROOT) -> dict[str, Any]:
+def evaluate(*, evidence_path: Path | None = None, repo_root: Path = ROOT, phase: str = "pre_tag", expected_commit: str | None = None) -> dict[str, Any]:
     contract = load_gate_contract(repo_root / "architecture" / "v8_acceptance_gates.json")
-    source = source_preflight(repo_root)
+    source = source_preflight(repo_root, phase=phase, expected_commit=expected_commit)
     head = current_head(repo_root)
     blockers: list[str] = []
     if source["valid"] is not True:
@@ -309,12 +309,14 @@ def main() -> int:
     parser.add_argument("--evidence", type=Path, default=None, help="Local evidence.json; PASS reports are read from sibling reports/<gate_id>.json and no path is emitted.")
     parser.add_argument("--source-only", action="store_true", help="Validate tracked source contracts without claiming release readiness.")
     parser.add_argument("--strict-release", action="store_true", help="Return success only when every release gate is satisfied.")
+    parser.add_argument("--phase", choices=("pre_tag", "post_tag"), default="pre_tag", help="Release identity phase.")
+    parser.add_argument("--expected-commit", default=None, help="Expected commit for post-tag verification.")
     args = parser.parse_args()
     if args.source_only and args.strict_release:
         print(json.dumps({"status": "invalid", "code": "CLI_MODE_CONFLICT", "execution": "not_run", "dry_run": True}, sort_keys=True))
         return 2
     try:
-        result = evaluate(evidence_path=args.evidence)
+        result = evaluate(evidence_path=args.evidence, phase=args.phase, expected_commit=args.expected_commit)
     except AcceptanceGateError as exc:
         print(json.dumps({"status": "blocked", "code": exc.code, "execution": "not_run", "dry_run": True}, sort_keys=True))
         return 1

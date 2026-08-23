@@ -17,7 +17,7 @@ from typing import Any
 ClosePrompt = Callable[[dict[str, Any]], None]
 ActiveJobs = Callable[[], int]
 CancelAndWait = Callable[[float], tuple[bool, str]]
-PrepareClose = Callable[[], tuple[bool, int, str]]
+PrepareClose = Callable[[], dict[str, Any]]
 Background = Callable[[], tuple[bool, str]]
 Restore = Callable[[], None]
 Destroy = Callable[[], None]
@@ -144,7 +144,7 @@ class DesktopCloseController:
         self._cancel_and_wait = cancel_and_wait
         self._prompt = prompt
         self._cancel_timeout_seconds = max(1.0, float(cancel_timeout_seconds))
-        self._prepare_close = prepare_close or (lambda: (True, 0, ""))
+        self._prepare_close = prepare_close or (lambda: {"status": "ready_to_close", "verification": "verified", "active_jobs": 0, "can_cancel": False, "message": ""})
         self._lock = threading.RLock()
         self._state = "interactive"
         self._cleanup_allowed = False
@@ -159,16 +159,16 @@ class DesktopCloseController:
         with self._lock:
             return self._state
 
-    def _show_prompt(self, *, message: str = "", kind: str = "attention", active_count: int | None = None) -> None:
-        try:
-            count = max(0, int(self._active_jobs())) if active_count is None else max(0, int(active_count))
-        except Exception:
-            # Unknown state must be treated as active: the desktop stays open
-            # instead of terminating a potentially live owned API tree.
-            count = 1
-            message = message or "Không thể xác nhận trạng thái job; Hub vẫn được giữ mở an toàn."
+    def _show_prompt(self, *, message: str = "", kind: str = "attention", active_count: int | None = None, verification: str = "verified", can_cancel: bool = False) -> None:
+        if verification != "verified" or active_count is None:
+            count = None
+            can_cancel = False
+            message = message or "Không thể xác minh trạng thái tác vụ; Hub chưa đóng để đảm bảo an toàn."
             kind = "error"
-        self._prompt({"active_jobs": count, "message": message, "kind": kind})
+        else:
+            count = max(0, int(active_count))
+            can_cancel = bool(can_cancel and count > 0)
+        self._prompt({"active_jobs": count, "verification": verification, "can_cancel": can_cancel, "message": message, "kind": kind})
 
     def request_window_close(self) -> bool:
         """Return True only when pywebview may actually destroy the window."""
@@ -189,16 +189,34 @@ class DesktopCloseController:
         if active:
             with self._lock:
                 self._state = "prompted"
-            self._show_prompt()
+            # The active-count callback is an owned, in-process verification
+            # boundary for this controller. Preserve the count and expose the
+            # cancel choice only for this verified owned path.
+            self._show_prompt(active_count=active, verification="verified", can_cancel=True)
             return False
         try:
-            ready, rechecked_active, message = self._prepare_close()
+            prepared = self._prepare_close()
+            # Keep old in-process fixtures source-compatible while the public
+            # desktop path uses the typed verification result below.
+            if isinstance(prepared, tuple) and len(prepared) == 3:
+                legacy_ready, legacy_active, legacy_message = prepared
+                prepared = {
+                    "status": "ready_to_close" if legacy_ready else "active_jobs",
+                    "verification": "verified",
+                    "active_jobs": max(0, int(legacy_active)),
+                    "can_cancel": not bool(legacy_ready) and int(legacy_active) > 0,
+                    "message": str(legacy_message or ""),
+                }
         except Exception:
-            ready, rechecked_active, message = False, 1, "Không thể khóa an toàn việc nhận job mới; Hub vẫn được giữ mở."
+            prepared = {"status": "unknown", "verification": "error", "active_jobs": None, "can_cancel": False, "message": "Không thể xác minh trạng thái tác vụ; Hub chưa đóng để đảm bảo an toàn."}
+        verification = prepared.get("verification") if isinstance(prepared, dict) else "error"
+        rechecked_active = prepared.get("active_jobs") if isinstance(prepared, dict) else None
+        ready = isinstance(prepared, dict) and prepared.get("status") == "ready_to_close" and verification == "verified" and rechecked_active == 0
+        message = str(prepared.get("message") or "") if isinstance(prepared, dict) else ""
         if not ready:
             with self._lock:
                 self._state = "prompted"
-            self._show_prompt(message=message, kind="error", active_count=rechecked_active)
+            self._show_prompt(message=message, kind="error", active_count=rechecked_active if isinstance(rechecked_active, int) and not isinstance(rechecked_active, bool) else None, verification=str(verification or "error"), can_cancel=bool(prepared.get("can_cancel")) if isinstance(prepared, dict) else False)
             return False
         with self._lock:
             self._state = "exiting"

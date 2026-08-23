@@ -7,10 +7,19 @@ from pathlib import Path
 from typing import Any
 
 from src.shared.paths.registry import CONFIG_ROOT, ROOT
+from src.platform.paths import get_paths
 
 
 BASE_DIR = ROOT
 CONFIG_DIR = CONFIG_ROOT
+
+
+def _configured_config_dir() -> Path:
+    """Return the installed DATA_ROOT config authority when the shell sets it."""
+
+    if os.environ.get("LOCALAIHUB_DATA_ROOT") or os.environ.get("LOCALAIHUB_INSTALL_ROOT"):
+        return get_paths().config_root
+    return Path(CONFIG_DIR)
 
 
 LOCAL_PROVENANCES = frozenset({
@@ -72,7 +81,7 @@ def read_local_config(
     name: str,
     default: Any,
     *,
-    config_dir: Path = CONFIG_DIR,
+    config_dir: Path | None = None,
     example_name: str | None = None,
 ) -> dict[str, Any]:
     """Read a config value while preserving whether it is machine-local or an example.
@@ -82,6 +91,7 @@ def read_local_config(
     tracked example can never silently become live machine state.
     """
 
+    config_dir = _configured_config_dir() if config_dir is None else Path(config_dir)
     local_name = name
     example_name = example_name or _example_name(name)
     try:
@@ -150,7 +160,7 @@ def read_local_config(
 def load_json(name: str, default: Any) -> Any:
     """Legacy value-only reader; new decisions must use :func:`read_local_config`."""
 
-    return read_local_config(name, default)["value"]
+    return read_local_config(name, default, config_dir=_configured_config_dir())["value"]
 
 
 def hub_config() -> dict[str, Any]:
@@ -168,7 +178,7 @@ def components() -> list[dict[str, Any]]:
     result = read_local_config(
         "components.json",
         {},
-        config_dir=CONFIG_DIR,
+        config_dir=_configured_config_dir(),
         example_name="components.example.json",
     )
     # Component status/launch callers may observe ports and paths.  A tracked
@@ -183,7 +193,7 @@ def models() -> list[dict[str, Any]]:
     result = read_local_config(
         "model_registry.json",
         {},
-        config_dir=CONFIG_DIR,
+        config_dir=_configured_config_dir(),
         example_name="model_registry.example.json",
     )
     if result.get("provenance") != "local":
