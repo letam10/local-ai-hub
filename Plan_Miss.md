@@ -842,3 +842,24 @@ The tracked handoff commit itself is the source of the next exact-head evidence
 binding. Candidate packaging, acceptance metadata, CI readback and PR status
 must use the final branch SHA after this commit; historical evidence remains
 labelled with its original source commit and is not rewritten.
+
+## 21. V8.0.1 final release-readiness policy audit
+
+The V8 release policy keeps `release_branch=feature/local-ai-hub-v8` as
+generation/integration-line metadata. The provenance verifier does not compare
+that value with the current checkout branch and does not authorize a candidate
+from a branch-name match. The current candidate is intentionally prepared on
+`fix/v8.0.1-stable-product-shell`.
+
+Trust binding is exact and branch-independent: acceptance evidence and the
+candidate manifest bind the source commit/tree; post-tag provenance binds the
+peeled immutable tag target to the approved release commit; and a wrong tag
+target is rejected. A regression proves that an approved exact commit is
+accepted from a temporary review branch while the wrong-target tests remain
+fail-closed.
+
+The user-approved preparation identity is now tracked as `8.0.1` / `v8.0.1`
+with `approval.identity=approved`. This does not authorize tag creation, main
+merge, or release publication. Historical V7/V8.0.0 release evidence remains
+immutable. Final pre-tag provenance is expected to be activation-ready with no
+blockers once exact-head acceptance is rerun.

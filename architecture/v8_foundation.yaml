@@ -66,7 +66,7 @@ waves:
       documentation: docs/V8_WAVE6_RELEASE_PROVENANCE_PREPARATION.md
     source_invariants:
       - v8_release_policy_is_generation_specific
-      - release_branch_is_feature_local_ai_hub_v8
+      - release_branch_names_v8_generation_line_not_current_checkout_authority
       - stable_release_version_major_is_8
       - release_tag_matches_exact_version
       - release_tags_are_immutable
