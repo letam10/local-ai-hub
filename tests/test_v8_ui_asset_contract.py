@@ -19,6 +19,13 @@ class UiAssetContractTests(unittest.TestCase):
         for relative in local_paths:
             self.assertTrue((ROOT / "src" / "ui" / relative).is_file(), relative)
 
+    def test_settings_backup_loader_imports_its_api_dependency(self) -> None:
+        app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
+        api = (ROOT / "src" / "ui" / "api.js").read_text(encoding="utf-8")
+        self.assertIn("  listBackups,", app)
+        self.assertRegex(api, r"export const listBackups\s*=")
+        self.assertIn("listBackups()", app)
+
 
 if __name__ == "__main__":
     unittest.main()

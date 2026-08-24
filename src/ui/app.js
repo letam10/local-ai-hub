@@ -64,6 +64,7 @@ import {
   repairInspectRecovery,
   repairClearRecoveryDrafts,
   createBackup,
+  listBackups,
   inspectBackup,
   planRestore,
   applyRestore,
