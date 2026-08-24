@@ -1,0 +1,19 @@
+{
+  "schema_version": "local-state-inventory.v1",
+  "classification": "LARGE_RUNTIME_DATA",
+  "local_only": true,
+  "generated_from": "bounded filesystem metadata enumeration on 2026-08-24",
+  "hash_policy": "large trees were not content-hashed; known_sha256 is null unless explicitly observed for a managed executable",
+  "never_commit_bytes": true,
+  "entries": [
+    {"id": "models", "category": "model_weights", "provider": "multiple", "local_state": "observed_local_only", "file_count": 47381, "approximate_size_bytes": 69073445980, "known_sha256": null, "expected_canonical_role": "User-managed model weights and model assets; preserve locally, never commit."},
+    {"id": "environments", "category": "python_environments", "provider": "multiple", "local_state": "observed_local_only", "file_count": 288867, "approximate_size_bytes": 49648134948, "known_sha256": null, "expected_canonical_role": "Machine environments and installed dependencies; preserve locally, never commit."},
+    {"id": "runtime", "category": "runtime_binaries", "provider": "Local AI Hub", "local_state": "observed_local_only", "file_count": 104278, "approximate_size_bytes": 17687597855, "known_sha256": null, "expected_canonical_role": "Runtime and bundled binaries; preserve locally, never commit."},
+    {"id": "output", "category": "generated_output", "provider": "Local AI Hub", "local_state": "user_data_local_only", "file_count": 583, "approximate_size_bytes": 9937185193, "known_sha256": null, "expected_canonical_role": "Generated artifacts and media; user data, never commit."},
+    {"id": "temp", "category": "temporary_evidence_and_work", "provider": "Codex/tasks", "local_state": "preserved_local_only", "file_count": 384598, "approximate_size_bytes": 22584996374, "known_sha256": null, "expected_canonical_role": "Task/evidence/candidate material; preserve for recovery, never commit or bulk-clean."},
+    {"id": "cache", "category": "cache", "provider": "Local AI Hub", "local_state": "local_only", "file_count": 1, "approximate_size_bytes": 1720320, "known_sha256": null, "expected_canonical_role": "Rebuildable cache; do not commit."},
+    {"id": "logs", "category": "logs", "provider": "Local AI Hub", "local_state": "local_only", "file_count": 25, "approximate_size_bytes": 3129944, "known_sha256": null, "expected_canonical_role": "Machine-local logs; review/sanitize only when a specific recovery report needs them."},
+    {"id": "external_service_clones", "category": "external_applications", "provider": "GroundingDINO, OmniParser, PaddleOCR, Qwen3-TTS, Seed-VC", "local_state": "local_only_external_clones", "file_count": 3720, "approximate_size_bytes": 553948534, "known_sha256": null, "expected_canonical_role": "Installer-managed or upstream service trees; never vendor or commit bytes."},
+    {"id": "stable_installed_app", "category": "external_application", "provider": "Local AI Hub", "local_state": "installed_outside_repository", "file_count": null, "approximate_size_bytes": 2082225015, "known_sha256": "4509019776122CCFEDD5A9D5FFEC4D8ED0E0D2B57281EB9A0A69DAE3C37838C1", "expected_canonical_role": "Stable installed application; do not replace, relocate, or commit its bytes."}
+  ]
+}

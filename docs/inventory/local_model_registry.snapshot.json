@@ -1,0 +1,29 @@
+{
+  "schema_version": "local-state-snapshot.v1",
+  "source": "Config/model_registry.json",
+  "classification": "SANITIZED_METADATA",
+  "local_only": true,
+  "record_count": 17,
+  "execution_claim": "not_run",
+  "canonical_role": "Model inventory and recovery planning metadata. Model bytes, local paths, credentials, environments, and provider endpoints are intentionally omitted.",
+  "hash_policy": "known_sha256_not_collected",
+  "records": [
+    {"id": "animesr-v2", "model_name": "AnimeSR v2", "engine": "AnimeSR", "source": "tool_model", "availability": "observed", "recovery_state": "observed_unverified", "file_size": 5996559, "size_source": "filesystem", "version": "observed-local", "license": "not_evaluated_in_registry_recovery"},
+    {"id": "sam2.1-hiera-small", "model_name": "sam2.1_hiera_small", "engine": "SAM 2", "source": "tool_model", "availability": "observed", "recovery_state": "observed_unverified", "file_size": 184416285, "size_source": "filesystem", "version": "observed-local", "license": "not_evaluated_in_registry_recovery"},
+    {"id": "faster-whisper-large-v3", "model_name": "large-v3", "engine": "Faster-Whisper", "source": "tool_model", "availability": "present_incompatible_layout", "recovery_state": "manual_review_reparse_layout", "file_size": 3087284237, "size_source": "filesystem", "version": "observed-local", "license": "not_evaluated_in_registry_recovery"},
+    {"id": "flux-2-klein-base-4b-fp8", "model_name": "FLUX.2 Klein Base 4B FP8", "engine": "FLUX", "source": "image_pipeline_asset", "availability": "observed", "recovery_state": "observed_unverified", "file_size": 4089498488, "size_source": "filesystem", "version": "observed-local", "license": "not_evaluated_in_registry_recovery"},
+    {"id": "flux2-vae", "model_name": "FLUX.2 VAE", "engine": "FLUX", "source": "image_pipeline_asset", "availability": "observed", "recovery_state": "observed_unverified", "file_size": 336213556, "size_source": "filesystem", "version": "observed-local", "license": "not_evaluated_in_registry_recovery"},
+    {"id": "qwen-image-2512-fp8", "model_name": "Qwen Image 2512 FP8", "engine": "Qwen Image", "source": "image_pipeline_asset", "availability": "observed", "recovery_state": "observed_unverified", "file_size": 20430679144, "size_source": "filesystem", "version": "observed-local", "license": "not_evaluated_in_registry_recovery"},
+    {"id": "qwen-3-4b-image-encoder", "model_name": "Qwen 3 4B embedded image encoder", "engine": "Qwen Image", "source": "image_pipeline_asset", "availability": "observed", "recovery_state": "observed_unverified", "file_size": 8044982048, "size_source": "filesystem", "version": "observed-local", "license": "not_evaluated_in_registry_recovery"},
+    {"id": "qwen-2.5-vl-7b-image-encoder", "model_name": "Qwen 2.5 VL embedded image encoder", "engine": "Qwen Image", "source": "image_pipeline_asset", "availability": "observed", "recovery_state": "observed_unverified", "file_size": 9384670680, "size_source": "filesystem", "version": "observed-local", "license": "not_evaluated_in_registry_recovery"},
+    {"id": "qwen-image-vae", "model_name": "Qwen Image VAE", "engine": "Qwen Image", "source": "image_pipeline_asset", "availability": "observed", "recovery_state": "observed_unverified", "file_size": 253806246, "size_source": "filesystem", "version": "observed-local", "license": "not_evaluated_in_registry_recovery"},
+    {"id": "realesr-animevideov3", "model_name": "realesr-animevideov3", "engine": "Real-ESRGAN", "source": "tool_model", "availability": "observed", "recovery_state": "observed_unverified", "file_size": 2504012, "size_source": "filesystem", "version": "observed-local", "license": "not_evaluated_in_registry_recovery"},
+    {"id": "omniparser-caption", "model_name": "caption model", "engine": "OmniParser", "source": "tool_model", "availability": "observed_present", "recovery_state": "observed_filesystem", "file_size": 1083916964, "size_source": "filesystem", "version": "observed-local", "license": "not_evaluated_in_registry_recovery"},
+    {"id": "omniparser-detection", "model_name": "detection model", "engine": "OmniParser", "source": "tool_model", "availability": "observed_present", "recovery_state": "observed_filesystem", "file_size": 281182680, "size_source": "filesystem", "version": "observed-local", "license": "not_evaluated_in_registry_recovery"},
+    {"id": "rfdetr-nano", "model_name": "RF-DETR nano", "engine": "RF-DETR", "source": "tool_model", "availability": "observed", "recovery_state": "observed_unverified", "file_size": 366287238, "size_source": "filesystem", "version": "observed-local", "license": "not_evaluated_in_registry_recovery"},
+    {"id": "groundingdino-swint", "model_name": "GroundingDINO SwinT OGC", "engine": "Grounding DINO", "source": "tool_model", "availability": "observed", "recovery_state": "observed_unverified", "file_size": 693997677, "size_source": "filesystem", "version": "observed-local", "license": "not_evaluated_in_registry_recovery"},
+    {"id": "qwen3-tts-local", "model_name": "Qwen3-TTS local weights", "engine": "Qwen3-TTS", "source": "tool_model", "availability": "observed", "recovery_state": "observed_unverified", "file_size": 11562786114, "size_source": "filesystem", "version": "observed-local", "license": "not_evaluated_in_registry_recovery"},
+    {"id": "seed-vc-dit", "model_name": "Seed-VC DiT", "engine": "Seed-VC", "source": "tool_model", "availability": "observed_present", "recovery_state": "observed_filesystem", "file_size": 142112203, "size_source": "filesystem", "version": "observed-local", "license": "not_evaluated_in_registry_recovery"},
+    {"id": "paddleocr-vl", "model_name": "PaddleOCR-VL", "engine": "PaddleOCR-VL", "source": "tool_model", "availability": "missing", "recovery_state": "observed_unverified", "file_size": 0, "size_source": "filesystem", "version": "observed-local", "license": "not_evaluated_in_registry_recovery"}
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "schema_version": "local-state-snapshot.v1",
+  "source": "Config/components.json",
+  "classification": "SANITIZED_METADATA",
+  "local_only": true,
+  "record_count": 18,
+  "execution_claim": "not_run",
+  "canonical_role": "Server-owned component readiness metadata; this snapshot contains no install, download, executable, environment, or filesystem-path bytes.",
+  "records": [
+    {"id": "local_ai_api", "name": "Local AI API", "status": "partial", "runtime_status": "not_run", "execution": "not_run", "recovery_state": "observed_unverified", "source": "machine-local filesystem observation", "version": "observed-local"},
+    {"id": "local_ai_mcp", "name": "Local AI MCP", "status": "not_installed", "runtime_status": "not_run", "execution": "not_run", "recovery_state": "observed_unverified", "source": "machine-local filesystem observation", "version": "observed-local"},
+    {"id": "animesr", "name": "AnimeSR", "status": "partial", "runtime_status": "not_run", "execution": "not_run", "recovery_state": "observed_unverified", "source": "machine-local filesystem observation", "version": "observed-local"},
+    {"id": "sam2", "name": "SAM 2", "status": "partial", "runtime_status": "not_run", "execution": "not_run", "recovery_state": "observed_unverified", "source": "machine-local filesystem observation", "version": "observed-local"},
+    {"id": "whisper", "name": "Faster-Whisper ASR", "status": "partial", "runtime_status": "not_run", "execution": "not_run", "recovery_state": "observed_unverified", "source": "machine-local filesystem observation", "version": "observed-local"},
+    {"id": "ffmpeg", "name": "FFmpeg / FFprobe", "status": "partial", "runtime_status": "not_run", "execution": "not_run", "recovery_state": "observed_unverified", "source": "machine-local filesystem observation", "version": "observed-local"},
+    {"id": "comfyui", "name": "ComfyUI", "status": "partial", "runtime_status": "not_run", "execution": "not_run", "recovery_state": "observed_unverified", "source": "machine-local filesystem observation", "version": "observed-local"},
+    {"id": "flux_klein_studio", "name": "FLUX Klein Studio", "status": "partial", "runtime_status": "not_run", "execution": "not_run", "recovery_state": "observed_unverified", "source": "machine-local filesystem observation", "version": "observed-local"},
+    {"id": "qwen_image", "name": "Qwen Image 2512", "status": "partial", "runtime_status": "not_run", "execution": "not_run", "recovery_state": "observed_unverified", "source": "machine-local filesystem observation", "version": "observed-local"},
+    {"id": "practical_rife", "name": "Practical-RIFE", "status": "partial", "runtime_status": "not_run", "execution": "not_run", "recovery_state": "observed_unverified", "source": "machine-local filesystem observation", "version": "observed-local"},
+    {"id": "real_esrgan", "name": "Real-ESRGAN", "status": "partial", "runtime_status": "not_run", "execution": "not_run", "recovery_state": "observed_unverified", "source": "machine-local filesystem observation", "version": "observed-local"},
+    {"id": "airi", "name": "AIRI", "status": "external_managed", "runtime_status": "not_run", "execution": "not_run", "recovery_state": "observed_unverified", "source": "machine-local filesystem observation", "version": "observed-local"},
+    {"id": "omniparser", "name": "OmniParser", "status": "partial", "runtime_status": "not_run", "execution": "not_run", "recovery_state": "observed_unverified", "source": "machine-local filesystem observation", "version": "observed-local"},
+    {"id": "rfdetr", "name": "RF-DETR", "status": "partial", "runtime_status": "not_run", "execution": "not_run", "recovery_state": "observed_unverified", "source": "machine-local filesystem observation", "version": "observed-local"},
+    {"id": "groundingdino", "name": "Grounding DINO", "status": "partial", "runtime_status": "not_run", "execution": "not_run", "recovery_state": "observed_unverified", "source": "machine-local filesystem observation", "version": "observed-local"},
+    {"id": "paddleocr_vl", "name": "PaddleOCR-VL", "status": "not_installed", "runtime_status": "not_run", "execution": "not_run", "recovery_state": "observed_unverified", "source": "machine-local filesystem observation", "version": "observed-local"},
+    {"id": "qwen3_tts", "name": "Qwen3-TTS", "status": "partial", "runtime_status": "not_run", "execution": "not_run", "recovery_state": "observed_unverified", "source": "machine-local filesystem observation", "version": "observed-local"},
+    {"id": "seed_vc", "name": "Seed-VC", "status": "partial", "runtime_status": "not_run", "execution": "not_run", "recovery_state": "observed_unverified", "source": "machine-local filesystem observation", "version": "observed-local"}
+  ]
+}
