@@ -553,7 +553,7 @@ td { color: var(--text); }
 
 /* Node inspector hierarchy and accessible boolean controls. */
 .graph-editor__layout { grid-template-columns: var(--node-palette-width) minmax(0, 1fr) minmax(260px, var(--node-inspector-width)); }
-.graph-inspector { min-width: 360px; }
+.graph-inspector { min-width: 0; }
 .graph-inspector__head h3 { overflow-wrap: anywhere; font-size: 17px; }.graph-inspector__head p { overflow-wrap: anywhere; }
 .graph-inspector__section > strong { color: var(--accent); letter-spacing: .06em; text-transform: uppercase; }
 .graph-status-list { display: grid; gap: 0; margin: 0; }
