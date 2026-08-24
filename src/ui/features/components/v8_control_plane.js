@@ -34,6 +34,14 @@ const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => 
 }[char]));
 
 const uiText = (value) => translateText(value);
+const fixedCopy = (value) => {
+  const candidate = typeof value === "string" ? value : "";
+  const keys = new Set([
+    "Review an explicit component import or installation plan.",
+    "Review the tracked license contract before any install action is enabled.",
+  ]);
+  return keys.has(candidate) ? uiText(candidate) : candidate;
+};
 
 const request = async (path, options = {}) => {
   const response = await fetch(path, {
@@ -141,7 +149,7 @@ const renderSourceAcceptance = (records) => {
       continue;
     }
     const req = item.requirements;
-    slot.innerHTML = `<div class="split"><strong>${uiText("V8 source acceptance")}</strong>${pill(item.acceptance_state)}</div><p class="small">${uiText("Disposition:")} ${escapeHtml(item.disposition)} · ${uiText("Auto-install:")} <strong>${item.auto_install_eligible ? uiText("eligible") : uiText("disabled")}</strong></p><p class="small">${uiText("Source")} ${requirementLabel(req.source_verified)} · ${uiText("Auth")} ${requirementLabel(req.authentication_ready)} · ${uiText("License")} ${requirementLabel(req.license_ready)} · ${uiText("Integrity")} ${requirementLabel(req.integrity_ready)} · ${uiText("Size")} ${requirementLabel(req.size_ready)}</p><div class="workspace-state__action"><strong>${uiText("Bước tiếp theo")}</strong><span>${escapeHtml(item.next_action || "Giữ component ở trạng thái non-automatic cho tới khi đủ evidence.")}</span></div>`;
+    slot.innerHTML = `<div class="split"><strong>${uiText("V8 source acceptance")}</strong>${pill(item.acceptance_state)}</div><p class="small">${uiText("Disposition:")} ${escapeHtml(item.disposition)} · ${uiText("Auto-install:")} <strong>${item.auto_install_eligible ? uiText("eligible") : uiText("disabled")}</strong></p><p class="small">${uiText("Source")} ${requirementLabel(req.source_verified)} · ${uiText("Auth")} ${requirementLabel(req.authentication_ready)} · ${uiText("License")} ${requirementLabel(req.license_ready)} · ${uiText("Integrity")} ${requirementLabel(req.integrity_ready)} · ${uiText("Size")} ${requirementLabel(req.size_ready)}</p><div class="workspace-state__action"><strong>${uiText("Bước tiếp theo")}</strong><span>${escapeHtml(fixedCopy(item.next_action) || "Giữ component ở trạng thái non-automatic cho tới khi đủ evidence.")}</span></div>`;
   }
 };
 
@@ -175,7 +183,7 @@ const refresh = async () => {
       renderSourceAcceptance(Array.isArray(acceptanceResult.value?.records) ? acceptanceResult.value.records : []);
     }
     const failures = [operationsResult, acceptanceResult].filter((item) => item.status === "rejected").length;
-    statusText(failures ? `V8 control plane tải một phần (${failures} nguồn lỗi); dữ liệu hiện có được giữ an toàn.` : "V8 control plane đã đồng bộ từ server-owned metadata; không có download tự động.", failures ? "partial" : "ready");
+    statusText(failures ? `V8 control plane tải một phần (${failures} nguồn lỗi); dữ liệu hiện có được giữ an toàn.` : uiText("V8 control plane đã đồng bộ từ server-owned metadata; không có download tự động."), failures ? "partial" : "ready");
   } finally {
     refreshing = false;
   }
