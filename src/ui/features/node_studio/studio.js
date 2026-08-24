@@ -859,7 +859,7 @@ class HubGraphEditor {
       // LiteGraph defaults unselected titles to #999 even on bright category
       // bars.  Use one high-contrast ink color for every category; selected
       // nodes still use LiteGraph's existing white selected-title color.
-      HubLiteNode.title_text_color = "#07111f";
+      HubLiteNode.title_text_color = "#ffffff";
       HubLiteNode.desc = captured.description;
       HubLiteNode.prototype.onDrawForeground = function drawHubNodeForeground(ctx) {
         if (this.hubStatus && this.hubStatus !== "completed") {

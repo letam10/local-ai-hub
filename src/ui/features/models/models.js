@@ -35,7 +35,7 @@ export function renderProductionModels({ productionCatalog, legacyModels, storag
     <label class="field"><span>Danh mục</span><select data-model-category><option value="">Tất cả danh mục</option>${categories.map((item) => `<option value="${escapeHtml(item)}"${filters.category === item ? " selected" : ""}>${escapeHtml(item)}</option>`).join("")}</select></label>
     <label class="field"><span>Trạng thái cài đặt</span><select data-model-installed><option value="all"${(filters.installed || "all") === "all" ? " selected" : ""}>Tất cả</option><option value="installed"${filters.installed === "installed" ? " selected" : ""}>Đã cài đặt</option><option value="uninstalled"${filters.installed === "uninstalled" ? " selected" : ""}>Chưa cài đặt</option></select></label>
     <span class="row-meta" data-model-count>Hiển thị ${visibleProduction.length}/${production.length} model</span>
-  </div>`;
+  </div>${stateActionStatus(filters, escapeHtml)}`;
   const updateRows = Array.isArray(updateCenter.records) ? updateCenter.records : [];
   const updateRowHtml = updateRows.slice(0, 8).map((item) => {
     const id = escapeHtml(item.component_id || "component");
@@ -55,6 +55,11 @@ export function renderProductionModels({ productionCatalog, legacyModels, storag
       ${card("Legacy cleanup", `<div class="metric-inline"><strong>${escapeHtml(storage?.legacy_counts?.total || 0)}</strong><span>${uiTextHtml("legacy paths inventoried")}</span></div><div class="callout callout--warning">${uiTextHtml("Cleanup V3 separates REAL_DIRECTORY/JUNCTION, checks references and user data first. Active or unknown items are retained with reason/rollback.")}</div>`, "", "card--flat")}
     </div>
     ${card("AI Models & Components", controls + table, "", "card--wide")}${updateCard}`;
+}
+
+function stateActionStatus(filters, escapeHtml) {
+  const message = typeof filters.actionStatus === "string" ? filters.actionStatus.trim().slice(0, 240) : "";
+  return message ? `<div class="form-result" data-model-action-status role="status" aria-live="polite">${escapeHtml(message)}</div>` : `<div class="form-result" data-model-action-status role="status" aria-live="polite"></div>`;
 }
 
 export const modelsFeature = Object.freeze({ id: "models", refreshPolicy: "manual", renderer: "renderProductionModels" });

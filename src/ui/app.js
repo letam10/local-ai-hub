@@ -120,7 +120,7 @@ const state = {
   creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
   workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trong V5-D trước khi đồng bộ." },
-  productionCatalog: { status: "partial", models: [], runtimes: [] }, updateCenter: { settings: { policy: "manual" }, records: [] }, modelFilters: { query: "", category: "", installed: "all" },
+  productionCatalog: { status: "partial", models: [], runtimes: [] }, updateCenter: { settings: { policy: "manual" }, records: [] }, modelFilters: { query: "", category: "", installed: "all" }, modelActionStatus: "", settingsActionStatus: "",
   featureRegistry: FEATURE_REGISTRY,
 };
 const view = document.querySelector("#module-view");
@@ -1306,9 +1306,18 @@ document.addEventListener("click", async (event) => {
       const plan = await planComponentInstall(productPlanButton.dataset.productPlan || "");
       if (plan?.plan_id) {
         const result = await confirmComponentInstall(plan.plan_id, false);
-        showToast(result?.reason || plan.reason || "Đã tạo kế hoạch catalog.", result?.status === "unavailable" ? "warning" : "success");
-      } else showToast(plan?.reason || "Không thể lập kế hoạch catalog.", "warning");
-    } catch (error) { showToast(error.message || "Không thể lập kế hoạch catalog.", "error"); }
+        state.modelActionStatus = result?.reason || plan.reason || "Đã tạo kế hoạch catalog.";
+        showToast(state.modelActionStatus, result?.status === "unavailable" ? "warning" : "success");
+      } else {
+        state.modelActionStatus = plan?.reason || "Không thể lập kế hoạch catalog.";
+        showToast(state.modelActionStatus, "warning");
+      }
+      render();
+    } catch (error) {
+      state.modelActionStatus = error.message || "Không thể lập kế hoạch catalog.";
+      showToast(state.modelActionStatus, "error");
+      render();
+    }
     finally { productPlanButton.disabled = false; }
     return;
   }
@@ -1729,21 +1738,30 @@ document.addEventListener("click", async (event) => {
     const select = document.querySelector("#backup-select");
     const backupId = select?.value?.trim();
     const outputEl = document.querySelector("#restore-plan-output");
+    const settingsStatus = document.querySelector("#settings-save-status");
     if (!backupId) {
-      showToast("Vui lòng chọn một bản sao lưu để kiểm tra.", "warning");
+      state.settingsActionStatus = "Vui lòng chọn một bản sao lưu để kiểm tra.";
+      if (settingsStatus) settingsStatus.textContent = state.settingsActionStatus;
+      showToast(state.settingsActionStatus, "warning");
       return;
     }
     try {
       const insp = await inspectBackup(backupId);
       if (!insp.valid) {
-        if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">File backup không hợp lệ: ${(insp.errors || []).join(", ")}</div>`;
+        state.settingsActionStatus = `File backup không hợp lệ: ${(insp.errors || []).join(", ")}`;
+        if (settingsStatus) settingsStatus.textContent = state.settingsActionStatus;
+        if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">${escapeHtml(state.settingsActionStatus)}</div>`;
         return;
       }
       const plan = await planRestore(backupId);
       if (!plan.accepted) {
-        if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">${escapeHtml(plan.reason || "Không thể lập kế hoạch khôi phục.")}</div>`;
+        state.settingsActionStatus = plan.reason || "Không thể lập kế hoạch khôi phục.";
+        if (settingsStatus) settingsStatus.textContent = state.settingsActionStatus;
+        if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">${escapeHtml(state.settingsActionStatus)}</div>`;
         return;
       }
+      state.settingsActionStatus = `Đã lập kế hoạch khôi phục ${plan.plan_id || ""}; chưa áp dụng thay đổi.`.trim();
+      if (settingsStatus) settingsStatus.textContent = state.settingsActionStatus;
       const categories = Object.keys(plan.categories || {}).join(", ");
       const prev = plan.preview || {};
       if (outputEl) {
@@ -1759,8 +1777,10 @@ document.addEventListener("click", async (event) => {
         `;
       }
     } catch (error) {
-      if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">${escapeHtml(error.message || "Lỗi kiểm tra backup.")}</div>`;
-      showToast(error.message || "Lỗi kiểm tra backup.", "error");
+      state.settingsActionStatus = error.message || "Lỗi kiểm tra backup.";
+      if (settingsStatus) settingsStatus.textContent = state.settingsActionStatus;
+      if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">${escapeHtml(state.settingsActionStatus)}</div>`;
+      showToast(state.settingsActionStatus, "error");
     }
     return;
   }
@@ -1787,7 +1807,22 @@ document.addEventListener("click", async (event) => {
   }
   if (event.target.closest("#theme-toggle") || event.target.closest("[data-cycle-theme]")) { cycleTheme(); return; }
   const refreshButton = event.target.closest("[data-refresh-storage]");
-  if (refreshButton) { refreshButton.disabled = true; await loadRouteData({ scan: true }); refreshButton.disabled = false; showToast("Đã quét lại storage theo yêu cầu."); return; }
+  if (refreshButton) {
+    refreshButton.disabled = true;
+    state.modelActionStatus = "Đang quét storage theo ngân sách bounded…";
+    render();
+    try {
+      await loadRouteData({ scan: true });
+      state.modelActionStatus = "Đã cập nhật snapshot storage; tổng có thể là partial nếu vượt ngân sách quét.";
+      showToast(state.modelActionStatus, "success");
+      render();
+    } catch (error) {
+      state.modelActionStatus = error.message || "Không thể quét lại storage.";
+      showToast(state.modelActionStatus, "error");
+      render();
+    }
+    return;
+  }
   const checkAllUpdatesButton = event.target.closest("[data-check-all-updates]");
   if (checkAllUpdatesButton) {
     checkAllUpdatesButton.disabled = true;

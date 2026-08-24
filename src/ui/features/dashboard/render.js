@@ -17,8 +17,16 @@ export function createDashboardRenderer(deps) {
     const componentFallback = components.map((item) => item);
     const control = source.capabilities && typeof source.capabilities === "object" ? source.capabilities : {};
     const readiness = readinessView.status !== "unknown" ? readinessView.status : readinessStatus(control.status || health.status);
+    const transport = readinessStatus(health.status || "unknown");
+    const transportReady = ["healthy", "operational", "ready"].includes(transport);
     const activeJobs = jobRecovery.counts.active;
-    const metricStatic = (label, value, detail) => `<article class="metric-card"><span data-i18n="${escapeHtml(label)}">${uiTextHtml(label)}</span><strong>${escapeHtml(value)}</strong><small data-i18n="${escapeHtml(detail)}">${uiTextHtml(detail)}</small></article>`;
+    const metricStatic = (label, value, detail) => {
+      if (label === "Hub API" && transportReady) {
+        value = formatStatus(transport);
+        detail = "Loopback API đang chạy; readiness module hiển thị riêng.";
+      }
+      return `<article class="metric-card"><span data-i18n="${escapeHtml(label)}">${uiTextHtml(label)}</span><strong>${escapeHtml(value)}</strong><small data-i18n="${escapeHtml(detail)}">${uiTextHtml(detail)}</small></article>`;
+    };
     const metricSnapshot = (label, value, detail) => `<article class="metric-card"><span data-i18n="${escapeHtml(label)}">${uiTextHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail)}</small></article>`;
     const statusRank = { error: 0, unavailable: 0, missing: 0, not_published: 0, partial: 1, not_run: 1, planned: 2, starting: 3, installed: 4, operational: 5, healthy: 5, ready: 5, clean: 5 };
     const rankOf = (status) => Object.prototype.hasOwnProperty.call(statusRank, status) ? statusRank[status] : 3;
@@ -32,7 +40,7 @@ export function createDashboardRenderer(deps) {
       return textKey(left.id) < textKey(right.id) ? -1 : textKey(left.id) > textKey(right.id) ? 1 : 0;
     });
     const attention = [];
-    if (readiness !== "healthy" && readiness !== "operational") attention.push({ id: "hub-api", title: "Hub API", detail: uiTextHtml("Readiness snapshot needs review"), status: readiness });
+    if (!transportReady && readiness !== "healthy" && readiness !== "operational") attention.push({ id: "hub-api", title: "Hub API", detail: uiTextHtml("Loopback API transport needs review"), status: readiness });
     modules.filter((item) => ["error", "unavailable", "missing", "partial", "not_published", "not_run"].includes(item.status)).forEach((item) => attention.push({ id: `module-${item.id}`, title: item.label, detail: item.kind, status: item.status }));
     jobs.filter((item) => ["failed", "unavailable", "cancelled", "interrupted"].includes(String(item?.status || ""))).forEach((item, index) => {
       const jobId = item?.id || `job-${index + 1}`;

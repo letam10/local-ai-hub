@@ -190,10 +190,18 @@ class V8Wave4ProductUxTests(unittest.TestCase):
 
     def test_ui_repairs_search_and_action_gating_at_render_boundary(self) -> None:
         app = (Path(__file__).resolve().parents[1] / "src" / "ui" / "app.js").read_text(encoding="utf-8")
+        dashboard = (Path(__file__).resolve().parents[1] / "src" / "ui" / "features" / "dashboard" / "render.js").read_text(encoding="utf-8")
+        models = (Path(__file__).resolve().parents[1] / "src" / "ui" / "features" / "models" / "models.js").read_text(encoding="utf-8")
+        settings = (Path(__file__).resolve().parents[1] / "src" / "ui" / "features" / "settings" / "render.js").read_text(encoding="utf-8")
+        studio = (Path(__file__).resolve().parents[1] / "src" / "ui" / "features" / "node_studio" / "studio.js").read_text(encoding="utf-8")
         self.assertIn("const TOOL_EXECUTION_READY = new Set([\"operational\"])", app)
         self.assertIn("form[data-job-form]", app)
         self.assertIn('document.addEventListener("input"', app)
         self.assertIn("readinessGate", app)
+        self.assertIn("data-model-action-status", models)
+        self.assertIn("settingsActionStatus", settings)
+        self.assertIn("transportReady", dashboard)
+        self.assertIn('HubLiteNode.title_text_color = "#ffffff"', studio)
 
 
 if __name__ == "__main__":
