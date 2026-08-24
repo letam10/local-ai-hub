@@ -84,6 +84,11 @@ class UiAssetContractTests(unittest.TestCase):
         self.assertIn('card("Ứng dụng ngoài — chưa kết nối"', renderer)
         self.assertIn('"Ứng dụng ngoài — chưa kết nối"', i18n)
 
+    def test_ui_declares_a_bounded_favicon_without_a_missing_default_request(self) -> None:
+        index = (ROOT / "src" / "ui" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('<link rel="icon" href="data:," />', index)
+        self.assertNotIn('href="/favicon.ico"', index)
+
 
 if __name__ == "__main__":
     unittest.main()
