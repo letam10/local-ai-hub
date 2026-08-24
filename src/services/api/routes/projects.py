@@ -35,7 +35,11 @@ def import_project(request: ApiRequest, context: ApiContext, params: Mapping[str
 
 
 def project_export(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
-    return ApiResponse(200, _pm(context).export_project(params["project_id"]))
+    try:
+        value = _pm(context).export_project(params["project_id"])
+    except KeyError:
+        return ApiResponse(404, {"status": "error", "error": "project_not_found"})
+    return ApiResponse(200, value)
 
 
 def project_manifest(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:

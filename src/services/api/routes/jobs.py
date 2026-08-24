@@ -19,8 +19,10 @@ def list_jobs(request: ApiRequest, context: ApiContext, params: Mapping[str, str
 
 
 def job_detail(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
-    status, value = context.call("get_job", params["job_id"])
-    return ApiResponse(status, value)
+    value = context.call("get_job", params["job_id"])
+    if value is None:
+        return ApiResponse(404, {"status": "error", "error": "job_not_found"})
+    return ApiResponse(200, value)
 
 
 def cancel(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
