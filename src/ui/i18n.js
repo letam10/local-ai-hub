@@ -183,6 +183,49 @@ const EXTRA_DICTIONARIES = Object.freeze({
   }),
 });
 
+// Additional fixed product copy used by the installed acceptance surfaces.
+// Keep server-owned names, IDs and arbitrary evidence text out of this table;
+// only stable UI labels and bounded guidance belong here.
+const V8_VI_UI_COPY = Object.freeze({
+  "MEDIA CAPABILITY EVIDENCE": "BẰNG CHỨNG KHẢ NĂNG MEDIA",
+  "Exact media operation scope": "Phạm vi thao tác media chính xác",
+  "Server snapshot only; the UI does not execute media operations.": "Chỉ hiển thị snapshot máy chủ; giao diện không thực thi thao tác media.",
+  "Outcome": "Kết quả", "Execution": "Thực thi", "Cleanup": "Dọn dẹp", "Source overwrite": "Ghi đè nguồn", "Reason": "Lý do", "Next action": "Hành động tiếp theo",
+  "Review detailed evidence": "Xem bằng chứng chi tiết", "Open server snapshot in Settings": "Mở snapshot máy chủ trong Cài đặt",
+  "Open Media / Node Studio": "Mở Media / Node Studio", "View exact operation scope": "Xem phạm vi thao tác chính xác",
+  "Generic Media actions remain Partial": "Thao tác media chung vẫn ở trạng thái một phần",
+  "Generic media actions are not covered by the three exact evidence rows.": "Thao tác media chung không nằm trong ba dòng bằng chứng chính xác.",
+  "Use only the published evidence rows; no generic media execution is claimed.": "Chỉ dùng các dòng bằng chứng đã công bố; không tuyên bố thực thi media chung.",
+  "Use the exact evidence summary first; this UI does not claim generic media execution.": "Trước hết hãy xem tóm tắt bằng chứng chính xác; giao diện này không tuyên bố thực thi media chung.",
+  "Execution unavailable from this snapshot": "Thực thi chưa khả dụng trong snapshot này",
+  "Image sequence to video": "Chuỗi ảnh thành video", "Image resize": "Đổi kích thước ảnh", "Image crop": "Cắt ảnh", "Image rotate": "Xoay ảnh", "Image flip": "Lật ảnh", "Image convert": "Chuyển đổi định dạng ảnh", "Image compress": "Nén ảnh",
+  "No recovery reason was published in this snapshot.": "Snapshot này không công bố lý do khôi phục.",
+  "Review the job state and create a new task when recovery is unavailable.": "Xem trạng thái tác vụ và tạo tác vụ mới khi không thể khôi phục.",
+  "No fixed catalog leaf is present under the managed root.": "Không có mục danh mục cố định dưới thư mục quản lý.",
+  "Review the tracked license contract before any install action is enabled.": "Kiểm tra điều khoản giấy phép đã theo dõi trước khi bật thao tác cài đặt.",
+  "Complete the separately reviewed provider authorization flow before creating an install plan.": "Hoàn tất quy trình cấp quyền nhà cung cấp đã được duyệt riêng trước khi tạo kế hoạch cài đặt.",
+  "Keep the component non-automatic until every failed requirement and catalog disposition are explicitly reviewed.": "Giữ component ở chế độ không tự động cho đến khi mọi yêu cầu thất bại và quyết định danh mục được kiểm tra rõ ràng.",
+  "Inspect the existing managed runtime; do not download or replace it from this acceptance view.": "Kiểm tra runtime đang quản lý; không tải xuống hoặc thay thế từ màn hình này.",
+  "Managed asset discovery is static only; no files, providers, or workflows were accessed.": "Phát hiện asset chỉ là tĩnh; không truy cập tệp, provider hoặc workflow.",
+  "Static server-owned evidence is available without runtime execution.": "Bằng chứng tĩnh do máy chủ sở hữu có sẵn mà không thực thi runtime.",
+  "The requested static section is unavailable or ambiguous.": "Mục tĩnh được yêu cầu chưa khả dụng hoặc không rõ ràng.",
+  "Restore a unique validated managed source under the fixed server-owned root.": "Khôi phục một nguồn quản lý duy nhất đã xác thực dưới thư mục cố định do máy chủ sở hữu.",
+  "Catalog output is static only and does not execute imported graphs.": "Kết quả danh mục chỉ là tĩnh và không thực thi graph đã nhập.",
+  "Run the static package CLI; reserve runtime checks for a separately authorized bounded smoke.": "Chạy CLI gói tĩnh; dành kiểm tra runtime cho smoke có giới hạn được cấp quyền riêng.",
+  "No release-evidence packet was published for this local snapshot.": "Snapshot cục bộ này chưa công bố gói bằng chứng phát hành.",
+  "Use the compatibility report or resource planner; no code has been loaded.": "Dùng báo cáo tương thích hoặc bộ lập kế hoạch tài nguyên; chưa nạp code.",
+  "Use the server-owned result for static QA, collection evaluation, or later authorized integration planning.": "Dùng kết quả do máy chủ sở hữu cho QA tĩnh, đánh giá tập hợp hoặc lập kế hoạch tích hợp được cấp quyền sau.",
+  "Review the static evidence before requesting separately authorized runtime work.": "Kiểm tra bằng chứng tĩnh trước khi yêu cầu thao tác runtime được cấp quyền riêng.",
+  "This descriptor requires separately configured ComfyUI and model evidence; discovery does not launch either one.": "Mô tả này yêu cầu bằng chứng ComfyUI và model được cấu hình riêng; việc phát hiện không khởi chạy thành phần nào.",
+  "Managed privacy policy passed static validation. No OS, process, device, or runtime probe was performed.": "Chính sách riêng tư do máy chủ quản lý đã qua xác thực tĩnh. Không thăm dò hệ điều hành, tiến trình, thiết bị hay runtime.",
+  "Use the server-owned policy result for static diagnostics only.": "Chỉ dùng kết quả chính sách do máy chủ sở hữu cho chẩn đoán tĩnh.",
+  "Managed policy discovery is static only. No machine or runtime state was accessed.": "Phát hiện chính sách quản lý chỉ là tĩnh. Không truy cập trạng thái máy hoặc runtime.",
+  "Use only the server-owned policy summaries for diagnostics planning.": "Chỉ dùng các tóm tắt chính sách do máy chủ sở hữu để lập kế hoạch chẩn đoán.",
+  "The managed descriptor passed static validation, but no runtime graph smoke has been authorized.": "Mô tả được quản lý đã qua xác thực tĩnh, nhưng chưa có smoke graph runtime được cấp quyền.",
+  "Use server-owned validated output for a later bounded integration preflight.": "Dùng kết quả đã xác thực do máy chủ sở hữu cho preflight tích hợp có giới hạn sau này.",
+  "Track do máy chủ sở hữu hàng đợi and recovery state; actions only appear when the published record gates them.": "Theo dõi hàng đợi và trạng thái khôi phục do máy chủ sở hữu; hành động chỉ xuất hiện khi bản ghi đã công bố cho phép.",
+});
+
 // Explicit labels used by the page renderer.  These keys are template-owned
 // copy only; server-projected reasons, names, IDs and artifact text never pass
 // through this table.
@@ -282,7 +325,7 @@ export const setLanguage = (value) => {
 
 export const translateText = (value, language = currentLanguage()) => {
   let result = String(value ?? "");
-  const dictionary = { ...(DICTIONARIES[language] || DICTIONARIES.vi), ...(EXTRA_DICTIONARIES[language] || {}), ...(PAGE_LABEL_DICTIONARIES[language] || {}), ...(COMPONENT_LABEL_DICTIONARIES[language] || {}) };
+  const dictionary = { ...(DICTIONARIES[language] || DICTIONARIES.vi), ...(EXTRA_DICTIONARIES[language] || {}), ...(language === "vi" ? V8_VI_UI_COPY : {}), ...(PAGE_LABEL_DICTIONARIES[language] || {}), ...(COMPONENT_LABEL_DICTIONARIES[language] || {}) };
   for (const [source, target] of Object.entries(dictionary).sort((a, b) => b[0].length - a[0].length)) {
     if (source.length < 8 && /^[A-Za-z ]+$/.test(source)) {
       const escaped = source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
