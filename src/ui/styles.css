@@ -570,7 +570,7 @@ td { color: var(--text); }
 .workflow-mini-graph__node { display: grid; min-width: 0; flex: 1 1 0; gap: 2px; padding: 7px 6px; border-left: 3px solid var(--workflow-color, var(--accent)); border-radius: 6px; background: var(--panel); }
 .workflow-mini-graph__node strong, .workflow-mini-graph__node small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.workflow-mini-graph__node strong { font-size: 10px; }.workflow-mini-graph__node small { color: var(--muted); font-size: 9px; }.workflow-mini-graph__arrow { color: var(--muted); font-size: 14px; }
 
-@media (max-width: 1450px) and (min-width: 981px) { .graph-editor { --node-inspector-width: 390px; } }
+@media (max-width: 1450px) and (min-width: 981px) { .graph-editor { --node-inspector-width: 280px; } }
 @media (max-width: 980px) { .graph-editor__layout { grid-template-columns: minmax(0, 1fr); }.graph-inspector { min-width: 0; }.job-filter-grid { grid-template-columns: 1fr; }.job-card__summary, .job-timestamps { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 560px) { .job-card__summary, .job-timestamps { grid-template-columns: 1fr; }.job-pagination { align-items: flex-start; flex-direction: column; }.status-explanation summary { align-items: flex-start; }.status-explanation summary .status-pill { flex: 0 0 auto; } }
 
