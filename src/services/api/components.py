@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import threading
+from collections.abc import Mapping
 from typing import Any
 
 from src.services.component_enablement_v8 import ComponentEnablementService
@@ -102,12 +103,61 @@ def _confirm_reference(reference: str, *, confirmed: bool) -> dict[str, Any]:
     )
 
 
+def _observed_model_records() -> dict[str, Mapping[str, Any]]:
+    """Return the path-free legacy model observation used for compatibility.
+
+    The Component Manager catalog and the older model registry describe the
+    same user-owned installation with different leaf identities.  Reconcile
+    only the bounded ``installed``/size projection; never expose the legacy
+    path or promote the result to operational.
+    """
+
+    try:
+        from src.services.storage_manager.overview import model_summary
+
+        return {
+            str(item.get("id")): item
+            for item in model_summary()
+            if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+        }
+    except Exception:
+        return {}
+
+
+def _merge_observed_model_state(value: dict[str, Any]) -> dict[str, Any]:
+    records = value.get("records") if isinstance(value, Mapping) else None
+    if not isinstance(records, list):
+        return value
+    observed = _observed_model_records()
+    if not observed:
+        return value
+    merged: list[dict[str, Any]] = []
+    for raw in records:
+        item = dict(raw) if isinstance(raw, Mapping) else {}
+        if item.get("component_type") == "model" and str(item.get("status", "")).upper() in {"NOT_INSTALLED", "UNAVAILABLE"}:
+            local = observed.get(str(item.get("component_id")))
+            if isinstance(local, Mapping) and local.get("installed") is True:
+                item.update({
+                    "status": "INSTALLED_UNVERIFIED",
+                    "model_status": "INSTALLED_UNVERIFIED",
+                    "observed_local": True,
+                    "observed_size_bytes": (local.get("size") or {}).get("bytes") if isinstance(local.get("size"), Mapping) else None,
+                    "reason": "A managed local model record was observed; exact catalog leaves and bounded smoke evidence remain unverified.",
+                    "next_action": "Review the matching catalog binding and run bounded verification before use.",
+                })
+        merged.append(item)
+    return {**value, "records": merged}
+
+
 def snapshot() -> dict[str, Any]:
-    return component_installer().snapshot()
+    return _merge_observed_model_state(component_installer().snapshot())
 
 
 def detail(component_id: str) -> dict[str, Any]:
-    return component_installer().detail(component_id)
+    value = component_installer().detail(component_id)
+    merged = _merge_observed_model_state({"records": [value.get("component", {})]})
+    component = merged["records"][0] if merged.get("records") else value.get("component", {})
+    return {**value, "component": component}
 
 
 def plan_install(component_id: str, *, component_type: str, variant: str | None = None) -> dict[str, Any]:

@@ -60,8 +60,22 @@ def _fingerprint(value: object) -> str:
 
 class ComponentLifecycle:
     def __init__(self, *, paths: HubPaths | None = None, catalog: ProductionCatalog | None = None) -> None:
+        requested_paths = paths
         self.paths = paths or get_paths()
-        self.catalog = catalog or ProductionCatalog(paths=self.paths)
+        if catalog is None and requested_paths is None:
+            try:
+                from src.services.storage_manager.overview import model_summary
+
+                observed = {
+                    str(item.get("id")): item
+                    for item in model_summary()
+                    if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+                }
+            except Exception:
+                observed = {}
+            self.catalog = ProductionCatalog(paths=self.paths, observed_models=observed)
+        else:
+            self.catalog = catalog or ProductionCatalog(paths=self.paths)
         self._plans: dict[str, dict[str, Any]] = {}
         self._jobs: dict[str, dict[str, Any]] = {}
 

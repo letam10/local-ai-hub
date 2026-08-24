@@ -11,6 +11,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from src.services.api.context import ApiContext
 from src.services.api.router import ApiRequest
@@ -21,9 +22,40 @@ from src.services.component_installer.maintenance_executor import MaintenanceExe
 from src.services.component_installer.receipts import write_component_receipt
 from src.services.productization import ComponentLifecycle
 from src.services.productization.catalog import ProductionCatalog
+from src.services.api import components as component_api
 
 
 class V8Wave4ProductUxTests(unittest.TestCase):
+    def test_observed_local_model_is_not_projected_as_absent(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = HubPaths(app_root=repo, data_root=Path(temporary))
+            catalog = ProductionCatalog(
+                paths=paths,
+                catalog_path=repo / "Config" / "v7_production_catalog.example.json",
+                observed_models={"animesr-v2": {"installed": True, "size": {"bytes": 42}}},
+            )
+            item = catalog.inspect_model("animesr-v2")
+            self.assertEqual(item["status"], "INSTALLED_UNVERIFIED")
+            self.assertTrue(item["observed_local"])
+            self.assertEqual(item["installed_size_bytes"], 42)
+            self.assertFalse(item["operational"])
+
+    def test_component_snapshot_reconciles_legacy_observation_without_promoting_runtime(self) -> None:
+        base = {"records": [{"component_id": "animesr-v2", "component_type": "model", "status": "NOT_INSTALLED", "model_status": "NOT_INSTALLED", "execution": "not_run"}]}
+        fake = SimpleNamespace(snapshot=lambda: base)
+        with patch.object(component_api, "component_installer", return_value=fake), patch.object(
+            component_api,
+            "_observed_model_records",
+            return_value={"animesr-v2": {"installed": True, "size": {"bytes": 12}}},
+        ):
+            value = component_api.snapshot()
+        record = value["records"][0]
+        self.assertEqual(record["status"], "INSTALLED_UNVERIFIED")
+        self.assertEqual(record["model_status"], "INSTALLED_UNVERIFIED")
+        self.assertTrue(record["observed_local"])
+        self.assertEqual(record["execution"], "not_run")
+
     def test_reference_existing_is_not_misclassified_as_download_gate(self) -> None:
         catalog = SimpleNamespace(
             models={},
@@ -155,6 +187,13 @@ class V8Wave4ProductUxTests(unittest.TestCase):
         self.assertNotIn("selected_path", control)
         self.assertIn('REFERENCE_EXISTING: "Use Existing"', feature)
         self.assertIn('MANUAL_INSTALL: "Manual Install"', feature)
+
+    def test_ui_repairs_search_and_action_gating_at_render_boundary(self) -> None:
+        app = (Path(__file__).resolve().parents[1] / "src" / "ui" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("const TOOL_EXECUTION_READY = new Set([\"operational\"])", app)
+        self.assertIn("form[data-job-form]", app)
+        self.assertIn('document.addEventListener("input"', app)
+        self.assertIn("readinessGate", app)
 
 
 if __name__ == "__main__":

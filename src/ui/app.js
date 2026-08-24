@@ -587,6 +587,33 @@ const renderApiState = () => {
   return "";
 };
 
+const TOOL_EXECUTION_READY = new Set(["operational"]);
+const applyToolActionGates = () => {
+  const tools = new Map((Array.isArray(state.tools) ? state.tools : []).map((item) => [String(item?.name || ""), item]));
+  view.querySelectorAll("form[data-job-form]").forEach((form) => {
+    const toolId = String(form.dataset.tool || "");
+    const item = tools.get(toolId) || {};
+    const status = String(item.tool_status || item.status || "unavailable").toLowerCase();
+    const ready = TOOL_EXECUTION_READY.has(status);
+    const reason = String(item.reason || "Backend chưa có bằng chứng chạy an toàn trong snapshot hiện tại.").slice(0, 240);
+    form.dataset.readinessStatus = status;
+    form.querySelectorAll("button[type=submit]").forEach((button) => {
+      if (button.hasAttribute("disabled") && button.dataset.readinessGate !== "true") return;
+      if (!ready) {
+        button.disabled = true;
+        button.dataset.readinessGate = "true";
+        button.setAttribute("aria-disabled", "true");
+        button.title = reason;
+      } else if (button.dataset.readinessGate === "true") {
+        button.disabled = false;
+        delete button.dataset.readinessGate;
+        button.removeAttribute("aria-disabled");
+        button.removeAttribute("title");
+      }
+    });
+  });
+};
+
 const updateTopbar = () => {
   const health = state.health || {};
   const disk = health.disk || {};
@@ -618,6 +645,7 @@ const render = ({ background = false, focus = "" } = {}) => {
   renderNavigation();
   syncSidebarState();
   view.innerHTML = `${renderApiState()}${renderPage(routeId(), state)}`;
+  applyToolActionGates();
   restoreScrollContinuity(continuity.scroll);
   restoreFocusContinuity(continuity, focus);
   setSnapshotStatus(background ? (continuity.activeInside ? "preserved" : "received") : (continuity.activeInside && !focus ? "preserved" : "received"));
@@ -1071,8 +1099,6 @@ const handleImageMaskForm = async (form) => {
 };
 
 document.addEventListener("change", (event) => {
-  const modelSearch = event.target.closest("[data-model-search]");
-  if (modelSearch) { state.modelFilters.query = String(modelSearch.value || "").slice(0, 80); render(); return; }
   const modelCategory = event.target.closest("[data-model-category]");
   if (modelCategory) { state.modelFilters.category = String(modelCategory.value || "").slice(0, 48); render(); return; }
   const modelInstalled = event.target.closest("[data-model-installed]");
@@ -1092,6 +1118,16 @@ document.addEventListener("change", (event) => {
     state.selectedProjectId = projectSelect.value || "";
     refreshCreative().catch((error) => showToast(error.message, "error"));
   }
+});
+
+document.addEventListener("input", (event) => {
+  const modelSearch = event.target.closest("[data-model-search]");
+  if (!modelSearch) return;
+  state.modelFilters.query = String(modelSearch.value || "").slice(0, 80);
+  // Keep the active search control stable while the bounded catalog filters
+  // on every keystroke; the old change-only listener left the table stale
+  // until a second unrelated control blurred.
+  render();
 });
 
 document.addEventListener("submit", async (event) => {
