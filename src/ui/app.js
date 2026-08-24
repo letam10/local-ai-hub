@@ -33,6 +33,8 @@ import {
   getImageMaskStudioOverview,
   getHealth,
   getJobs,
+  deleteJobHistory,
+  clearTerminalJobHistory,
   getDurableJobs,
   resumeDurableJob,
   getWorkflowLibrary,
@@ -116,7 +118,7 @@ import { FEATURE_REGISTRY } from "./core/feature_registry.js";
 import { confirmComponentInstall, getProductionCatalog, planComponentInstall } from "./shared/api/catalog.js";
 
 const state = {
-  health: {}, capabilities: {}, productization: {}, components: [], componentManager: {}, componentPlans: {}, tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", apiStatus: "loading", apiError: "",
+  health: {}, capabilities: {}, productization: {}, components: [], componentManager: {}, componentPlans: {}, tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", jobQuery: "", jobTypeFilter: "all", jobSort: "newest", jobPage: 1, apiStatus: "loading", apiError: "",
   creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
   workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trong V5-D trước khi đồng bộ." },
@@ -1103,6 +1105,10 @@ document.addEventListener("change", (event) => {
   if (modelCategory) { state.modelFilters.category = String(modelCategory.value || "").slice(0, 48); render(); return; }
   const modelInstalled = event.target.closest("[data-model-installed]");
   if (modelInstalled) { state.modelFilters.installed = ["all", "installed", "uninstalled"].includes(modelInstalled.value) ? modelInstalled.value : "all"; render(); return; }
+  const jobType = event.target.closest("[data-job-type-filter]");
+  if (jobType) { state.jobTypeFilter = String(jobType.value || "all").slice(0, 80); state.jobPage = 1; render(); return; }
+  const jobSort = event.target.closest("[data-job-sort]");
+  if (jobSort) { state.jobSort = jobSort.value === "oldest" ? "oldest" : "newest"; state.jobPage = 1; render(); return; }
   const language = event.target.closest("#language-select");
   if (language) {
     setLanguage(language.value);
@@ -1120,7 +1126,25 @@ document.addEventListener("change", (event) => {
   }
 });
 
+document.addEventListener("load", (event) => {
+  const image = event.target.closest?.("[data-asset-preview]");
+  if (!image) return;
+  image.closest(".asset-preview-frame")?.querySelector("[data-preview-skeleton]")?.remove();
+}, true);
+
+document.addEventListener("error", (event) => {
+  const image = event.target.closest?.("[data-asset-preview]");
+  if (!image) return;
+  const frame = image.closest(".asset-preview-frame");
+  image.hidden = true;
+  frame?.querySelector("[data-preview-skeleton]")?.remove();
+  const fallback = frame?.querySelector("[data-preview-fallback]");
+  if (fallback) fallback.hidden = false;
+}, true);
+
 document.addEventListener("input", (event) => {
+  const jobSearch = event.target.closest("[data-job-search]");
+  if (jobSearch) { state.jobQuery = String(jobSearch.value || "").slice(0, 120); state.jobPage = 1; render(); return; }
   const modelSearch = event.target.closest("[data-model-search]");
   if (!modelSearch) return;
   state.modelFilters.query = String(modelSearch.value || "").slice(0, 80);
@@ -1570,7 +1594,48 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const jobFilter = event.target.closest("[data-job-filter]");
-  if (jobFilter) { state.jobFilter = jobFilter.dataset.jobFilter || "all"; render(); return; }
+  if (jobFilter) { state.jobFilter = jobFilter.dataset.jobFilter || "all"; state.jobPage = 1; render(); return; }
+  const jobPageButton = event.target.closest("[data-job-page]");
+  if (jobPageButton) {
+    state.jobPage = Math.max(1, state.jobPage + (jobPageButton.dataset.jobPage === "next" ? 1 : -1));
+    render();
+    return;
+  }
+  const deleteJobButton = event.target.closest("[data-delete-job]");
+  if (deleteJobButton) {
+    const jobCard = deleteJobButton.closest("[data-job-id]");
+    if (jobCard?.dataset.jobStatus && ["queued", "starting", "running", "cancelling"].includes(jobCard.dataset.jobStatus)) {
+      showToast("Tác vụ đang chạy không thể xóa khỏi lịch sử.", "warning");
+      return;
+    }
+    const confirmed = window.confirm("Xóa 1 tác vụ khỏi lịch sử? File đầu ra và artifact sẽ được giữ nguyên.");
+    if (!confirmed) return;
+    deleteJobButton.disabled = true;
+    try {
+      const result = await deleteJobHistory(deleteJobButton.dataset.deleteJob || "");
+      if (result.status !== "deleted") throw new Error(result.message || "Không thể xóa tác vụ khỏi lịch sử.");
+      await refreshFast({ quiet: true, renderView: false });
+      render();
+      showToast(result.message || "Đã xóa khỏi lịch sử; artifact vẫn được giữ nguyên.", "success");
+    } catch (error) { showToast(error.message || "Không thể xóa tác vụ khỏi lịch sử.", "error"); deleteJobButton.disabled = false; }
+    return;
+  }
+  const clearHistoryButton = event.target.closest("[data-clear-terminal-history]");
+  if (clearHistoryButton) {
+    const count = jobRecoverySnapshot(state).records.filter((job) => ["completed", "failed", "unavailable", "cancelled", "interrupted"].includes(job.status) && job.source !== "durable").length;
+    const confirmed = window.confirm(`Xóa ${count} tác vụ đã kết thúc khỏi lịch sử? File đầu ra và artifact sẽ được giữ nguyên; tác vụ đang chạy không bị ảnh hưởng.`);
+    if (!confirmed) return;
+    clearHistoryButton.disabled = true;
+    try {
+      const result = await clearTerminalJobHistory(true);
+      if (result.status !== "completed") throw new Error(result.message || "Không thể xóa lịch sử.");
+      state.jobPage = 1;
+      await refreshFast({ quiet: true, renderView: false });
+      render();
+      showToast(result.message || "Đã xóa lịch sử đã kết thúc.", "success");
+    } catch (error) { showToast(error.message || "Không thể xóa lịch sử.", "error"); clearHistoryButton.disabled = false; }
+    return;
+  }
   if (event.target.closest("[data-refresh-diagnostics]")) {
     try {
       state.diagnostics = await getDiagnosticsSnapshot();

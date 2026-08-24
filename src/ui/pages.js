@@ -6,7 +6,7 @@
 */
 
 import * as shared from "./shared/rendering.js";
-const { escapeHtml, formatGb, formatStatus, translateText, uiText, uiTextHtml, dynamicTextHtml, NAVIGATION, component, tool, app, opaqueArtifactId, opaqueArtifactUrl, safeArtifactName, artifactMetadata, artifactProvenance, isMaskArtifact, READINESS_STATUS_LABELS, UI_STATUS_RE, uiStatus, readinessStatus, readinessStatusLabel, statusPill, unsafeUiText, safeUiText, safeUiIdentifier, safeJobId, safeJobStatus, safeJobTimestamp, safeJobCount, safeArtifactMediaType, safeJobArtifacts, safeJobProvenance, safeHotJobDetail, safeReadinessModules, safeStorageVolumes, safeResourceGpu, safeResourceFits, safeResourceErrors, safeResourceActions, safeResourcePlan, readinessSnapshot, MEDIA_EVIDENCE_OPERATIONS, MEDIA_EVIDENCE_LABELS, MEDIA_EVIDENCE_OUTCOME_LABELS, MEDIA_EVIDENCE_EXECUTION_LABELS, unsafeMediaEvidenceText, isMediaEvidenceRecord, exactMediaOperationList, safeMediaEvidenceText, mediaEvidenceFallback, normalizeRuntimeMediaEvidence, normalizeMediaOperationScope, mediaCapabilityEvidence, mediaEvidencePanel, JOB_STATUS_RANK, textKey, jobRecoverySnapshot, readinessModuleDetails, readinessFitLabel, readinessResourceDetails, readinessStorageDetails, heading, card, cardDynamic, field, fieldDynamic, file, files, button, capability, workspaceState, workflowLibraryState, activeTab, moduleTabs, imageModuleTabs, nodeStudio, imageWorkflowRail, videoWorkflowRail, visionWorkflowRail, artifacts, legacyArtifactList, artifactList, provenanceList, formResult } = shared;
+const { escapeHtml, formatGb, formatStatus, translateText, uiText, uiTextHtml, dynamicTextHtml, NAVIGATION, component, tool, app, opaqueArtifactId, opaqueArtifactUrl, safeArtifactName, artifactMetadata, artifactProvenance, isMaskArtifact, READINESS_STATUS_LABELS, UI_STATUS_RE, uiStatus, readinessStatus, readinessStatusLabel, statusSeverity, statusMeaning, statusImpact, statusPill, statusExplanation, unsafeUiText, safeUiText, safeUiIdentifier, safeJobId, safeJobStatus, safeJobTimestamp, safeJobCount, safeArtifactMediaType, safeJobArtifacts, safeJobProvenance, safeHotJobDetail, safeReadinessModules, safeStorageVolumes, safeResourceGpu, safeResourceFits, safeResourceErrors, safeResourceActions, safeResourcePlan, readinessSnapshot, MEDIA_EVIDENCE_OPERATIONS, MEDIA_EVIDENCE_LABELS, MEDIA_EVIDENCE_OUTCOME_LABELS, MEDIA_EVIDENCE_EXECUTION_LABELS, unsafeMediaEvidenceText, isMediaEvidenceRecord, exactMediaOperationList, safeMediaEvidenceText, mediaEvidenceFallback, normalizeRuntimeMediaEvidence, normalizeMediaOperationScope, mediaCapabilityEvidence, mediaEvidencePanel, JOB_STATUS_RANK, textKey, jobRecoverySnapshot, readinessModuleDetails, readinessFitLabel, readinessResourceDetails, readinessStorageDetails, heading, card, cardDynamic, field, fieldDynamic, file, files, button, capability, workspaceState, workflowLibraryState, activeTab, moduleTabs, imageModuleTabs, nodeStudio, imageWorkflowRail, videoWorkflowRail, visionWorkflowRail, artifacts, legacyArtifactList, artifactList, provenanceList, formResult } = shared;
 export { NAVIGATION, jobRecoverySnapshot };
 import { renderProductionModels } from "./features/models/models.js";
 import { createDashboardRenderer } from "./features/dashboard/render.js";
@@ -82,19 +82,26 @@ const LEGACY_STATIC_COPY = Object.freeze([
 
 const localizeLegacyMarkup = (html) => LEGACY_STATIC_COPY.reduce((result, key) => {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return result.replace(new RegExp(`>(\\s*)${escaped}(\\s*)<`, "g"), (_match, prefix, suffix) => `>${prefix}${uiTextHtml(key)}${suffix}<`);
+  return result.replace(new RegExp(`>(\\s*)${escaped}(\\s*)<`, "g"), (match, prefix, suffix, offset, source) => {
+    // data-i18n-container is intentionally left in its source language here;
+    // localizeDocument() updates only its fixed label child after insertion.
+    // Keeping the source token also preserves the stable semantic contract for
+    // tests and assistive tooling without translating server-owned values.
+    if (String(source).slice(Math.max(0, offset - 160), offset).includes("data-i18n-container=")) return match;
+    return `>${prefix}${uiTextHtml(key)}${suffix}<`;
+  });
 }, String(html || ""));
 
 const renderDashboardFeature = createDashboardRenderer({
   uiTextHtml, escapeHtml, formatGb, readinessSnapshot, jobRecoverySnapshot, readinessStatus,
-  safeReadinessModules, statusPill, readinessStatusLabel, textKey, mediaEvidencePanel,
+  safeReadinessModules, statusPill, statusExplanation, statusImpact, readinessStatusLabel, textKey, mediaEvidencePanel,
   workflowLibraryState, formatStatus,
 });
-const renderJobsFeature = createJobsRenderer({ jobRecoverySnapshot, escapeHtml, uiTextHtml, statusPill, readinessStatusLabel, artifactList, provenanceList, heading });
-const renderComponentsFeature = createComponentsRenderer({ heading, escapeHtml, statusPill, uiTextHtml, uiText });
-const renderDiagnosticsFeature = createDiagnosticsRenderer({ heading, escapeHtml, statusPill, uiTextHtml });
+const renderJobsFeature = createJobsRenderer({ jobRecoverySnapshot, escapeHtml, uiTextHtml, statusPill, statusExplanation, statusImpact, readinessStatusLabel, artifactList, provenanceList, heading });
+const renderComponentsFeature = createComponentsRenderer({ heading, escapeHtml, statusPill, statusExplanation, statusImpact, readinessStatusLabel, uiTextHtml, uiText });
+const renderDiagnosticsFeature = createDiagnosticsRenderer({ heading, escapeHtml, statusPill, statusExplanation, statusImpact, uiTextHtml });
 const renderSettingsFeature = createSettingsRenderer({ heading, card, escapeHtml, uiTextHtml, statusPill, readinessStatusLabel, readinessSnapshot, readinessModuleDetails, readinessResourceDetails, readinessStorageDetails, mediaEvidencePanel });
-const renderAiri = createAiriRenderer({ app, heading, card, escapeHtml, statusPill });
+const renderAiri = createAiriRenderer({ app, heading, card, escapeHtml, statusPill, statusExplanation, statusImpact });
 const renderVision = createVisionRenderer({ component, tool, heading, visionWorkflowRail, capability, card, file, field, button, formResult });
 const renderSam2 = createSam2Renderer({ component, tool, formatStatus, heading, statusPill, workspaceState, card, file, field, button, formResult });
 const renderOcr = createOcrRenderer({ component, tool, heading, statusPill, card, file, field, button, formResult });

@@ -65,6 +65,8 @@ export const getSettingsSchema = () => request("/api/settings/schema");
 export const patchSettings = (patch, expectedRevision) => request("/api/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...patch, expected_revision: expectedRevision }) });
 export const resetSettingsSection = (section) => request("/api/settings/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ section }) });
 export const getJobs = () => request("/api/jobs");
+export const deleteJobHistory = (id) => request(`/api/jobs/${encodeURIComponent(id)}`, { method: "DELETE" });
+export const clearTerminalJobHistory = (confirmed = false) => request("/api/jobs/history/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: Boolean(confirmed) }) });
 export const getDurableJobs = () => request("/api/durable-jobs");
 export const resumeDurableJob = (id) => request(`/api/durable-jobs/${encodeURIComponent(id)}/resume`, { method: "POST" });
 export const getLifecycle = () => request("/api/lifecycle");

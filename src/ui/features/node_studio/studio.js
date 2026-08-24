@@ -43,7 +43,11 @@ const NODE_COPY = Object.freeze({
   "Load Image": "Tải ảnh", "Load Video": "Tải video", "Load Audio": "Tải âm thanh", "Load Subtitle": "Tải phụ đề", "Prompt / Text": "Prompt / Văn bản", Number: "Số", Boolean: "Đúng / Sai", "Point Input": "Điểm đầu vào", "Box Input": "Hộp đầu vào", "Preview Image": "Xem trước ảnh", "Preview Video": "Xem trước video", "Save Image": "Lưu ảnh", "Save Video": "Lưu video", "Export Mask": "Xuất mask", "Export Video": "Xuất video", Comment: "Ghi chú", Group: "Nhóm", Resolution: "Độ phân giải", Seed: "Seed", "Steps / Sampler": "Steps / Bộ lấy mẫu", "FLUX Generate": "Tạo ảnh FLUX", "Qwen Image Generate": "Tạo ảnh Qwen", "Image Edit / Image-to-Image": "Sửa ảnh / Ảnh sang ảnh", "AnimeSR Upscale": "Nâng cấp AnimeSR", "Real-ESRGAN": "Real-ESRGAN", "Frame Interpolation": "Nội suy khung hình", Encode: "Mã hóa", "Subtitle Burn": "Ghi phụ đề", "Extract Frames": "Tách khung hình", Rotate: "Xoay", FPS: "FPS", "Extract Audio": "Tách âm thanh", "Replace Audio": "Thay âm thanh", Resize: "Đổi kích thước", "ComfyUI Workflow": "Workflow ComfyUI", "Video Generate (backend partial)": "Tạo video (backend một phần)", "Video Transform": "Biến đổi video", "Video Upscale (AnimeSR / FFmpeg)": "Nâng cấp video (AnimeSR / FFmpeg)", "Video Grade": "Hiệu chỉnh video", "Logo / Image Overlay": "Phủ logo / ảnh", "Video Generate": "Tạo video", "Video Transform": "Biến đổi video", "Text Overlay (unavailable)": "Phủ chữ (chưa khả dụng)", "Trim / Cut": "Cắt", Concat: "Nối", Crop: "Cắt khung", Flip: "Lật", "Audio Loudness": "Độ lớn âm thanh", "Color / Levels": "Màu / mức sáng", "Image Compare A/B": "So sánh ảnh A/B", "Mask Apply": "Áp dụng mask", "Mask Composite": "Ghép mask", "Mask Preview": "Xem trước mask", "Probe Audio": "Đọc metadata âm thanh", "Probe Video": "Đọc metadata video", "Grounding DINO": "Grounding DINO", "Grounding Prompt": "Prompt Grounding", "RF-DETR Detect": "Phát hiện RF-DETR", "SAM2 Segment": "Phân vùng SAM2", "SAM2 Track": "Theo dõi SAM2", "Upscale Image (FFmpeg fallback)": "Nâng cấp ảnh (FFmpeg dự phòng)",
   "Node Guide": "Hướng dẫn Node",
   "Node Guide · Hướng dẫn toàn diện Hub Nodes & Typed Workflow": "Hướng dẫn Node · Hướng dẫn toàn diện Hub Nodes & Typed Workflow",
-  "Status truthful": "Trạng thái trung thực",
+  "Status truthful": "Trạng thái thực thi",
+  "Execution status": "Trạng thái thực thi",
+  "Capability": "Khả năng",
+  "Execution state": "Trạng thái thực thi",
+  "Artifact": "Artifact",
   "Safe artifact preview": "Xem trước artifact an toàn",
   "Parameters": "Thông số",
   "Validation": "Kiểm tra",
@@ -107,6 +111,8 @@ const NODE_COPY = Object.freeze({
   "No properties": "Node này không có thuộc tính.",
   "Build video creative graph": "Tạo graph sáng tạo video", "Library": "Thư viện", "ready": "sẵn sàng", "LiteGraph workflow canvas": "Canvas workflow LiteGraph", "Run Graph": "Chạy graph",
   "No completed exact evidence is available in this server snapshot.": "Snapshot máy chủ chưa có bằng chứng chính xác đã hoàn tất.",
+  "Chưa có bản xem trước an toàn trong trạng thái này.": "Chưa có bản xem trước an toàn trong trạng thái này.",
+  "Bật": "Bật", "Tắt": "Tắt",
 });
 const NODE_STATIC_TEXT = Object.freeze([
   "NODE WORKFLOW", "Recent", "Recent workflows", "Export JSON", "Import JSON", "Preview indicator (manual; no auto-run)",
@@ -407,11 +413,11 @@ export function collectArtifactProjections(values) {
 }
 
 const ARTIFACT_PREVIEW_STATE_COPY = Object.freeze({
-  completed: ["Published artifacts", "This node completed, but only server-published opaque artifacts are shown."],
-  partial: ["Partial output", "This node is partial; only safe published artifacts can be previewed."],
-  failed: ["No artifact from failed run", "This node failed or was cancelled; no artifact is available from this run."],
-  unavailable: ["Preview unavailable", "This node is unavailable; no artifact is claimed in this snapshot."],
-  not_run: ["No artifact output yet", "Execution is not claimed; run state has not published an artifact."],
+  completed: ["Có artifact đầu ra", "Node đã hoàn tất; chỉ artifact opaque do server công bố mới được hiển thị."],
+  partial: ["Đầu ra một phần", "Node chưa hoàn tất đầy đủ; chỉ artifact an toàn đã công bố mới được xem."],
+  failed: ["Tác vụ thất bại", "Node thất bại hoặc bị hủy; không có artifact an toàn từ lần chạy này."],
+  unavailable: ["Chưa khả dụng", "Node đang thiếu phụ thuộc hoặc bằng chứng; không khẳng định có artifact."],
+  not_run: ["Chưa có đầu ra để xem trước", "Node chưa chạy; không suy đoán rằng artifact đã được tạo."],
 });
 
 function artifactPreviewState(value) {
@@ -445,7 +451,7 @@ export function renderArtifactPreviewMarkup(collection, state = {}) {
   const previewState = artifactPreviewState(state?.status);
   const [title, message] = ARTIFACT_PREVIEW_STATE_COPY[previewState].map(nodeText);
   const summary = `<div class="graph-preview-summary" data-artifact-state="${escapeHtml(previewState)}"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(message)}</span></div>`;
-  if (!items.length) return `${summary}<p class="graph-empty graph-preview-empty">${escapeHtml(nodeText("Preview unavailable in this node snapshot; no safe artifact was published."))}</p>`;
+  if (!items.length) return `${summary}<p class="graph-empty graph-preview-empty">${escapeHtml(nodeText("Chưa có bản xem trước an toàn trong trạng thái này."))}</p>`;
   const truncation = collected.truncated ? `<p class="graph-preview-truncated">Showing the first ${MAX_PREVIEW_ARTIFACTS} safe artifacts; additional output metadata is unavailable.</p>` : "";
   return `${summary}<div class="graph-preview-list" aria-label="Node output artifacts">${items.map(artifactPreviewItem).join("")}</div>${truncation}`;
 }
@@ -462,7 +468,7 @@ function propertyControl(node, property) {
     return `<label class="graph-property"><span>${label}</span><small>${escapeHtml(value || "Chưa có artifact")}</small><input type="file" data-graph-asset="${escapeHtml(target)}" accept="${escapeHtml(property.accept || "")}" /></label>`;
   }
   if (property.kind === "boolean") {
-    return `<label class="graph-property graph-property--toggle"><input type="checkbox" data-graph-property="${escapeHtml(target)}" ${value ? "checked" : ""} /><span>${label}</span></label>`;
+    return `<label class="graph-property graph-property--toggle"><input type="checkbox" role="switch" aria-label="${label}" data-graph-property="${escapeHtml(target)}" ${value ? "checked" : ""} /><span>${label} · <b>${value ? escapeHtml(nodeText("Bật")) : escapeHtml(nodeText("Tắt"))}</b></span></label>`;
   }
   if (property.kind === "select" || property.kind === "encoder") {
     const options = property.options || (property.kind === "encoder" ? ["auto"] : []);
@@ -1444,7 +1450,9 @@ class HubGraphEditor {
     const error = state.error ? String(state.error).slice(0, 240) : "none";
     const statusRows = [["Validation", validation], ["Dirty / downstream", dirty], ["Cache", cache], ["Progress", progress], ["Error", error]]
       .map(([label, value]) => `<div><dt>${escapeHtml(nodeText(label))}</dt><dd>${escapeHtml(nodeText(value))}</dd></div>`).join("");
-    this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(nodeText(definition?.category || "node"))}</span><h3>${escapeHtml(nodeText(definition?.title || node.hubType))}</h3><p>${escapeHtml(definition?.description || "")}</p></div><div class="graph-node-state" data-status="${escapeHtml(displayStatus)}"><b>${escapeHtml(nodeText(displayStatus))}</b><span>${escapeHtml(displayMessage)}</span></div></div>${action ? `<div class="graph-action-hint"><strong>${escapeHtml(nodeText("Bước tiếp theo"))}</strong><span>${escapeHtml(action)}</span></div>` : ""}<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Status truthful"))}</strong><dl class="graph-status-list">${statusRows}</dl></section>${preview ? `<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Safe artifact preview"))}</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Parameters"))}</strong>${(definition?.properties || []).map((property) => propertyControl(node, property)).join("") || `<p class="graph-empty">Node này không có property.</p>`}</section>`;
+    const capability = `<div class="graph-inspector__capability" data-status="${escapeHtml(displayStatus)}"><div class="graph-inspector__capability-head"><strong>${escapeHtml(nodeText(displayStatus))}</strong><span class="status-pill" data-status="${escapeHtml(displayStatus)}">${escapeHtml(nodeText(displayStatus))}</span></div><p>${escapeHtml(displayMessage || "Snapshot chưa công bố thêm giải thích.")}</p></div>`;
+    const nextAction = action || "Chưa có hành động tiếp theo trong snapshot này.";
+    this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(nodeText(definition?.category || "node"))}</span><h3>${escapeHtml(nodeText(definition?.title || node.hubType))}</h3><p>${escapeHtml(definition?.description || "")}</p></div></div><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Capability"))}</strong>${capability}</section><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Bước tiếp theo"))}</strong><div class="graph-action-hint"><span>${escapeHtml(nextAction)}</span></div></section><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Execution status"))}</strong><dl class="graph-status-list">${statusRows}</dl></section>${preview ? `<section class="graph-inspector__section"><strong>ARTIFACT</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Parameters"))}</strong>${(definition?.properties || []).map((property) => propertyControl(node, property)).join("") || `<p class="graph-empty">Node này không có property.</p>`}</section>`;
     if (this.scope === "media") {
       this.inspectorElement.querySelector(".graph-inspector__head")?.insertAdjacentHTML("afterend", this.operationEvidenceMarkup(operationEvidence ? definition : null));
       const inspectorState = this.inspectorElement.querySelector(".graph-node-state");

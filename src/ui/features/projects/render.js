@@ -16,10 +16,23 @@ const projectOptions = (projects, selected = "", label = "Chọn project…") =>
 const recipeOptions = (recipes, selected = "", label = "Không gắn recipe") => `<option value="">${escapeHtml(label)}</option>${recipes.map((recipe) => `<option value="${escapeHtml(recipe.id)}" ${recipe.id === selected ? "selected" : ""}>${escapeHtml(recipe.title)} · v${escapeHtml(recipe.version)}</option>`).join("")}`;
 
 const assetThumb = (asset, extra = "") => {
-  const image = asset.preview_url ? `<img src="${escapeHtml(asset.preview_url)}" alt="${escapeHtml(asset.name || asset.id)}" loading="lazy" />` : `<div class="asset-contact-sheet__placeholder" aria-hidden="true">${String(asset.media_type || "artifact").startsWith("video/") ? "▶" : String(asset.media_type || "artifact").startsWith("audio/") ? "♪" : "▧"}</div>`;
+  const mediaType = String(asset.media_type || "artifact").toLowerCase();
+  const kind = mediaType.startsWith("image/") ? "Ảnh" : mediaType.startsWith("video/") ? "Video" : mediaType.startsWith("audio/") ? "Âm thanh" : "Artifact";
+  const icon = mediaType.startsWith("video/") ? "▶" : mediaType.startsWith("audio/") ? "♪" : mediaType.startsWith("image/") ? "▧" : "◇";
+  const previewUrl = /^\/api\/artifacts\/artifact_[a-f0-9]{32}$/.test(String(asset.preview_url || "")) ? String(asset.preview_url) : "";
+  const previewBody = mediaType.startsWith("image/")
+    ? `<img data-asset-preview src="${escapeHtml(previewUrl)}" alt="${escapeHtml(asset.name || asset.id)}" loading="lazy" />`
+    : mediaType.startsWith("video/")
+      ? `<video data-asset-preview controls preload="metadata" src="${escapeHtml(previewUrl)}" aria-label="${escapeHtml(asset.name || asset.id)}"></video>`
+      : mediaType.startsWith("audio/")
+        ? `<audio data-asset-preview controls preload="metadata" src="${escapeHtml(previewUrl)}" aria-label="${escapeHtml(asset.name || asset.id)}"></audio>`
+        : "";
+  const image = previewUrl && previewBody ? `<div class="asset-preview-frame">${previewBody}<div class="asset-preview-fallback" data-preview-fallback hidden><span aria-hidden="true">${icon}</span><strong>Chưa có bản xem trước</strong><small>${escapeHtml(kind)} · artifact vẫn an toàn</small></div><div class="asset-preview-skeleton" data-preview-skeleton aria-hidden="true"></div></div>` : `<div class="asset-preview-frame"><div class="asset-preview-fallback"><span aria-hidden="true">${icon}</span><strong>${mediaType.startsWith("image/") || mediaType.startsWith("video/") || mediaType.startsWith("audio/") ? "Preview chưa khả dụng" : "Chưa có bản xem trước"}</strong><small>${escapeHtml(kind)} · không có URL preview opaque an toàn</small></div></div>`;
   const tags = (asset.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("");
   const lineage = asset.lineage?.parent_artifact_id ? `<small>Derived from ${escapeHtml(asset.lineage.parent_artifact_id)}</small>` : asset.lineage?.derived_artifact_ids?.length ? `<small>${escapeHtml(asset.lineage.derived_artifact_ids.length)} derived asset</small>` : "";
-  return `<article class="asset-contact-sheet__item ${extra}" data-asset-id="${escapeHtml(asset.id)}">${image}<div class="asset-contact-sheet__copy"><strong title="${escapeHtml(asset.name || asset.id)}">${escapeHtml(asset.name || asset.id)}</strong><span>${escapeHtml(asset.media_type || "artifact")} · ${formatGb(asset.size_bytes)}</span>${lineage}<div class="tag-list">${tags}</div></div></article>`;
+  const dimensions = asset.width && asset.height ? ` · ${escapeHtml(asset.width)}×${escapeHtml(asset.height)}` : "";
+  const duration = asset.duration_seconds ? ` · ${escapeHtml(asset.duration_seconds)}s` : "";
+  return `<article class="asset-contact-sheet__item ${extra}" data-asset-id="${escapeHtml(asset.id)}">${image}<div class="asset-contact-sheet__copy"><strong title="${escapeHtml(asset.name || asset.id)}">${escapeHtml(asset.name || asset.id)}</strong><span>${escapeHtml(kind)} · ${formatGb(asset.size_bytes)}${dimensions}${duration}</span>${lineage}<div class="tag-list">${tags}</div></div></article>`;
 };
 
 const renderCreativeProjects = (state) => {
@@ -85,6 +98,18 @@ const renderCreativeCompare = (state) => {
   ${differences.length ? card("Metadata / settings / provenance diff", `<div class="creative-diff-grid">${differences.map(([fieldName, values]) => `<details><summary>${escapeHtml(fieldName)} · ${values.length} artifact</summary><pre>${escapeHtml(JSON.stringify(values, null, 2))}</pre></details>`).join("")}</div>`, "", "card--wide") : `<div class="callout">Chưa có khác biệt metadata cần hiển thị. Compare Board sẽ cho diff khi có nhiều artifact với provenance/settings khác nhau.</div>`}`;
 };
 
+const workflowMiniGraph = (item) => {
+  const raw = Array.isArray(item.preview?.nodes) ? item.preview.nodes : [];
+  const fallback = [item.scope || "Input", ...(item.categories || []).slice(0, 2), "Output"];
+  const values = (raw.length ? raw : fallback).slice(0, 5);
+  const nodes = values.map((node, index) => {
+    const value = typeof node === "string" ? node : node?.title || node?.label || node?.category || "Step";
+    const color = ["#80aaff", "#cf7cff", "#f1ad5f", "#45d19a", "#ef7885"][index % 5];
+    return `<span class="workflow-mini-graph__node" style="--workflow-color:${color}"><strong>${escapeHtml(String(value))}</strong><small>${index === 0 ? "Input" : index === values.length - 1 ? "Output" : "Processing"}</small></span>`;
+  });
+  return `<div class="workflow-mini-graph" aria-label="Sơ đồ workflow">${nodes.map((node, index) => `${index ? `<span class="workflow-mini-graph__arrow" aria-hidden="true">→</span>` : ""}${node}`).join("")}</div>`;
+};
+
 const renderCreativeGallery = (state) => {
   const creative = state.creative || {};
   const filters = state.galleryFilters || {};
@@ -96,7 +121,7 @@ const renderCreativeGallery = (state) => {
     ${card("Khám phá template", `<form class="stack" data-creative-form="gallery-filter">${field("Tìm kiếm", `<input name="query" value="${escapeHtml(filters.query || "")}" placeholder="Tên, mô tả hoặc category" />`)}${field("Category", `<select name="category"><option value="">Tất cả category</option>${categories.map((item) => `<option value="${escapeHtml(item)}" ${item === filters.category ? "selected" : ""}>${escapeHtml(item)}</option>`).join("")}</select>`)}<div class="form-actions">${button("Lọc gallery")}</div></form>`) }
     ${card("Capability preflight", `<p class="small">Mỗi card bên dưới đọc availability từ node registry hiện tại. Template partial/unavailable vẫn có thể được xem, nhưng Hub sẽ nêu rõ reason/action thay vì hứa backend đã chạy.</p>`, "", "card--flat")}
   </div>
-  <section class="creative-gallery-grid" aria-label="Workflow template gallery">${gallery.map((item) => `<article class="creative-gallery-card"><div class="creative-gallery-card__preview" aria-hidden="true"><span>⌘</span><small>${escapeHtml(item.preview?.label || "workflow")}</small></div><div class="split"><div><span class="eyebrow">${escapeHtml(item.scope)} · ${escapeHtml(item.stage)}</span><h2>${escapeHtml(item.title)}</h2></div>${statusPill(item.status)}</div><p>${escapeHtml(item.description || "Tracked workflow template.")}</p><div class="tag-list">${(item.categories || []).map((categoryName) => `<span class="tag">${escapeHtml(categoryName)}</span>`).join("")}</div><div class="workspace-state creative-gallery-card__availability" data-status="${escapeHtml(item.status)}"><p>${escapeHtml(item.availability?.reason || "Chưa có availability detail.")}</p><div class="workspace-state__action"><strong>Bước tiếp theo</strong><span>${escapeHtml(item.availability?.action || "Mở template trong Hub Nodes.")}</span></div></div><div class="form-actions"><button class="button button--compact" type="button" data-gallery-use="${escapeHtml(item.id)}" data-gallery-scope="${escapeHtml(item.scope)}">Mở trong Hub Nodes</button><span class="small">${escapeHtml(item.node_count)} node</span></div></article>`).join("") || `<div class="empty-state"><strong>Không có template phù hợp</strong><span>Thử bỏ bớt điều kiện tìm kiếm hoặc kiểm tra workflow tracked.</span></div>`}</section>`;
+  <section class="creative-gallery-grid" aria-label="Workflow template gallery">${gallery.map((item) => `<article class="creative-gallery-card"><div class="creative-gallery-card__preview">${workflowMiniGraph(item)}<small>${escapeHtml(item.preview?.label || "Sơ đồ workflow · không phải output giả")}</small></div><div class="split"><div><span class="eyebrow">${escapeHtml(item.scope)} · ${escapeHtml(item.stage)}</span><h2>${escapeHtml(item.title)}</h2></div>${statusPill(item.status)}</div><p>${escapeHtml(item.description || "Template workflow đã được theo dõi.")}</p><div class="tag-list">${(item.categories || []).map((categoryName) => `<span class="tag">${escapeHtml(categoryName)}</span>`).join("")}</div><div class="workspace-state creative-gallery-card__availability" data-status="${escapeHtml(item.status)}"><p>${escapeHtml(item.availability?.reason || "Chưa có chi tiết availability.")}</p><div class="workspace-state__action"><strong>Bước tiếp theo</strong><span>${escapeHtml(item.availability?.action || "Mở template trong Hub Nodes.")}</span></div></div><div class="form-actions"><button class="button button--compact" type="button" data-gallery-use="${escapeHtml(item.id)}" data-gallery-scope="${escapeHtml(item.scope)}">Mở trong Hub Nodes</button><span class="small">${escapeHtml(item.node_count)} node</span></div></article>`).join("") || `<div class="empty-state"><strong>Không có template phù hợp</strong><span>Thử bỏ bớt điều kiện tìm kiếm hoặc kiểm tra workflow tracked.</span></div>`}</section>`;
 };
 
 return function renderCreativeWorkspace(state) {

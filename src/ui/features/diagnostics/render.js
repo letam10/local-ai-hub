@@ -1,5 +1,5 @@
 export function createDiagnosticsRenderer(deps) {
-  const { heading, escapeHtml, statusPill, uiTextHtml } = deps;
+  const { heading, escapeHtml, statusPill, statusExplanation, statusImpact, uiTextHtml } = deps;
   return function renderDiagnostics(state) {
   const diag = state.diagnostics?.snapshot || {};
   const subsystems = [
@@ -21,18 +21,21 @@ export function createDiagnosticsRenderer(deps) {
     const status = String(info?.status || "UNKNOWN").toUpperCase();
     const reason = info?.reason || "Đang tải dữ liệu kiểm tra...";
     const nextAction = info?.next_action || "Không có hành động bổ sung.";
-    return `
-      <article class="card diagnostics-card" data-subsystem="${escapeHtml(id)}" data-status="${escapeHtml(status)}">
-        <div class="split">
-          <strong>${uiTextHtml(label)}</strong>
-          ${statusPill(status.toLowerCase(), status)}
-        </div>
-        <div class="diagnostics-detail">
-          <p class="diagnostics-reason">${escapeHtml(reason)}</p>
-          <div class="diagnostics-action"><span class="small-label">Khuyến nghị:</span> ${escapeHtml(nextAction)}</div>
-        </div>
-      </article>
-    `;
+    const purpose = {
+      git_integrity: "Xác nhận source/repository không bị thay đổi ngoài contract.",
+      config_registry: "Đọc cấu hình server-owned và các registry đã allowlist.",
+      jobs_store: "Theo dõi hàng đợi, lịch sử và khả năng phục hồi tác vụ.",
+      artifact_store: "Xác nhận artifact/output được quản lý an toàn.",
+      workflow_store: "Kiểm tra Workflow Library và revision metadata.",
+      models_inventory: "Kiểm tra inventory model quan sát được, không tự cài model.",
+      environments_inventory: "Kiểm tra runtime/environment đã được khai báo.",
+      runtime_inventory: "Kiểm tra engine/runtime được phép sử dụng.",
+      storage: "Kiểm tra volume và dung lượng cho các thao tác ghi an toàn.",
+      gpu: "Đọc snapshot GPU; không tự chạy inference.",
+      latest_app_errors: "Tóm tắt lỗi ứng dụng đã được redact.",
+      recovery_forensic: "Kiểm tra dấu vết phục hồi và bản nháp cần xử lý.",
+    }[id] || "Kiểm tra một subsystem server-owned.";
+    return `<article class="card diagnostics-card" data-subsystem="${escapeHtml(id)}" data-status="${escapeHtml(status)}">${statusExplanation({ name: label, technicalId: id, purpose, status: status.toLowerCase(), reason, impact: statusImpact(status.toLowerCase(), label), nextAction, compact: true })}</article>`;
   }).join("");
 
   return heading("SYSTEM", "Diagnostics Center", "Kiểm tra toàn diện 12 subsystem phần mềm, phát hiện sự cố và hỗ trợ bảo trì an toàn (read-only first).", `

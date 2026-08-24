@@ -3900,13 +3900,14 @@
         }
         
         out[0] = nodePos[0] - left_offset;
-        out[1] = nodePos[1] - LiteGraph.NODE_TITLE_HEIGHT - top_offset;
+        var title_height = hub_title_height(this);
+        out[1] = nodePos[1] - title_height - top_offset;
         out[2] = isCollapsed ?
             (this._collapsed_width || LiteGraph.NODE_COLLAPSED_WIDTH) + right_offset :
             nodeSize[0] + right_offset;
         out[3] = isCollapsed ?
-            LiteGraph.NODE_TITLE_HEIGHT + bottom_offset :
-            nodeSize[1] + LiteGraph.NODE_TITLE_HEIGHT + bottom_offset;
+            title_height + bottom_offset :
+            nodeSize[1] + title_height + bottom_offset;
 
         if (this.onBounding) {
             this.onBounding(out);
@@ -3924,7 +3925,8 @@
     LGraphNode.prototype.isPointInside = function(x, y, margin, skip_title) {
         margin = margin || 0;
 
-        var margin_top = this.graph && this.graph.isLive() ? 0 : LiteGraph.NODE_TITLE_HEIGHT;
+        var title_height = hub_title_height(this);
+        var margin_top = this.graph && this.graph.isLive() ? 0 : title_height;
         if (skip_title) {
             margin_top = 0;
         }
@@ -3935,10 +3937,10 @@
                     x,
                     y,
                     this.pos[0] - margin,
-                    this.pos[1] - LiteGraph.NODE_TITLE_HEIGHT - margin,
+                    this.pos[1] - title_height - margin,
                     (this._collapsed_width || LiteGraph.NODE_COLLAPSED_WIDTH) +
                         2 * margin,
-                    LiteGraph.NODE_TITLE_HEIGHT + 2 * margin
+                    title_height + 2 * margin
                 )
             ) {
                 return true;
@@ -4755,6 +4757,7 @@
         slot_number,
         out
     ) {
+        var title_height = hub_title_height(this);
         out = out || new Float32Array(2);
         var num_slots = 0;
         if (is_input && this.inputs) {
@@ -4771,7 +4774,7 @@
             if (this.horizontal) {
                 out[0] = this.pos[0] + w * 0.5;
                 if (is_input) {
-                    out[1] = this.pos[1] - LiteGraph.NODE_TITLE_HEIGHT;
+                    out[1] = this.pos[1] - title_height;
                 } else {
                     out[1] = this.pos[1];
                 }
@@ -4781,7 +4784,7 @@
                 } else {
                     out[0] = this.pos[0] + w;
                 }
-                out[1] = this.pos[1] - LiteGraph.NODE_TITLE_HEIGHT * 0.5;
+                out[1] = this.pos[1] - title_height * 0.5;
             }
             return out;
         }
@@ -4817,7 +4820,7 @@
             out[0] =
                 this.pos[0] + (slot_number + 0.5) * (this.size[0] / num_slots);
             if (is_input) {
-                out[1] = this.pos[1] - LiteGraph.NODE_TITLE_HEIGHT;
+                out[1] = this.pos[1] - title_height;
             } else {
                 out[1] = this.pos[1] + this.size[1];
             }
@@ -4833,7 +4836,7 @@
         out[1] =
             this.pos[1] +
             (slot_number + 0.7) * LiteGraph.NODE_SLOT_HEIGHT +
-            (this.constructor.slot_start_y || 0);
+            (this.constructor.slot_start_y || 0) + Math.max(0, title_height - LiteGraph.NODE_TITLE_HEIGHT);
         return out;
     };
 
@@ -7205,7 +7208,7 @@ LGraphNode.prototype.executeAction = function(action)
      * @method isOverNodeBox
      **/
     LGraphCanvas.prototype.isOverNodeBox = function(node, canvasx, canvasy) {
-        var title_height = LiteGraph.NODE_TITLE_HEIGHT;
+        var title_height = hub_title_height(node);
         if (
             isInsideRectangle(
                 canvasx,
@@ -9204,6 +9207,63 @@ LGraphNode.prototype.executeAction = function(action)
      * draws the shape of the given node in the canvas
      * @method drawNodeShape
      **/
+    function hub_title_layout(node, ctx) {
+        var title = String(node && node.getTitle ? node.getTitle() : node && node.title ? node.title : "");
+        if (node && node.flags && node.flags.collapsed) {
+            return { lines: [title.substr(0, 20)], height: LiteGraph.NODE_TITLE_HEIGHT, lineHeight: 19 };
+        }
+        var width = Math.max(86, Number(node && node.size && node.size[0] || LiteGraph.NODE_WIDTH) - LiteGraph.NODE_TITLE_HEIGHT - 16);
+        var measure = function(value) {
+            if (ctx && ctx.measureText) return ctx.measureText(value).width;
+            return value.length * (LiteGraph.NODE_TEXT_SIZE * 0.56);
+        };
+        var words = title.split(/\s+/).filter(Boolean);
+        var lines = [];
+        var current = "";
+        words.forEach(function(word) {
+            if (!current && measure(word) > width) {
+                var fragment = "";
+                for (var char_index = 0; char_index < word.length; char_index += 1) {
+                    var next_fragment = fragment + word.charAt(char_index);
+                    if (fragment && measure(next_fragment) > width) {
+                        lines.push(fragment);
+                        fragment = word.charAt(char_index);
+                    } else {
+                        fragment = next_fragment;
+                    }
+                }
+                current = fragment;
+                return;
+            }
+            var candidate = current ? current + " " + word : word;
+            if (current && measure(candidate) > width) {
+                lines.push(current);
+                current = word;
+            } else {
+                current = candidate;
+            }
+        });
+        if (current) lines.push(current);
+        if (!lines.length) lines = [""];
+        if (lines.length > 3) {
+            lines = lines.slice(0, 3);
+            var last = lines[2];
+            while (last.length > 3 && measure(last + "…") > width) last = last.slice(0, -1);
+            lines[2] = last.replace(/[\s.,;:!?-]+$/, "") + "…";
+        }
+        var lineHeight = 19;
+        var height = LiteGraph.NODE_TITLE_HEIGHT + Math.max(0, lines.length - 1) * lineHeight;
+        node._hub_title_lines = lines;
+        node._hub_title_height = height;
+        return { lines: lines, height: height, lineHeight: lineHeight };
+    }
+
+    function hub_title_height(node) {
+        if (node && Number.isFinite(node._hub_title_height)) return node._hub_title_height;
+        var title = String(node && node.getTitle ? node.getTitle() : node && node.title ? node.title : "");
+        return LiteGraph.NODE_TITLE_HEIGHT + (title.length > 24 ? 19 : 0) + (title.length > 48 ? 19 : 0);
+    }
+
     var tmp_area = new Float32Array(4);
 
     LGraphCanvas.prototype.drawNodeShape = function(
@@ -9219,7 +9279,9 @@ LGraphNode.prototype.executeAction = function(action)
         ctx.strokeStyle = fgcolor;
         ctx.fillStyle = bgcolor;
 
-        var title_height = LiteGraph.NODE_TITLE_HEIGHT;
+        ctx.font = this.title_text_font;
+        var title_layout = hub_title_layout(node, ctx);
+        var title_height = title_layout.height;
         var low_quality = this.ds.scale < 0.5;
 
         //render node area depending on shape
@@ -9419,23 +9481,14 @@ LGraphNode.prototype.executeAction = function(action)
                             node.constructor.title_text_color ||
                             this.node_title_color;
                     }
-                    if (node.flags.collapsed) {
-                        ctx.textAlign = "left";
-                        var measure = ctx.measureText(title);
+                    ctx.textAlign = "left";
+                    title_layout.lines.forEach(function(line, index) {
                         ctx.fillText(
-                            title.substr(0,20), //avoid urls too long
-                            title_height,// + measure.width * 0.5,
-                            LiteGraph.NODE_TITLE_TEXT_Y - title_height
-                        );
-                        ctx.textAlign = "left";
-                    } else {
-                        ctx.textAlign = "left";
-                        ctx.fillText(
-                            title,
+                            line,
                             title_height,
-                            LiteGraph.NODE_TITLE_TEXT_Y - title_height
+                            -title_height + 20 + index * title_layout.lineHeight
                         );
-                    }
+                    });
                 }
             }
 

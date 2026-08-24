@@ -35,7 +35,7 @@ from .config import hub_config
 from .core import capability_control_plane, component_statuses, get_job_or_error, health, prepare_owned_shutdown, submit_graph, submit_tool, tool_catalog
 from .jobs import flush as flush_jobs
 from .jobs import reconcile_startup
-from .jobs import get_job, list_jobs
+from .jobs import clear_terminal_history, delete_job, get_job, list_jobs
 from .v5_productization import admit_durable_job, durable_jobs_snapshot, reconcile_durable_jobs, resume_durable_job
 from src.services.product_surface import project_product_surface
 from .context import ApiContext
@@ -280,6 +280,8 @@ def _api_context() -> ApiContext:
             "workflow_library_store": _workflow_library_store,
             "list_jobs": list_jobs,
             "get_job": get_job,
+            "delete_job": delete_job,
+            "clear_terminal_history": clear_terminal_history,
             "durable_jobs_snapshot": durable_jobs_snapshot,
             "admit_durable_job": admit_durable_job,
             "resume_durable_job": resume_durable_job,
@@ -314,6 +316,8 @@ def _api_context() -> ApiContext:
             "component_statuses": component_statuses,
             "list_jobs": list_jobs,
             "get_job": get_job,
+            "delete_job": delete_job,
+            "clear_terminal_history": clear_terminal_history,
             "durable_jobs_snapshot": durable_jobs_snapshot,
             "admit_durable_job": admit_durable_job,
             "resume_durable_job": resume_durable_job,

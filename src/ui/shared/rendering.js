@@ -78,6 +78,7 @@ const READINESS_STATUS_LABELS = Object.freeze({
   error: "Error",
   available: "Available",
   installed: "Installed",
+  not_installed: "Not installed",
   planned: "Planned",
   missing: "Missing",
   unknown: "Unknown",
@@ -89,6 +90,16 @@ const READINESS_STATUS_LABELS = Object.freeze({
   failed: "Failed",
   interrupted: "Interrupted",
   completed: "Completed",
+  blocked: "Blocked",
+  degraded: "Degraded",
+  needs_setup: "Needs setup",
+  waiting: "Waiting",
+  not_applicable: "Not applicable",
+  unsupported: "Unsupported",
+  recovery_required: "Recovery required",
+  incompatible: "Incompatible",
+  attention: "Needs attention",
+  external_managed: "External app",
 });
 const UI_STATUS_RE = /^[a-z][a-z0-9_-]{0,39}$/;
 const uiStatus = (value, fallback = "unknown") => {
@@ -103,13 +114,54 @@ const readinessStatusLabel = (value) => {
   const normalized = readinessStatus(value);
   return READINESS_STATUS_LABELS[normalized] || formatStatus(normalized);
 };
-const statusPill = (status) => {
+const STATUS_SEVERITY = Object.freeze({
+  operational: "success", healthy: "success", ready: "success", clean: "success", available: "success", installed: "success", running: "success", completed: "success",
+  partial: "warning", degraded: "warning", needs_setup: "warning", unavailable: "warning", missing: "warning", not_installed: "warning", attention: "warning", cancelling: "warning",
+  error: "error", failed: "error", blocked: "error", incompatible: "error", recovery_required: "error",
+  not_run: "neutral", planned: "neutral", not_published: "neutral", waiting: "neutral", starting: "neutral", queued: "neutral", cancelled: "neutral", interrupted: "neutral", unknown: "neutral",
+  not_applicable: "muted", unsupported: "muted", external_managed: "muted",
+});
+const statusSeverity = (status) => STATUS_SEVERITY[readinessStatus(status)] || "neutral";
+const STATUS_MEANINGS = Object.freeze({
+  success: ["Đang hoạt động", "Không phát hiện lỗi trong snapshot hiện tại.", "Bạn không cần làm gì thêm lúc này."],
+  warning: ["Chưa sẵn sàng đầy đủ", "Chức năng đang thiếu setup, bằng chứng hoặc phụ thuộc cần kiểm tra.", "Mở phần thiết lập được nêu ở Bước tiếp theo; không tự chạy workload."],
+  error: ["Đang lỗi hoặc bị chặn", "Một phụ thuộc bắt buộc đã lỗi, không hợp lệ hoặc bị từ chối.", "Sửa nguyên nhân được nêu, rồi làm mới trạng thái trước khi thử lại."],
+  neutral: ["Chưa chạy / chưa công bố", "Đây là trạng thái thông tin; chưa có lần chạy hoặc bằng chứng công bố, không tự khẳng định lỗi.", "Chờ bằng chứng hoặc thực hiện Bước tiếp theo nếu bạn cần chức năng này."],
+  muted: ["Không áp dụng", "Chức năng này do ứng dụng ngoài quản lý hoặc chưa được Hub hỗ trợ trong contract hiện tại.", "Không cần sửa trong Hub; xem hướng dẫn tích hợp nếu muốn mở rộng."],
+});
+const statusImpact = (status, purpose = "chức năng này") => {
+  const severity = statusSeverity(status);
+  if (severity === "success") return `${purpose} có thể được sử dụng theo bằng chứng hiện tại.`;
+  if (severity === "error") return `${purpose} bị chặn; các thao tác phụ thuộc có thể không chạy.`;
+  if (severity === "warning") return `${purpose} chưa nên được coi là operational; thao tác nặng sẽ bị giữ an toàn.`;
+  if (severity === "muted") return `${purpose} không thuộc phạm vi thực thi của Hub trong trạng thái này.`;
+  return `${purpose} chưa được xác nhận đã chạy hoặc đã phát hành.`;
+};
+const statusPill = (status, labelOverride = "") => {
   // Snapshot status values are data, not translation keys.  Collapse any
   // unknown-but-well-shaped value to the fixed Unknown label before it can
   // reach the translator.
   const normalized = readinessStatus(status);
-  const label = READINESS_STATUS_LABELS[normalized] || READINESS_STATUS_LABELS.unknown;
-  return `<span class="status-pill" data-status="${escapeHtml(normalized)}">${uiTextHtml(label)}</span>`;
+  const label = labelOverride || READINESS_STATUS_LABELS[normalized] || READINESS_STATUS_LABELS.unknown;
+  return `<span class="status-pill" data-status="${escapeHtml(normalized)}" data-severity="${escapeHtml(statusSeverity(normalized))}" title="${escapeHtml(statusMeaning(normalized).summary)}">${uiTextHtml(label)}</span>`;
+};
+const statusMeaning = (status) => {
+  const severity = statusSeverity(status);
+  const copy = STATUS_MEANINGS[severity] || STATUS_MEANINGS.neutral;
+  return { severity, summary: copy[0], reasonFallback: copy[1], actionFallback: copy[2] };
+};
+const statusExplanation = ({ name, technicalId = "", purpose = "Chức năng server-owned", status = "unknown", reason = "", impact = "", nextAction = "", compact = false } = {}) => {
+  const normalized = readinessStatus(status);
+  const meaning = statusMeaning(normalized);
+  // Names often contain user/server-owned identifiers; translate only fixed
+  // explanatory copy, never rewrite a dynamic label such as a component name.
+  const safeName = safeUiText(name, "Mục trạng thái");
+  const safeId = safeUiIdentifier(technicalId, "");
+  const safePurpose = uiText(safeUiText(purpose, "Chức năng server-owned"));
+  const safeReason = uiText(safeUiText(reason, meaning.reasonFallback));
+  const safeImpact = uiText(safeUiText(impact, statusImpact(normalized, safePurpose)));
+  const safeAction = uiText(safeUiText(nextAction, meaning.actionFallback));
+  return `<details class="status-explanation${compact ? " status-explanation--compact" : ""}" data-status-explanation data-status="${escapeHtml(normalized)}" data-severity="${escapeHtml(meaning.severity)}"><summary><span class="status-explanation__title"><strong>${escapeHtml(safeName)}</strong>${safeId ? `<code>${escapeHtml(safeId)}</code>` : ""}</span>${statusPill(normalized)}</summary><div class="status-explanation__body"><div><span class="status-explanation__label">${uiText("Dùng để làm gì")}</span><p>${escapeHtml(safePurpose)}</p></div><div><span class="status-explanation__label">${uiText("Trạng thái này nghĩa là gì")}</span><p>${escapeHtml(uiText(meaning.summary))}</p></div><div><span class="status-explanation__label">${uiText("Tại sao")}</span><p>${escapeHtml(safeReason)}</p></div><div><span class="status-explanation__label">${uiText("Ảnh hưởng")}</span><p>${escapeHtml(safeImpact)}</p></div><div><span class="status-explanation__label">${uiText("Bước tiếp theo")}</span><p>${escapeHtml(safeAction)}</p></div></div></details>`;
 };
 const unsafeUiText = /(?:[a-z]:[\\/]|\\\\|(?:^|\s)\/(?:etc|tmp|var|home)(?:[\\/]|$)|(?:file|data):|(?:api[_-]?key|password|secret|token)\s*[:=])/i;
 const safeUiText = (value, fallback = "") => {
@@ -132,6 +184,24 @@ const safeJobStatus = (value, fallback = "unavailable") => {
 const safeJobTimestamp = (value) => {
   const candidate = safeUiText(value, "");
   return /^[0-9T:.+Z-]{8,80}$/.test(candidate) ? candidate : "";
+};
+const JOB_HUMAN_TITLES = Object.freeze({
+  segment_from_points: "Phân đoạn đối tượng từ điểm",
+  segment_from_box: "Phân đoạn đối tượng từ khung",
+  transcribe_media: "Chuyển âm thanh thành văn bản",
+  run_media_operation: "Xử lý media",
+  upscale_anime_video: "Nâng cấp video AnimeSR",
+  generate_flux: "Tạo ảnh FLUX",
+  generate_qwen_image: "Tạo/chỉnh ảnh Qwen",
+  text_to_speech: "Tạo giọng nói",
+  design_voice: "Thiết kế giọng nói",
+  clone_voice: "Nhân bản giọng nói",
+  convert_voice: "Chuyển đổi giọng nói",
+});
+const humanJobTitle = (value) => {
+  const candidate = typeof value === "string" ? value.trim() : "";
+  if (!candidate) return "Tác vụ Hub";
+  return JOB_HUMAN_TITLES[candidate] || candidate.replace(/[_-]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 };
 const safeJobCount = (value, fallback = 0) => Number.isInteger(value) && value >= 0 && value <= 500 ? value : fallback;
 const safeArtifactMediaType = (value) => {
@@ -181,6 +251,8 @@ const safeHotJobDetail = (value) => {
   return {
     lifecycle: safeUiText(lifecycleValue),
     message: safeUiText(detail.message),
+    error: safeUiText(detail.error),
+    reason: safeUiText(detail.reason),
     contractVersion: safeUiText(detail.contract_version),
     createdAt: safeJobTimestamp(detail.created_at),
     startedAt: safeJobTimestamp(detail.started_at),
@@ -205,8 +277,10 @@ const safeReadinessModules = (state) => {
       kind: fromProductSurface ? safeUiIdentifier(record.provider, "server-owned") : safeUiText(record.kind || record.provider, "component"),
       version: safeUiText(record.version),
       status: readinessStatus(record.status || record.component_status, "missing"),
-      reason: safeUiText(record.reason, "No additional reason was published in this server snapshot."),
-      nextAction: safeUiText(record.next_action, "Review the server-owned evidence before runtime work."),
+      purpose: safeUiText(record.purpose, "Kiểm tra phụ thuộc backend/model trước khi workflow sử dụng."),
+      reason: safeUiText(record.reason, "Snapshot chưa công bố thêm nguyên nhân an toàn."),
+      impact: safeUiText(record.impact, ""),
+      nextAction: safeUiText(record.next_action, "Xem bằng chứng server-owned trước khi yêu cầu runtime."),
     };
   });
 };
@@ -454,13 +528,15 @@ const jobRecoverySnapshot = (state) => {
       id,
       actionId,
       tool: safeUiText(item.tool, "Job"),
+      title: humanJobTitle(item.tool),
+      jobType: safeUiIdentifier(item.tool, "hub_job"),
       source: jobSource,
       sourceLabel: jobSource === "durable" ? "Durable" : "Hot",
       status,
       progress,
       resumable: item.resumable === true,
-      reason: safeUiText(item.reason),
-      nextAction: safeUiText(item.next_action, "Review the job state and create a new task when recovery is unavailable."),
+      reason: safeUiText(item.reason || item.error || detail?.error || detail?.reason || detail?.message, "Chưa có nguyên nhân an toàn trong snapshot này."),
+      nextAction: safeUiText(item.next_action, "Kiểm tra backend liên quan rồi tạo lại tác vụ nếu cần."),
       lifecycle: detail?.lifecycle || durableLifecycle,
       lifecycleNote: detail?.message || "",
       contractVersion: detail?.contractVersion || "",
@@ -515,8 +591,8 @@ const jobRecoverySnapshot = (state) => {
   };
 };
 const readinessModuleDetails = (modules) => modules.length
-  ? modules.map((item) => `<article class="readiness-module" data-status="${escapeHtml(item.status)}" role="listitem"><div class="readiness-module__head"><div><h3>${escapeHtml(item.label)}</h3><p>${escapeHtml(item.kind)}${item.version ? ` · ${escapeHtml(item.version)}` : ""}</p></div>${statusPill(item.status, readinessStatusLabel(item.status))}</div><div class="readiness-module__guidance"><div><span>Reason</span><p>${escapeHtml(item.reason)}</p></div><div><span>Next action</span><p>${escapeHtml(item.nextAction)}</p></div></div></article>`).join("")
-  : `<div class="empty-state compact"><strong>No module rows published</strong><span>The server snapshot contains no safe module projection.</span></div>`;
+  ? modules.map((item) => `<article class="readiness-module" data-status="${escapeHtml(item.status)}" role="listitem">${statusExplanation({ name: item.label, technicalId: item.id, purpose: item.purpose || `${item.kind || "Server-owned"} capability`, status: item.status, reason: item.reason, impact: item.impact, nextAction: item.nextAction })}</article>`).join("")
+  : `<div class="empty-state compact"><strong>Chưa có dòng module</strong><span>Snapshot server chưa công bố projection module an toàn; không có lỗi runtime nào được suy đoán.</span></div>`;
 const readinessFitLabel = (fit) => fit === true ? "Fit" : fit === false ? "No fit" : "Unknown";
 const readinessResourceDetails = (resource) => {
   const target = resource.targetGpu;
@@ -648,7 +724,7 @@ const artifactList = (value) => {
     const mediaType = String(item.media_type || "application/octet-stream").split(";", 1)[0].trim().toLowerCase();
     const isImage = mediaType.startsWith("image/");
     const mask = isMaskArtifact(item, name);
-    const previewButton = url ? `<button class="button button--compact" type="button" data-focus-key="artifact-preview-opener" data-preview-artifact="${escapeHtml(id)}" data-artifact-url="${escapeHtml(url)}" data-artifact-name="${escapeHtml(name)}" data-artifact-type="${escapeHtml(mediaType)}" data-artifact-mask="${mask}" data-artifact-meta="${escapeHtml(artifactMetadata(item))}" data-artifact-provenance="${escapeHtml(artifactProvenance(item))}">Xem</button>` : `<span class="artifact-unavailable">Preview unavailable</span>`;
+    const previewButton = url ? `<button class="button button--compact" type="button" data-focus-key="artifact-preview-opener" data-preview-artifact="${escapeHtml(id)}" data-artifact-url="${escapeHtml(url)}" data-artifact-name="${escapeHtml(name)}" data-artifact-type="${escapeHtml(mediaType)}" data-artifact-mask="${mask}" data-artifact-meta="${escapeHtml(artifactMetadata(item))}" data-artifact-provenance="${escapeHtml(artifactProvenance(item))}" aria-label="Artifact preview">Xem</button>` : `<span class="artifact-unavailable">Preview unavailable</span>`;
     const saveLink = url ? `<a class="button button--compact" href="${escapeHtml(url)}" download="${escapeHtml(name)}">Lưu/Xuất</a>` : "";
     const openButton = id ? `<button class="button button--compact" type="button" data-open-artifact="${escapeHtml(id)}">Mở</button>` : "";
     return `<div class="artifact-item">${isImage && url ? `<img class="artifact-preview${mask ? " artifact-preview--mask" : ""}" src="${escapeHtml(url)}" alt="${escapeHtml(mask ? `Mask raster: ${name}` : name)}" />` : ""}<div class="row-main"><div class="row-name">${escapeHtml(name)}</div><div class="row-meta">${escapeHtml(mediaType)} · ${formatGb(item.size_bytes)}${mask ? " · mask" : ""}</div></div>${previewButton}${saveLink}${openButton}</div>`;
@@ -663,4 +739,4 @@ const provenanceList = (job) => {
 
 const formResult = (id) => `<div class="form-result" id="${escapeHtml(id)}" role="status" aria-live="polite"></div>`;
 
-export { escapeHtml, formatGb, formatStatus, translateText, uiText, uiTextHtml, dynamicTextHtml, component, tool, app, opaqueArtifactId, opaqueArtifactUrl, safeArtifactName, artifactMetadata, artifactProvenance, isMaskArtifact, READINESS_STATUS_LABELS, UI_STATUS_RE, uiStatus, readinessStatus, readinessStatusLabel, statusPill, unsafeUiText, safeUiText, safeUiIdentifier, safeJobId, safeJobStatus, safeJobTimestamp, safeJobCount, safeArtifactMediaType, safeJobArtifacts, safeJobProvenance, safeHotJobDetail, safeReadinessModules, safeStorageVolumes, safeResourceGpu, safeResourceFits, safeResourceErrors, safeResourceActions, safeResourcePlan, readinessSnapshot, MEDIA_EVIDENCE_OPERATIONS, MEDIA_EVIDENCE_LABELS, MEDIA_EVIDENCE_OUTCOME_LABELS, MEDIA_EVIDENCE_EXECUTION_LABELS, unsafeMediaEvidenceText, isMediaEvidenceRecord, exactMediaOperationList, safeMediaEvidenceText, mediaEvidenceFallback, normalizeRuntimeMediaEvidence, normalizeMediaOperationScope, mediaCapabilityEvidence, mediaEvidencePanel, JOB_STATUS_RANK, textKey, jobRecoverySnapshot, readinessModuleDetails, readinessFitLabel, readinessResourceDetails, readinessStorageDetails, heading, card, cardDynamic, field, fieldDynamic, file, files, button, capability, workspaceState, workflowLibraryState, activeTab, moduleTabs, imageModuleTabs, nodeStudio, imageWorkflowRail, videoWorkflowRail, visionWorkflowRail, artifacts, legacyArtifactList, artifactList, provenanceList, formResult };
+export { escapeHtml, formatGb, formatStatus, translateText, uiText, uiTextHtml, dynamicTextHtml, component, tool, app, opaqueArtifactId, opaqueArtifactUrl, safeArtifactName, artifactMetadata, artifactProvenance, isMaskArtifact, READINESS_STATUS_LABELS, STATUS_SEVERITY, UI_STATUS_RE, uiStatus, readinessStatus, readinessStatusLabel, statusSeverity, statusMeaning, statusImpact, statusPill, statusExplanation, unsafeUiText, safeUiText, safeUiIdentifier, safeJobId, safeJobStatus, safeJobTimestamp, safeJobCount, humanJobTitle, safeArtifactMediaType, safeJobArtifacts, safeJobProvenance, safeHotJobDetail, safeReadinessModules, safeStorageVolumes, safeResourceGpu, safeResourceFits, safeResourceErrors, safeResourceActions, safeResourcePlan, readinessSnapshot, MEDIA_EVIDENCE_OPERATIONS, MEDIA_EVIDENCE_LABELS, MEDIA_EVIDENCE_OUTCOME_LABELS, MEDIA_EVIDENCE_EXECUTION_LABELS, unsafeMediaEvidenceText, isMediaEvidenceRecord, exactMediaOperationList, safeMediaEvidenceText, mediaEvidenceFallback, normalizeRuntimeMediaEvidence, normalizeMediaOperationScope, mediaCapabilityEvidence, mediaEvidencePanel, JOB_STATUS_RANK, textKey, jobRecoverySnapshot, readinessModuleDetails, readinessFitLabel, readinessResourceDetails, readinessStorageDetails, heading, card, cardDynamic, field, fieldDynamic, file, files, button, capability, workspaceState, workflowLibraryState, activeTab, moduleTabs, imageModuleTabs, nodeStudio, imageWorkflowRail, videoWorkflowRail, visionWorkflowRail, artifacts, legacyArtifactList, artifactList, provenanceList, formResult };
