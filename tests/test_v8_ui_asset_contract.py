@@ -78,6 +78,12 @@ class UiAssetContractTests(unittest.TestCase):
         self.assertIn('this.addOutput(nodeText(port.label || port.name)', studio)
         self.assertIn('nodeText(definition.title)', studio)
 
+    def test_airi_external_state_is_explicitly_unconnected(self) -> None:
+        renderer = (ROOT / "src" / "ui" / "features" / "airi" / "render.js").read_text(encoding="utf-8")
+        i18n = (ROOT / "src" / "ui" / "i18n.js").read_text(encoding="utf-8")
+        self.assertIn('card("Ứng dụng ngoài — chưa kết nối"', renderer)
+        self.assertIn('"Ứng dụng ngoài — chưa kết nối"', i18n)
+
 
 if __name__ == "__main__":
     unittest.main()

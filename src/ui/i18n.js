@@ -211,7 +211,7 @@ const V8_VI_UI_COPY = Object.freeze({
   "Media operation scope is not applied to this workspace; no execution is claimed.": "Phạm vi thao tác media không áp dụng cho workspace này; không tuyên bố thực thi.",
   "unavailable": "chưa khả dụng",
   "Size unavailable": "Kích thước chưa có", "Check All Updates": "Kiểm tra tất cả cập nhật", "Output": "Đầu ra", "Image": "Hình ảnh",
-  "AIRI external": "AIRI bên ngoài", "Open AIRI Settings in the AIRI application; Hub only uses an allowlist to call the registered launcher.": "Mở Cài đặt AIRI trong ứng dụng AIRI; Hub chỉ dùng allowlist để gọi launcher đã đăng ký.",
+  "AIRI external": "AIRI bên ngoài", "Ứng dụng ngoài — chưa kết nối": "Ứng dụng ngoài — chưa kết nối", "Open AIRI Settings in the AIRI application; Hub only uses an allowlist to call the registered launcher.": "Mở Cài đặt AIRI trong ứng dụng AIRI; Hub chỉ dùng allowlist để gọi launcher đã đăng ký.",
   "Image sequence to video": "Chuỗi ảnh thành video", "Image resize": "Đổi kích thước ảnh", "Image crop": "Cắt ảnh", "Image rotate": "Xoay ảnh", "Image flip": "Lật ảnh", "Image convert": "Chuyển đổi định dạng ảnh", "Image compress": "Nén ảnh",
   "No recovery reason was published in this snapshot.": "Snapshot này không công bố lý do khôi phục.",
   "Review the job state and create a new task when recovery is unavailable.": "Xem trạng thái tác vụ và tạo tác vụ mới khi không thể khôi phục.",
