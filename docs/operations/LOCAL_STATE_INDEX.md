@@ -10,6 +10,8 @@ This index records a bounded, read-only discovery of the Local AI Hub machine st
 
 The requested `docs/operations/LOCAL_STATE_ARCHIVE_POLICY.md` was not present in the local checkout and was not present in `origin/main` at discovery time. That absence is recorded deliberately; the applicable controls for this batch are the repository `AGENTS.md` rules and the explicit local-only archive request. A future policy file should supersede this note without treating this index as an authority for destructive cleanup.
 
+The initial archive was created before policy PR #106 reached `main`. After PR #106 merged, this branch was synchronized with `origin/main` at `1c03bc2354d3d690b5c57629669c0dbcf992b4b0` and all five archive files were re-reviewed against the policy now tracked there. The existing metadata remains sanitized and inventory-only; no large-tree rescan or content hash was needed for this re-review.
+
 ## Classification summary
 
 | Classification | Discovery result | Repository action | Purpose |
@@ -32,7 +34,7 @@ The local enumeration covered the selected repository and state roots below. Cou
 | `workflows/` and `workflows/comfyui/` | `TRACKABLE_SOURCE` | 13 | 20,923 | All canonical first-party workflow/template definitions are already tracked |
 | `tests/fixtures`, `src/ui/assets` | `TRACKABLE_SOURCE` | 0 new | 0 new | No untracked fixture or first-party asset was found |
 
-The source-area byte subtotal is intentionally not used as a release size: local counts include ignored interpreter caches where present, while tracked content is the reviewable source of truth. The exact tracked baseline in the archive checkout is 743 files.
+The source-area byte subtotal is intentionally not used as a release size: local counts include ignored interpreter caches where present, while tracked content is the reviewable source of truth. After the policy sync, `origin/main` contains 764 tracked files and this archive branch contains exactly 769 tracked files (main plus the five archive files).
 
 ## Sanitized Config snapshots
 

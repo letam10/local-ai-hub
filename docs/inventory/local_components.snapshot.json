@@ -1,5 +1,7 @@
 {
   "schema_version": "local-state-snapshot.v1",
+  "observed_at": "2026-08-24",
+  "source_scope": "machine_local_snapshot",
   "source": "Config/components.json",
   "classification": "SANITIZED_METADATA",
   "local_only": true,

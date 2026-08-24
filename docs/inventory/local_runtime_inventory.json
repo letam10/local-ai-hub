@@ -1,5 +1,7 @@
 {
   "schema_version": "local-state-inventory.v1",
+  "observed_at": "2026-08-24",
+  "source_scope": "machine_local_snapshot",
   "classification": "LARGE_RUNTIME_DATA",
   "local_only": true,
   "generated_from": "bounded filesystem metadata enumeration on 2026-08-24",
