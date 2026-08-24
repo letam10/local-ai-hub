@@ -42,6 +42,26 @@ class UiAssetContractTests(unittest.TestCase):
         self.assertIn('uiText("V8 source acceptance")', control_plane)
         self.assertIn('uiTextHtml("Component Operations")', renderer)
 
+    def test_models_and_resource_fit_use_localized_fixed_labels(self) -> None:
+        models = (ROOT / "src" / "ui" / "features" / "models" / "models.js").read_text(encoding="utf-8")
+        pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
+        rendering = (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
+        self.assertIn("uiTextHtml(action)", models)
+        self.assertIn('uiTextHtml("Check Update")', models)
+        self.assertIn("uiTextHtml });", pages)
+        self.assertIn("uiTextHtml(item.kind)", rendering)
+        self.assertIn("uiTextHtml(readinessFitLabel(item.fit))", rendering)
+
+    def test_storage_partial_copy_is_explicit_and_localized(self) -> None:
+        models = (ROOT / "src" / "ui" / "features" / "models" / "models.js").read_text(encoding="utf-8")
+        rendering = (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
+        i18n = (ROOT / "src" / "ui" / "i18n.js").read_text(encoding="utf-8")
+        self.assertIn('value?.complete === false || value?.status === "partial"', models)
+        self.assertIn('volume.status === "partial"', rendering)
+        self.assertIn('"At least": "Đã tính ít nhất"', i18n)
+        self.assertIn('uiTextHtml("Model")', models)
+        self.assertIn('uiTextHtml("Check")', models)
+
 
 if __name__ == "__main__":
     unittest.main()
