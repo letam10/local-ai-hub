@@ -105,6 +105,8 @@ const NODE_COPY = Object.freeze({
   "Open preview": "Mở bản xem trước",
   "Inspector / Live preview": "Bảng kiểm tra / Preview trực tiếp",
   "No properties": "Node này không có thuộc tính.",
+  "Build video creative graph": "Tạo graph sáng tạo video", "Library": "Thư viện", "ready": "sẵn sàng", "LiteGraph workflow canvas": "Canvas workflow LiteGraph", "Run Graph": "Chạy graph",
+  "No completed exact evidence is available in this server snapshot.": "Snapshot máy chủ chưa có bằng chứng chính xác đã hoàn tất.",
 });
 const NODE_STATIC_TEXT = Object.freeze([
   "NODE WORKFLOW", "Recent", "Recent workflows", "Export JSON", "Import JSON", "Preview indicator (manual; no auto-run)",
@@ -777,7 +779,7 @@ class HubGraphEditor {
     const libraryStatus = this.root.querySelector("[data-workflow-library-status]");
     if (libraryStatus) {
       libraryStatus.dataset.workflowLibraryStatus = this.workflowLibraryState.status || "partial";
-      libraryStatus.textContent = "Library: " + (this.workflowLibraryState.status || "partial");
+      libraryStatus.textContent = `${nodeText("Library")}: ${nodeText(this.workflowLibraryState.status || "partial")}`;
       libraryStatus.title = this.workflowLibraryState.reason || "";
     }
     this.refreshRecentControls();
@@ -898,7 +900,7 @@ class HubGraphEditor {
         </header>
         <div class="graph-editor__workflow-bar"><label class="graph-workflow-title"><span>Tên workflow</span><input data-graph-title aria-label="Tên workflow" value="${escapeHtml(this.graphData.title || "")}" /></label><label class="graph-workflow-recent"><span>Recent</span><select data-graph-recent aria-label="Recent workflows"><option value="">Chọn workflow local…</option>${this.recentOptions()}</select></label><span class="graph-save-state" data-graph-save-state>Đã lưu local</span><button class="button button--compact" type="button" data-graph-action="duplicate">Nhân bản</button></div>
         <div class="graph-editor__toolbar">
-          <div class="graph-editor__toolbar-group"><button class="button button--primary" type="button" data-graph-action="run" aria-label="Run Graph"${this.runButtonAttributes()}>Chạy workflow</button><button class="button" type="button" data-graph-action="validate">Kiểm tra</button><button class="button" type="button" data-graph-action="cancel" disabled>Hủy job</button><button class="button" type="button" data-graph-action="undo">Hoàn tác</button><button class="button" type="button" data-graph-action="redo">Làm lại</button></div>
+          <div class="graph-editor__toolbar-group"><button class="button button--primary" type="button" data-graph-action="run" aria-label="${escapeHtml(nodeText("Run Graph"))}"${this.runButtonAttributes()}>Chạy workflow</button><button class="button" type="button" data-graph-action="validate">Kiểm tra</button><button class="button" type="button" data-graph-action="cancel" disabled>Hủy job</button><button class="button" type="button" data-graph-action="undo">Hoàn tác</button><button class="button" type="button" data-graph-action="redo">Làm lại</button></div>
           <div class="graph-editor__toolbar-group"><select data-graph-preset aria-label="Preset workflow"><option value="">Chọn template…</option>${this.presets.map((item) => `<option value="${escapeHtml(item.id)}" title="${escapeHtml(item.description || "")}">${escapeHtml(item.title)}${item.stage ? ` · ${escapeHtml(item.stage)}` : ""}</option>`).join("")}</select><button class="button" type="button" data-graph-action="save-local">Lưu local</button><button class="button" type="button" data-graph-action="export">Export JSON</button><label class="button graph-editor__import">Import JSON<input type="file" data-graph-import accept="application/json,.json" /></label></div>
         </div>
         <div class="graph-editor__options"><label><input type="checkbox" data-graph-option="auto" ${this.autoPreview ? "checked" : ""} /> Preview tự động (Auto Preview)</label><label><input type="checkbox" data-graph-option="draft" ${this.draft ? "checked" : ""} /> Draft ảnh</label><span>Bấm node để cộng dồn lựa chọn · Ctrl/Shift cũng cộng dồn · kéo nhóm để di chuyển · kéo vùng để chọn · bấm nền trống, Esc hoặc Xóa chọn để bỏ chọn</span></div>
@@ -977,11 +979,11 @@ class HubGraphEditor {
       libraryTools.append(libraryButton);
     }
     const autoPreviewLabel = this.root.querySelector('[data-graph-option="auto"]')?.parentElement;
-    if (autoPreviewLabel?.lastChild) autoPreviewLabel.lastChild.textContent = " Preview indicator (manual; no auto-run)";
+    if (autoPreviewLabel?.lastChild) autoPreviewLabel.lastChild.textContent = ` ${nodeText("Preview indicator (manual; no auto-run)")}`;
     this.canvasElement = this.root.querySelector("[data-graph-canvas]");
     this.canvasElement.tabIndex = 0;
     this.canvasElement.setAttribute("role", "application");
-    this.canvasElement.setAttribute("aria-label", "LiteGraph workflow canvas");
+    this.canvasElement.setAttribute("aria-label", nodeText("LiteGraph workflow canvas"));
     this.minimap = this.root.querySelector("[data-graph-minimap]");
     this.paletteElement = this.root.querySelector("[data-graph-palette]");
     this.inspectorElement = this.root.querySelector("[data-graph-inspector]");

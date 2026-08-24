@@ -261,6 +261,12 @@ const V8_VI_UI_COPY = Object.freeze({
   "Resource fit is planning evidence only; no provider, install, repair, uninstall, GPU or media operation ran.": "Mức phù hợp tài nguyên chỉ là bằng chứng lập kế hoạch; chưa chạy provider, cài đặt, sửa chữa, gỡ cài đặt, GPU hay thao tác media.",
   "STORAGE CONSTRAINTS": "RÀNG BUỘC LƯU TRỮ", "Allowlisted volume constraints": "Ràng buộc ổ đĩa theo allowlist", "Server-owned snapshot": "Snapshot do máy chủ sở hữu", "Low-space action": "Hành động khi sắp hết dung lượng",
   "Download & Install": "Tải xuống & cài đặt", "Authorize & Install": "Cấp quyền & cài đặt", "Review License": "Kiểm tra giấy phép", "Manual Review": "Kiểm tra thủ công", "Check Update": "Kiểm tra cập nhật", "Plan Update": "Lập kế hoạch cập nhật", "Roll Back": "Quay lại phiên bản trước", "Update Center": "Trung tâm cập nhật",
+  "Build video creative graph": "Tạo graph sáng tạo video", "Library: ready": "Thư viện: sẵn sàng", "Preview indicator (manual; no auto-run)": "Chỉ báo xem trước (thủ công; không tự chạy)",
+  "No completed exact evidence is available in this server snapshot.": "Snapshot máy chủ chưa có bằng chứng chính xác đã hoàn tất.", "Run Graph": "Chạy graph", "Track server-owned queue and recovery state; actions only appear when the published record gates them.": "Theo dõi hàng đợi và trạng thái khôi phục do máy chủ sở hữu; chỉ hiện hành động khi bản ghi đã công bố cho phép.",
+  "Models Inventory": "Kiểm kê model", "Environments": "Môi trường", "Runtime Engines": "Engine runtime", "Storage Drives": "Ổ đĩa lưu trữ", "GPU Detection": "Phát hiện GPU", "Application Logs": "Nhật ký ứng dụng", "Recovery State": "Trạng thái khôi phục",
+  "machine-local app state": "trạng thái ứng dụng cục bộ trên máy", "Loopback project": "Project loopback", "Loopback Project": "Project loopback", "Tags": "Thẻ", "Archive": "Lưu trữ", "Import project manifest": "Nhập manifest project", "Copy an toàn": "Sao chép an toàn", "SYSTEM": "HỆ THỐNG",
+  "AIRI Settings": "Cài đặt AIRI", "installer-managed": "do trình cài đặt quản lý", "embed WebView": "nhúng WebView",
+  "Cancel": "Hủy", "Resume": "Tiếp tục", "Retry": "Thử lại", "All": "Tất cả", "available": "có sẵn", "Lifecycle": "Vòng đời", "Archived": "Đã lưu trữ", "Backup & Restore": "Sao lưu & Khôi phục", "Sao lưu & Khôi phục dữ liệu (Backup & Restore)": "Sao lưu & Khôi phục dữ liệu", "Gỡ component": "Gỡ component",
 });
 
 // Explicit labels used by the page renderer.  These keys are template-owned

@@ -1,5 +1,5 @@
 export function createDiagnosticsRenderer(deps) {
-  const { heading, escapeHtml, statusPill } = deps;
+  const { heading, escapeHtml, statusPill, uiTextHtml } = deps;
   return function renderDiagnostics(state) {
   const diag = state.diagnostics?.snapshot || {};
   const subsystems = [
@@ -24,7 +24,7 @@ export function createDiagnosticsRenderer(deps) {
     return `
       <article class="card diagnostics-card" data-subsystem="${escapeHtml(id)}" data-status="${escapeHtml(status)}">
         <div class="split">
-          <strong>${escapeHtml(label)}</strong>
+          <strong>${uiTextHtml(label)}</strong>
           ${statusPill(status.toLowerCase(), status)}
         </div>
         <div class="diagnostics-detail">
@@ -48,8 +48,8 @@ export function createDiagnosticsRenderer(deps) {
       <div class="card-title-row">
         <div>
           <span class="eyebrow">BẢO TRÌ & KHẮC PHỤC</span>
-          <h2>Desktop Repair Center</h2>
-          <p>Các hành động bảo trì chỉ tác động lên machine-local app state (fail-closed, inspect trước khi thực thi).</p>
+          <h2>${uiTextHtml("Desktop Repair Center")}</h2>
+          <p>Các hành động bảo trì chỉ tác động lên ${uiTextHtml("machine-local app state")} (fail-closed, inspect trước khi thực thi).</p>
         </div>
       </div>
       <div class="form-actions repair-actions">

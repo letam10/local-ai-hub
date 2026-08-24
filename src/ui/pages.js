@@ -92,7 +92,7 @@ const renderDashboardFeature = createDashboardRenderer({
 });
 const renderJobsFeature = createJobsRenderer({ jobRecoverySnapshot, escapeHtml, uiTextHtml, statusPill, readinessStatusLabel, artifactList, provenanceList, heading });
 const renderComponentsFeature = createComponentsRenderer({ heading, escapeHtml, statusPill, uiTextHtml, uiText });
-const renderDiagnosticsFeature = createDiagnosticsRenderer({ heading, escapeHtml, statusPill });
+const renderDiagnosticsFeature = createDiagnosticsRenderer({ heading, escapeHtml, statusPill, uiTextHtml });
 const renderSettingsFeature = createSettingsRenderer({ heading, card, escapeHtml, uiTextHtml, statusPill, readinessStatusLabel, readinessSnapshot, readinessModuleDetails, readinessResourceDetails, readinessStorageDetails, mediaEvidencePanel });
 const renderAiri = createAiriRenderer({ app, heading, card, escapeHtml, statusPill });
 const renderVision = createVisionRenderer({ component, tool, heading, visionWorkflowRail, capability, card, file, field, button, formResult });
@@ -103,7 +103,7 @@ const renderVoice = createVoiceRenderer({ component, tool, heading, capability, 
 const { renderImageQuickV5, renderImage } = createImageAiRenderer({ tool, heading, escapeHtml, formatStatus, workspaceState, imageWorkflowRail, card, field, file, button, formResult });
 const renderMedia = createMediaRenderer({ component, tool, mediaCapabilityEvidence, heading, statusPill, mediaEvidencePanel, workspaceState, videoWorkflowRail, card, file, files, field, formResult, escapeHtml });
 const renderAnime = createAnimesrRenderer({ component, tool, heading, statusPill, workspaceState, card, file, field, button, formResult });
-const renderCreativeWorkspace = createProjectsRenderer({ heading, card, cardDynamic, field, fieldDynamic, button, escapeHtml, statusPill, workflowLibraryState, formatGb });
+const renderCreativeWorkspace = createProjectsRenderer({ heading, card, cardDynamic, field, fieldDynamic, button, escapeHtml, uiTextHtml, statusPill, workflowLibraryState, formatGb });
 const { renderImageMaskStudio, renderComfyAdvancedV5 } = createImageMaskRenderer({ heading, card, field, file, button, escapeHtml, statusPill });
 
 // Dashboard implementation lives in src/ui/features/dashboard/render.js; this legacy block is intentionally removed.

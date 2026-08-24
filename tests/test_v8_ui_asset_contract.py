@@ -84,6 +84,15 @@ class UiAssetContractTests(unittest.TestCase):
         self.assertIn('card("Ứng dụng ngoài — chưa kết nối"', renderer)
         self.assertIn('"Ứng dụng ngoài — chưa kết nối"', i18n)
 
+    def test_vietnamese_copy_covers_observed_english_defect_register(self) -> None:
+        i18n = (ROOT / "src" / "ui" / "i18n.js").read_text(encoding="utf-8")
+        for key in (
+            '"Build video creative graph"', '"Library: ready"', '"Models Inventory"',
+            '"Runtime Engines"', '"Storage Drives"', '"Application Logs"',
+            '"Recovery State"', '"Import project manifest"', '"AIRI Settings"',
+        ):
+            self.assertIn(key, i18n)
+
     def test_ui_declares_a_bounded_favicon_without_a_missing_default_request(self) -> None:
         index = (ROOT / "src" / "ui" / "index.html").read_text(encoding="utf-8")
         self.assertIn('<link rel="icon" href="data:," />', index)
