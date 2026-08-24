@@ -880,3 +880,17 @@ before a user selects a tag. Acceptance results expose separate
 `technical_ready`, `merge_ready`, `release_ready`, and `tagged_release_ready`
 fields; a normal integration pass never implies a tagged release. Historical
 V7/V8.0.0 tags/evidence remain immutable.
+
+## 23. V8.0.1 installed startup payload/runtime hotfix
+
+Real shortcut reproduction exposed a P0 split-install defect that unit tests
+with mocked readiness did not cover. The desktop compared API identity using
+the version payload app root while the API used the stable installation root;
+installed startup also allowed legacy/system Core Python selection, leaked an
+owned child when readiness failed, and wrote startup logs below the mutable
+payload. The corrective contract keeps `LocalAIHub.exe`, shortcuts and
+`DATA_ROOT` stable while repairing only the active version payload: identity is
+installation-root plus data-root, installed mode uses the validated bundled
+runtime from `current.json`, every failed owned startup is reaped, and bounded
+diagnostics go to the data-root Logs authority. Full source tests, a real
+split-install smoke and exact-head CI are required before payload repair.

@@ -1,5 +1,5 @@
 export function createMediaRenderer(deps) {
-  const { component, tool, mediaCapabilityEvidence, heading, statusPill, mediaEvidencePanel, workspaceState, videoWorkflowRail, card, file, files, field, formResult, escapeHtml } = deps;
+  const { component, tool, mediaCapabilityEvidence, heading, statusPill, mediaEvidencePanel, workspaceState, videoWorkflowRail, card, file, files, field, formResult, escapeHtml, uiTextHtml } = deps;
   return function renderMedia(state) {
       const item = component(state, "ffmpeg");
       const genericTool = tool(state, "run_media_operation");

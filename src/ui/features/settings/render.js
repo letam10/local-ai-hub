@@ -90,7 +90,7 @@ export function createSettingsRenderer(deps) {
           <button class="button button--compact" type="button" data-reset-settings="jobs">Đặt lại Jobs</button>
           <button class="button button--accent" type="button" data-save-settings data-expected-revision="${revision}">Lưu cài đặt</button>
         </div>
-        <div id="settings-save-status" role="status" aria-live="polite"></div>
+        <div id="settings-save-status" role="status" aria-live="polite">${escapeHtml(String(state.settingsActionStatus || "").slice(0, 240))}</div>
       `)}
       ${card("Sao lưu & Khôi phục dữ liệu (Backup & Restore)", `
         <p class="small">Tạo bản sao lưu ZIP an toàn cho toàn bộ cấu hình, projects, recipes, workflow library và drafts (đã lọc bỏ secrets và không bao gồm models/media nặng).</p>

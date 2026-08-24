@@ -3,6 +3,25 @@
   "generated_by": "scripts/generate_api_route_inventory.py",
   "routes": [
     {
+      "route_id": "jobs.history_delete",
+      "method": "DELETE",
+      "path": "/api/jobs/{job_id}",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/jobs.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "node.draft_delete",
       "method": "DELETE",
       "path": "/api/node-studio/drafts/{scope}",
@@ -383,6 +402,44 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "components.v8_operations",
+      "method": "GET",
+      "path": "/api/components/operations",
+      "domain": "components",
+      "owner": "src/services/api/routes/component_v8.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "components.v8_operation_lookup",
+      "method": "GET",
+      "path": "/api/components/operations/{operation_id}",
+      "domain": "components",
+      "owner": "src/services/api/routes/component_v8.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "components.plan",
       "method": "GET",
       "path": "/api/components/plans/{plan_id}",
@@ -402,11 +459,49 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "components.v8_source_acceptance",
+      "method": "GET",
+      "path": "/api/components/source-acceptance",
+      "domain": "components",
+      "owner": "src/services/api/routes/component_v8.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "components.detail",
       "method": "GET",
       "path": "/api/components/{component_id}",
       "domain": "components",
       "owner": "src/services/api/routes/components.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "components.v8_source_acceptance_detail",
+      "method": "GET",
+      "path": "/api/components/{component_id}/source-acceptance",
+      "domain": "components",
+      "owner": "src/services/api/routes/component_v8.py",
       "service": "components",
       "streaming": false,
       "body_limit": "json_default",
@@ -1846,6 +1941,44 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "components.v8_operation_cancel",
+      "method": "POST",
+      "path": "/api/components/operations/{operation_id}/cancel",
+      "domain": "components",
+      "owner": "src/services/api/routes/component_v8.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "components.v8_operation_confirm",
+      "method": "POST",
+      "path": "/api/components/operations/{operation_id}/confirm",
+      "domain": "components",
+      "owner": "src/services/api/routes/component_v8.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "components.plan_confirm",
       "method": "POST",
       "path": "/api/components/plans/{plan_id}/confirm",
@@ -2213,6 +2346,25 @@
       "domain": "image",
       "owner": "src/services/api/routes/image.py",
       "service": "image",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "jobs.history_clear",
+      "method": "POST",
+      "path": "/api/jobs/history/clear",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/jobs.py",
+      "service": "jobs",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [

@@ -33,6 +33,8 @@ import {
   getImageMaskStudioOverview,
   getHealth,
   getJobs,
+  deleteJobHistory,
+  clearTerminalJobHistory,
   getDurableJobs,
   resumeDurableJob,
   getWorkflowLibrary,
@@ -64,6 +66,7 @@ import {
   repairInspectRecovery,
   repairClearRecoveryDrafts,
   createBackup,
+  listBackups,
   inspectBackup,
   planRestore,
   applyRestore,
@@ -115,11 +118,11 @@ import { FEATURE_REGISTRY } from "./core/feature_registry.js";
 import { confirmComponentInstall, getProductionCatalog, planComponentInstall } from "./shared/api/catalog.js";
 
 const state = {
-  health: {}, capabilities: {}, productization: {}, components: [], componentManager: {}, componentPlans: {}, tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", apiStatus: "loading", apiError: "",
+  health: {}, capabilities: {}, productization: {}, components: [], componentManager: {}, componentPlans: {}, tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", jobQuery: "", jobTypeFilter: "all", jobSort: "newest", jobPage: 1, apiStatus: "loading", apiError: "",
   creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
   workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trong V5-D trước khi đồng bộ." },
-  productionCatalog: { status: "partial", models: [], runtimes: [] }, updateCenter: { settings: { policy: "manual" }, records: [] }, modelFilters: { query: "", category: "", installed: "all" },
+  productionCatalog: { status: "partial", models: [], runtimes: [] }, updateCenter: { settings: { policy: "manual" }, records: [] }, modelFilters: { query: "", category: "", installed: "all" }, modelActionStatus: "", settingsActionStatus: "",
   featureRegistry: FEATURE_REGISTRY,
 };
 const view = document.querySelector("#module-view");
@@ -586,6 +589,33 @@ const renderApiState = () => {
   return "";
 };
 
+const TOOL_EXECUTION_READY = new Set(["operational"]);
+const applyToolActionGates = () => {
+  const tools = new Map((Array.isArray(state.tools) ? state.tools : []).map((item) => [String(item?.name || ""), item]));
+  view.querySelectorAll("form[data-job-form]").forEach((form) => {
+    const toolId = String(form.dataset.tool || "");
+    const item = tools.get(toolId) || {};
+    const status = String(item.tool_status || item.status || "unavailable").toLowerCase();
+    const ready = TOOL_EXECUTION_READY.has(status);
+    const reason = String(item.reason || "Backend chưa có bằng chứng chạy an toàn trong snapshot hiện tại.").slice(0, 240);
+    form.dataset.readinessStatus = status;
+    form.querySelectorAll("button[type=submit]").forEach((button) => {
+      if (button.hasAttribute("disabled") && button.dataset.readinessGate !== "true") return;
+      if (!ready) {
+        button.disabled = true;
+        button.dataset.readinessGate = "true";
+        button.setAttribute("aria-disabled", "true");
+        button.title = reason;
+      } else if (button.dataset.readinessGate === "true") {
+        button.disabled = false;
+        delete button.dataset.readinessGate;
+        button.removeAttribute("aria-disabled");
+        button.removeAttribute("title");
+      }
+    });
+  });
+};
+
 const updateTopbar = () => {
   const health = state.health || {};
   const disk = health.disk || {};
@@ -617,6 +647,7 @@ const render = ({ background = false, focus = "" } = {}) => {
   renderNavigation();
   syncSidebarState();
   view.innerHTML = `${renderApiState()}${renderPage(routeId(), state)}`;
+  applyToolActionGates();
   restoreScrollContinuity(continuity.scroll);
   restoreFocusContinuity(continuity, focus);
   setSnapshotStatus(background ? (continuity.activeInside ? "preserved" : "received") : (continuity.activeInside && !focus ? "preserved" : "received"));
@@ -1070,12 +1101,14 @@ const handleImageMaskForm = async (form) => {
 };
 
 document.addEventListener("change", (event) => {
-  const modelSearch = event.target.closest("[data-model-search]");
-  if (modelSearch) { state.modelFilters.query = String(modelSearch.value || "").slice(0, 80); render(); return; }
   const modelCategory = event.target.closest("[data-model-category]");
   if (modelCategory) { state.modelFilters.category = String(modelCategory.value || "").slice(0, 48); render(); return; }
   const modelInstalled = event.target.closest("[data-model-installed]");
   if (modelInstalled) { state.modelFilters.installed = ["all", "installed", "uninstalled"].includes(modelInstalled.value) ? modelInstalled.value : "all"; render(); return; }
+  const jobType = event.target.closest("[data-job-type-filter]");
+  if (jobType) { state.jobTypeFilter = String(jobType.value || "all").slice(0, 80); state.jobPage = 1; render(); return; }
+  const jobSort = event.target.closest("[data-job-sort]");
+  if (jobSort) { state.jobSort = jobSort.value === "oldest" ? "oldest" : "newest"; state.jobPage = 1; render(); return; }
   const language = event.target.closest("#language-select");
   if (language) {
     setLanguage(language.value);
@@ -1091,6 +1124,34 @@ document.addEventListener("change", (event) => {
     state.selectedProjectId = projectSelect.value || "";
     refreshCreative().catch((error) => showToast(error.message, "error"));
   }
+});
+
+document.addEventListener("load", (event) => {
+  const image = event.target.closest?.("[data-asset-preview]");
+  if (!image) return;
+  image.closest(".asset-preview-frame")?.querySelector("[data-preview-skeleton]")?.remove();
+}, true);
+
+document.addEventListener("error", (event) => {
+  const image = event.target.closest?.("[data-asset-preview]");
+  if (!image) return;
+  const frame = image.closest(".asset-preview-frame");
+  image.hidden = true;
+  frame?.querySelector("[data-preview-skeleton]")?.remove();
+  const fallback = frame?.querySelector("[data-preview-fallback]");
+  if (fallback) fallback.hidden = false;
+}, true);
+
+document.addEventListener("input", (event) => {
+  const jobSearch = event.target.closest("[data-job-search]");
+  if (jobSearch) { state.jobQuery = String(jobSearch.value || "").slice(0, 120); state.jobPage = 1; render(); return; }
+  const modelSearch = event.target.closest("[data-model-search]");
+  if (!modelSearch) return;
+  state.modelFilters.query = String(modelSearch.value || "").slice(0, 80);
+  // Keep the active search control stable while the bounded catalog filters
+  // on every keystroke; the old change-only listener left the table stale
+  // until a second unrelated control blurred.
+  render();
 });
 
 document.addEventListener("submit", async (event) => {
@@ -1269,9 +1330,18 @@ document.addEventListener("click", async (event) => {
       const plan = await planComponentInstall(productPlanButton.dataset.productPlan || "");
       if (plan?.plan_id) {
         const result = await confirmComponentInstall(plan.plan_id, false);
-        showToast(result?.reason || plan.reason || "Đã tạo kế hoạch catalog.", result?.status === "unavailable" ? "warning" : "success");
-      } else showToast(plan?.reason || "Không thể lập kế hoạch catalog.", "warning");
-    } catch (error) { showToast(error.message || "Không thể lập kế hoạch catalog.", "error"); }
+        state.modelActionStatus = result?.reason || plan.reason || "Đã tạo kế hoạch catalog.";
+        showToast(state.modelActionStatus, result?.status === "unavailable" ? "warning" : "success");
+      } else {
+        state.modelActionStatus = plan?.reason || "Không thể lập kế hoạch catalog.";
+        showToast(state.modelActionStatus, "warning");
+      }
+      render();
+    } catch (error) {
+      state.modelActionStatus = error.message || "Không thể lập kế hoạch catalog.";
+      showToast(state.modelActionStatus, "error");
+      render();
+    }
     finally { productPlanButton.disabled = false; }
     return;
   }
@@ -1524,7 +1594,48 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const jobFilter = event.target.closest("[data-job-filter]");
-  if (jobFilter) { state.jobFilter = jobFilter.dataset.jobFilter || "all"; render(); return; }
+  if (jobFilter) { state.jobFilter = jobFilter.dataset.jobFilter || "all"; state.jobPage = 1; render(); return; }
+  const jobPageButton = event.target.closest("[data-job-page]");
+  if (jobPageButton) {
+    state.jobPage = Math.max(1, state.jobPage + (jobPageButton.dataset.jobPage === "next" ? 1 : -1));
+    render();
+    return;
+  }
+  const deleteJobButton = event.target.closest("[data-delete-job]");
+  if (deleteJobButton) {
+    const jobCard = deleteJobButton.closest("[data-job-id]");
+    if (jobCard?.dataset.jobStatus && ["queued", "starting", "running", "cancelling"].includes(jobCard.dataset.jobStatus)) {
+      showToast("Tác vụ đang chạy không thể xóa khỏi lịch sử.", "warning");
+      return;
+    }
+    const confirmed = window.confirm("Xóa 1 tác vụ khỏi lịch sử? File đầu ra và artifact sẽ được giữ nguyên.");
+    if (!confirmed) return;
+    deleteJobButton.disabled = true;
+    try {
+      const result = await deleteJobHistory(deleteJobButton.dataset.deleteJob || "");
+      if (result.status !== "deleted") throw new Error(result.message || "Không thể xóa tác vụ khỏi lịch sử.");
+      await refreshFast({ quiet: true, renderView: false });
+      render();
+      showToast(result.message || "Đã xóa khỏi lịch sử; artifact vẫn được giữ nguyên.", "success");
+    } catch (error) { showToast(error.message || "Không thể xóa tác vụ khỏi lịch sử.", "error"); deleteJobButton.disabled = false; }
+    return;
+  }
+  const clearHistoryButton = event.target.closest("[data-clear-terminal-history]");
+  if (clearHistoryButton) {
+    const count = jobRecoverySnapshot(state).records.filter((job) => ["completed", "failed", "unavailable", "cancelled", "interrupted"].includes(job.status) && job.source !== "durable").length;
+    const confirmed = window.confirm(`Xóa ${count} tác vụ đã kết thúc khỏi lịch sử? File đầu ra và artifact sẽ được giữ nguyên; tác vụ đang chạy không bị ảnh hưởng.`);
+    if (!confirmed) return;
+    clearHistoryButton.disabled = true;
+    try {
+      const result = await clearTerminalJobHistory(true);
+      if (result.status !== "completed") throw new Error(result.message || "Không thể xóa lịch sử.");
+      state.jobPage = 1;
+      await refreshFast({ quiet: true, renderView: false });
+      render();
+      showToast(result.message || "Đã xóa lịch sử đã kết thúc.", "success");
+    } catch (error) { showToast(error.message || "Không thể xóa lịch sử.", "error"); clearHistoryButton.disabled = false; }
+    return;
+  }
   if (event.target.closest("[data-refresh-diagnostics]")) {
     try {
       state.diagnostics = await getDiagnosticsSnapshot();
@@ -1692,21 +1803,30 @@ document.addEventListener("click", async (event) => {
     const select = document.querySelector("#backup-select");
     const backupId = select?.value?.trim();
     const outputEl = document.querySelector("#restore-plan-output");
+    const settingsStatus = document.querySelector("#settings-save-status");
     if (!backupId) {
-      showToast("Vui lòng chọn một bản sao lưu để kiểm tra.", "warning");
+      state.settingsActionStatus = "Vui lòng chọn một bản sao lưu để kiểm tra.";
+      if (settingsStatus) settingsStatus.textContent = state.settingsActionStatus;
+      showToast(state.settingsActionStatus, "warning");
       return;
     }
     try {
       const insp = await inspectBackup(backupId);
       if (!insp.valid) {
-        if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">File backup không hợp lệ: ${(insp.errors || []).join(", ")}</div>`;
+        state.settingsActionStatus = `File backup không hợp lệ: ${(insp.errors || []).join(", ")}`;
+        if (settingsStatus) settingsStatus.textContent = state.settingsActionStatus;
+        if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">${escapeHtml(state.settingsActionStatus)}</div>`;
         return;
       }
       const plan = await planRestore(backupId);
       if (!plan.accepted) {
-        if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">${escapeHtml(plan.reason || "Không thể lập kế hoạch khôi phục.")}</div>`;
+        state.settingsActionStatus = plan.reason || "Không thể lập kế hoạch khôi phục.";
+        if (settingsStatus) settingsStatus.textContent = state.settingsActionStatus;
+        if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">${escapeHtml(state.settingsActionStatus)}</div>`;
         return;
       }
+      state.settingsActionStatus = `Đã lập kế hoạch khôi phục ${plan.plan_id || ""}; chưa áp dụng thay đổi.`.trim();
+      if (settingsStatus) settingsStatus.textContent = state.settingsActionStatus;
       const categories = Object.keys(plan.categories || {}).join(", ");
       const prev = plan.preview || {};
       if (outputEl) {
@@ -1722,8 +1842,10 @@ document.addEventListener("click", async (event) => {
         `;
       }
     } catch (error) {
-      if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">${escapeHtml(error.message || "Lỗi kiểm tra backup.")}</div>`;
-      showToast(error.message || "Lỗi kiểm tra backup.", "error");
+      state.settingsActionStatus = error.message || "Lỗi kiểm tra backup.";
+      if (settingsStatus) settingsStatus.textContent = state.settingsActionStatus;
+      if (outputEl) outputEl.innerHTML = `<div class="callout callout--danger">${escapeHtml(state.settingsActionStatus)}</div>`;
+      showToast(state.settingsActionStatus, "error");
     }
     return;
   }
@@ -1750,7 +1872,22 @@ document.addEventListener("click", async (event) => {
   }
   if (event.target.closest("#theme-toggle") || event.target.closest("[data-cycle-theme]")) { cycleTheme(); return; }
   const refreshButton = event.target.closest("[data-refresh-storage]");
-  if (refreshButton) { refreshButton.disabled = true; await loadRouteData({ scan: true }); refreshButton.disabled = false; showToast("Đã quét lại storage theo yêu cầu."); return; }
+  if (refreshButton) {
+    refreshButton.disabled = true;
+    state.modelActionStatus = "Đang quét storage theo ngân sách bounded…";
+    render();
+    try {
+      await loadRouteData({ scan: true });
+      state.modelActionStatus = "Đã cập nhật snapshot storage; tổng có thể là partial nếu vượt ngân sách quét.";
+      showToast(state.modelActionStatus, "success");
+      render();
+    } catch (error) {
+      state.modelActionStatus = error.message || "Không thể quét lại storage.";
+      showToast(state.modelActionStatus, "error");
+      render();
+    }
+    return;
+  }
   const checkAllUpdatesButton = event.target.closest("[data-check-all-updates]");
   if (checkAllUpdatesButton) {
     checkAllUpdatesButton.disabled = true;

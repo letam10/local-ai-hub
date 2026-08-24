@@ -15,7 +15,7 @@ function filterCatalogModels(models, filters = {}) {
   });
 }
 
-export function renderProductionModels({ productionCatalog, legacyModels, storage, updateCenter = {}, filters = {}, escapeHtml, formatGb, statusPill, card, heading }) {
+export function renderProductionModels({ productionCatalog, legacyModels, storage, updateCenter = {}, filters = {}, escapeHtml, formatGb, statusPill, card, heading, uiTextHtml }) {
   const production = Array.isArray(productionCatalog?.models) ? productionCatalog.models : [];
   const visibleProduction = filterCatalogModels(production, filters);
   const categories = [...new Set(production.map((item) => String(item.category || "Other")))].sort((a, b) => a.localeCompare(b));
@@ -26,30 +26,40 @@ export function renderProductionModels({ productionCatalog, legacyModels, storag
     const disposition = String(item.disposition || "MANUAL_IMPORT_ONLY");
     const action = disposition === "AUTO_INSTALL_READY" ? "Download & Install" : disposition === "AUTH_REQUIRED" ? "Authorize & Install" : disposition === "LICENSE_REQUIRED" ? "Review License" : disposition === "MANUAL_IMPORT_ONLY" ? "Import Model" : "Manual Review";
     const sourceStatus = String(item.source_availability?.status || "UNKNOWN");
-    return `<tr><td><strong>${escapeHtml(item.display_name || item.model_id)}</strong><br><small>${escapeHtml(item.model_id || "")}</small></td><td>${escapeHtml(item.category || "Other")}</td><td>${escapeHtml(item.size_label || (item.expected_download_size_bytes ? `Download: ${item.expected_download_size_bytes} bytes` : "Size unavailable"))}</td><td>${statusPill(status)}<br><small>Nguồn: ${escapeHtml(sourceStatus)}</small><br><small>${escapeHtml(action)}</small></td><td><button class="button button--compact" type="button" data-product-plan="${escapeHtml(item.model_id || "")}">${escapeHtml(action)}</button><button class="button button--compact" type="button" data-check-update="${escapeHtml(item.model_id || "")}">Check Update</button></td></tr>`;
+    return `<tr><td><strong>${escapeHtml(item.display_name || item.model_id)}</strong><br><small>${escapeHtml(item.model_id || "")}</small></td><td>${escapeHtml(item.category || "Other")}</td><td>${escapeHtml(item.size_label || (item.expected_download_size_bytes ? `Download: ${item.expected_download_size_bytes} bytes` : "Size unavailable"))}</td><td>${statusPill(status)}<br><small>Nguồn: ${escapeHtml(sourceStatus)}</small><br><small>${uiTextHtml(action)}</small></td><td><button class="button button--compact" type="button" data-product-plan="${escapeHtml(item.model_id || "")}">${uiTextHtml(action)}</button><button class="button button--compact" type="button" data-check-update="${escapeHtml(item.model_id || "")}">${uiTextHtml("Check Update")}</button></td></tr>`;
   }).join("");
   const legacyRows = legacy.map((item) => `<tr><td>${escapeHtml(item.model_name)}</td><td>${escapeHtml(item.engine)}</td><td>${formatGb(item.size?.bytes)}</td><td>${statusPill(item.installed ? "installed" : "not_installed")}</td></tr>`).join("");
-  const table = catalogRows ? `<div class="table-wrap"><table><thead><tr><th>Model</th><th>Category</th><th>Size</th><th>Status / action</th><th></th></tr></thead><tbody>${catalogRows}</tbody></table></div>` : legacyRows ? `<div class="table-wrap"><table><thead><tr><th>Model</th><th>Engine</th><th>Size</th><th>Status</th></tr></thead><tbody>${legacyRows}</tbody></table></div>` : `<div class="empty-state compact">Chưa có model catalog.</div>`;
+  const table = catalogRows ? `<div class="table-wrap"><table><thead><tr><th>${uiTextHtml("Model")}</th><th>${uiTextHtml("Category")}</th><th>${uiTextHtml("Size")}</th><th>${uiTextHtml("Status / action")}</th><th></th></tr></thead><tbody>${catalogRows}</tbody></table></div>` : legacyRows ? `<div class="table-wrap"><table><thead><tr><th>${uiTextHtml("Model")}</th><th>${uiTextHtml("Engine")}</th><th>${uiTextHtml("Size")}</th><th>${uiTextHtml("Status")}</th></tr></thead><tbody>${legacyRows}</tbody></table></div>` : `<div class="empty-state compact">Chưa có model catalog.</div>`;
   const controls = `<div class="model-catalog-controls" data-model-filters role="search" aria-label="Lọc model catalog">
     <label class="field"><span>Tìm model</span><input type="search" data-model-search value="${escapeHtml(filters.query || "")}" placeholder="Tên, ID hoặc module" autocomplete="off" /></label>
     <label class="field"><span>Danh mục</span><select data-model-category><option value="">Tất cả danh mục</option>${categories.map((item) => `<option value="${escapeHtml(item)}"${filters.category === item ? " selected" : ""}>${escapeHtml(item)}</option>`).join("")}</select></label>
     <label class="field"><span>Trạng thái cài đặt</span><select data-model-installed><option value="all"${(filters.installed || "all") === "all" ? " selected" : ""}>Tất cả</option><option value="installed"${filters.installed === "installed" ? " selected" : ""}>Đã cài đặt</option><option value="uninstalled"${filters.installed === "uninstalled" ? " selected" : ""}>Chưa cài đặt</option></select></label>
     <span class="row-meta" data-model-count>Hiển thị ${visibleProduction.length}/${production.length} model</span>
-  </div>`;
+  </div>${stateActionStatus(filters, escapeHtml)}`;
   const updateRows = Array.isArray(updateCenter.records) ? updateCenter.records : [];
   const updateRowHtml = updateRows.slice(0, 8).map((item) => {
     const id = escapeHtml(item.component_id || "component");
-    const actions = `<button class="button button--compact" type="button" data-check-update="${id}">Check</button>${item.status === "UPDATE_AVAILABLE" ? `<button class="button button--compact button--accent" type="button" data-plan-update="${id}">Plan Update</button>` : ""}${item.rollback_available ? `<button class="button button--compact" type="button" data-rollback-update="${id}">Roll Back</button>` : ""}`;
-    return `<div class="row-item"><span>${id} · ${escapeHtml((item.changed_parts || []).join(", ") || "no changed parts")}</span><span>${escapeHtml(item.status || "CHECK_FAILED")} ${actions}</span></div>`;
+    const actions = `<button class="button button--compact" type="button" data-check-update="${id}">${uiTextHtml("Check")}</button>${item.status === "UPDATE_AVAILABLE" ? `<button class="button button--compact button--accent" type="button" data-plan-update="${id}">${uiTextHtml("Plan Update")}</button>` : ""}${item.rollback_available ? `<button class="button button--compact" type="button" data-rollback-update="${id}">${uiTextHtml("Roll Back")}</button>` : ""}`;
+    return `<div class="row-item"><span>${id} · ${escapeHtml((item.changed_parts || []).join(", ") || uiTextHtml("no changed parts"))}</span><span>${escapeHtml(item.status || "CHECK_FAILED")} ${actions}</span></div>`;
   }).join("");
-  const updateCardBody = `<div class="form-actions"><button class="button button--compact" type="button" data-check-all-updates>Check All Updates</button><span class="small">Lịch hiện tại: ${escapeHtml(updateCenter.settings?.policy || "manual")}; không tự cài.</span></div>${updateRows.length ? `<div class="row-list">${updateRowHtml}</div>` : "<p class=\"small\">Chưa có báo cáo update. Kiểm tra theo yêu cầu, không polling 24/7.</p>"}`;
+  const updateCardBody = `<div class="form-actions"><button class="button button--compact" type="button" data-check-all-updates>${uiTextHtml("Check All Updates")}</button><span class="small">Lịch hiện tại: ${escapeHtml(updateCenter.settings?.policy || "manual")}; không tự cài.</span></div>${updateRows.length ? `<div class="row-list">${updateRowHtml}</div>` : `<p class="small">${uiTextHtml("No update report yet. Check on demand; no 24/7 polling.")}</p>`}`;
   const updateCard = card("Update Center", updateCardBody, "", "card--wide");
+  const storageAreaValue = (value) => {
+    const size = escapeHtml(formatGb(value?.bytes));
+    const partial = value?.complete === false || value?.status === "partial";
+    return partial ? `${uiTextHtml("At least")} ${size} ${uiTextHtml("— not fully scanned")}` : size;
+  };
   return heading("STORAGE", "Models & Storage", "Model store canonical không nhân bản. Legacy cleanup chỉ xử lý mục đã phân loại và xác minh, không tự xoá UNKNOWN hoặc user media.", `<button class="button" type="button" data-refresh-storage>Quét lại</button>`) + `
     <div class="workspace-grid workspace-grid--two">
-      ${card("Dung lượng", `<div class="row-list">${areas.map(([name, value]) => `<div class="row-item"><span>${escapeHtml(name)}</span><strong>${formatGb(value.bytes)}</strong></div>`).join("") || `<div class="empty-state compact">Chưa có số liệu storage.</div>`}</div>`)}
-      ${card("Legacy cleanup", `<div class="metric-inline"><strong>${escapeHtml(storage?.legacy_counts?.total || 0)}</strong><span>legacy paths đã inventory</span></div><div class="callout callout--warning">Cleanup V3 tách REAL_DIRECTORY/JUNCTION, kiểm tra reference và user data trước. Mục active hoặc unknown sẽ được giữ cùng lý do/rollback.</div>`, "", "card--flat")}
+      ${card("Dung lượng", `<div class="row-list">${areas.map(([name, value]) => `<div class="row-item"><span>${escapeHtml(name)}</span><strong>${storageAreaValue(value)}</strong></div>`).join("") || `<div class="empty-state compact">Chưa có số liệu storage.</div>`}</div>`)}
+      ${card("Legacy cleanup", `<div class="metric-inline"><strong>${escapeHtml(storage?.legacy_counts?.total || 0)}</strong><span>${uiTextHtml("legacy paths inventoried")}</span></div><div class="callout callout--warning">${uiTextHtml("Cleanup V3 separates REAL_DIRECTORY/JUNCTION, checks references and user data first. Active or unknown items are retained with reason/rollback.")}</div>`, "", "card--flat")}
     </div>
     ${card("AI Models & Components", controls + table, "", "card--wide")}${updateCard}`;
+}
+
+function stateActionStatus(filters, escapeHtml) {
+  const message = typeof filters.actionStatus === "string" ? filters.actionStatus.trim().slice(0, 240) : "";
+  return message ? `<div class="form-result" data-model-action-status role="status" aria-live="polite">${escapeHtml(message)}</div>` : `<div class="form-result" data-model-action-status role="status" aria-live="polite"></div>`;
 }
 
 export const modelsFeature = Object.freeze({ id: "models", refreshPolicy: "manual", renderer: "renderProductionModels" });

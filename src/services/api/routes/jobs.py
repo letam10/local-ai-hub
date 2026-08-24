@@ -19,8 +19,25 @@ def list_jobs(request: ApiRequest, context: ApiContext, params: Mapping[str, str
 
 
 def job_detail(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
-    status, value = context.call("get_job", params["job_id"])
-    return ApiResponse(status, value)
+    value = context.call("get_job", params["job_id"])
+    if value is None:
+        return ApiResponse(404, {"status": "error", "error": "job_not_found"})
+    return ApiResponse(200, value)
+
+
+def delete_history_job(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    result = context.call("delete_job", params["job_id"])
+    status = {"deleted": 200, "not_found": 404, "rejected": 409, "invalid": 400, "unavailable": 503}.get(result.get("status"), 500)
+    return ApiResponse(status, result)
+
+
+def clear_history(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    payload = request.json(strict=True)
+    if not isinstance(payload, dict) or payload.get("confirmed") is not True:
+        return ApiResponse(400, {"status": "confirmation_required", "message": "Cần xác nhận trước khi xóa lịch sử đã kết thúc."})
+    result = context.call("clear_terminal_history")
+    status = 200 if result.get("status") == "completed" else 503
+    return ApiResponse(status, result)
 
 
 def cancel(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
@@ -63,6 +80,8 @@ def register(router: Router) -> None:
     router.register(route_id="jobs.list", method="GET", path="/api/jobs", domain="jobs", owner=owner, handler=list_jobs)
     router.register(route_id="jobs.compat_list", method="GET", path="/jobs", domain="jobs", owner=owner, handler=list_jobs)
     router.register(route_id="jobs.detail", method="GET", path="/jobs/{job_id}", domain="jobs", owner=owner, handler=job_detail)
+    router.register(route_id="jobs.history_delete", method="DELETE", path="/api/jobs/{job_id}", domain="jobs", owner=owner, handler=delete_history_job)
+    router.register(route_id="jobs.history_clear", method="POST", path="/api/jobs/history/clear", domain="jobs", owner=owner, handler=clear_history)
     router.register(route_id="jobs.cancel", method="POST", path="/jobs/{job_id}/cancel", domain="jobs", owner=owner, handler=cancel)
     router.register(route_id="jobs.resume", method="POST", path="/jobs/{job_id}/resume", domain="jobs", owner=owner, handler=resume)
     router.register(route_id="jobs.tool_submit", method="POST", path="/api/jobs/{tool}", domain="jobs", owner=owner, handler=submit_tool)

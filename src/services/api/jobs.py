@@ -525,6 +525,46 @@ def get_job(job_id: str) -> dict[str, Any] | None:
     return public_job(record) if record else None
 
 
+def delete_job(job_id: str) -> dict[str, Any]:
+    """Soft-remove one terminal history record without touching artifacts."""
+
+    if not isinstance(job_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@_-]{0,119}", job_id):
+        return {"status": "invalid", "code": "JOB_ID_INVALID", "message": "Mã tác vụ không hợp lệ."}
+    with _lock:
+        record = _jobs.get(job_id)
+        if record is None:
+            return {"status": "not_found", "code": "JOB_NOT_FOUND", "message": "Không tìm thấy tác vụ trong lịch sử."}
+        current = str(record.get("status") or "")
+        if current in ACTIVE_STATUSES:
+            return {"status": "rejected", "code": "ACTIVE_JOB_NOT_DELETABLE", "message": "Tác vụ đang chạy không thể xóa khỏi lịch sử."}
+        if current not in TERMINAL_STATUSES:
+            return {"status": "rejected", "code": "JOB_NOT_TERMINAL", "message": "Chỉ tác vụ đã kết thúc mới có thể xóa."}
+        removed = _jobs.pop(job_id)
+        try:
+            _save(immediate=True)
+        except Exception:
+            _jobs[job_id] = removed
+            return {"status": "unavailable", "code": "JOB_HISTORY_PERSISTENCE_FAILED", "message": "Không thể lưu thay đổi lịch sử; bản ghi vẫn được giữ nguyên."}
+        return {"status": "deleted", "job_id": job_id, "artifacts_preserved": True, "message": "Đã xóa tác vụ khỏi lịch sử; file đầu ra và artifact vẫn được giữ nguyên."}
+
+
+def clear_terminal_history() -> dict[str, Any]:
+    """Remove only terminal legacy history records; never deletes artifacts."""
+
+    with _lock:
+        removed = {job_id: record for job_id, record in _jobs.items() if str(record.get("status") or "") in TERMINAL_STATUSES}
+        if not removed:
+            return {"status": "completed", "removed_count": 0, "artifacts_preserved": True, "message": "Không có tác vụ đã kết thúc để xóa."}
+        for job_id in removed:
+            _jobs.pop(job_id, None)
+        try:
+            _save(immediate=True)
+        except Exception:
+            _jobs.update(removed)
+            return {"status": "unavailable", "code": "JOB_HISTORY_PERSISTENCE_FAILED", "message": "Không thể lưu thay đổi lịch sử; các bản ghi vẫn được giữ nguyên."}
+        return {"status": "completed", "removed_count": len(removed), "artifacts_preserved": True, "message": f"Đã xóa {len(removed)} tác vụ đã kết thúc khỏi lịch sử; file đầu ra và artifact vẫn được giữ nguyên."}
+
+
 def list_jobs(*, limit: int = DEFAULT_LIST_LIMIT) -> list[dict[str, Any]]:
     """List active jobs plus at most ``limit`` terminal records (1..500)."""
 

@@ -1,3 +1,5 @@
+import { translateText } from "../../i18n.js";
+
 /*
   V8 Wave 4 source-side Product UX.
   - Reads only opaque component operation/source-acceptance endpoints.
@@ -30,6 +32,16 @@ const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => 
   "'": "&#39;",
   '"': "&quot;",
 }[char]));
+
+const uiText = (value) => translateText(value);
+const fixedCopy = (value) => {
+  const candidate = typeof value === "string" ? value : "";
+  const keys = new Set([
+    "Review an explicit component import or installation plan.",
+    "Review the tracked license contract before any install action is enabled.",
+  ]);
+  return keys.has(candidate) ? uiText(candidate) : candidate;
+};
 
 const request = async (path, options = {}) => {
   const response = await fetch(path, {
@@ -120,7 +132,7 @@ const renderOperations = (target, operations) => {
   }
   target.innerHTML = `<div class="component-manager-list">${safe.map((item) => {
     const actions = item.state === "planned" ? `<div class="form-actions"><button class="button button--compact button--accent" type="button" data-v8-operation-confirm="${escapeHtml(item.operation_id)}">Xác nhận operation</button><button class="button button--compact" type="button" data-v8-operation-cancel="${escapeHtml(item.operation_id)}">Hủy operation</button></div>` : "";
-    const result = item.result_code ? `<p class="small">Result: <strong>${escapeHtml(item.result_code)}</strong></p>` : "";
+    const result = item.result_code ? `<p class="small">${uiText("Result:")} <strong>${escapeHtml(item.result_code)}</strong></p>` : "";
     return `<article class="component-plan-preview"><div class="split"><div><strong>${escapeHtml(item.component_id)}</strong><p class="small">${escapeHtml(item.component_type)} · ${escapeHtml(item.action)} · <code>${escapeHtml(item.operation_id)}</code></p></div>${pill(item.state)}</div>${result}${actions}</article>`;
   }).join("")}</div>`;
 };
@@ -137,7 +149,7 @@ const renderSourceAcceptance = (records) => {
       continue;
     }
     const req = item.requirements;
-    slot.innerHTML = `<div class="split"><strong>V8 source acceptance</strong>${pill(item.acceptance_state)}</div><p class="small">Disposition: ${escapeHtml(item.disposition)} · Auto-install: <strong>${item.auto_install_eligible ? "eligible" : "disabled"}</strong></p><p class="small">Source ${requirementLabel(req.source_verified)} · Auth ${requirementLabel(req.authentication_ready)} · License ${requirementLabel(req.license_ready)} · Integrity ${requirementLabel(req.integrity_ready)} · Size ${requirementLabel(req.size_ready)}</p><div class="workspace-state__action"><strong>Bước tiếp theo</strong><span>${escapeHtml(item.next_action || "Giữ component ở trạng thái non-automatic cho tới khi đủ evidence.")}</span></div>`;
+    slot.innerHTML = `<div class="split"><strong>${uiText("V8 source acceptance")}</strong>${pill(item.acceptance_state)}</div><p class="small">${uiText("Disposition:")} ${escapeHtml(item.disposition)} · ${uiText("Auto-install:")} <strong>${item.auto_install_eligible ? uiText("eligible") : uiText("disabled")}</strong></p><p class="small">${uiText("Source")} ${requirementLabel(req.source_verified)} · ${uiText("Auth")} ${requirementLabel(req.authentication_ready)} · ${uiText("License")} ${requirementLabel(req.license_ready)} · ${uiText("Integrity")} ${requirementLabel(req.integrity_ready)} · ${uiText("Size")} ${requirementLabel(req.size_ready)}</p><div class="workspace-state__action"><strong>${uiText("Bước tiếp theo")}</strong><span>${escapeHtml(fixedCopy(item.next_action) || "Giữ component ở trạng thái non-automatic cho tới khi đủ evidence.")}</span></div>`;
   }
 };
 
@@ -171,7 +183,7 @@ const refresh = async () => {
       renderSourceAcceptance(Array.isArray(acceptanceResult.value?.records) ? acceptanceResult.value.records : []);
     }
     const failures = [operationsResult, acceptanceResult].filter((item) => item.status === "rejected").length;
-    statusText(failures ? `V8 control plane tải một phần (${failures} nguồn lỗi); dữ liệu hiện có được giữ an toàn.` : "V8 control plane đã đồng bộ từ server-owned metadata; không có download tự động.", failures ? "partial" : "ready");
+    statusText(failures ? `V8 control plane tải một phần (${failures} nguồn lỗi); dữ liệu hiện có được giữ an toàn.` : uiText("V8 control plane đã đồng bộ từ server-owned metadata; không có download tự động."), failures ? "partial" : "ready");
   } finally {
     refreshing = false;
   }

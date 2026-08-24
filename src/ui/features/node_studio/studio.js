@@ -23,6 +23,7 @@ import {
   saveNodeDraft,
 } from "../../api.js";
 import { workflowLibraryEntry } from "../../workflow_library.js";
+import { currentLanguage, translateText } from "../../i18n.js";
 
 // LiteGraph.js is intentionally pinned and served from /ui/vendor.  This file
 // is the Hub adapter: it maps mature canvas-editor state to the Hub DAG API.
@@ -37,7 +38,122 @@ const TYPE_COLORS = {
   TEXT: "#6c8cff", NUMBER: "#a9c6ff", BOOLEAN: "#e5d66a", MODEL: "#e291c7", METADATA: "#8794ad",
 };
 const CATEGORY_COLORS = { utility: "#6c8cff", image: "#cf7cff", vision: "#42c6a0", media: "#f1ad5f", video: "#f17c8e", annotation: "#8794ad" };
+const NODE_COPY = Object.freeze({
+  utility: "Tiện ích", image: "Hình ảnh", vision: "Thị giác", media: "Media", video: "Video", annotation: "Chú thích",
+  "Load Image": "Tải ảnh", "Load Video": "Tải video", "Load Audio": "Tải âm thanh", "Load Subtitle": "Tải phụ đề", "Prompt / Text": "Prompt / Văn bản", Number: "Số", Boolean: "Đúng / Sai", "Point Input": "Điểm đầu vào", "Box Input": "Hộp đầu vào", "Preview Image": "Xem trước ảnh", "Preview Video": "Xem trước video", "Save Image": "Lưu ảnh", "Save Video": "Lưu video", "Export Mask": "Xuất mask", "Export Video": "Xuất video", Comment: "Ghi chú", Group: "Nhóm", Resolution: "Độ phân giải", Seed: "Seed", "Steps / Sampler": "Steps / Bộ lấy mẫu", "FLUX Generate": "Tạo ảnh FLUX", "Qwen Image Generate": "Tạo ảnh Qwen", "Image Edit / Image-to-Image": "Sửa ảnh / Ảnh sang ảnh", "AnimeSR Upscale": "Nâng cấp AnimeSR", "Real-ESRGAN": "Real-ESRGAN", "Frame Interpolation": "Nội suy khung hình", Encode: "Mã hóa", "Subtitle Burn": "Ghi phụ đề", "Extract Frames": "Tách khung hình", Rotate: "Xoay", FPS: "FPS", "Extract Audio": "Tách âm thanh", "Replace Audio": "Thay âm thanh", Resize: "Đổi kích thước", "ComfyUI Workflow": "Workflow ComfyUI", "Video Generate (backend partial)": "Tạo video (backend một phần)", "Video Transform": "Biến đổi video", "Video Upscale (AnimeSR / FFmpeg)": "Nâng cấp video (AnimeSR / FFmpeg)", "Video Grade": "Hiệu chỉnh video", "Logo / Image Overlay": "Phủ logo / ảnh", "Video Generate": "Tạo video", "Video Transform": "Biến đổi video", "Text Overlay (unavailable)": "Phủ chữ (chưa khả dụng)", "Trim / Cut": "Cắt", Concat: "Nối", Crop: "Cắt khung", Flip: "Lật", "Audio Loudness": "Độ lớn âm thanh", "Color / Levels": "Màu / mức sáng", "Image Compare A/B": "So sánh ảnh A/B", "Mask Apply": "Áp dụng mask", "Mask Composite": "Ghép mask", "Mask Preview": "Xem trước mask", "Probe Audio": "Đọc metadata âm thanh", "Probe Video": "Đọc metadata video", "Grounding DINO": "Grounding DINO", "Grounding Prompt": "Prompt Grounding", "RF-DETR Detect": "Phát hiện RF-DETR", "SAM2 Segment": "Phân vùng SAM2", "SAM2 Track": "Theo dõi SAM2", "Upscale Image (FFmpeg fallback)": "Nâng cấp ảnh (FFmpeg dự phòng)",
+  "Node Guide": "Hướng dẫn Node",
+  "Node Guide · Hướng dẫn toàn diện Hub Nodes & Typed Workflow": "Hướng dẫn Node · Hướng dẫn toàn diện Hub Nodes & Typed Workflow",
+  "Status truthful": "Trạng thái thực thi",
+  "Execution status": "Trạng thái thực thi",
+  "Capability": "Khả năng",
+  "Execution state": "Trạng thái thực thi",
+  "Artifact": "Artifact",
+  "Safe artifact preview": "Xem trước artifact an toàn",
+  "Parameters": "Thông số",
+  "Validation": "Kiểm tra",
+  "Dirty / downstream": "Thay đổi / phụ thuộc",
+  "Cache": "Bộ nhớ đệm",
+  "Progress": "Tiến độ",
+  "Error": "Lỗi",
+  "valid": "hợp lệ",
+  "dirty": "có thay đổi",
+  "clean": "sạch",
+  "hit": "có trong bộ nhớ đệm",
+  "miss": "không có trong bộ nhớ đệm",
+  "none": "không có",
+  "not_run": "chưa chạy",
+  "operational": "sẵn sàng",
+  "partial": "một phần",
+  "unavailable": "chưa khả dụng",
+  "No artifact output yet": "Chưa có artifact đầu ra",
+  "Partial output": "Đầu ra một phần",
+  "Preview unavailable": "Bản xem trước chưa khả dụng",
+  "No artifact from failed run": "Không có artifact từ lần chạy thất bại",
+  "No native preview": "Không có bản xem trước gốc",
+  "Artifact": "Artifact",
+  "Type": "Loại",
+  "Size": "Kích thước",
+  "Open preview": "Mở bản xem trước",
+  "Mask": "Mask",
+  "Escaped metadata only; this artifact type is not rendered as media.": "Chỉ hiển thị metadata đã thoát; loại artifact này không được dựng thành media.",
+  "Preview unavailable in this node snapshot; no safe artifact was published.": "Bản xem trước chưa khả dụng trong snapshot node này; chưa có artifact an toàn được công bố.",
+  "Video grade": "Hiệu chỉnh video",
+  "Logo overlay": "Phủ logo",
+  "Encode": "Mã hóa",
+  "No compatible node port matches this search.": "Không có cổng node tương thích với tìm kiếm này.",
+  "Media operation scope is not applied to this workspace; no execution is claimed.": "Phạm vi thao tác media không áp dụng cho workspace này; không tuyên bố thực thi.",
+  "This node is outside the exact published media operation scope.": "Node này nằm ngoài phạm vi thao tác media chính xác đã công bố.",
+  "Use only the three exactly evidenced media operations.": "Chỉ sử dụng ba thao tác media có bằng chứng chính xác.",
+  "Media operation evidence": "Bằng chứng thao tác media",
+  "Video grade evidence": "Bằng chứng hiệu chỉnh video",
+  "Logo overlay evidence": "Bằng chứng phủ logo",
+  "Encode evidence": "Bằng chứng mã hóa",
+  "Next action": "Hành động tiếp theo",
+  "Server snapshot": "Snapshot máy chủ",
+  "execution:": "thực thi:",
+  "no UI execution": "không thực thi trên giao diện",
+  "No completed exact evidence is available for the listed media operations.": "Chưa có bằng chứng chính xác đã hoàn tất cho các thao tác media được liệt kê.",
+  "Keep the listed operations and all other media tools partial until separately evidenced.": "Giữ các thao tác được liệt kê và mọi công cụ media khác ở mức một phần cho đến khi có bằng chứng riêng.",
+  "This exact operation is not verified in the server snapshot.": "Thao tác chính xác này chưa được xác minh trong snapshot máy chủ.",
+  "Keep this operation partial until separately evidenced.": "Giữ thao tác này ở mức một phần cho đến khi có bằng chứng riêng.",
+  "Exact media evidence is published for video grade, logo overlay and encode; opening Node Studio does not execute a worker.": "Đã công bố bằng chứng media chính xác cho hiệu chỉnh video, phủ logo và mã hóa; mở Node Studio không chạy worker.",
+  "No exact media evidence is verified in this server snapshot; scoped nodes remain partial and no execution is claimed.": "Snapshot máy chủ chưa xác minh bằng chứng media chính xác; các node trong phạm vi vẫn là một phần và không tuyên bố thực thi.",
+  "NODE WORKFLOW": "WORKFLOW NODE",
+  "Recent": "Gần đây",
+  "Recent workflows": "Workflow gần đây",
+  "Run Graph": "Chạy Graph",
+  "Export JSON": "Xuất JSON",
+  "Import JSON": "Nhập JSON",
+  "Preview indicator (manual; no auto-run)": "Chỉ báo preview (thủ công; không tự chạy)",
+  "Palette": "Bảng node",
+  "Inspector": "Bảng kiểm tra",
+  "Canvas focus": "Tập trung canvas",
+  "Palette width": "Độ rộng bảng node",
+  "Inspector width": "Độ rộng bảng kiểm tra",
+  "Preview size": "Kích thước preview",
+  "Fit": "Vừa khung",
+  "Minimap graph": "Minimap graph",
+  "Open preview": "Mở bản xem trước",
+  "Inspector / Live preview": "Bảng kiểm tra / Preview trực tiếp",
+  "No properties": "Node này không có thuộc tính.",
+  "Build video creative graph": "Tạo graph sáng tạo video", "Library": "Thư viện", "ready": "sẵn sàng", "LiteGraph workflow canvas": "Canvas workflow LiteGraph", "Run Graph": "Chạy graph",
+  "No completed exact evidence is available in this server snapshot.": "Snapshot máy chủ chưa có bằng chứng chính xác đã hoàn tất.",
+  "Chưa có bản xem trước an toàn trong trạng thái này.": "Chưa có bản xem trước an toàn trong trạng thái này.",
+  "Bật": "Bật", "Tắt": "Tắt",
+});
+const NODE_STATIC_TEXT = Object.freeze([
+  "NODE WORKFLOW", "Recent", "Recent workflows", "Export JSON", "Import JSON", "Preview indicator (manual; no auto-run)",
+  "Palette", "Inspector", "Canvas focus", "Palette width", "Inspector width", "Preview size", "Fit", "Minimap graph",
+  "Inspector / Live preview", "Open preview",
+]);
+const localizeNodeStaticMarkup = (root) => {
+  if (!root?.ownerDocument) return;
+  // Keep the helper usable in the browser and in the pure Node/data-URL test
+  // harness, where the global NodeFilter constructor is not exposed.
+  const showText = root.ownerDocument.defaultView?.NodeFilter?.SHOW_TEXT ?? 4;
+  const walker = root.ownerDocument.createTreeWalker(root, showText);
+  const nodes = [];
+  let current;
+  while ((current = walker.nextNode())) nodes.push(current);
+  nodes.forEach((textNode) => {
+    const value = textNode.nodeValue || "";
+    const key = value.trim();
+    if (!NODE_STATIC_TEXT.includes(key)) return;
+    const leading = value.slice(0, value.indexOf(key));
+    const trailing = value.slice(value.indexOf(key) + key.length);
+    textNode.nodeValue = `${leading}${nodeText(key)}${trailing}`;
+  });
+};
 const NODE_UI_STATE_VERSION = 1;
+const nodeText = (value) => {
+  const key = String(value ?? "");
+  // Pure helper tests evaluate the bounded renderer without the page module's
+  // i18n imports; keep that contract deterministic while using the real
+  // translators whenever the full browser module is loaded.
+  const translated = typeof translateText === "function" ? translateText(key) : key;
+  const language = typeof currentLanguage === "function" ? currentLanguage() : "en";
+  return translated !== key ? translated : language === "vi" ? (NODE_COPY[key] || key) : key;
+};
 const NODE_UI_STATE_PREFIX = `${LOCAL_PREFIX}:ui:v${NODE_UI_STATE_VERSION}`;
 const OPAQUE_ARTIFACT_ID = /^artifact_[a-f0-9]{32}$/;
 const SAFE_ARTIFACT_URL = /^\/api\/artifacts\/artifact_[a-f0-9]{32}$/;
@@ -304,11 +420,11 @@ export function collectArtifactProjections(values) {
 }
 
 const ARTIFACT_PREVIEW_STATE_COPY = Object.freeze({
-  completed: ["Published artifacts", "This node completed, but only server-published opaque artifacts are shown."],
-  partial: ["Partial output", "This node is partial; only safe published artifacts can be previewed."],
-  failed: ["No artifact from failed run", "This node failed or was cancelled; no artifact is available from this run."],
-  unavailable: ["Preview unavailable", "This node is unavailable; no artifact is claimed in this snapshot."],
-  not_run: ["No artifact output yet", "Execution is not claimed; run state has not published an artifact."],
+  completed: ["Có artifact đầu ra", "Node đã hoàn tất; chỉ artifact opaque do server công bố mới được hiển thị."],
+  partial: ["Đầu ra một phần", "Node chưa hoàn tất đầy đủ; chỉ artifact an toàn đã công bố mới được xem."],
+  failed: ["Tác vụ thất bại", "Node thất bại hoặc bị hủy; không có artifact an toàn từ lần chạy này."],
+  unavailable: ["Chưa khả dụng", "Node đang thiếu phụ thuộc hoặc bằng chứng; không khẳng định có artifact."],
+  not_run: ["Chưa có đầu ra để xem trước", "Node chưa chạy; không suy đoán rằng artifact đã được tạo."],
 });
 
 function artifactPreviewState(value) {
@@ -319,19 +435,19 @@ function artifactPreviewState(value) {
 
 function artifactPreviewButton(artifact) {
   const metadata = JSON.stringify({ media_type: artifact.mediaType, ...(artifact.sizeBytes === null ? {} : { size_bytes: artifact.sizeBytes }) });
-  return `<button class="button button--compact" type="button" data-preview-artifact="${escapeHtml(artifact.id)}" data-artifact-url="${escapeHtml(artifact.url)}" data-artifact-name="${escapeHtml(artifact.name)}" data-artifact-type="${escapeHtml(artifact.mediaType)}" data-artifact-mask="${String(artifact.mask)}" data-artifact-meta="${escapeHtml(metadata)}">Open preview</button>`;
+  return `<button class="button button--compact" type="button" data-preview-artifact="${escapeHtml(artifact.id)}" data-artifact-url="${escapeHtml(artifact.url)}" data-artifact-name="${escapeHtml(artifact.name)}" data-artifact-type="${escapeHtml(artifact.mediaType)}" data-artifact-mask="${String(artifact.mask)}" data-artifact-meta="${escapeHtml(metadata)}">${escapeHtml(nodeText("Open preview"))}</button>`;
 }
 
 function artifactPreviewItem(artifact) {
-  const label = artifact.mask ? `Mask · ${artifact.mediaType}` : artifact.mediaType;
+  const label = artifact.mask ? `${nodeText("Mask")} · ${artifact.mediaType}` : artifact.mediaType;
   const media = artifact.kind === "image"
     ? `<img class="graph-preview-image${artifact.mask ? " graph-preview-image--mask" : ""}" src="${escapeHtml(artifact.url)}" alt="${escapeHtml(artifact.name)}" loading="lazy" />`
     : artifact.kind === "video"
       ? `<video class="graph-preview-media" controls preload="metadata" src="${escapeHtml(artifact.url)}">Video preview unavailable in this browser.</video>`
       : artifact.kind === "audio"
         ? `<audio class="graph-preview-media" controls preload="metadata" src="${escapeHtml(artifact.url)}">Audio preview unavailable in this browser.</audio>`
-        : `<div class="graph-preview-fallback"><strong>No native preview</strong><p>Escaped metadata only; this artifact type is not rendered as media.</p></div>`;
-  return `<article class="graph-preview-card" data-artifact-id="${escapeHtml(artifact.id)}"><div class="graph-preview-card__head"><strong>${escapeHtml(artifact.name)}</strong><span class="tag">${escapeHtml(label)}</span></div>${media}<dl class="graph-preview-meta"><div><dt>Artifact</dt><dd>${escapeHtml(artifact.id)}</dd></div><div><dt>Type</dt><dd>${escapeHtml(label)}</dd></div><div><dt>Size</dt><dd>${artifact.sizeBytes === null ? "unavailable" : `${escapeHtml(String(artifact.sizeBytes))} bytes`}</dd></div></dl><div class="graph-preview-card__actions">${artifactPreviewButton(artifact)}</div></article>`;
+        : `<div class="graph-preview-fallback"><strong>${escapeHtml(nodeText("No native preview"))}</strong><p>${escapeHtml(nodeText("Escaped metadata only; this artifact type is not rendered as media."))}</p></div>`;
+  return `<article class="graph-preview-card" data-artifact-id="${escapeHtml(artifact.id)}"><div class="graph-preview-card__head"><strong>${escapeHtml(artifact.name)}</strong><span class="tag">${escapeHtml(label)}</span></div>${media}<dl class="graph-preview-meta"><div><dt>${escapeHtml(nodeText("Artifact"))}</dt><dd>${escapeHtml(artifact.id)}</dd></div><div><dt>${escapeHtml(nodeText("Type"))}</dt><dd>${escapeHtml(label)}</dd></div><div><dt>${escapeHtml(nodeText("Size"))}</dt><dd>${artifact.sizeBytes === null ? escapeHtml(nodeText("unavailable")) : `${escapeHtml(String(artifact.sizeBytes))} bytes`}</dd></div></dl><div class="graph-preview-card__actions">${artifactPreviewButton(artifact)}</div></article>`;
 }
 
 export function renderArtifactPreviewMarkup(collection, state = {}) {
@@ -340,9 +456,9 @@ export function renderArtifactPreviewMarkup(collection, state = {}) {
     : collectArtifactProjections(collection);
   const items = Array.isArray(collected.items) ? collected.items : [];
   const previewState = artifactPreviewState(state?.status);
-  const [title, message] = ARTIFACT_PREVIEW_STATE_COPY[previewState];
+  const [title, message] = ARTIFACT_PREVIEW_STATE_COPY[previewState].map(nodeText);
   const summary = `<div class="graph-preview-summary" data-artifact-state="${escapeHtml(previewState)}"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(message)}</span></div>`;
-  if (!items.length) return `${summary}<p class="graph-empty graph-preview-empty">Preview unavailable in this node snapshot; no safe artifact was published.</p>`;
+  if (!items.length) return `${summary}<p class="graph-empty graph-preview-empty">${escapeHtml(nodeText("Chưa có bản xem trước an toàn trong trạng thái này."))}</p>`;
   const truncation = collected.truncated ? `<p class="graph-preview-truncated">Showing the first ${MAX_PREVIEW_ARTIFACTS} safe artifacts; additional output metadata is unavailable.</p>` : "";
   return `${summary}<div class="graph-preview-list" aria-label="Node output artifacts">${items.map(artifactPreviewItem).join("")}</div>${truncation}`;
 }
@@ -354,12 +470,12 @@ function graphFingerprint(graph) {
 function propertyControl(node, property) {
   const value = node.properties?.[property.name] ?? property.default ?? "";
   const target = `${node.id}:${property.name}`;
-  const label = escapeHtml(property.label || property.name);
+  const label = escapeHtml(nodeText(property.label || property.name));
   if (property.kind === "asset") {
     return `<label class="graph-property"><span>${label}</span><small>${escapeHtml(value || "Chưa có artifact")}</small><input type="file" data-graph-asset="${escapeHtml(target)}" accept="${escapeHtml(property.accept || "")}" /></label>`;
   }
   if (property.kind === "boolean") {
-    return `<label class="graph-property graph-property--toggle"><input type="checkbox" data-graph-property="${escapeHtml(target)}" ${value ? "checked" : ""} /><span>${label}</span></label>`;
+    return `<label class="graph-property graph-property--toggle"><input type="checkbox" role="switch" aria-label="${label}" data-graph-property="${escapeHtml(target)}" ${value ? "checked" : ""} /><span>${label} · <b>${value ? escapeHtml(nodeText("Bật")) : escapeHtml(nodeText("Tắt"))}</b></span></label>`;
   }
   if (property.kind === "select" || property.kind === "encoder") {
     const options = property.options || (property.kind === "encoder" ? ["auto"] : []);
@@ -473,9 +589,12 @@ class HubGraphEditor {
         this.persist({ source: "recipe" });
         this.onRecipeApplied(this.recipeApplication);
       }
-      this.savedFingerprint = graphFingerprint(this.graphData);
-      this.unsaved = this.unsaved || !this.recovered;
-      this.dirty = new Set(this.graphData.nodes.map((node) => node.id));
+      this.savedFingerprint = this.savedFingerprint || graphFingerprint(this.graphData);
+      // Loading the server-owned default preset is a baseline, not a user
+      // edit.  Only a recovered draft or an explicit recipe/template action
+      // should surface "Có thay đổi chưa lưu" on first open.
+      this.unsaved = Boolean(this.unsaved);
+      this.dirty = this.unsaved ? new Set(this.graphData.nodes.map((node) => node.id)) : new Set();
       this.renderShell();
       this.hydrateLiteGraph(this.graphData);
       this.renderWorkflowStatus();
@@ -532,8 +651,8 @@ class HubGraphEditor {
     if (evidence) return evidence;
     return {
       status: "partial",
-      reason: "This node is outside the exact published media operation scope.",
-      action: "Use only Video grade, Logo overlay, or Encode when their server evidence is operational.",
+      reason: nodeText("This node is outside the exact published media operation scope."),
+      action: nodeText("Use only the three exactly evidenced media operations."),
       evidenceVerified: false,
       execution: "not_run",
     };
@@ -549,20 +668,20 @@ class HubGraphEditor {
   }
 
   operationScopeSummary() {
-    if (this.scope !== "media") return "Media operation scope is not applied to this workspace; no execution is claimed.";
-    if (this.operationScope.evidenceVerified) return "Exact media evidence is published for video grade, logo overlay and encode; opening Node Studio does not execute a worker.";
-    return "No exact media evidence is verified in this server snapshot; scoped nodes remain partial and no execution is claimed.";
+    if (this.scope !== "media") return nodeText("Media operation scope is not applied to this workspace; no execution is claimed.");
+    if (this.operationScope.evidenceVerified) return nodeText("Exact media evidence is published for video grade, logo overlay and encode; opening Node Studio does not execute a worker.");
+    return nodeText("No exact media evidence is verified in this server snapshot; scoped nodes remain partial and no execution is claimed.");
   }
 
   operationEvidenceMarkup(definition = null) {
     const evidence = this.operationEvidenceFor(definition);
-    const title = evidence ? `${evidence.label} evidence` : "Media operation evidence";
+    const title = evidence ? nodeText(`${evidence.label} evidence`) : nodeText("Media operation evidence");
     const generic = this.scope === "media" && !evidence;
     const status = evidence?.status || (generic ? "partial" : this.scope === "media" ? this.operationScope.status : "unavailable");
-    const reason = evidence?.reason || (generic ? "This node is outside the exact published media operation scope." : this.operationScopeSummary());
-    const nextAction = evidence?.nextAction || (generic ? "Use only the three exactly evidenced media operations." : safeOperationScopeText(this.operationScope.nextAction, MEDIA_OPERATION_SCOPE_FALLBACK.nextAction));
+    const reason = evidence?.reason || (generic ? nodeText("This node is outside the exact published media operation scope.") : this.operationScopeSummary());
+    const nextAction = evidence?.nextAction || (generic ? nodeText("Use only the three exactly evidenced media operations.") : safeOperationScopeText(this.operationScope.nextAction, MEDIA_OPERATION_SCOPE_FALLBACK.nextAction));
     const execution = evidence?.execution || (generic ? "not_run" : this.operationScope.execution);
-    return `<section class="graph-operation-evidence" data-operation-scope-status="${escapeHtml(status)}" data-operation-scope-verified="${String(evidence?.evidenceVerified === true)}"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(reason)}</span><span><b>Next action</b> ${escapeHtml(nextAction)}</span><small>Server snapshot · execution: ${escapeHtml(execution)} · no UI execution</small></section>`;
+    return `<section class="graph-operation-evidence" data-operation-scope-status="${escapeHtml(status)}" data-operation-scope-verified="${String(evidence?.evidenceVerified === true)}"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(nodeText(reason))}</span><span><b>${escapeHtml(nodeText("Next action"))}</b> ${escapeHtml(nodeText(nextAction))}</span><small>${escapeHtml(nodeText("Server snapshot"))} · ${escapeHtml(nodeText("execution:"))} ${escapeHtml(nodeText(execution))} · ${escapeHtml(nodeText("no UI execution"))}</small></section>`;
   }
 
   destroy() {
@@ -676,7 +795,7 @@ class HubGraphEditor {
     const libraryStatus = this.root.querySelector("[data-workflow-library-status]");
     if (libraryStatus) {
       libraryStatus.dataset.workflowLibraryStatus = this.workflowLibraryState.status || "partial";
-      libraryStatus.textContent = "Library: " + (this.workflowLibraryState.status || "partial");
+      libraryStatus.textContent = `${nodeText("Library")}: ${nodeText(this.workflowLibraryState.status || "partial")}`;
       libraryStatus.title = this.workflowLibraryState.reason || "";
     }
     this.refreshRecentControls();
@@ -738,15 +857,15 @@ class HubGraphEditor {
       if (LiteGraph.registered_node_types[typeName]) continue;
       const captured = definition;
       function HubLiteNode() {
-        this.title = captured.title;
+          this.title = nodeText(captured.title);
         this.hubType = captured.type;
         this.properties = Object.fromEntries((captured.properties || []).map((property) => [property.name, clone(property.default)]));
         for (const port of captured.inputs || []) {
-          this.addInput(port.label || port.name, port.type, { hubPort: port.name, required: Boolean(port.required), multi: Boolean(port.multi) });
+          this.addInput(nodeText(port.label || port.name), port.type, { hubPort: port.name, required: Boolean(port.required), multi: Boolean(port.multi) });
           this.inputs[this.inputs.length - 1].hubPort = port.name;
         }
         for (const port of captured.outputs || []) {
-          this.addOutput(port.label || port.name, port.type, { hubPort: port.name });
+          this.addOutput(nodeText(port.label || port.name), port.type, { hubPort: port.name });
           this.outputs[this.outputs.length - 1].hubPort = port.name;
         }
         this.color = CATEGORY_COLORS[captured.category] || "#8794ad";
@@ -754,7 +873,11 @@ class HubGraphEditor {
         this.shape = "round";
         this.size = [230, Math.max(82, 42 + Math.max((captured.inputs || []).length, (captured.outputs || []).length) * 22)];
       }
-      HubLiteNode.title = captured.title;
+      HubLiteNode.title = nodeText(captured.title);
+      // LiteGraph defaults unselected titles to #999 even on bright category
+      // bars.  Use one high-contrast ink color for every category; selected
+      // nodes still use LiteGraph's existing white selected-title color.
+      HubLiteNode.title_text_color = "#ffffff";
       HubLiteNode.desc = captured.description;
       HubLiteNode.prototype.onDrawForeground = function drawHubNodeForeground(ctx) {
         if (this.hubStatus && this.hubStatus !== "completed") {
@@ -793,11 +916,11 @@ class HubGraphEditor {
         </header>
         <div class="graph-editor__workflow-bar"><label class="graph-workflow-title"><span>Tên workflow</span><input data-graph-title aria-label="Tên workflow" value="${escapeHtml(this.graphData.title || "")}" /></label><label class="graph-workflow-recent"><span>Recent</span><select data-graph-recent aria-label="Recent workflows"><option value="">Chọn workflow local…</option>${this.recentOptions()}</select></label><span class="graph-save-state" data-graph-save-state>Đã lưu local</span><button class="button button--compact" type="button" data-graph-action="duplicate">Nhân bản</button></div>
         <div class="graph-editor__toolbar">
-          <div class="graph-editor__toolbar-group"><button class="button button--primary" type="button" data-graph-action="run" aria-label="Run Graph"${this.runButtonAttributes()}>Chạy workflow</button><button class="button" type="button" data-graph-action="validate">Kiểm tra</button><button class="button" type="button" data-graph-action="cancel" disabled>Hủy job</button><button class="button" type="button" data-graph-action="undo">Hoàn tác</button><button class="button" type="button" data-graph-action="redo">Làm lại</button></div>
+          <div class="graph-editor__toolbar-group"><button class="button button--primary" type="button" data-graph-action="run" aria-label="${escapeHtml(nodeText("Run Graph"))}"${this.runButtonAttributes()}>Chạy workflow</button><button class="button" type="button" data-graph-action="validate">Kiểm tra</button><button class="button" type="button" data-graph-action="cancel" disabled>Hủy job</button><button class="button" type="button" data-graph-action="undo">Hoàn tác</button><button class="button" type="button" data-graph-action="redo">Làm lại</button></div>
           <div class="graph-editor__toolbar-group"><select data-graph-preset aria-label="Preset workflow"><option value="">Chọn template…</option>${this.presets.map((item) => `<option value="${escapeHtml(item.id)}" title="${escapeHtml(item.description || "")}">${escapeHtml(item.title)}${item.stage ? ` · ${escapeHtml(item.stage)}` : ""}</option>`).join("")}</select><button class="button" type="button" data-graph-action="save-local">Lưu local</button><button class="button" type="button" data-graph-action="export">Export JSON</button><label class="button graph-editor__import">Import JSON<input type="file" data-graph-import accept="application/json,.json" /></label></div>
         </div>
         <div class="graph-editor__options"><label><input type="checkbox" data-graph-option="auto" ${this.autoPreview ? "checked" : ""} /> Preview tự động (Auto Preview)</label><label><input type="checkbox" data-graph-option="draft" ${this.draft ? "checked" : ""} /> Draft ảnh</label><span>Bấm node để cộng dồn lựa chọn · Ctrl/Shift cũng cộng dồn · kéo nhóm để di chuyển · kéo vùng để chọn · bấm nền trống, Esc hoặc Xóa chọn để bỏ chọn</span></div>
-        <div class="graph-editor__statusbar"><span data-graph-validation>Chưa kiểm tra workflow.</span><span class="graph-editor__availability">${this.availability.counts?.operational || 0} sẵn sàng · ${this.availability.counts?.partial || 0} partial · ${this.availability.counts?.unavailable || 0} unavailable</span><span class="graph-operation-scope-status" data-graph-operation-evidence role="status">${escapeHtml(this.operationScopeSummary())}</span></div>
+        <div class="graph-editor__statusbar"><span data-graph-validation>Chưa kiểm tra workflow.</span><span class="graph-editor__availability">${this.availability.counts?.operational || 0} ${escapeHtml(nodeText("operational"))} · ${this.availability.counts?.partial || 0} ${escapeHtml(nodeText("partial"))} · ${this.availability.counts?.unavailable || 0} ${escapeHtml(nodeText("unavailable"))}</span><span class="graph-operation-scope-status" data-graph-operation-evidence role="status">${escapeHtml(this.operationScopeSummary())}</span></div>
         <div class="graph-editor__panel-controls" role="toolbar" aria-label="Node Studio panels">
           <button class="button button--compact" type="button" data-graph-action="toggle-palette" aria-expanded="${String(this.panelState.palette !== "collapsed")}">Palette</button>
           <button class="button button--compact" type="button" data-graph-action="toggle-inspector" aria-expanded="${String(this.panelState.inspector !== "collapsed")}">Inspector</button>
@@ -805,10 +928,10 @@ class HubGraphEditor {
           <button class="button button--compact" type="button" data-graph-action="cycle-palette-width">Palette width</button>
           <button class="button button--compact" type="button" data-graph-action="cycle-inspector-width">Inspector width</button>
           <button class="button button--compact" type="button" data-graph-action="toggle-preview">Preview size</button>
-          <button class="button button--compact" type="button" data-graph-action="toggle-guide" aria-expanded="${String(this.panelState.guide)}">Node Guide</button>
+          <button class="button button--compact" type="button" data-graph-action="toggle-guide" aria-expanded="${String(this.panelState.guide)}">${escapeHtml(nodeText("Node Guide"))}</button>
         </div>
         <details class="graph-guide" data-graph-guide ${this.panelState.guide ? "open" : ""}>
-          <summary>Node Guide · Hướng dẫn toàn diện Hub Nodes & Typed Workflow</summary>
+          <summary>${escapeHtml(nodeText("Node Guide · Hướng dẫn toàn diện Hub Nodes & Typed Workflow"))}</summary>
           <div class="graph-guide__content">
             <div class="graph-guide__section">
               <strong>1. Khái niệm Typed Sockets & Dữ liệu</strong>
@@ -872,11 +995,11 @@ class HubGraphEditor {
       libraryTools.append(libraryButton);
     }
     const autoPreviewLabel = this.root.querySelector('[data-graph-option="auto"]')?.parentElement;
-    if (autoPreviewLabel?.lastChild) autoPreviewLabel.lastChild.textContent = " Preview indicator (manual; no auto-run)";
+    if (autoPreviewLabel?.lastChild) autoPreviewLabel.lastChild.textContent = ` ${nodeText("Preview indicator (manual; no auto-run)")}`;
     this.canvasElement = this.root.querySelector("[data-graph-canvas]");
     this.canvasElement.tabIndex = 0;
     this.canvasElement.setAttribute("role", "application");
-    this.canvasElement.setAttribute("aria-label", "LiteGraph workflow canvas");
+    this.canvasElement.setAttribute("aria-label", nodeText("LiteGraph workflow canvas"));
     this.minimap = this.root.querySelector("[data-graph-minimap]");
     this.paletteElement = this.root.querySelector("[data-graph-palette]");
     this.inspectorElement = this.root.querySelector("[data-graph-inspector]");
@@ -911,6 +1034,7 @@ class HubGraphEditor {
     this.resizeObserver = new ResizeObserver(() => this.resizeCanvas());
     this.resizeObserver.observe(this.canvasElement.parentElement);
     this.resizeCanvas();
+    localizeNodeStaticMarkup(this.root);
   }
 
   bindEvents() {
@@ -1138,7 +1262,7 @@ class HubGraphEditor {
       return !query || haystack.includes(query);
     });
     const results = state.element.querySelector("[data-graph-picker-results]");
-    if (results) results.innerHTML = matches.length ? matches.map(({ candidate, index }) => `<button class="button button--compact" type="button" role="option" data-graph-picker-candidate="${index}" title="${escapeHtml(candidate.definition.description || "")}">${escapeHtml(candidate.definition.title)} · ${escapeHtml(candidate.port.label || candidate.port.name)} <small>${escapeHtml(candidate.definition.availability?.status || candidate.definition.status || "operational")}</small></button>`).join("") : `<p class="graph-empty">No compatible node port matches this search.</p>`;
+    if (results) results.innerHTML = matches.length ? matches.map(({ candidate, index }) => `<button class="button button--compact" type="button" role="option" data-graph-picker-candidate="${index}" title="${escapeHtml(candidate.definition.description || "")}">${escapeHtml(candidate.definition.title)} · ${escapeHtml(candidate.port.label || candidate.port.name)} <small>${escapeHtml(nodeText(candidate.definition.availability?.status || candidate.definition.status || "operational"))}</small></button>`).join("") : `<p class="graph-empty">${escapeHtml(nodeText("No compatible node port matches this search."))}</p>`;
     const rejected = state.element.querySelector("[data-graph-picker-rejected]");
     if (rejected) {
       const reasons = state.candidates.rejected.slice(0, 4).map((item) => `${item.definition.title} · ${item.port.label || item.port.name}: ${item.reason}`);
@@ -1279,11 +1403,11 @@ class HubGraphEditor {
       (result[definition.category] ||= []).push(definition);
       return result;
     }, {});
-    this.paletteElement.innerHTML = Object.entries(groups).map(([category, definitions]) => `<section class="graph-palette__group"><h3>${escapeHtml(category)}</h3>${definitions.map((definition) => {
+    this.paletteElement.innerHTML = Object.entries(groups).map(([category, definitions]) => `<section class="graph-palette__group"><h3>${escapeHtml(nodeText(category))}</h3>${definitions.map((definition) => {
       const evidence = this.operationEvidenceFor(definition);
       const availability = this.operationAvailabilityFor(definition);
       const scoped = Boolean(evidence);
-      return `<button type="button" class="graph-palette__item" data-graph-add="${escapeHtml(definition.type)}" data-operation-status="${escapeHtml(availability.status || "partial")}"${scoped ? ` data-operation-scope="${escapeHtml(evidence.id)}"` : ""} title="${escapeHtml(availability.reason || definition.description || "")}"><i style="--node-color:${escapeHtml(CATEGORY_COLORS[definition.category] || "#8794ad")}"></i><span><b>${escapeHtml(definition.title)}</b><small>${escapeHtml(availability.status)} · ${escapeHtml(availability.reason || definition.description || "")}</small></span></button>`;
+      return `<button type="button" class="graph-palette__item" data-graph-add="${escapeHtml(definition.type)}" data-operation-status="${escapeHtml(availability.status || "partial")}"${scoped ? ` data-operation-scope="${escapeHtml(evidence.id)}"` : ""} title="${escapeHtml(availability.reason || definition.description || "")}"><i style="--node-color:${escapeHtml(CATEGORY_COLORS[definition.category] || "#8794ad")}"></i><span><b>${escapeHtml(nodeText(definition.title))}</b><small>${escapeHtml(nodeText(availability.status))} · ${escapeHtml(availability.reason || definition.description || "")}</small></span></button>`;
     }).join("")}</section>`).join("") || `<p class="graph-empty">Không tìm thấy node.</p>`;
   }
 
@@ -1307,10 +1431,12 @@ class HubGraphEditor {
     const nodes = this.selectedNodes();
     if (!nodes.length) {
       this.inspectorElement.innerHTML = `<div class="graph-inspector__empty"><strong>Inspector / Live preview</strong><p>Chọn node để chỉnh thông số và xem output. Kết nối trực tiếp từ socket sang socket.</p><div class="graph-type-legend">${Object.entries(TYPE_COLORS).map(([type, color]) => `<span><i style="--node-color:${color}"></i>${type}</span>`).join("")}</div><p>Minimap, pan/zoom, undo/redo và layout do canvas xử lý.</p></div>`;
+      localizeNodeStaticMarkup(this.inspectorElement);
       return;
     }
     if (nodes.length > 1) {
       this.inspectorElement.innerHTML = `<div class="graph-inspector__empty"><strong>${nodes.length} node đang được chọn</strong><p>Kéo các node cùng lúc, dùng Delete để xóa hoặc Ctrl+Z để hoàn tác.</p></div>`;
+      localizeNodeStaticMarkup(this.inspectorElement);
       return;
     }
     const node = nodes[0];
@@ -1330,14 +1456,17 @@ class HubGraphEditor {
     const progress = state.progress === undefined || state.progress === null ? "not_run" : Number.isFinite(Number(state.progress)) ? `${Math.max(0, Math.min(100, Number(state.progress)))}%` : "unavailable";
     const error = state.error ? String(state.error).slice(0, 240) : "none";
     const statusRows = [["Validation", validation], ["Dirty / downstream", dirty], ["Cache", cache], ["Progress", progress], ["Error", error]]
-      .map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
-    this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(definition?.category || "node")}</span><h3>${escapeHtml(definition?.title || node.hubType)}</h3><p>${escapeHtml(definition?.description || "")}</p></div><div class="graph-node-state" data-status="${escapeHtml(displayStatus)}"><b>${escapeHtml(displayStatus)}</b><span>${escapeHtml(displayMessage)}</span></div></div>${action ? `<div class="graph-action-hint"><strong>Bước tiếp theo</strong><span>${escapeHtml(action)}</span></div>` : ""}<section class="graph-inspector__section"><strong>Status truthful</strong><dl class="graph-status-list">${statusRows}</dl></section>${preview ? `<section class="graph-inspector__section"><strong>Safe artifact preview</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>Thông số</strong>${(definition?.properties || []).map((property) => propertyControl(node, property)).join("") || `<p class="graph-empty">Node này không có property.</p>`}</section>`;
+      .map(([label, value]) => `<div><dt>${escapeHtml(nodeText(label))}</dt><dd>${escapeHtml(nodeText(value))}</dd></div>`).join("");
+    const capability = `<div class="graph-inspector__capability" data-status="${escapeHtml(displayStatus)}"><div class="graph-inspector__capability-head"><strong>${escapeHtml(nodeText(displayStatus))}</strong><span class="status-pill" data-status="${escapeHtml(displayStatus)}">${escapeHtml(nodeText(displayStatus))}</span></div><p>${escapeHtml(nodeText(displayMessage || "Snapshot chưa công bố thêm giải thích."))}</p></div>`;
+    const nextAction = action || "Chưa có hành động tiếp theo trong snapshot này.";
+    this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(nodeText(definition?.category || "node"))}</span><h3>${escapeHtml(nodeText(definition?.title || node.hubType))}</h3><p>${escapeHtml(nodeText(definition?.description || ""))}</p></div></div><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Capability"))}</strong>${capability}</section><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Bước tiếp theo"))}</strong><div class="graph-action-hint"><span>${escapeHtml(nodeText(nextAction))}</span></div></section><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Execution status"))}</strong><dl class="graph-status-list">${statusRows}</dl></section>${preview ? `<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Artifact"))}</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Parameters"))}</strong>${(definition?.properties || []).map((property) => propertyControl(node, property)).join("") || `<p class="graph-empty">${escapeHtml(nodeText("Node này không có property."))}</p>`}</section>`;
     if (this.scope === "media") {
       this.inspectorElement.querySelector(".graph-inspector__head")?.insertAdjacentHTML("afterend", this.operationEvidenceMarkup(operationEvidence ? definition : null));
       const inspectorState = this.inspectorElement.querySelector(".graph-node-state");
       inspectorState?.setAttribute("data-operation-scope-status", operationEvidence?.status || this.operationScope.status);
       inspectorState?.setAttribute("data-operation-scope-verified", String(operationEvidence?.evidenceVerified || this.operationScope.evidenceVerified === true));
     }
+    localizeNodeStaticMarkup(this.inspectorElement);
   }
 
   renderArtifactPreview(collection, state = {}) {
@@ -1527,11 +1656,11 @@ class HubGraphEditor {
       this.runProvenance = [];
       this.dirty = new Set((result.graph.nodes || []).map((node) => node.id));
       this.graphData = result.graph;
-      this.savedFingerprint = "";
+      this.savedFingerprint = quiet ? graphFingerprint(result.graph) : "";
       this.recovered = false;
-      this.unsaved = true;
+      this.unsaved = !quiet;
       if (render && this.liteGraph) this.hydrateLiteGraph(result.graph);
-      this.persist({ source: "template" });
+      this.persist({ source: "template", saved: quiet });
       if (!quiet) this.showToast("Đã nạp preset workflow Hub.");
     } catch (error) {
       if (!quiet) this.showToast(error.message, "error");

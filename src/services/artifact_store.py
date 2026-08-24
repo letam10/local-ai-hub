@@ -1553,7 +1553,9 @@ def publicize(value: Any, *, key: str | None = None) -> Any:
 def diagnostics_summary() -> dict[str, Any]:
     """Public read-only diagnostic summary of the artifact store."""
     with _LOCK:
+        index = _load_managed_index()
         return {
-            "total_artifacts": len(_registry),
+            "total_artifacts": len(index) if index is not None else 0,
             "index_path_exists": INDEX_PATH.exists(),
+            "index_readable": index is not None,
         }

@@ -731,7 +731,7 @@ def load_production_catalog(path: Path) -> dict[str, Any]:
 class ProductionCatalog:
     """Read-only production catalog plus explicit, bounded size refresh."""
 
-    def __init__(self, *, paths: HubPaths | None = None, catalog_path: Path | None = None) -> None:
+    def __init__(self, *, paths: HubPaths | None = None, catalog_path: Path | None = None, observed_models: Mapping[str, Mapping[str, Any]] | None = None) -> None:
         self.paths = paths or get_paths()
         self.catalog_path = catalog_path or self.paths.app_root / "Config" / "v7_production_catalog.example.json"
         loaded = load_production_catalog(self.catalog_path)
@@ -741,6 +741,14 @@ class ProductionCatalog:
         self.runtimes = {item["runtime_id"]: item for item in loaded["runtimes"]}
         self.fingerprint = _fingerprint(loaded)
         self.source_availability = SourceAvailabilityService(paths=self.paths)
+        # Injected server-owned compatibility observations stay path-free and
+        # are omitted from fixture catalogs unless the API composition layer
+        # explicitly supplies the legacy model registry projection.
+        self.observed_models = {
+            str(key): dict(value)
+            for key, value in (observed_models or {}).items()
+            if isinstance(key, str) and isinstance(value, Mapping)
+        }
 
     def _root_for_runtime(self, record: Mapping[str, Any]) -> Path:
         if record["root_class"] == "environments_root":
@@ -815,7 +823,18 @@ class ProductionCatalog:
         else:
             status = "NOT_INSTALLED"
             reason = "No catalog leaf is present under the managed Models root."
-        if record["disposition"] == "UNSUPPORTED_SOURCE":
+        observed = self.observed_models.get(model_id)
+        observed_installed = isinstance(observed, Mapping) and observed.get("installed") is True
+        observed_size = observed.get("size", {}).get("bytes") if isinstance(observed, Mapping) and isinstance(observed.get("size"), Mapping) else None
+        if status == "NOT_INSTALLED" and observed_installed:
+            # The legacy registry found a managed local record, while the
+            # reviewed production leaf contract did not match it.  Expose
+            # that distinction instead of claiming that the model is absent;
+            # verification/smoke is still required before operational use.
+            status = "INSTALLED_UNVERIFIED"
+            reason = "A managed local model record was observed; exact catalog leaves and bounded smoke evidence remain unverified."
+            action = "Review the matching catalog binding and run bounded verification before use."
+        elif record["disposition"] == "UNSUPPORTED_SOURCE":
             action = "Manual review is required; no trusted installation action is available."
         elif record["disposition"] == "AUTH_REQUIRED":
             action = "Authorize the official provider before installation."
@@ -825,11 +844,13 @@ class ProductionCatalog:
             action = "Review the server-owned plan, then choose Download & Install."
         else:
             action = "Use Import Model after verifying the official source and license."
-        cache = self._size_cache().get(model_id) if status == "INSTALLED" else None
-        installed_size = cache.get("size_bytes") if isinstance(cache, Mapping) and isinstance(cache.get("size_bytes"), int) else self._receipt_size(model_id) if status == "INSTALLED" else None
+        cache = self._size_cache().get(model_id) if status in {"INSTALLED", "INSTALLED_UNVERIFIED"} else None
+        installed_size = cache.get("size_bytes") if isinstance(cache, Mapping) and isinstance(cache.get("size_bytes"), int) else self._receipt_size(model_id) if status in {"INSTALLED", "INSTALLED_UNVERIFIED"} else None
+        if installed_size is None and observed_installed and isinstance(observed_size, int) and observed_size >= 0:
+            installed_size = observed_size
         projected = {key: value for key, value in record.items() if key not in {"official_source", "primary_source", "trusted_fallback_sources", "license_url", "files", "update_candidate"}}
-        projected.update({"status": status, "execution": "not_run", "operational": False, "leaves": leaves, "installed_size_bytes": installed_size, "expected_download_size_bytes": record["estimated_download_size"] or None, "expected_disk_size_bytes": record["estimated_disk_size"] or None, "source_availability": self.source_availability.cached(model_id, record, binding=self._source_availability_binding(model_id, record, component_type="model")), "reason": reason, "next_action": action})
-        if installed_size is None and status == "INSTALLED":
+        projected.update({"status": status, "execution": "not_run", "operational": False, "observed_local": bool(observed_installed), "leaves": leaves, "installed_size_bytes": installed_size, "expected_download_size_bytes": record["estimated_download_size"] or None, "expected_disk_size_bytes": record["estimated_disk_size"] or None, "source_availability": self.source_availability.cached(model_id, record, binding=self._source_availability_binding(model_id, record, component_type="model")), "reason": reason, "next_action": action})
+        if installed_size is None and status in {"INSTALLED", "INSTALLED_UNVERIFIED"}:
             projected["size_label"] = "Size unavailable"
         elif installed_size is not None:
             projected["size_label"] = f"{installed_size} bytes"
@@ -874,8 +895,8 @@ class ProductionCatalog:
         if category:
             models = [item for item in models if str(item.get("category", "")).casefold() == category.casefold()]
         if installed is not None:
-            models = [item for item in models if (item["status"] == "INSTALLED") is installed]
-        return {"schema_version": "v7-production-catalog-snapshot.v1", "catalog_schema_version": self.catalog_schema_version, "catalog_version": self.catalog_version, "status": "completed", "execution": "not_run", "dry_run": True, "catalog_fingerprint": self.fingerprint, "models": models, "runtimes": runtimes, "counts": {"models": len(models), "runtimes": len(runtimes), "installed_models": sum(item["status"] == "INSTALLED" for item in models), "install_ready": sum(item["disposition"] == "AUTO_INSTALL_READY" for item in models)}, "reason": "Catalog and fixed-leaf discovery only; no model/runtime process or network action ran.", "next_action": "Select a server-owned component plan before any installation."}
+            models = [item for item in models if (item["status"] in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"}) is installed]
+        return {"schema_version": "v7-production-catalog-snapshot.v1", "catalog_schema_version": self.catalog_schema_version, "catalog_version": self.catalog_version, "status": "completed", "execution": "not_run", "dry_run": True, "catalog_fingerprint": self.fingerprint, "models": models, "runtimes": runtimes, "counts": {"models": len(models), "runtimes": len(runtimes), "installed_models": sum(item["status"] in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"} for item in models), "install_ready": sum(item["disposition"] == "AUTO_INSTALL_READY" for item in models)}, "reason": "Catalog and fixed-leaf discovery only; no model/runtime process or network action ran.", "next_action": "Select a server-owned component plan before any installation."}
 
     def refresh_model_size(self, model_id: str, *, max_files: int = 10000) -> dict[str, Any]:
         """Explicit user-requested bounded size refresh; never runs on every UI refresh."""
@@ -914,7 +935,19 @@ class ProductionCatalog:
 
 
 def catalog_snapshot(*, paths: HubPaths | None = None, query: str = "", category: str = "", installed: bool | None = None) -> dict[str, Any]:
-    return ProductionCatalog(paths=paths).snapshot(query=query, category=category, installed=installed)
+    observed: dict[str, Mapping[str, Any]] = {}
+    if paths is None:
+        try:
+            from src.services.storage_manager.overview import model_summary
+
+            observed = {
+                str(item.get("id")): item
+                for item in model_summary()
+                if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+            }
+        except Exception:
+            observed = {}
+    return ProductionCatalog(paths=paths, observed_models=observed).snapshot(query=query, category=category, installed=installed)
 
 
 __all__ = ["MODEL_DISPOSITIONS", "ProductionCatalog", "ProductionCatalogError", "RUNTIME_DISPOSITIONS", "SCHEMA", "SCHEMA_V2", "SUPPORTED_SCHEMAS", "catalog_snapshot", "load_production_catalog"]
