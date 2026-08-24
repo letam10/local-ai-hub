@@ -48,7 +48,8 @@ const LEGACY_STATIC_COPY = Object.freeze([
   "Volume statistics are available from the server-owned allowlist.", "No action is required; refresh after external storage changes.",
   "The server recovery snapshot has jobs that need review.", "Open Jobs to review the server-owned recovery state.",
   "No bounded media acceptance invocation was recorded.", "Keep media operations partial until a separately authorized bounded acceptance is recorded.",
-  "Server snapshot only; the UI does not execute media operations.", "Outcome", "Execution", "Cleanup", "Source overwrite", "Reason", "Video grade",
+  "Server snapshot only; the UI does not execute media operations.", "Outcome", "Execution", "Cleanup", "Source overwrite", "Reason", "Not checked", "Video grade", "Logo overlay", "Encode", "Generic Media action",
+  "Generic media actions are not covered by the three exact server evidence rows.", "Phương tiện operation state is shown from the server snapshot before any separately authorized work.",
   "Review detailed evidence", "Open server snapshot in Settings", "View exact operation scope", "Generic Media actions remain Partial",
   "Generic media actions are not covered by the three exact evidence rows.", "Use only the published evidence rows; no generic media execution is claimed.",
   "Use the exact evidence summary first; this UI does not claim generic media execution.", "Execution unavailable from this snapshot",
@@ -72,6 +73,7 @@ const LEGACY_STATIC_COPY = Object.freeze([
   "Use server-owned validated output for a later bounded integration preflight.",
   "Track do máy chủ sở hữu hàng đợi and recovery state; actions only appear when the published record gates them.",
   "Image sequence to video", "Image resize", "Image crop", "Image rotate", "Image flip", "Image convert", "Image compress",
+  "Size unavailable", "Check All Updates", "Output", "Image", "AIRI external", "Open AIRI Settings in the AIRI application; Hub only uses an allowlist to call the registered launcher.",
   "No V8 operation", "Model", "Category", "Size", "Status / action", "Import Model", "Check Update",
 ]);
 
