@@ -76,6 +76,13 @@ const NODE_COPY = Object.freeze({
   "Encode": "Mã hóa",
   "No compatible node port matches this search.": "Không có cổng node tương thích với tìm kiếm này.",
   "Media operation scope is not applied to this workspace; no execution is claimed.": "Phạm vi thao tác media không áp dụng cho workspace này; không tuyên bố thực thi.",
+  "This node is outside the exact published media operation scope.": "Node này nằm ngoài phạm vi thao tác media chính xác đã công bố.",
+  "Use only the three exactly evidenced media operations.": "Chỉ sử dụng ba thao tác media có bằng chứng chính xác.",
+  "Media operation evidence": "Bằng chứng thao tác media",
+  "Next action": "Hành động tiếp theo",
+  "Server snapshot": "Snapshot máy chủ",
+  "execution:": "thực thi:",
+  "no UI execution": "không thực thi trên giao diện",
   "Exact media evidence is published for video grade, logo overlay and encode; opening Node Studio does not execute a worker.": "Đã công bố bằng chứng media chính xác cho hiệu chỉnh video, phủ logo và mã hóa; mở Node Studio không chạy worker.",
   "No exact media evidence is verified in this server snapshot; scoped nodes remain partial and no execution is claimed.": "Snapshot máy chủ chưa xác minh bằng chứng media chính xác; các node trong phạm vi vẫn là một phần và không tuyên bố thực thi.",
   "NODE WORKFLOW": "WORKFLOW NODE",
@@ -624,8 +631,8 @@ class HubGraphEditor {
     if (evidence) return evidence;
     return {
       status: "partial",
-      reason: "This node is outside the exact published media operation scope.",
-      action: "Use only Video grade, Logo overlay, or Encode when their server evidence is operational.",
+      reason: nodeText("This node is outside the exact published media operation scope."),
+      action: nodeText("Use only the three exactly evidenced media operations."),
       evidenceVerified: false,
       execution: "not_run",
     };
@@ -648,13 +655,13 @@ class HubGraphEditor {
 
   operationEvidenceMarkup(definition = null) {
     const evidence = this.operationEvidenceFor(definition);
-    const title = evidence ? `${evidence.label} evidence` : "Media operation evidence";
+    const title = evidence ? `${evidence.label} evidence` : nodeText("Media operation evidence");
     const generic = this.scope === "media" && !evidence;
     const status = evidence?.status || (generic ? "partial" : this.scope === "media" ? this.operationScope.status : "unavailable");
-    const reason = evidence?.reason || (generic ? "This node is outside the exact published media operation scope." : this.operationScopeSummary());
-    const nextAction = evidence?.nextAction || (generic ? "Use only the three exactly evidenced media operations." : safeOperationScopeText(this.operationScope.nextAction, MEDIA_OPERATION_SCOPE_FALLBACK.nextAction));
+    const reason = evidence?.reason || (generic ? nodeText("This node is outside the exact published media operation scope.") : this.operationScopeSummary());
+    const nextAction = evidence?.nextAction || (generic ? nodeText("Use only the three exactly evidenced media operations.") : safeOperationScopeText(this.operationScope.nextAction, MEDIA_OPERATION_SCOPE_FALLBACK.nextAction));
     const execution = evidence?.execution || (generic ? "not_run" : this.operationScope.execution);
-    return `<section class="graph-operation-evidence" data-operation-scope-status="${escapeHtml(status)}" data-operation-scope-verified="${String(evidence?.evidenceVerified === true)}"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(reason)}</span><span><b>Next action</b> ${escapeHtml(nextAction)}</span><small>Server snapshot · execution: ${escapeHtml(execution)} · no UI execution</small></section>`;
+    return `<section class="graph-operation-evidence" data-operation-scope-status="${escapeHtml(status)}" data-operation-scope-verified="${String(evidence?.evidenceVerified === true)}"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(reason)}</span><span><b>${escapeHtml(nodeText("Next action"))}</b> ${escapeHtml(nextAction)}</span><small>${escapeHtml(nodeText("Server snapshot"))} · ${escapeHtml(nodeText("execution:"))} ${escapeHtml(execution)} · ${escapeHtml(nodeText("no UI execution"))}</small></section>`;
   }
 
   destroy() {
