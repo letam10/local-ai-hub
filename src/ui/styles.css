@@ -552,7 +552,7 @@ td { color: var(--text); }
 @keyframes asset-preview-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 
 /* Node inspector hierarchy and accessible boolean controls. */
-.graph-editor__layout { grid-template-columns: var(--node-palette-width) minmax(0, 1fr) minmax(360px, var(--node-inspector-width)); }
+.graph-editor__layout { grid-template-columns: var(--node-palette-width) minmax(0, 1fr) minmax(260px, var(--node-inspector-width)); }
 .graph-inspector { min-width: 360px; }
 .graph-inspector__head h3 { overflow-wrap: anywhere; font-size: 17px; }.graph-inspector__head p { overflow-wrap: anywhere; }
 .graph-inspector__section > strong { color: var(--accent); letter-spacing: .06em; text-transform: uppercase; }
