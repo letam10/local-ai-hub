@@ -35,6 +35,13 @@ class UiAssetContractTests(unittest.TestCase):
             i18n,
         )
 
+    def test_component_control_plane_uses_localized_fixed_copy(self) -> None:
+        control_plane = (ROOT / "src" / "ui" / "features" / "components" / "v8_control_plane.js").read_text(encoding="utf-8")
+        renderer = (ROOT / "src" / "ui" / "features" / "components" / "render.js").read_text(encoding="utf-8")
+        self.assertIn('import { translateText } from "../../i18n.js";', control_plane)
+        self.assertIn('uiText("V8 source acceptance")', control_plane)
+        self.assertIn('uiTextHtml("Component Operations")', renderer)
+
 
 if __name__ == "__main__":
     unittest.main()
