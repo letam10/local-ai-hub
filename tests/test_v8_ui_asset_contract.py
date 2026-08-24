@@ -71,6 +71,13 @@ class UiAssetContractTests(unittest.TestCase):
         self.assertIn('uiTextHtml("Prompt / Input")', rendering)
         self.assertIn('"Snapshot received.": "Đã nhận snapshot."', i18n)
 
+    def test_node_titles_and_ports_use_the_fixed_localization_boundary(self) -> None:
+        studio = (ROOT / "src" / "ui" / "features" / "node_studio" / "studio.js").read_text(encoding="utf-8")
+        self.assertIn('this.title = nodeText(captured.title)', studio)
+        self.assertIn('this.addInput(nodeText(port.label || port.name)', studio)
+        self.assertIn('this.addOutput(nodeText(port.label || port.name)', studio)
+        self.assertIn('nodeText(definition.title)', studio)
+
 
 if __name__ == "__main__":
     unittest.main()
