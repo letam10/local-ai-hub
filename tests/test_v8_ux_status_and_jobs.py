@@ -139,6 +139,14 @@ process.stdout.write(renderPage({json.dumps(route)}, {payload}));
             self.assertIn(marker, vendor)
         for marker in ("Execution status", "Capability", "data-graph-property", "role=\"switch\""):
             self.assertIn(marker, studio)
+        for marker in (
+            '"Encode evidence": "Bằng chứng mã hóa"',
+            '"No completed exact evidence is available for the listed media operations."',
+            'nodeText(`${evidence.label} evidence`)',
+            'nodeText(reason)',
+            'nodeText(nextAction)',
+        ):
+            self.assertIn(marker, studio)
         for marker in ("workflow-mini-graph", "data-asset-preview", "preview_url", "data-preview-fallback"):
             self.assertIn(marker, projects)
         for marker in ("status-pill[data-severity=\"error\"]", ".workflow-mini-graph", ".asset-preview-skeleton", ".graph-inspector"):

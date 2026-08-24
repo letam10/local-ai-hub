@@ -85,10 +85,17 @@ const NODE_COPY = Object.freeze({
   "This node is outside the exact published media operation scope.": "Node này nằm ngoài phạm vi thao tác media chính xác đã công bố.",
   "Use only the three exactly evidenced media operations.": "Chỉ sử dụng ba thao tác media có bằng chứng chính xác.",
   "Media operation evidence": "Bằng chứng thao tác media",
+  "Video grade evidence": "Bằng chứng hiệu chỉnh video",
+  "Logo overlay evidence": "Bằng chứng phủ logo",
+  "Encode evidence": "Bằng chứng mã hóa",
   "Next action": "Hành động tiếp theo",
   "Server snapshot": "Snapshot máy chủ",
   "execution:": "thực thi:",
   "no UI execution": "không thực thi trên giao diện",
+  "No completed exact evidence is available for the listed media operations.": "Chưa có bằng chứng chính xác đã hoàn tất cho các thao tác media được liệt kê.",
+  "Keep the listed operations and all other media tools partial until separately evidenced.": "Giữ các thao tác được liệt kê và mọi công cụ media khác ở mức một phần cho đến khi có bằng chứng riêng.",
+  "This exact operation is not verified in the server snapshot.": "Thao tác chính xác này chưa được xác minh trong snapshot máy chủ.",
+  "Keep this operation partial until separately evidenced.": "Giữ thao tác này ở mức một phần cho đến khi có bằng chứng riêng.",
   "Exact media evidence is published for video grade, logo overlay and encode; opening Node Studio does not execute a worker.": "Đã công bố bằng chứng media chính xác cho hiệu chỉnh video, phủ logo và mã hóa; mở Node Studio không chạy worker.",
   "No exact media evidence is verified in this server snapshot; scoped nodes remain partial and no execution is claimed.": "Snapshot máy chủ chưa xác minh bằng chứng media chính xác; các node trong phạm vi vẫn là một phần và không tuyên bố thực thi.",
   "NODE WORKFLOW": "WORKFLOW NODE",
@@ -668,13 +675,13 @@ class HubGraphEditor {
 
   operationEvidenceMarkup(definition = null) {
     const evidence = this.operationEvidenceFor(definition);
-    const title = evidence ? `${evidence.label} evidence` : nodeText("Media operation evidence");
+    const title = evidence ? nodeText(`${evidence.label} evidence`) : nodeText("Media operation evidence");
     const generic = this.scope === "media" && !evidence;
     const status = evidence?.status || (generic ? "partial" : this.scope === "media" ? this.operationScope.status : "unavailable");
     const reason = evidence?.reason || (generic ? nodeText("This node is outside the exact published media operation scope.") : this.operationScopeSummary());
     const nextAction = evidence?.nextAction || (generic ? nodeText("Use only the three exactly evidenced media operations.") : safeOperationScopeText(this.operationScope.nextAction, MEDIA_OPERATION_SCOPE_FALLBACK.nextAction));
     const execution = evidence?.execution || (generic ? "not_run" : this.operationScope.execution);
-    return `<section class="graph-operation-evidence" data-operation-scope-status="${escapeHtml(status)}" data-operation-scope-verified="${String(evidence?.evidenceVerified === true)}"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(reason)}</span><span><b>${escapeHtml(nodeText("Next action"))}</b> ${escapeHtml(nextAction)}</span><small>${escapeHtml(nodeText("Server snapshot"))} · ${escapeHtml(nodeText("execution:"))} ${escapeHtml(execution)} · ${escapeHtml(nodeText("no UI execution"))}</small></section>`;
+    return `<section class="graph-operation-evidence" data-operation-scope-status="${escapeHtml(status)}" data-operation-scope-verified="${String(evidence?.evidenceVerified === true)}"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(nodeText(reason))}</span><span><b>${escapeHtml(nodeText("Next action"))}</b> ${escapeHtml(nodeText(nextAction))}</span><small>${escapeHtml(nodeText("Server snapshot"))} · ${escapeHtml(nodeText("execution:"))} ${escapeHtml(nodeText(execution))} · ${escapeHtml(nodeText("no UI execution"))}</small></section>`;
   }
 
   destroy() {
@@ -1450,9 +1457,9 @@ class HubGraphEditor {
     const error = state.error ? String(state.error).slice(0, 240) : "none";
     const statusRows = [["Validation", validation], ["Dirty / downstream", dirty], ["Cache", cache], ["Progress", progress], ["Error", error]]
       .map(([label, value]) => `<div><dt>${escapeHtml(nodeText(label))}</dt><dd>${escapeHtml(nodeText(value))}</dd></div>`).join("");
-    const capability = `<div class="graph-inspector__capability" data-status="${escapeHtml(displayStatus)}"><div class="graph-inspector__capability-head"><strong>${escapeHtml(nodeText(displayStatus))}</strong><span class="status-pill" data-status="${escapeHtml(displayStatus)}">${escapeHtml(nodeText(displayStatus))}</span></div><p>${escapeHtml(displayMessage || "Snapshot chưa công bố thêm giải thích.")}</p></div>`;
+    const capability = `<div class="graph-inspector__capability" data-status="${escapeHtml(displayStatus)}"><div class="graph-inspector__capability-head"><strong>${escapeHtml(nodeText(displayStatus))}</strong><span class="status-pill" data-status="${escapeHtml(displayStatus)}">${escapeHtml(nodeText(displayStatus))}</span></div><p>${escapeHtml(nodeText(displayMessage || "Snapshot chưa công bố thêm giải thích."))}</p></div>`;
     const nextAction = action || "Chưa có hành động tiếp theo trong snapshot này.";
-    this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(nodeText(definition?.category || "node"))}</span><h3>${escapeHtml(nodeText(definition?.title || node.hubType))}</h3><p>${escapeHtml(definition?.description || "")}</p></div></div><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Capability"))}</strong>${capability}</section><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Bước tiếp theo"))}</strong><div class="graph-action-hint"><span>${escapeHtml(nextAction)}</span></div></section><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Execution status"))}</strong><dl class="graph-status-list">${statusRows}</dl></section>${preview ? `<section class="graph-inspector__section"><strong>ARTIFACT</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Parameters"))}</strong>${(definition?.properties || []).map((property) => propertyControl(node, property)).join("") || `<p class="graph-empty">Node này không có property.</p>`}</section>`;
+    this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(nodeText(definition?.category || "node"))}</span><h3>${escapeHtml(nodeText(definition?.title || node.hubType))}</h3><p>${escapeHtml(nodeText(definition?.description || ""))}</p></div></div><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Capability"))}</strong>${capability}</section><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Bước tiếp theo"))}</strong><div class="graph-action-hint"><span>${escapeHtml(nodeText(nextAction))}</span></div></section><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Execution status"))}</strong><dl class="graph-status-list">${statusRows}</dl></section>${preview ? `<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Artifact"))}</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Parameters"))}</strong>${(definition?.properties || []).map((property) => propertyControl(node, property)).join("") || `<p class="graph-empty">${escapeHtml(nodeText("Node này không có property."))}</p>`}</section>`;
     if (this.scope === "media") {
       this.inspectorElement.querySelector(".graph-inspector__head")?.insertAdjacentHTML("afterend", this.operationEvidenceMarkup(operationEvidence ? definition : null));
       const inspectorState = this.inspectorElement.querySelector(".graph-node-state");
