@@ -1,0 +1,36 @@
+{
+  "schema_version": "local-state-snapshot.v1",
+  "observed_at": "2026-08-24",
+  "source_scope": "machine_local_snapshot",
+  "source": "Config/hub_config.json",
+  "classification": "SANITIZED_METADATA",
+  "local_only": true,
+  "canonical_role": "Safe operational configuration summary for architecture review; private hosts, ports, paths, process settings, and environment details are omitted.",
+  "omitted_fields": [
+    "bind_host",
+    "api_port",
+    "comfyui_port",
+    "ffmpeg_path",
+    "ffprobe_path",
+    "log_root",
+    "output_root",
+    "temp_root",
+    "shared_cache_roots",
+    "mcp_http_port"
+  ],
+  "safe_fields": {
+    "hub_name": "Local AI Hub",
+    "execution": "not_run",
+    "runtime_status": "not_run",
+    "model_load_policy": "on_demand",
+    "max_heavy_gpu_jobs": 1,
+    "idle_unload_seconds": 900,
+    "overwrite_source": false,
+    "auto_start_heavy_services": false,
+    "start_maximized": true,
+    "minimum_width": 1280,
+    "minimum_height": 720,
+    "upload_max_bytes": 8589934592,
+    "upload_disk_safety_bytes": 536870912
+  }
+}
