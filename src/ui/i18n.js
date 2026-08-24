@@ -246,6 +246,20 @@ const V8_VI_UI_COPY = Object.freeze({
   "The managed descriptor passed static validation, but no runtime graph smoke has been authorized.": "Mô tả được quản lý đã qua xác thực tĩnh, nhưng chưa có smoke graph runtime được cấp quyền.",
   "Use server-owned validated output for a later bounded integration preflight.": "Dùng kết quả đã xác thực do máy chủ sở hữu cho preflight tích hợp có giới hạn sau này.",
   "Track do máy chủ sở hữu hàng đợi and recovery state; actions only appear when the published record gates them.": "Theo dõi hàng đợi và trạng thái khôi phục do máy chủ sở hữu; hành động chỉ xuất hiện khi bản ghi đã công bố cho phép.",
+  "Readiness is derived from server-owned static capability evidence.": "Mức sẵn sàng được suy ra từ bằng chứng năng lực tĩnh do máy chủ sở hữu.",
+  "Review the module plan before requesting runtime work.": "Xem kế hoạch module trước khi yêu cầu thao tác runtime.",
+  "Publish a server-owned evidence packet and obtain manager QA admission.": "Công bố gói bằng chứng do máy chủ sở hữu và nhận phê duyệt QA của quản lý.",
+  "Static descriptors were validated and this extension declares no runtime workload.": "Mô tả tĩnh đã được xác thực và extension này không khai báo workload runtime.",
+  "Use the static CLI output for review and reserve runtime verification for a separately authorized smoke.": "Dùng kết quả CLI tĩnh để xem xét; dành xác minh runtime cho smoke được cấp quyền riêng.",
+  "The catalog passed static contract checks, but no asset filesystem or provider operation was performed.": "Danh mục đã qua kiểm tra hợp đồng tĩnh, nhưng chưa thực hiện thao tác filesystem asset hoặc provider.",
+  "Review dependency preflight and run a bounded approved smoke before enabling image generation.": "Xem preflight phụ thuộc và chạy smoke có giới hạn được duyệt trước khi bật tạo ảnh.",
+  "current server capability snapshot": "snapshot năng lực máy chủ hiện tại",
+  "RESOURCE PREFLIGHT": "KIỂM TRA TÀI NGUYÊN", "Dry-run resource fit": "Đánh giá tài nguyên chạy thử", "Mode": "Chế độ", "Target": "Mục tiêu", "Server-owned": "Do máy chủ sở hữu",
+  "Physical fit": "Phù hợp vật lý", "Concurrent fit": "Phù hợp đồng thời", "Fit": "Phù hợp", "No fit": "Không phù hợp", "Unknown": "Chưa rõ", "Resource notes": "Ghi chú tài nguyên", "Next safe action": "Hành động an toàn tiếp theo",
+  "No per-module resource fit was published.": "Chưa công bố mức phù hợp tài nguyên theo module.",
+  "Resource fit is planning evidence only; no provider, install, repair, uninstall, GPU or media operation ran.": "Mức phù hợp tài nguyên chỉ là bằng chứng lập kế hoạch; chưa chạy provider, cài đặt, sửa chữa, gỡ cài đặt, GPU hay thao tác media.",
+  "STORAGE CONSTRAINTS": "RÀNG BUỘC LƯU TRỮ", "Allowlisted volume constraints": "Ràng buộc ổ đĩa theo allowlist", "Server-owned snapshot": "Snapshot do máy chủ sở hữu", "Low-space action": "Hành động khi sắp hết dung lượng",
+  "Download & Install": "Tải xuống & cài đặt", "Authorize & Install": "Cấp quyền & cài đặt", "Review License": "Kiểm tra giấy phép", "Manual Review": "Kiểm tra thủ công", "Check Update": "Kiểm tra cập nhật", "Plan Update": "Lập kế hoạch cập nhật", "Roll Back": "Quay lại phiên bản trước", "Update Center": "Trung tâm cập nhật",
 });
 
 // Explicit labels used by the page renderer.  These keys are template-owned
