@@ -207,6 +207,8 @@ const V8_VI_UI_COPY = Object.freeze({
   "Use only the published evidence rows; no generic media execution is claimed.": "Chỉ dùng các dòng bằng chứng đã công bố; không tuyên bố thực thi media chung.",
   "Use the exact evidence summary first; this UI does not claim generic media execution.": "Trước hết hãy xem tóm tắt bằng chứng chính xác; giao diện này không tuyên bố thực thi media chung.",
   "Execution unavailable from this snapshot": "Thực thi chưa khả dụng trong snapshot này",
+  "Media operation scope is not applied to this workspace; no execution is claimed.": "Phạm vi thao tác media không áp dụng cho workspace này; không tuyên bố thực thi.",
+  "unavailable": "chưa khả dụng",
   "Size unavailable": "Kích thước chưa có", "Check All Updates": "Kiểm tra tất cả cập nhật", "Output": "Đầu ra", "Image": "Hình ảnh",
   "AIRI external": "AIRI bên ngoài", "Open AIRI Settings in the AIRI application; Hub only uses an allowlist to call the registered launcher.": "Mở Cài đặt AIRI trong ứng dụng AIRI; Hub chỉ dùng allowlist để gọi launcher đã đăng ký.",
   "Image sequence to video": "Chuỗi ảnh thành video", "Image resize": "Đổi kích thước ảnh", "Image crop": "Cắt ảnh", "Image rotate": "Xoay ảnh", "Image flip": "Lật ảnh", "Image convert": "Chuyển đổi định dạng ảnh", "Image compress": "Nén ảnh",

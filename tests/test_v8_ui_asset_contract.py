@@ -26,6 +26,15 @@ class UiAssetContractTests(unittest.TestCase):
         self.assertRegex(api, r"export const listBackups\s*=")
         self.assertIn("listBackups()", app)
 
+    def test_vietnamese_status_dictionary_does_not_fragment_unavailable(self) -> None:
+        i18n = (ROOT / "src" / "ui" / "i18n.js").read_text(encoding="utf-8")
+        self.assertIn('"unavailable": "chưa khả dụng"', i18n)
+        self.assertIn(
+            '"Media operation scope is not applied to this workspace; no execution is claimed.": '
+            '"Phạm vi thao tác media không áp dụng cho workspace này; không tuyên bố thực thi."',
+            i18n,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
