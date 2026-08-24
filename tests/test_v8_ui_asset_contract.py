@@ -62,6 +62,15 @@ class UiAssetContractTests(unittest.TestCase):
         self.assertIn('uiTextHtml("Model")', models)
         self.assertIn('uiTextHtml("Check")', models)
 
+    def test_snapshot_and_workflow_rail_copy_is_localized(self) -> None:
+        index = (ROOT / "src" / "ui" / "index.html").read_text(encoding="utf-8")
+        rendering = (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
+        i18n = (ROOT / "src" / "ui" / "i18n.js").read_text(encoding="utf-8")
+        self.assertIn('data-i18n="Snapshot received."', index)
+        self.assertIn('uiTextHtml("Load & Transform")', rendering)
+        self.assertIn('uiTextHtml("Prompt / Input")', rendering)
+        self.assertIn('"Snapshot received.": "Đã nhận snapshot."', i18n)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -187,6 +187,7 @@ const EXTRA_DICTIONARIES = Object.freeze({
 // Keep server-owned names, IDs and arbitrary evidence text out of this table;
 // only stable UI labels and bounded guidance belong here.
 const V8_VI_UI_COPY = Object.freeze({
+  "Snapshot received.": "Đã nhận snapshot.", "IMAGE WORKFLOW": "WORKFLOW HÌNH ẢNH", "VIDEO WORKFLOW": "WORKFLOW VIDEO", "VISION WORKFLOW": "WORKFLOW THỊ GIÁC", "Prompt / Input": "Prompt / Đầu vào", "Generate / Edit / Upscale / Mask": "Tạo / Sửa / Nâng cấp / Mask", "Generate / Edit / Mask": "Tạo / Sửa / Mask", "Preview": "Xem trước", "Save": "Lưu", "Preview & Save": "Xem trước & Lưu", "Load Video": "Tải video", "Transform": "Biến đổi", "Upscale": "Nâng cấp", "Grade": "Hiệu chỉnh", "Subtitle / Logo": "Phụ đề / Logo", "Audio": "Âm thanh", "Encode": "Mã hóa", "Load & Transform": "Tải & biến đổi", "Upscale & RIFE & Grade": "Nâng cấp & RIFE & hiệu chỉnh", "Color grade": "Hiệu chỉnh màu", "Subtitle, Encode & Save": "Phụ đề, mã hóa & lưu", "Load": "Tải", "Detect / Ground / Segment / OCR": "Phát hiện / Ground / Phân vùng / OCR", "Preview / Export": "Xem trước / Xuất", "Load Input": "Tải đầu vào", "Detect / Segment / OCR": "Phát hiện / Phân vùng / OCR", "Preview & Export": "Xem trước & Xuất",
   "MEDIA CAPABILITY EVIDENCE": "BẰNG CHỨNG KHẢ NĂNG MEDIA",
   "Exact media operation scope": "Phạm vi thao tác media chính xác",
   "Server snapshot only; the UI does not execute media operations.": "Chỉ hiển thị snapshot máy chủ; giao diện không thực thi thao tác media.",

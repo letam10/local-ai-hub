@@ -583,11 +583,11 @@ const imageWorkflowRail = (state) => {
   const edit = tool(state, "generate_qwen_image");
   const transform = tool(state, "run_media_operation");
   return `<section class="image-workflow-rail" aria-label="Image workflow">
-    <div class="image-workflow-rail__intro"><div><span class="eyebrow">IMAGE WORKFLOW</span><h2>Luồng xử lý ảnh chuẩn</h2><p>Chuỗi node chuẩn: <b>Prompt / Input</b> → <b>Generate / Edit / Upscale / Mask</b> → <b>Preview</b> → <b>Save</b>. Trạng thái backend luôn phản ánh trung thực.</p></div><span class="tag">image · mask · DAG</span></div>
+    <div class="image-workflow-rail__intro"><div><span class="eyebrow">${uiTextHtml("IMAGE WORKFLOW")}</span><h2>Luồng xử lý ảnh chuẩn</h2><p>Chuỗi node chuẩn: <b>${uiTextHtml("Prompt / Input")}</b> → <b>${uiTextHtml("Generate / Edit / Upscale / Mask")}</b> → <b>${uiTextHtml("Preview")}</b> → <b>${uiTextHtml("Save")}</b>. Trạng thái backend luôn phản ánh trung thực.</p></div><span class="tag">image · mask · DAG</span></div>
     <div class="image-workflow-rail__steps">
-      <article><span>01</span><strong>Prompt / Input</strong><small>Text prompt hoặc ảnh đầu vào</small>${statusPill("operational")}<button class="button button--compact" type="button" data-workspace-tab="image:nodes">Mở Hub Nodes</button></article>
-      <article><span>02</span><strong>Generate / Edit / Mask</strong><small>FLUX / Qwen / SAM2 / Upscale</small>${statusPill(generation.tool_status || edit.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="image:nodes">Mở template</button></article>
-      <article><span>03</span><strong>Preview & Save</strong><small>Xem preview an toàn và xuất artifact</small>${statusPill("operational")}<button class="button button--compact" type="button" data-workspace-tab="image:nodes">Xem canvas</button></article>
+      <article><span>01</span><strong>${uiTextHtml("Prompt / Input")}</strong><small>Text prompt hoặc ảnh đầu vào</small>${statusPill("operational")}<button class="button button--compact" type="button" data-workspace-tab="image:nodes">Mở Hub Nodes</button></article>
+      <article><span>02</span><strong>${uiTextHtml("Generate / Edit / Mask")}</strong><small>FLUX / Qwen / SAM2 / Upscale</small>${statusPill(generation.tool_status || edit.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="image:nodes">Mở template</button></article>
+      <article><span>03</span><strong>${uiTextHtml("Preview & Save")}</strong><small>Xem preview an toàn và xuất artifact</small>${statusPill("operational")}<button class="button button--compact" type="button" data-workspace-tab="image:nodes">Xem canvas</button></article>
     </div>
   </section>`;
 };
@@ -595,11 +595,11 @@ const videoWorkflowRail = (state) => {
   const transform = tool(state, "run_media_operation");
   const upscale = tool(state, "upscale_anime_video");
   return `<section class="video-workflow-rail" aria-label="Video workflow">
-    <div class="video-workflow-rail__intro"><div><span class="eyebrow">VIDEO WORKFLOW</span><h2>Luồng xử lý video chuẩn</h2><p>Chuỗi pipeline chuẩn: <b>Load Video</b> → <b>Transform</b> → <b>Upscale</b> → <b>RIFE</b> → <b>Grade</b> → <b>Subtitle / Logo</b> → <b>Audio</b> → <b>Encode</b> → <b>Preview</b> → <b>Save</b>.</p></div><span class="tag">video · streaming · DAG</span></div>
+    <div class="video-workflow-rail__intro"><div><span class="eyebrow">${uiTextHtml("VIDEO WORKFLOW")}</span><h2>Luồng xử lý video chuẩn</h2><p>Chuỗi pipeline chuẩn: <b>${uiTextHtml("Load Video")}</b> → <b>${uiTextHtml("Transform")}</b> → <b>${uiTextHtml("Upscale")}</b> → <b>RIFE</b> → <b>${uiTextHtml("Grade")}</b> → <b>${uiTextHtml("Subtitle / Logo")}</b> → <b>${uiTextHtml("Audio")}</b> → <b>${uiTextHtml("Encode")}</b> → <b>${uiTextHtml("Preview")}</b> → <b>${uiTextHtml("Save")}</b>.</p></div><span class="tag">video · streaming · DAG</span></div>
     <div class="video-workflow-rail__steps">
-      <article><span>01</span><strong>Load & Transform</strong><small>Đầu vào video và tiền xử lý FFmpeg</small>${statusPill(transform.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Mở template</button></article>
-      <article><span>02</span><strong>Upscale & RIFE & Grade</strong><small>AnimeSR · Nội suy FPS · Color grade</small>${statusPill(upscale.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Mở template</button></article>
-      <article><span>03</span><strong>Subtitle, Encode & Save</strong><small>Chèn phụ đề / Logo · Encode · Xuất file</small>${statusPill(transform.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Xem pipeline</button></article>
+      <article><span>01</span><strong>${uiTextHtml("Load & Transform")}</strong><small>Đầu vào video và tiền xử lý FFmpeg</small>${statusPill(transform.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Mở template</button></article>
+      <article><span>02</span><strong>${uiTextHtml("Upscale & RIFE & Grade")}</strong><small>AnimeSR · Nội suy FPS · ${uiTextHtml("Color grade")}</small>${statusPill(upscale.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Mở template</button></article>
+      <article><span>03</span><strong>${uiTextHtml("Subtitle, Encode & Save")}</strong><small>Chèn phụ đề / Logo · ${uiTextHtml("Encode")} · Xuất file</small>${statusPill(transform.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Xem pipeline</button></article>
     </div>
   </section>`;
 };
@@ -608,11 +608,11 @@ const visionWorkflowRail = (state) => {
   const detect = tool(state, "detect_objects");
   const ocr = tool(state, "ocr_document");
   return `<section class="image-workflow-rail" aria-label="Vision workflow" style="background:linear-gradient(135deg, rgba(66,198,160,.1), transparent 48%), var(--panel)">
-    <div class="image-workflow-rail__intro"><div><span class="eyebrow">VISION WORKFLOW</span><h2>Luồng phân tích thị giác chuẩn</h2><p>Chuỗi thao tác chuẩn: <b>Load</b> → <b>Detect / Ground / Segment / OCR</b> → <b>Preview / Export</b>. Kết quả JSON và mask bounding box xem trực tiếp.</p></div><span class="tag">vision · bbox · OCR</span></div>
+    <div class="image-workflow-rail__intro"><div><span class="eyebrow">${uiTextHtml("VISION WORKFLOW")}</span><h2>Luồng phân tích thị giác chuẩn</h2><p>Chuỗi thao tác chuẩn: <b>${uiTextHtml("Load")}</b> → <b>${uiTextHtml("Detect / Ground / Segment / OCR")}</b> → <b>${uiTextHtml("Preview / Export")}</b>. Kết quả JSON và mask bounding box xem trực tiếp.</p></div><span class="tag">vision · bbox · OCR</span></div>
     <div class="image-workflow-rail__steps">
-      <article><span>01</span><strong>Load Input</strong><small>Tải ảnh, tài liệu hoặc screenshot</small>${statusPill("operational")}<button class="button button--compact" type="button" data-route="vision">Mở Vision Studio</button></article>
-      <article><span>02</span><strong>Detect / Segment / OCR</strong><small>OmniParser · RF-DETR · DINO · PaddleOCR</small>${statusPill(parse.tool_status || detect.tool_status || ocr.tool_status || "partial")}<button class="button button--compact" type="button" data-route="vision">Xem modules</button></article>
-      <article><span>03</span><strong>Preview & Export</strong><small>Xem JSON annotation và trích xuất text</small>${statusPill("operational")}<button class="button button--compact" type="button" data-route="jobs">Xem Jobs</button></article>
+      <article><span>01</span><strong>${uiTextHtml("Load Input")}</strong><small>Tải ảnh, tài liệu hoặc screenshot</small>${statusPill("operational")}<button class="button button--compact" type="button" data-route="vision">Mở Vision Studio</button></article>
+      <article><span>02</span><strong>${uiTextHtml("Detect / Segment / OCR")}</strong><small>OmniParser · RF-DETR · DINO · PaddleOCR</small>${statusPill(parse.tool_status || detect.tool_status || ocr.tool_status || "partial")}<button class="button button--compact" type="button" data-route="vision">Xem modules</button></article>
+      <article><span>03</span><strong>${uiTextHtml("Preview & Export")}</strong><small>Xem JSON annotation và trích xuất text</small>${statusPill("operational")}<button class="button button--compact" type="button" data-route="jobs">Xem Jobs</button></article>
     </div>
   </section>`;
 };
