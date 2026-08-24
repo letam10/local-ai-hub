@@ -576,9 +576,12 @@ class HubGraphEditor {
         this.persist({ source: "recipe" });
         this.onRecipeApplied(this.recipeApplication);
       }
-      this.savedFingerprint = graphFingerprint(this.graphData);
-      this.unsaved = this.unsaved || !this.recovered;
-      this.dirty = new Set(this.graphData.nodes.map((node) => node.id));
+      this.savedFingerprint = this.savedFingerprint || graphFingerprint(this.graphData);
+      // Loading the server-owned default preset is a baseline, not a user
+      // edit.  Only a recovered draft or an explicit recipe/template action
+      // should surface "Có thay đổi chưa lưu" on first open.
+      this.unsaved = Boolean(this.unsaved);
+      this.dirty = this.unsaved ? new Set(this.graphData.nodes.map((node) => node.id)) : new Set();
       this.renderShell();
       this.hydrateLiteGraph(this.graphData);
       this.renderWorkflowStatus();
@@ -1638,11 +1641,11 @@ class HubGraphEditor {
       this.runProvenance = [];
       this.dirty = new Set((result.graph.nodes || []).map((node) => node.id));
       this.graphData = result.graph;
-      this.savedFingerprint = "";
+      this.savedFingerprint = quiet ? graphFingerprint(result.graph) : "";
       this.recovered = false;
-      this.unsaved = true;
+      this.unsaved = !quiet;
       if (render && this.liteGraph) this.hydrateLiteGraph(result.graph);
-      this.persist({ source: "template" });
+      this.persist({ source: "template", saved: quiet });
       if (!quiet) this.showToast("Đã nạp preset workflow Hub.");
     } catch (error) {
       if (!quiet) this.showToast(error.message, "error");

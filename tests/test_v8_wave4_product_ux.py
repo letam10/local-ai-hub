@@ -202,6 +202,8 @@ class V8Wave4ProductUxTests(unittest.TestCase):
         self.assertIn("settingsActionStatus", settings)
         self.assertIn("transportReady", dashboard)
         self.assertIn('HubLiteNode.title_text_color = "#ffffff"', studio)
+        self.assertIn("this.unsaved = Boolean(this.unsaved)", studio)
+        self.assertIn("this.persist({ source: \"template\", saved: quiet })", studio)
 
 
 if __name__ == "__main__":
