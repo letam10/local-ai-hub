@@ -72,6 +72,8 @@ class V8AppReadinessContractTests(unittest.TestCase):
         self.assertIn("initialize().catch", app_js)
         self.assertIn("frontend_js_bootstrap_failed", app_js)
         self.assertIn("__localAiHubFrontendReady", app_js)
+        self.assertIn("__localAiHubFrontendRendered", app_js)
+        self.assertIn("__localAiHubFrontendBootstrapReady", app_js)
         self.assertIn("Promise.race", app_js)
         self.assertIn("FRONTEND_READY_TIMEOUT", app_js)
         self.assertIn("bridge?.frontend?.record", app_js)

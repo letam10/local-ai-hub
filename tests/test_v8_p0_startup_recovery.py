@@ -288,6 +288,27 @@ class V8P0StartupRecoveryTests(unittest.TestCase):
                 _load_ui_when_ready(timeout_window, DesktopBridge())
             self.assertIn(FRONTEND_BOOTSTRAP_TIMEOUT, timeout_window.loaded_html[0])
 
+    def test_frontend_render_marker_drives_native_confirmation_when_js_callback_is_unavailable(self):
+        class Window:
+            def __init__(self):
+                self.loaded_urls = []
+                self.loaded_html = []
+            def load_url(self, url):
+                self.loaded_urls.append(url)
+            def evaluate_js(self, script):
+                self.script = script
+                return True
+            def load_html(self, value):
+                self.loaded_html.append(value)
+
+        bridge = DesktopBridge()
+        window = Window()
+        with patch("src.app.main.ensure_api", return_value=None), patch("src.app.main._probe_api", return_value=("compatible_owned_or_reusable", {})), patch("src.app.main._record_startup_event"), patch.object(bridge, "confirm_frontend_ready", return_value={"status": "ready"}) as confirm:
+            _load_ui_when_ready(window, bridge)
+        self.assertTrue(window.loaded_urls)
+        self.assertFalse(window.loaded_html)
+        confirm.assert_called_once_with()
+
     def test_watchdog_bridge_uses_old_verified_runtime_when_new_runtime_is_missing(self):
         with self._temp() as temporary:
             root = Path(temporary) / "install"

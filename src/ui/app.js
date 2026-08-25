@@ -905,6 +905,8 @@ const initialize = async () => {
   } catch { /* Keep the explicit partial adapter state. */ }
   render({ focus: "main" });
   await recordFrontendEvent("frontend_rendered", routeId());
+  globalThis.__localAiHubFrontendRendered = true;
+  globalThis.__localAiHubFrontendBootstrapReady = bootstrapReady;
   if (bootstrapReady) {
     try {
       await confirmFrontendReady();

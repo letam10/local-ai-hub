@@ -848,7 +848,23 @@ def _load_ui_when_ready(window: object, bridge: DesktopBridge | None = None) -> 
         return
     if bridge is None:
         return
-    if not bridge._frontend_ready_event.wait(timeout=FRONTEND_READY_TIMEOUT_SECONDS):
+    deadline = time.monotonic() + FRONTEND_READY_TIMEOUT_SECONDS
+    while not bridge._frontend_ready_event.is_set() and time.monotonic() < deadline:
+        try:
+            marker = window.evaluate_js(  # type: ignore[attr-defined]
+                "Boolean(globalThis.__localAiHubFrontendRendered && globalThis.__localAiHubFrontendBootstrapReady)"
+            )
+        except Exception:
+            marker = False
+        if marker is True or marker == "true":
+            result = bridge.confirm_frontend_ready()
+            if result.get("status") == "ready":
+                bridge._frontend_ready_event.set()
+                break
+            _record_startup_event("frontend_ready_rejected", selected_port=_configured_port(), probe_state=api_state, runtime_class="installed_bundled")
+            break
+        time.sleep(0.2)
+    if not bridge._frontend_ready_event.is_set():
         _record_startup_event("frontend_timeout", selected_port=_configured_port(), probe_state=api_state, runtime_class="installed_bundled")
         try:
             window.load_html(_error_html(FRONTEND_BOOTSTRAP_TIMEOUT))  # type: ignore[attr-defined]
