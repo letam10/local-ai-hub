@@ -42,9 +42,38 @@ jobs:
         run: |
           node --check src/ui/features/components/render.js
           node --check src/ui/features/components/v8_control_plane.js
+          node --check src/ui/app_update.js
       - name: Check pull request whitespace
         if: github.event_name == 'pull_request'
         run: git diff --check "${{ github.event.pull_request.base.sha }}" HEAD
       - name: Check push whitespace
         if: github.event_name == 'push'
         run: git diff --check HEAD^ HEAD
+
+  build-main-update:
+    name: Build stable main update artifact
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Check out exact validated main source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build deterministic APP_ONLY payload
+        run: python scripts/build_main_update.py --output dist/main-update
+      - name: Upload main update artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-ai-hub-main-update
+          path: |
+            dist/main-update/LocalAIHub-main-update.zip
+            dist/main-update/update-manifest.json
+            dist/main-update/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
