@@ -247,6 +247,13 @@ class V8P0StartupRecoveryTests(unittest.TestCase):
             self.assertEqual(bridge.frontend.confirm_frontend_ready(), {"status": "ready"})
             confirm.assert_called_once_with()
 
+    def test_frontend_ready_telemetry_event_commits_native_readiness(self):
+        with patch.object(DesktopBridge, "confirm_frontend_ready", return_value={"status": "ready"}) as confirm, patch("src.app.main._record_startup_event"):
+            bridge = DesktopBridge()
+            result = bridge.frontend.record("frontend_ready")
+            self.assertEqual(result["status"], "ready")
+            confirm.assert_called_once_with()
+
     def test_normal_legacy_payload_without_build_metadata_can_confirm_frontend(self):
         with self._temp() as temporary:
             root = Path(temporary) / "install"

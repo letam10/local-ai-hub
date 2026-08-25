@@ -711,6 +711,7 @@ class _FrontendReadinessBridge:
         "webview_navigation_completed",
         "frontend_bootstrap_started",
         "frontend_rendered",
+        "frontend_ready",
         "frontend_js_bootstrap_failed",
         "frontend_ready_rejected",
         "frontend_timeout",
@@ -723,6 +724,14 @@ class _FrontendReadinessBridge:
     def record(self, event: str, route: str | None = None) -> dict[str, object]:
         if event not in self._EVENTS:
             return {"status": "rejected", "code": "READINESS_EVENT_INVALID"}
+        if event == "frontend_ready":
+            result = self._owner.confirm_frontend_ready()
+            if result.get("status") == "ready":
+                _record_startup_event(event, selected_port=_configured_port(), probe_state="frontend", runtime_class="installed_bundled")
+                return result
+            _record_desktop_readiness("frontend_ready_rejected", status="failed")
+            _record_startup_event("frontend_ready_rejected", selected_port=_configured_port(), probe_state="frontend", runtime_class="installed_bundled")
+            return result
         result = _record_desktop_readiness(event, route=route, status="failed" if "failed" in event or "rejected" in event else "running")
         _record_startup_event(event, selected_port=_configured_port(), probe_state="frontend", runtime_class="installed_bundled")
         return result

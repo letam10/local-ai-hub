@@ -74,8 +74,8 @@ class V8AppReadinessContractTests(unittest.TestCase):
         self.assertIn("__localAiHubFrontendReady", app_js)
         self.assertIn("Promise.race", app_js)
         self.assertIn("FRONTEND_READY_TIMEOUT", app_js)
-        self.assertIn("bridge?.frontend?.confirm_frontend_ready", app_js)
-        self.assertIn("confirm()", app_js)
+        self.assertIn("bridge?.frontend?.record", app_js)
+        self.assertIn('bridge.frontend.record("frontend_ready")', app_js)
         self.assertIn("HTTP 200 của API không đủ", index_html)
 
 

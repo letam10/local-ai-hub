@@ -738,14 +738,13 @@ const confirmFrontendReady = async () => {
     window.addEventListener("pywebviewready", onReady, { once: true });
     setTimeout(() => finish(globalThis.pywebview?.api || null), 2000);
   });
-  const confirm = bridge?.frontend?.confirm_frontend_ready;
-  if (typeof confirm !== "function") {
+  if (typeof bridge?.frontend?.record !== "function") {
     if (!globalThis.pywebview) return true;
     throw new Error("FRONTEND_BRIDGE_UNAVAILABLE");
   }
   try { await bridge.frontend?.record?.("webview_navigation_completed", null); } catch { /* bounded telemetry only */ }
   const result = await Promise.race([
-    confirm(),
+    bridge.frontend.record("frontend_ready"),
     new Promise((_, reject) => setTimeout(() => reject(new Error("FRONTEND_READY_TIMEOUT")), 3000)),
   ]);
   if (!result || result.status !== "ready") throw new Error("FRONTEND_READY_REJECTED");
