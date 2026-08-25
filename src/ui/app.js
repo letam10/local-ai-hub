@@ -133,7 +133,12 @@ const topStatus = document.querySelector("#top-status");
 const recordFrontendEvent = async (event, route = null) => {
   const recorder = globalThis.pywebview?.api?.frontend?.record;
   if (typeof recorder !== "function") return { status: "unavailable" };
-  try { return await recorder(event, route); } catch { return { status: "unavailable" }; }
+  try {
+    return await Promise.race([
+      recorder(event, route),
+      new Promise((resolve) => setTimeout(() => resolve({ status: "timeout" }), 1500)),
+    ]);
+  } catch { return { status: "unavailable" }; }
 };
 const showFrontendBootstrapFailure = async () => {
   await recordFrontendEvent("frontend_js_bootstrap_failed");
@@ -738,7 +743,10 @@ const confirmFrontendReady = async () => {
     throw new Error("FRONTEND_BRIDGE_UNAVAILABLE");
   }
   try { await bridge.frontend?.record?.("webview_navigation_completed", null); } catch { /* bounded telemetry only */ }
-  const result = await bridge.confirm_frontend_ready();
+  const result = await Promise.race([
+    bridge.confirm_frontend_ready(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("FRONTEND_READY_TIMEOUT")), 3000)),
+  ]);
   if (!result || result.status !== "ready") throw new Error("FRONTEND_READY_REJECTED");
   return true;
 };
