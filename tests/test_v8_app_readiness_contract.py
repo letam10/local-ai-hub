@@ -49,7 +49,7 @@ class V8AppReadinessContractTests(unittest.TestCase):
         self.assertIn("routes_complete", result["missing"])
 
     def test_readiness_events_are_bounded_and_identity_bound(self) -> None:
-        with tempfile.TemporaryDirectory(dir=r"D:\LocalAIHub\Temp", prefix="v8-readiness-") as folder:
+        with tempfile.TemporaryDirectory(prefix="v8-readiness-") as folder:
             root = Path(folder)
             payload_id = "main-aaaaaaaaaaaa"
             payload = root / "versions" / payload_id
