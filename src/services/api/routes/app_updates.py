@@ -23,6 +23,40 @@ def status(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) 
     return ApiResponse(200, app_update_service().status(refresh=refresh))
 
 
+def auth_status(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    return ApiResponse(200, app_update_service().auth_status())
+
+
+def auth_device_start(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    body = request.json(strict=True)
+    if body and set(body) != set():
+        return ApiResponse(400, {"status": "invalid", "code": "OAUTH_REQUEST_INVALID", "execution": "not_run"})
+    return ApiResponse(200, app_update_service().begin_device_login())
+
+
+def auth_logout(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    body = request.json(strict=True)
+    if body and set(body) != set():
+        return ApiResponse(400, {"status": "invalid", "code": "OAUTH_REQUEST_INVALID", "execution": "not_run"})
+    return ApiResponse(200, app_update_service().logout_auth())
+
+
+def auth_device_poll(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    body = request.json(strict=True)
+    session_id = body.get("session_id") if isinstance(body, dict) else None
+    if set(body) != {"session_id"} or not isinstance(session_id, str) or not session_id or len(session_id) > 128:
+        return ApiResponse(400, {"status": "invalid", "code": "OAUTH_SESSION_INVALID", "execution": "not_run"})
+    return ApiResponse(200, app_update_service().poll_device_login(session_id))
+
+
+def auth_device_cancel(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    body = request.json(strict=True)
+    session_id = body.get("session_id") if isinstance(body, dict) else None
+    if set(body) != {"session_id"} or not isinstance(session_id, str) or not session_id or len(session_id) > 128:
+        return ApiResponse(400, {"status": "invalid", "code": "OAUTH_SESSION_INVALID", "execution": "not_run"})
+    return ApiResponse(200, app_update_service().cancel_device_login(session_id))
+
+
 def changes(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
     try:
         return ApiResponse(200, app_update_service().changes())
@@ -61,6 +95,11 @@ def rollback(request: ApiRequest, context: ApiContext, params: Mapping[str, str]
 def register(router: Router) -> None:
     owner = "src/services/api/routes/app_updates.py"
     router.register(route_id="app_updates.status", method="GET", path="/api/app-update/status", domain="app_updates", owner=owner, handler=status)
+    router.register(route_id="app_updates.auth_status", method="GET", path="/api/app-update/auth/status", domain="app_updates", owner=owner, handler=auth_status)
+    router.register(route_id="app_updates.auth_device_start", method="POST", path="/api/app-update/auth/device/start", domain="app_updates", owner=owner, handler=auth_device_start)
+    router.register(route_id="app_updates.auth_device_poll", method="POST", path="/api/app-update/auth/device/poll", domain="app_updates", owner=owner, handler=auth_device_poll)
+    router.register(route_id="app_updates.auth_device_cancel", method="POST", path="/api/app-update/auth/device/cancel", domain="app_updates", owner=owner, handler=auth_device_cancel)
+    router.register(route_id="app_updates.auth_logout", method="POST", path="/api/app-update/auth/logout", domain="app_updates", owner=owner, handler=auth_logout)
     router.register(route_id="app_updates.changes", method="GET", path="/api/app-update/changes", domain="app_updates", owner=owner, handler=changes)
     router.register(route_id="app_updates.prepare", method="POST", path="/api/app-update/prepare", domain="app_updates", owner=owner, handler=prepare)
     router.register(route_id="app_updates.rollback", method="POST", path="/api/app-update/rollback", domain="app_updates", owner=owner, handler=rollback)

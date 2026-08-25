@@ -74,6 +74,7 @@ jobs:
           path: |
             dist/main-update/LocalAIHub-main-update.zip
             dist/main-update/update-manifest.json
+            dist/main-update/update-contract.json
             dist/main-update/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30

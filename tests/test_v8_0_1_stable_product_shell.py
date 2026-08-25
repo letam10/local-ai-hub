@@ -12,6 +12,7 @@ from unittest.mock import patch
 import os
 
 from src.app.desktop_lifecycle import DesktopCloseController
+from src.app.stable_launcher import _wait_for_pending_health
 from src.app.stable_shell import (
     APP_USER_MODEL_ID,
     POINTER_SCHEMA,
@@ -62,6 +63,21 @@ class StableProductShellTests(unittest.TestCase):
         }
         (root / "current.json").write_text(json.dumps(pointer, sort_keys=True) + "\n", encoding="utf-8")
         return root, data, pointer
+
+    def test_stable_launcher_waits_for_pending_health_and_rejects_exited_child(self) -> None:
+        class Process:
+            def __init__(self, exit_code):
+                self.exit_code = exit_code
+            def poll(self):
+                return self.exit_code
+
+        root = Path(tempfile.mkdtemp(prefix="lah-801-launcher-health-"))
+        marker = root / "update-state" / "pending-health.json"
+        marker.parent.mkdir()
+        marker.write_text("{}", encoding="utf-8")
+        self.assertFalse(_wait_for_pending_health(root, Process(1), timeout_seconds=1))
+        marker.unlink()
+        self.assertTrue(_wait_for_pending_health(root, Process(None), timeout_seconds=1))
 
     def test_stable_launcher_resolves_bundled_runtime_and_data_root(self) -> None:
         root, data, _pointer = self._fixture()

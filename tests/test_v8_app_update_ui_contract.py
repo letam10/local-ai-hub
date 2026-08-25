@@ -14,6 +14,11 @@ class V8AppUpdateUiContractTests(unittest.TestCase):
     def test_router_exposes_bounded_installed_update_surface(self) -> None:
         rows = {(route.method, route.path) for route in build_router().routes()}
         self.assertIn(("GET", "/api/app-update/status"), rows)
+        self.assertIn(("GET", "/api/app-update/auth/status"), rows)
+        self.assertIn(("POST", "/api/app-update/auth/device/start"), rows)
+        self.assertIn(("POST", "/api/app-update/auth/device/poll"), rows)
+        self.assertIn(("POST", "/api/app-update/auth/device/cancel"), rows)
+        self.assertIn(("POST", "/api/app-update/auth/logout"), rows)
         self.assertIn(("GET", "/api/app-update/changes"), rows)
         self.assertIn(("POST", "/api/app-update/prepare"), rows)
         self.assertIn(("POST", "/api/app-update/rollback"), rows)

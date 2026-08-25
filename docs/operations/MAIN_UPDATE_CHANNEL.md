@@ -15,9 +15,15 @@ The installed application never runs `git pull` and never executes a Git checkou
 
 ## Private repository authentication
 
-The repository is private. The first implementation intentionally does **not** embed a GitHub PAT/token in Local AI Hub. It uses an already-installed and authenticated GitHub CLI (`gh`) as the transport boundary. If `gh` is absent or not authenticated, Dashboard explains that update checking is unavailable and leaves the installed payload untouched.
+The repository is private. The updater transport order is:
 
-A future GitHub Device Flow / Windows Credential Manager transport can replace the CLI transport without changing the update artifact or pointer contract.
+1. native GitHub OAuth Device Flow when `LOCALAIHUB_GITHUB_OAUTH_CLIENT_ID` is configured and a token has been validated against the private repository;
+2. an already-installed and authenticated GitHub CLI (`gh`) fallback;
+3. a bounded `oauth_configuration_required` or unavailable state.
+
+The OAuth client id is not invented or hard-coded in this repository. Tokens are stored only through Windows Credential Manager under an installer-owned target; they never appear in Config, logs, UI payloads, diagnostics, process arguments or Git. If the repository owner has not supplied a valid OAuth App client id, native login remains explicitly blocked while the authenticated `gh` fallback continues to work.
+
+Device login exposes only the verification URI, user code and bounded expiry/poll state. Logout removes the local credential; no remote token is copied or printed.
 
 ## Build identity versus product version
 
@@ -33,13 +39,14 @@ Tags remain optional and user-controlled. Main merge readiness and this update c
 - Update is blocked while active jobs exist.
 - Old payloads are retained.
 - The previous `current.json` pointer is retained under installer-owned `update-state/` and can be restored with the rollback API.
+- A pending-health marker is written before activation. The new payload clears it only after matching product/API identity and build SHA are healthy; a failed proof restores the previous verified pointer without touching `DATA_ROOT`.
 - Models, Environments, runtime assets in `DATA_ROOT`, Output, Config, Projects and user media are never included in the GitHub artifact and are not moved/deleted by the updater.
 
 ## Runtime strategy and limitation
 
-The initial channel is `reuse-current`: source/UI/workflow changes reuse the installed bundled Python runtime. This keeps ordinary updates small and avoids reinstalling the launcher/runtime for every merge. The updater performs an import preflight before switching the pointer.
+The initial channel is `APP_ONLY`/`reuse-current`: source/UI/workflow changes reuse the installed bundled Python runtime. The update contract records the app protocol, minimum launcher compatibility and exact source commit. This keeps ordinary updates small and avoids reinstalling the launcher/runtime for every merge. The updater performs an import preflight before switching the pointer.
 
-A change that genuinely requires a new Python/native runtime must use a separately reviewed FULL update/installer path. The APP_ONLY channel must not silently download or replace the Core runtime.
+A change that genuinely requires a new Python/native runtime must use a separately reviewed `FULL` update/installer path. A FULL contract must carry a bundled runtime version and inventory hash; the APP_ONLY channel refuses such a payload and never silently downloads or replaces the Core runtime. The checked-in builder exposes the contract boundary, while Windows launcher/runtime replacement remains a separately validated prerequisite.
 
 ## One-time bootstrap
 

@@ -652,6 +652,21 @@ def _load_ui_when_ready(window: object) -> None:
             return
         return
     try:
+        # A newly activated payload proves its identity only after its own API
+        # is healthy.  The marker is local installer state and contains no
+        # user data; a mismatch fail-closes to the previous verified pointer.
+        from src.services.app_update import mark_startup_health
+
+        with urllib.request.urlopen(f"{_api_base_url()}/health", timeout=2.0) as response:
+            health = json.loads(response.read(128 * 1024 + 1).decode("utf-8"))
+        install_root = Path(os.environ.get("LOCALAIHUB_INSTALL_ROOT") or ROOT)
+        mark_startup_health(install_root, health=health if isinstance(health, dict) else None)
+    except Exception:
+        # A missing marker is normal.  If the marker is malformed or the
+        # health proof fails, mark_startup_health already attempted a bounded
+        # rollback; the stable shell remains usable for the next launch.
+        pass
+    try:
         window.load_url(_ui_url())  # type: ignore[attr-defined]
     except Exception:
         # The user can still close the loading window normally if WebView2 fails.
