@@ -72,6 +72,18 @@ _PAYLOAD_RE = re.compile(r"^main-[0-9a-f]{12}$")
 _RUNTIME_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
+def _classify_channel_relation(compare_status: object) -> str:
+    """Map GitHub compare semantics to the safe updater decision."""
+
+    value = str(compare_status or "").casefold()
+    return {
+        "identical": "same",
+        "ahead": "forward_update_available",
+        "behind": "blocked_current_ahead_of_main",
+        "diverged": "blocked_channel_diverged",
+    }.get(value, "channel_relation_unavailable")
+
+
 class AppUpdateError(RuntimeError):
     def __init__(self, code: str, message: str = "") -> None:
         super().__init__(message or code)
@@ -458,6 +470,19 @@ class AppUpdateService:
             commit = "unknown"
         return {"commit": commit, "payload_id": plan.version}
 
+    def _channel_relation(self, current_commit: str, candidate_commit: str) -> str:
+        """Prove update ancestry before exposing or preparing a main update."""
+
+        if current_commit in {"legacy", "unknown"} or not _SHA_RE.fullmatch(current_commit):
+            return "legacy_or_unbound"
+        if current_commit == candidate_commit:
+            return "same"
+        try:
+            comparison = self._api_json(f"repos/{REPOSITORY}/compare/{current_commit}...{candidate_commit}")
+        except AppUpdateError:
+            return "channel_relation_unavailable"
+        return _classify_channel_relation(comparison.get("status"))
+
     def status(self, *, refresh: bool = False) -> dict[str, Any]:
         with self._lock:
             now = time.monotonic()
@@ -482,15 +507,41 @@ class AppUpdateService:
                             "latest_build": None, "transport": "github_cli", "action": "Chờ main CI tạo update artifact thành công.",
                         }
                     else:
-                        available = current["commit"] != candidate.source_commit
-                        result = {
+                        relation = self._channel_relation(current["commit"], candidate.source_commit)
+                        if relation == "blocked_current_ahead_of_main":
+                            result = {
+                                "status": relation, "available": False, "product_version": PRODUCT_VERSION,
+                                "current_build": current["commit"], "current_payload": current["payload_id"],
+                                "latest_build": candidate.source_commit, "latest_payload": f"main-{candidate.source_commit[:12]}",
+                                "run_id": candidate.run_id, "artifact_id": candidate.artifact_id, "transport": auth.transport,
+                                "action": "Bản đang chạy chứa thay đổi chưa được tích hợp vào main; Hub sẽ không tự hạ cấp.",
+                            }
+                        elif relation == "blocked_channel_diverged":
+                            result = {
+                                "status": relation, "available": False, "product_version": PRODUCT_VERSION,
+                                "current_build": current["commit"], "current_payload": current["payload_id"],
+                                "latest_build": candidate.source_commit, "latest_payload": f"main-{candidate.source_commit[:12]}",
+                                "run_id": candidate.run_id, "artifact_id": candidate.artifact_id, "transport": auth.transport,
+                                "action": "Bản đang chạy và main đã tách lịch sử; không tự thay đổi payload.",
+                            }
+                        elif relation == "channel_relation_unavailable":
+                            result = {
+                                "status": relation, "available": False, "product_version": PRODUCT_VERSION,
+                                "current_build": current["commit"], "current_payload": current["payload_id"],
+                                "latest_build": candidate.source_commit, "latest_payload": f"main-{candidate.source_commit[:12]}",
+                                "transport": auth.transport,
+                                "action": "Không xác minh được ancestry của payload; Hub không tự cài đặt.",
+                            }
+                        else:
+                            available = relation == "forward_update_available" or (relation == "legacy_or_unbound" and current["commit"] != candidate.source_commit)
+                            result = {
                             "status": "available" if available else "up_to_date", "available": available,
                             "product_version": PRODUCT_VERSION, "current_build": current["commit"],
                             "current_payload": current["payload_id"], "latest_build": candidate.source_commit,
                             "latest_payload": f"main-{candidate.source_commit[:12]}", "run_id": candidate.run_id,
                             "artifact_id": candidate.artifact_id, "transport": auth.transport,
                             "action": "Cập nhật Local AI Hub" if available else "Bạn đang dùng build main mới nhất.",
-                        }
+                            }
             except AppUpdateError as exc:
                 result = {
                     "status": "unavailable", "available": False, "product_version": PRODUCT_VERSION,
@@ -770,6 +821,13 @@ class AppUpdateService:
             current = self._current_build(root)
             if current["commit"] == candidate.source_commit:
                 return {"status": "up_to_date", "restart_required": False, "source_commit": candidate.source_commit}
+            relation = self._channel_relation(current["commit"], candidate.source_commit)
+            if relation == "blocked_current_ahead_of_main":
+                raise AppUpdateError("UPDATE_CURRENT_AHEAD_OF_MAIN")
+            if relation == "blocked_channel_diverged":
+                raise AppUpdateError("UPDATE_CHANNEL_DIVERGED")
+            if relation == "channel_relation_unavailable" and current["commit"] not in {"legacy", "unknown"}:
+                raise AppUpdateError("UPDATE_CHANNEL_RELATION_UNAVAILABLE")
             plan = resolve_launch_plan(root, allow_test_root=self._allow_test_root)
             staging_root = root / "staging"
             staging_root.mkdir(parents=True, exist_ok=True)

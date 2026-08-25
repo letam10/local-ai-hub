@@ -32,6 +32,9 @@ class _ReadyTransport:
     def auth_state(self):
         return SimpleNamespace(status="ready", code=None, transport="fixture")
 
+    def api_json(self, _endpoint, _fields=None):
+        return {"status": "ahead"}
+
 
 class _HealthResponse:
     def __init__(self, value: dict[str, object]):
