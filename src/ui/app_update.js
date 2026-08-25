@@ -328,7 +328,10 @@ document.addEventListener("click", (event) => {
 injectStyle();
 const observer = new MutationObserver(() => {
   if (!document.querySelector("#module-view .dashboard-page")) return;
-  const card = ensureCard();
+  const dashboard = document.querySelector("#module-view .dashboard-page");
+  const existing = dashboard.querySelector("[data-app-update-card]");
+  const card = existing || ensureCard();
+  if (!card || existing) return;
   if (lastStatus) render(card, lastStatus);
   else check(false);
 });
