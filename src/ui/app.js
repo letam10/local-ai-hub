@@ -130,17 +130,7 @@ const state = {
 const view = document.querySelector("#module-view");
 const nav = document.querySelector("#sidebar-nav");
 const topStatus = document.querySelector("#top-status");
-const recordFrontendEvent = async (event, route = null) => {
-  const recorder = globalThis.pywebview?.api?.frontend?.record;
-  if (typeof recorder === "function") {
-    try {
-      const nativeResult = await Promise.race([
-        recorder(event, route),
-        new Promise((resolve) => setTimeout(() => resolve({ status: "timeout" }), 1500)),
-      ]);
-      if (nativeResult?.status === "recorded" || nativeResult?.status === "ready") return nativeResult;
-    } catch { /* fall back to the identity-bound loopback signal */ }
-  }
+const recordLoopbackFrontendEvent = async (event, route = null) => {
   try {
     const health = state.health || {};
     const response = await fetch("/api/desktop/readiness", {
@@ -156,6 +146,19 @@ const recordFrontendEvent = async (event, route = null) => {
     const result = await response.json();
     return result && typeof result === "object" ? result : { status: "unavailable" };
   } catch { return { status: "unavailable" }; }
+};
+const recordFrontendEvent = async (event, route = null) => {
+  const recorder = globalThis.pywebview?.api?.frontend?.record;
+  if (typeof recorder === "function") {
+    try {
+      const nativeResult = await Promise.race([
+        recorder(event, route),
+        new Promise((resolve) => setTimeout(() => resolve({ status: "timeout" }), 1500)),
+      ]);
+      if (nativeResult?.status === "recorded" || nativeResult?.status === "ready") return nativeResult;
+    } catch { /* fall back to the identity-bound loopback signal */ }
+  }
+  return recordLoopbackFrontendEvent(event, route);
 };
 const showFrontendBootstrapFailure = async () => {
   await recordFrontendEvent("frontend_js_bootstrap_failed");
@@ -740,6 +743,15 @@ const applyBootstrap = (payload) => {
 };
 
 const confirmFrontendReady = async () => {
+  // Persist the identity-bound proof before asking the native bridge to clear
+  // pending health.  This makes a WebView/native bridge delay observable to
+  // the desktop wait loop without treating HTTP status as readiness.
+  if (globalThis.pywebview) {
+    const signal = await recordLoopbackFrontendEvent("frontend_ready", routeId());
+    if (signal?.status !== "recorded" && signal?.status !== "ready") {
+      throw new Error(signal?.code || "FRONTEND_READY_SIGNAL_REJECTED");
+    }
+  }
   const bridge = await new Promise((resolve) => {
     if (globalThis.pywebview?.api) { resolve(globalThis.pywebview.api); return; }
     // Browser/dev mode has no native pending-health authority to commit.
