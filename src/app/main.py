@@ -855,6 +855,7 @@ def _load_ui_when_ready(window: object, bridge: DesktopBridge | None = None) -> 
         bootstrap_rendered = (
             event_seen(state, "frontend_bootstrap_completed")
             and event_seen(state, "frontend_rendered", route="dashboard")
+            and event_seen(state, "frontend_dom_visible", route="dashboard")
         )
         if state.get("pid") == os.getpid() and (event_seen(state, "frontend_ready") or bootstrap_rendered):
             result = bridge.confirm_frontend_ready()

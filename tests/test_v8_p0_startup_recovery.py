@@ -308,6 +308,7 @@ class V8P0StartupRecoveryTests(unittest.TestCase):
             pid = os.getpid()
             record_event(root, "desktop_started", status="starting", pid=pid)
             record_event(root, "frontend_bootstrap_completed", status="running", pid=pid)
+            record_event(root, "frontend_dom_visible", status="running", route="dashboard", pid=pid)
             record_event(root, "frontend_rendered", status="running", route="dashboard", pid=pid)
             record_event(root, "frontend_ready", status="running", pid=pid)
             bridge = DesktopBridge()

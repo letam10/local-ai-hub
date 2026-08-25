@@ -154,6 +154,9 @@ const recordLoopbackFrontendEvent = async (event, route = null) => {
 const recordFrontendEvent = async (event, route = null) => {
   return recordLoopbackFrontendEvent(event, route);
 };
+const waitForPaint = () => new Promise((resolve) => {
+  requestAnimationFrame(() => requestAnimationFrame(resolve));
+});
 const showFrontendBootstrapFailure = async () => {
   await recordFrontendEvent("frontend_js_bootstrap_failed");
   globalThis.__localAiHubFrontendReady = false;
@@ -905,6 +908,13 @@ const initialize = async () => {
     if (library?.status) state.workflowLibrary = library;
   } catch { /* Keep the explicit partial adapter state. */ }
   render({ focus: "main" });
+  await waitForPaint();
+  const visualProof = Boolean(
+    nav?.querySelectorAll(".nav-item").length
+    && view?.textContent?.trim(),
+  );
+  if (!visualProof) throw new Error("FRONTEND_DOM_NOT_RENDERED");
+  await recordFrontendEvent("frontend_dom_visible", routeId());
   await recordFrontendEvent("frontend_rendered", routeId());
   globalThis.__localAiHubFrontendRendered = true;
   globalThis.__localAiHubFrontendBootstrapReady = bootstrapReady;
