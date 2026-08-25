@@ -131,11 +131,14 @@ const view = document.querySelector("#module-view");
 const nav = document.querySelector("#sidebar-nav");
 const topStatus = document.querySelector("#top-status");
 const recordLoopbackFrontendEvent = async (event, route = null) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2000);
   try {
     const health = state.health || {};
     const response = await fetch("/api/desktop/readiness", {
       method: "POST",
       headers: { Accept: "application/json", "Content-Type": "application/json" },
+      signal: controller.signal,
       body: JSON.stringify({
         event,
         route,
@@ -146,6 +149,7 @@ const recordLoopbackFrontendEvent = async (event, route = null) => {
     const result = await response.json();
     return result && typeof result === "object" ? result : { status: "unavailable" };
   } catch { return { status: "unavailable" }; }
+  finally { clearTimeout(timeout); }
 };
 const recordFrontendEvent = async (event, route = null) => {
   const recorder = globalThis.pywebview?.api?.frontend?.record;
@@ -746,12 +750,12 @@ const confirmFrontendReady = async () => {
   // Persist the identity-bound proof before asking the native bridge to clear
   // pending health.  This makes a WebView/native bridge delay observable to
   // the desktop wait loop without treating HTTP status as readiness.
-  if (globalThis.pywebview) {
-    const signal = await recordLoopbackFrontendEvent("frontend_ready", routeId());
-    if (signal?.status !== "recorded" && signal?.status !== "ready") {
-      throw new Error(signal?.code || "FRONTEND_READY_SIGNAL_REJECTED");
-    }
+  const signal = await recordLoopbackFrontendEvent("frontend_ready", routeId());
+  const signalRecorded = signal?.status === "recorded" || signal?.status === "ready";
+  if (globalThis.pywebview && !signalRecorded) {
+    throw new Error(signal?.code || "FRONTEND_READY_SIGNAL_REJECTED");
   }
+  if (!globalThis.pywebview) return true;
   const bridge = await new Promise((resolve) => {
     if (globalThis.pywebview?.api) { resolve(globalThis.pywebview.api); return; }
     // Browser/dev mode has no native pending-health authority to commit.
