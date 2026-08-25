@@ -32,6 +32,7 @@ from src.shared.runtime_identity import APP_USER_MODEL_ID, API_PROTOCOL_VERSION,
 from src.shared.version import PRODUCT_VERSION
 
 from .desktop_lifecycle import DesktopCloseController
+from .readiness import record_event as record_readiness_event
 from .stable_shell import StableShellError, resolve_launch_plan
 from .tray import WindowsTray
 
@@ -240,6 +241,16 @@ def _record_startup_event(event: str, *, selected_port: int | None = None, probe
         probe_state=probe_state,
         runtime_class=runtime_class,
     )
+
+
+def _record_desktop_readiness(event: str, *, status: str | None = None, route: str | None = None) -> dict[str, object]:
+    """Persist bounded desktop/frontend evidence, never an HTTP-only claim."""
+
+    try:
+        root = Path(os.environ.get("LOCALAIHUB_INSTALL_ROOT") or ROOT)
+        return record_readiness_event(root, event, status=status, route=route)
+    except (OSError, TypeError, ValueError):
+        return {"status": "unavailable", "code": "READINESS_STATE_UNAVAILABLE"}
 
 
 def ensure_api(timeout_seconds: float = 20.0) -> subprocess.Popen[object] | None:
@@ -474,6 +485,7 @@ class DesktopBridge:
         self._close_prompt_fallback = False
         self._frontend_ready_event = threading.Event()
         self._frontend_ready_result: dict[str, object] | None = None
+        self.frontend = _FrontendReadinessBridge(self)
         # Keep the native component picker in a nested bridge namespace so
         # the top-level close API remains the exact three-choice contract.
         self.component_import = _ComponentSelectionBridge(self)
@@ -609,6 +621,7 @@ class DesktopBridge:
             if result.get("status") in {"healthy", "not_pending"}:
                 self._frontend_ready_result = {**result, "status": "ready"}
                 self._frontend_ready_event.set()
+                _record_desktop_readiness(FRONTEND_READY, status="ready")
                 state, _payload = _probe_api()
                 _record_startup_event(FRONTEND_READY, probe_state=state, runtime_class="installed_bundled")
                 return dict(self._frontend_ready_result)
@@ -687,6 +700,30 @@ class _ComponentSelectionBridge:
 
     def select_source(self, component_id: str) -> dict[str, object]:
         return self._owner._select_component_source(component_id)
+
+
+class _FrontendReadinessBridge:
+    """Nested, allowlisted telemetry namespace for the native frontend."""
+
+    _EVENTS = frozenset({
+        "webview_navigation_completed",
+        "frontend_bootstrap_started",
+        "frontend_rendered",
+        "frontend_js_bootstrap_failed",
+        "frontend_ready_rejected",
+        "frontend_timeout",
+        "route_rendered",
+    })
+
+    def __init__(self, owner: DesktopBridge) -> None:
+        self._owner = owner
+
+    def record(self, event: str, route: str | None = None) -> dict[str, object]:
+        if event not in self._EVENTS:
+            return {"status": "rejected", "code": "READINESS_EVENT_INVALID"}
+        result = _record_desktop_readiness(event, route=route, status="failed" if "failed" in event or "rejected" in event else "running")
+        _record_startup_event(event, selected_port=_configured_port(), probe_state="frontend", runtime_class="installed_bundled")
+        return result
 
 
 def _loading_html() -> str:
@@ -776,6 +813,8 @@ def _load_ui_when_ready(window: object, bridge: DesktopBridge | None = None) -> 
     api_state, _payload = _probe_api()
     _record_startup_event("api_ready", selected_port=_configured_port(), probe_state=api_state, runtime_class="installed_bundled")
     _record_startup_event("webview_navigation_started", selected_port=_configured_port(), probe_state=api_state, runtime_class="installed_bundled")
+    _record_desktop_readiness("api_ready", status="running")
+    _record_desktop_readiness("webview_navigation_started", status="running")
     try:
         window.load_url(_ui_url())  # type: ignore[attr-defined]
     except Exception:
@@ -828,6 +867,7 @@ def main() -> int:
 
         try:
             _record_startup_event("desktop_started", selected_port=_configured_port(), probe_state="unknown", runtime_class="installed_bundled")
+            _record_desktop_readiness("desktop_started", status="starting")
             bridge = DesktopBridge()
             window_kwargs = {
                 "html": _loading_html(),
@@ -864,6 +904,7 @@ def main() -> int:
                 webview.start(initialize_window, gui="edgechromium", debug=False)
             finally:
                 _record_startup_event("desktop_exit", selected_port=_configured_port(), probe_state="unknown", runtime_class="installed_bundled")
+                _record_desktop_readiness("desktop_exit", status="stopped")
                 if bridge._controller and bridge._controller.cleanup_allowed:
                     close_owned_idle_backends()
                     close_owned_api()

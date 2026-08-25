@@ -117,6 +117,8 @@ import { currentLanguage, localizeDocument, setLanguage, translateText } from ".
 import { FEATURE_REGISTRY } from "./core/feature_registry.js";
 import { confirmComponentInstall, getProductionCatalog, planComponentInstall } from "./shared/api/catalog.js";
 
+globalThis.__localAiHubFrontendStarted = true;
+
 const state = {
   health: {}, capabilities: {}, productization: {}, components: [], componentManager: {}, componentPlans: {}, tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", jobQuery: "", jobTypeFilter: "all", jobSort: "newest", jobPage: 1, apiStatus: "loading", apiError: "",
   creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
@@ -128,6 +130,19 @@ const state = {
 const view = document.querySelector("#module-view");
 const nav = document.querySelector("#sidebar-nav");
 const topStatus = document.querySelector("#top-status");
+const recordFrontendEvent = async (event, route = null) => {
+  const recorder = globalThis.pywebview?.api?.frontend?.record;
+  if (typeof recorder !== "function") return { status: "unavailable" };
+  try { return await recorder(event, route); } catch { return { status: "unavailable" }; }
+};
+const showFrontendBootstrapFailure = async () => {
+  await recordFrontendEvent("frontend_js_bootstrap_failed");
+  globalThis.__localAiHubFrontendReady = false;
+  const message = "Giao diện Local AI Hub không hoàn tất khởi tạo. Hãy thử lại hoặc khôi phục phiên bản trước.";
+  if (topStatus) topStatus.textContent = "Không thể khởi động giao diện";
+  if (apiEndpoint) apiEndpoint.textContent = "Frontend chưa sẵn sàng";
+  if (view) view.innerHTML = `<section class="empty-state startup-recovery" role="alert"><strong>Không thể khởi động giao diện Local AI Hub</strong><span>${message}</span><span>API có thể vẫn phản hồi, nhưng HTTP không được xem là bằng chứng app đã chạy.</span></section>`;
+};
 const diskMetric = document.querySelector("#disk-metric");
 const gpuMetric = document.querySelector("#gpu-metric");
 const apiEndpoint = document.querySelector("#api-endpoint");
@@ -680,6 +695,7 @@ const render = ({ background = false, focus = "" } = {}) => {
   }
   if (languageSelect) languageSelect.value = currentLanguage();
   localizeDocument(document);
+  void recordFrontendEvent("route_rendered", routeId());
   return true;
 };
 
@@ -721,6 +737,7 @@ const confirmFrontendReady = async () => {
     if (!globalThis.pywebview) return true;
     throw new Error("FRONTEND_BRIDGE_UNAVAILABLE");
   }
+  try { await bridge.frontend?.record?.("webview_navigation_completed", null); } catch { /* bounded telemetry only */ }
   const result = await bridge.confirm_frontend_ready();
   if (!result || result.status !== "ready") throw new Error("FRONTEND_READY_REJECTED");
   return true;
@@ -864,6 +881,7 @@ const loadRouteData = async ({ scan = false } = {}) => {
 };
 
 const initialize = async () => {
+  await recordFrontendEvent("frontend_bootstrap_started");
   let bootstrapReady = false;
   try {
     applyBootstrap(await getBootstrap());
@@ -878,6 +896,7 @@ const initialize = async () => {
     if (library?.status) state.workflowLibrary = library;
   } catch { /* Keep the explicit partial adapter state. */ }
   render({ focus: "main" });
+  await recordFrontendEvent("frontend_rendered", routeId());
   if (bootstrapReady) {
     try {
       await confirmFrontendReady();
@@ -887,6 +906,7 @@ const initialize = async () => {
       render({ background: true });
     }
   }
+  globalThis.__localAiHubFrontendReady = bootstrapReady && state.apiStatus !== "error";
   await loadRouteData();
 };
 
@@ -2134,4 +2154,4 @@ window.addEventListener("hashchange", async () => { render({ focus: "main" }); a
 syncSidebarState();
 applyTheme(currentTheme());
 setLanguage(currentLanguage());
-initialize();
+initialize().catch(() => { void showFrontendBootstrapFailure(); });
