@@ -901,6 +901,7 @@ const initialize = async () => {
     try {
       await confirmFrontendReady();
     } catch {
+      await recordFrontendEvent("frontend_ready_rejected");
       state.apiStatus = "error";
       state.apiError = "FRONTEND_READY_REJECTED";
       render({ background: true });

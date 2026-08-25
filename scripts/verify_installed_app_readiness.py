@@ -111,7 +111,10 @@ def verify(install_root: Path) -> dict[str, Any]:
     bootstrap_valid = isinstance(bootstrap, dict) and bootstrap.get("status") == "completed" and all(key in bootstrap for key in ("health", "components", "settings", "capabilities", "applications", "tools"))
     frontend_pid_match = desktop_pid is not None and state.get("pid") == desktop_pid
     frontend_ready = frontend_pid_match and state.get("status") in {"running", "ready"} and event_seen(state, "frontend_ready")
-    dashboard_rendered = frontend_pid_match and event_seen(state, "route_rendered", route="dashboard")
+    dashboard_rendered = frontend_pid_match and (
+        event_seen(state, "route_rendered", route="dashboard")
+        or event_seen(state, "frontend_rendered", route="dashboard")
+    )
     routes_complete = frontend_pid_match and all(event_seen(state, "route_rendered", route=route) for route in ROUTES)
     evidence = {
         "desktop_process_alive": desktop_alive,

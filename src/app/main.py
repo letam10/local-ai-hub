@@ -626,9 +626,11 @@ class DesktopBridge:
                 _record_startup_event(FRONTEND_READY, probe_state=state, runtime_class="installed_bundled")
                 return dict(self._frontend_ready_result)
             self._frontend_ready_result = {"status": "error", "code": str(result.get("code") or "FRONTEND_READY_REJECTED")}
+            _record_desktop_readiness("frontend_ready_rejected", status="failed")
             return dict(self._frontend_ready_result)
         except Exception:
             self._frontend_ready_result = {"status": "error", "code": "FRONTEND_READY_REJECTED"}
+            _record_desktop_readiness("frontend_ready_rejected", status="failed")
             return dict(self._frontend_ready_result)
 
     def rollback_previous_payload(self) -> dict[str, str]:
