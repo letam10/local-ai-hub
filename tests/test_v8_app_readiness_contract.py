@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from src.app.readiness import evaluate_readiness, event_seen, load_state, record_event
+from src.app.readiness import evaluate_readiness, event_seen, load_state, record_event, record_frontend_signal
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,6 +66,23 @@ class V8AppReadinessContractTests(unittest.TestCase):
             serialized = json.dumps(state)
             self.assertNotIn("\\", serialized)
 
+    def test_loopback_frontend_signal_requires_identity_and_render_before_ready(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="v8-readiness-signal-") as folder:
+            root = Path(folder)
+            payload_id = "main-aaaaaaaaaaaa"
+            payload = root / "versions" / payload_id
+            payload.mkdir(parents=True)
+            (root / "current.json").write_text(json.dumps({"version": payload_id}), encoding="utf-8")
+            (payload / "build.json").write_text(json.dumps({"source_commit": "a" * 40}), encoding="utf-8")
+            record_event(root, "desktop_started", status="starting", pid=4321)
+            blocked = record_frontend_signal(root, "frontend_ready", source_commit="a" * 40, payload_id=payload_id)
+            self.assertEqual(blocked["code"], "FRONTEND_RENDER_REQUIRED")
+            self.assertEqual(record_frontend_signal(root, "frontend_rendered", route="dashboard", source_commit="a" * 40, payload_id=payload_id)["status"], "recorded")
+            ready = record_frontend_signal(root, "frontend_ready", source_commit="a" * 40, payload_id=payload_id)
+            self.assertEqual(ready["status"], "recorded")
+            mismatch = record_frontend_signal(root, "frontend_ready", source_commit="b" * 40, payload_id=payload_id)
+            self.assertEqual(mismatch["code"], "READINESS_SOURCE_MISMATCH")
+
     def test_frontend_has_failure_guard_and_ready_contract(self) -> None:
         app_js = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
         index_html = (ROOT / "src" / "ui" / "index.html").read_text(encoding="utf-8")
@@ -74,6 +91,8 @@ class V8AppReadinessContractTests(unittest.TestCase):
         self.assertIn("__localAiHubFrontendReady", app_js)
         self.assertIn("__localAiHubFrontendRendered", app_js)
         self.assertIn("__localAiHubFrontendBootstrapReady", app_js)
+        self.assertIn("/api/desktop/readiness", app_js)
+        self.assertIn("source_commit", app_js)
         self.assertIn("Promise.race", app_js)
         self.assertIn("FRONTEND_READY_TIMEOUT", app_js)
         self.assertIn("bridge?.frontend?.record", app_js)

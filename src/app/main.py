@@ -32,7 +32,7 @@ from src.shared.runtime_identity import APP_USER_MODEL_ID, API_PROTOCOL_VERSION,
 from src.shared.version import PRODUCT_VERSION
 
 from .desktop_lifecycle import DesktopCloseController
-from .readiness import record_event as record_readiness_event
+from .readiness import event_seen, load_state, record_event as record_readiness_event
 from .stable_shell import StableShellError, resolve_launch_plan
 from .tray import WindowsTray
 
@@ -848,15 +848,11 @@ def _load_ui_when_ready(window: object, bridge: DesktopBridge | None = None) -> 
         return
     if bridge is None:
         return
+    install_root = Path(os.environ.get("LOCALAIHUB_INSTALL_ROOT") or ROOT)
     deadline = time.monotonic() + FRONTEND_READY_TIMEOUT_SECONDS
     while not bridge._frontend_ready_event.is_set() and time.monotonic() < deadline:
-        try:
-            marker = window.evaluate_js(  # type: ignore[attr-defined]
-                "Boolean(globalThis.__localAiHubFrontendRendered && globalThis.__localAiHubFrontendBootstrapReady)"
-            )
-        except Exception:
-            marker = False
-        if marker is True or marker == "true":
+        state = load_state(install_root)
+        if state.get("pid") == os.getpid() and event_seen(state, "frontend_ready"):
             result = bridge.confirm_frontend_ready()
             if result.get("status") == "ready":
                 bridge._frontend_ready_event.set()

@@ -38,6 +38,14 @@ _EVENTS = frozenset({
 })
 _ROUTES = frozenset({"dashboard", "models", "diagnostics", "settings"})
 _MAX_EVENTS = 64
+_FRONTEND_SIGNAL_EVENTS = frozenset({
+    "frontend_bootstrap_started",
+    "frontend_rendered",
+    "frontend_js_bootstrap_failed",
+    "frontend_ready_rejected",
+    "frontend_ready",
+    "route_rendered",
+})
 
 
 def _read_json(path: Path, *, max_bytes: int) -> dict[str, Any]:
@@ -139,6 +147,41 @@ def load_state(install_root: Path) -> dict[str, Any]:
     return _read_json(readiness_path(Path(install_root).absolute()), max_bytes=64 * 1024)
 
 
+def record_frontend_signal(
+    install_root: Path,
+    event: str,
+    *,
+    route: str | None = None,
+    source_commit: str | None = None,
+    payload_id: str | None = None,
+) -> dict[str, Any]:
+    """Record an identity-bound frontend signal received on loopback."""
+
+    if event not in _FRONTEND_SIGNAL_EVENTS:
+        return {"status": "rejected", "code": "READINESS_EVENT_INVALID"}
+    root = Path(install_root).absolute()
+    expected_commit, expected_payload = _identity(root)
+    if not expected_commit or not expected_payload:
+        return {"status": "rejected", "code": "READINESS_IDENTITY_UNAVAILABLE"}
+    if source_commit is not None and source_commit != expected_commit:
+        return {"status": "rejected", "code": "READINESS_SOURCE_MISMATCH"}
+    if payload_id is not None and payload_id != expected_payload:
+        return {"status": "rejected", "code": "READINESS_PAYLOAD_MISMATCH"}
+    if event == "frontend_ready" and (source_commit != expected_commit or payload_id != expected_payload):
+        return {"status": "rejected", "code": "READINESS_IDENTITY_REQUIRED"}
+    state = load_state(root)
+    pid = state.get("pid")
+    if state.get("payload_id") != expected_payload or not isinstance(pid, int) or pid <= 0:
+        return {"status": "rejected", "code": "READINESS_DESKTOP_SESSION_UNAVAILABLE"}
+    if event == "frontend_ready" and not (
+        event_seen(state, "frontend_rendered", route="dashboard")
+        or event_seen(state, "route_rendered", route="dashboard")
+    ):
+        return {"status": "rejected", "code": "FRONTEND_RENDER_REQUIRED"}
+    status = "failed" if "failed" in event or "rejected" in event else "running"
+    return record_event(root, event, status=status, route=route, pid=pid)
+
+
 def event_seen(state: Mapping[str, Any], event: str, *, route: str | None = None) -> bool:
     events = state.get("events")
     if not isinstance(events, list):
@@ -185,6 +228,7 @@ __all__ = [
     "evaluate_readiness",
     "event_seen",
     "load_state",
+    "record_frontend_signal",
     "readiness_path",
     "record_event",
 ]

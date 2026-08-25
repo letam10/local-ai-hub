@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from src.services.artifact_store import DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_UPLOAD_DISK_SAFETY_BYTES
 from src.services.artifact_store import UploadError, describe as describe_artifact, normalize_media_type
 from src.services.artifact_store import open_artifact, resolve as resolve_artifact, stage_upload_stream
+from src.app.readiness import record_frontend_signal
 from src.services.image_mask_studio import StudioConflictError, image_mask_studio
 from src.services.job_manager.manager import job_manager
 from src.services.project_manager import project_manager
@@ -635,9 +636,28 @@ class HubHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:  # noqa: N802
+        path = unquote(urlparse(self.path).path.rstrip("/") or "/")
+        if path == "/api/desktop/readiness":
+            try:
+                payload = self._read_json(strict=True)
+                event = payload.get("event")
+                route = payload.get("route")
+                source_commit = payload.get("source_commit")
+                payload_id = payload.get("payload_id")
+                result = record_frontend_signal(
+                    Path(os.environ.get("LOCALAIHUB_INSTALL_ROOT") or APP_ROOT),
+                    event if isinstance(event, str) else "",
+                    route=route if isinstance(route, str) else None,
+                    source_commit=source_commit if isinstance(source_commit, str) else None,
+                    payload_id=payload_id if isinstance(payload_id, str) else None,
+                )
+                status = 200 if result.get("status") == "recorded" else 409 if result.get("status") == "rejected" else 503
+                self._write(status, result)
+            except (ValueError, TypeError, OSError):
+                self._write(400, {"status": "rejected", "code": "READINESS_REQUEST_INVALID"})
+            return
         if self._dispatch_modular("POST"):
             return
-        path = unquote(urlparse(self.path).path.rstrip("/") or "/")
         if path == "/api/uploads":
             self._upload()
             return

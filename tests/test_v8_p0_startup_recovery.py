@@ -13,6 +13,7 @@ from src.app.main import DesktopBridge, FRONTEND_BOOTSTRAP_TIMEOUT, WEBVIEW_NAVI
 from src.app.stable_shell import POINTER_SCHEMA, PRODUCT_SCHEMA, VERSION_MANIFEST_SCHEMA, StableShellError, atomic_activate_pointer, load_current_pointer, resolve_launch_plan, resolve_verified_running_plan
 from src.app.update_bridge import _restart_after_update
 from src.app.update_watchdog import _rollback_previous
+from src.app.readiness import record_event
 from src.services.app_update import (
     AppUpdateError,
     AppUpdateService,
@@ -288,26 +289,33 @@ class V8P0StartupRecoveryTests(unittest.TestCase):
                 _load_ui_when_ready(timeout_window, DesktopBridge())
             self.assertIn(FRONTEND_BOOTSTRAP_TIMEOUT, timeout_window.loaded_html[0])
 
-    def test_frontend_render_marker_drives_native_confirmation_when_js_callback_is_unavailable(self):
+    def test_loopback_frontend_ready_event_drives_native_confirmation(self):
         class Window:
             def __init__(self):
                 self.loaded_urls = []
                 self.loaded_html = []
             def load_url(self, url):
                 self.loaded_urls.append(url)
-            def evaluate_js(self, script):
-                self.script = script
-                return True
             def load_html(self, value):
                 self.loaded_html.append(value)
 
-        bridge = DesktopBridge()
-        window = Window()
-        with patch("src.app.main.ensure_api", return_value=None), patch("src.app.main._probe_api", return_value=("compatible_owned_or_reusable", {})), patch("src.app.main._record_startup_event"), patch.object(bridge, "confirm_frontend_ready", return_value={"status": "ready"}) as confirm:
-            _load_ui_when_ready(window, bridge)
-        self.assertTrue(window.loaded_urls)
-        self.assertFalse(window.loaded_html)
-        confirm.assert_called_once_with()
+        with tempfile.TemporaryDirectory(prefix="v8-frontend-ready-") as folder:
+            root = Path(folder)
+            payload_id = "main-aaaaaaaaaaaa"
+            (root / "versions" / payload_id).mkdir(parents=True)
+            (root / "current.json").write_text(json.dumps({"version": payload_id}), encoding="utf-8")
+            (root / "versions" / payload_id / "build.json").write_text(json.dumps({"source_commit": "a" * 40}), encoding="utf-8")
+            pid = os.getpid()
+            record_event(root, "desktop_started", status="starting", pid=pid)
+            record_event(root, "frontend_rendered", status="running", route="dashboard", pid=pid)
+            record_event(root, "frontend_ready", status="running", pid=pid)
+            bridge = DesktopBridge()
+            window = Window()
+            with patch.dict(os.environ, {"LOCALAIHUB_INSTALL_ROOT": str(root)}, clear=False), patch("src.app.main.ensure_api", return_value=None), patch("src.app.main._probe_api", return_value=("compatible_owned_or_reusable", {})), patch("src.app.main._record_startup_event"), patch.object(bridge, "confirm_frontend_ready", return_value={"status": "ready"}) as confirm:
+                _load_ui_when_ready(window, bridge)
+            self.assertTrue(window.loaded_urls)
+            self.assertFalse(window.loaded_html)
+            confirm.assert_called_once_with()
 
     def test_watchdog_bridge_uses_old_verified_runtime_when_new_runtime_is_missing(self):
         with self._temp() as temporary:

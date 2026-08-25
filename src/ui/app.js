@@ -132,12 +132,29 @@ const nav = document.querySelector("#sidebar-nav");
 const topStatus = document.querySelector("#top-status");
 const recordFrontendEvent = async (event, route = null) => {
   const recorder = globalThis.pywebview?.api?.frontend?.record;
-  if (typeof recorder !== "function") return { status: "unavailable" };
+  if (typeof recorder === "function") {
+    try {
+      const nativeResult = await Promise.race([
+        recorder(event, route),
+        new Promise((resolve) => setTimeout(() => resolve({ status: "timeout" }), 1500)),
+      ]);
+      if (nativeResult?.status === "recorded" || nativeResult?.status === "ready") return nativeResult;
+    } catch { /* fall back to the identity-bound loopback signal */ }
+  }
   try {
-    return await Promise.race([
-      recorder(event, route),
-      new Promise((resolve) => setTimeout(() => resolve({ status: "timeout" }), 1500)),
-    ]);
+    const health = state.health || {};
+    const response = await fetch("/api/desktop/readiness", {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        event,
+        route,
+        source_commit: health.build_source_commit || null,
+        payload_id: health.build_payload_id || null,
+      }),
+    });
+    const result = await response.json();
+    return result && typeof result === "object" ? result : { status: "unavailable" };
   } catch { return { status: "unavailable" }; }
 };
 const showFrontendBootstrapFailure = async () => {
