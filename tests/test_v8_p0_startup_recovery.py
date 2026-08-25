@@ -241,6 +241,12 @@ class V8P0StartupRecoveryTests(unittest.TestCase):
             self.assertFalse((root / "update-state" / "pending-health.json").exists())
             self.assertTrue(bridge._frontend_ready_event.is_set())
 
+    def test_nested_frontend_bridge_confirms_ready_without_top_level_method_lookup(self):
+        with patch.object(DesktopBridge, "confirm_frontend_ready", return_value={"status": "ready"}) as confirm:
+            bridge = DesktopBridge()
+            self.assertEqual(bridge.frontend.confirm_frontend_ready(), {"status": "ready"})
+            confirm.assert_called_once_with()
+
     def test_normal_legacy_payload_without_build_metadata_can_confirm_frontend(self):
         with self._temp() as temporary:
             root = Path(temporary) / "install"

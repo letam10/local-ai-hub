@@ -727,6 +727,17 @@ class _FrontendReadinessBridge:
         _record_startup_event(event, selected_port=_configured_port(), probe_state="frontend", runtime_class="installed_bundled")
         return result
 
+    def confirm_frontend_ready(self) -> dict[str, object]:
+        """Commit readiness through the namespace already used by telemetry.
+
+        Some pywebview/Edge WebView hosts expose nested API objects reliably
+        before top-level methods become callable. Keeping the confirmation in
+        this allowlisted namespace avoids a false timeout while preserving the
+        native health, payload, and identity checks in ``DesktopBridge``.
+        """
+
+        return self._owner.confirm_frontend_ready()
+
 
 def _loading_html() -> str:
     """Return a tiny local screen shown before the loopback API is ready."""
