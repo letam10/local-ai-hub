@@ -178,18 +178,26 @@ def mark_startup_health(
 
     root = app_root.absolute()
     pending_path = _pending_health_path(root)
+    pending_exists = pending_path.is_file() and not pending_path.is_symlink()
     if frontend_ready:
         try:
             current = load_current_pointer(root)
-            build = _safe_json_file(root / str(current["payload_relative"]) / "build.json", max_bytes=32 * 1024)
+            build_path = root / str(current["payload_relative"]) / "build.json"
+            if not build_path.is_file() or build_path.is_symlink():
+                if not pending_exists:
+                    return {"status": "not_pending"}
+                raise AppUpdateError("FRONTEND_BUILD_UNAVAILABLE")
+            build = _safe_json_file(build_path, max_bytes=32 * 1024)
             source_commit = str(build.get("source_commit") or "")
             payload_id = str(current.get("version") or "")
             if _SHA_RE.fullmatch(source_commit) and payload_id == f"main-{source_commit[:12]}":
                 if not isinstance(health, dict) or health.get("build_source_commit") != source_commit or health.get("build_payload_id") != payload_id:
                     return {"status": "frontend_rejected", "code": "FRONTEND_BUILD_MISMATCH"}
         except (OSError, UnicodeError, json.JSONDecodeError, StableShellError, AppUpdateError):
+            if not pending_exists:
+                return {"status": "not_pending"}
             return {"status": "frontend_rejected", "code": "FRONTEND_BUILD_UNAVAILABLE"}
-    if not pending_path.is_file() or pending_path.is_symlink():
+    if not pending_exists:
         return {"status": "not_pending"}
     if not frontend_ready:
         return {"status": "frontend_pending", "code": "FRONTEND_READY_REQUIRED"}

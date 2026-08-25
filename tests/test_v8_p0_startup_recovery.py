@@ -228,6 +228,18 @@ class V8P0StartupRecoveryTests(unittest.TestCase):
             self.assertFalse((root / "update-state" / "pending-health.json").exists())
             self.assertTrue(bridge._frontend_ready_event.is_set())
 
+    def test_normal_legacy_payload_without_build_metadata_can_confirm_frontend(self):
+        with self._temp() as temporary:
+            root = Path(temporary) / "install"
+            self._install(root, current="old", current_commit="c" * 40)
+            (root / "versions" / "old" / "build.json").unlink()
+            health = {"status": "healthy", "product_id": PRODUCT_ID, "product_version": PRODUCT_VERSION, "api_protocol_version": API_PROTOCOL_VERSION, "app_user_model_id": APP_USER_MODEL_ID, "installation_id": "c" * 32}
+            with patch.dict(os.environ, {"LOCALAIHUB_INSTALL_ROOT": str(root), "LOCALAIHUB_PORT": "8765"}, clear=False), patch("src.app.main.urllib.request.urlopen", return_value=_HealthResponse(health)), patch("src.app.main._record_startup_event"):
+                bridge = DesktopBridge()
+                result = bridge.confirm_frontend_ready()
+            self.assertEqual(result["status"], "ready")
+            self.assertTrue(bridge._frontend_ready_event.is_set())
+
     def test_navigation_failure_and_frontend_timeout_keep_pending_and_show_distinct_ui(self):
         class Window:
             def __init__(self, fail=False):
