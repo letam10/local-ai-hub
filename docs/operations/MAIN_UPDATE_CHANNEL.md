@@ -40,6 +40,33 @@ Tags remain optional and user-controlled. Main merge readiness and this update c
 - Old payloads are retained.
 - The previous `current.json` pointer is retained under installer-owned `update-state/` and can be restored with the rollback API.
 - A pending-health marker is written before activation. The new payload clears it only after matching product/API identity and build SHA are healthy; a failed proof restores the previous verified pointer without touching `DATA_ROOT`.
+
+### Candidate API preflight and restart safety
+
+An APP_ONLY candidate is not activated after ZIP/hash/import validation alone.
+Before `previous-current.json`, `pending-health.json`, or `current.json` is
+changed, the staged payload starts its bundled API on an owned ephemeral
+loopback port with an isolated temporary data root.  The child must remain
+alive while `/health` proves the product/API identity and the exact
+`build_source_commit`/`build_payload_id`; a failed or timed-out probe preserves
+the candidate and its bounded preflight log and leaves the current pointer
+untouched.  The production API port and persistent data root are not used by
+this probe.
+
+Restart is guarded by `src.app.update_watchdog`, an updater-owned helper started
+from the reviewed candidate runtime.  It waits for the old desktop PID, starts
+the stable launcher, and accepts the new payload only after the pending-health
+marker is cleared by matching health/build identity.  On crash, identity
+mismatch, or timeout it terminates only the launcher process it started,
+atomically restores the verified previous pointer, and relaunches the stable
+launcher once.  Foreign loopback listeners and `DATA_ROOT` are never killed or
+modified.
+
+If the desktop API cannot start, the native shell leaves the indefinite loading
+state and shows a Vietnamese recovery screen with a bounded error code and
+payload short SHA.  It offers only **Thử lại** and, when the installer-owned
+previous pointer and manifest are independently verified, **Khôi phục phiên bản
+trước**.
 - Models, Environments, runtime assets in `DATA_ROOT`, Output, Config, Projects and user media are never included in the GitHub artifact and are not moved/deleted by the updater.
 
 ## Runtime strategy and limitation

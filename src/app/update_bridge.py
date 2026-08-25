@@ -55,11 +55,26 @@ def _restart_after_update(self: Any) -> dict[str, object]:
     launcher = install_root / "LocalAIHub.exe"
     if not launcher.is_file() or launcher.is_symlink():
         return {"status": "blocked", "code": "STABLE_LAUNCHER_UNAVAILABLE"}
+    watchdog = plan.app_payload / "src" / "app" / "update_watchdog.py"
+    if not watchdog.is_file() or watchdog.is_symlink():
+        return {"status": "blocked", "code": "UPDATE_WATCHDOG_UNAVAILABLE"}
     environment = dict(os.environ)
-    environment["LOCALAIHUB_RESTART_WAIT_PID"] = str(os.getpid())
+    environment.update({
+        "LOCALAIHUB_WATCHDOG_INSTALL_ROOT": str(install_root),
+        "LOCALAIHUB_WATCHDOG_APP_ROOT": str(plan.app_payload),
+        "LOCALAIHUB_WATCHDOG_WAIT_PID": str(os.getpid()),
+        "LOCALAIHUB_WATCHDOG_TIMEOUT": "30",
+        "LOCALAIHUB_INSTALL_ROOT": str(install_root),
+        "LOCALAIHUB_APP_ROOT": str(plan.app_payload),
+        "LOCALAIHUB_DATA_ROOT": str(plan.data_root),
+        "PYTHONPATH": str(plan.app_payload),
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONUTF8": "1",
+    })
     try:
         subprocess.Popen(
-            [str(launcher)], cwd=str(install_root), env=environment,
+            [str(plan.runtime_pythonw), "-m", "src.app.update_watchdog"],
+            cwd=str(plan.app_payload), env=environment,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True, creationflags=_creationflags(),
         )

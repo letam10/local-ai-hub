@@ -260,6 +260,19 @@ def resolve_launch_plan(app_root: Path, *, allow_test_root: bool = False) -> Lau
         "PYTHONNOUSERSITE": "1",
         "PYTHONUTF8": "1",
     })
+    # Build identity is optional for legacy payloads, but when present it is
+    # propagated into the API health handshake so restart/watchdog checks can
+    # prove the exact payload rather than trusting process launch alone.
+    build_path = payload_root / "build.json"
+    try:
+        build = _load_json(build_path) if build_path.is_file() and not build_path.is_symlink() else {}
+        source_commit = build.get("source_commit") if isinstance(build, dict) else None
+        if isinstance(source_commit, str) and re.fullmatch(r"[0-9a-f]{40}", source_commit) and source_commit == source_commit.lower():
+            expected_payload = f"main-{source_commit[:12]}"
+            if version == expected_payload:
+                environment.update({"LOCALAIHUB_BUILD_SHA": source_commit, "LOCALAIHUB_BUILD_PAYLOAD": version})
+    except (OSError, StableShellError, UnicodeError, json.JSONDecodeError):
+        pass
     return LaunchPlan(root, installation.data_root, version, payload_root, app_payload, runtime_pythonw, (str(runtime_pythonw), "-m", "src.app.launcher"), environment)
 
 

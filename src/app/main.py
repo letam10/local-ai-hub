@@ -14,6 +14,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -561,6 +562,40 @@ class DesktopBridge:
 
         return self._controller.keep_running_in_background(background)
 
+    def retry_startup(self) -> dict[str, str]:
+        """Retry the bounded API startup probe from the recovery screen."""
+
+        window = self._window
+        if window is None:
+            return {"status": "error", "message": "Desktop bridge chưa sẵn sàng."}
+        threading.Thread(target=_load_ui_when_ready, args=(window,), name="LocalAIHub-API-retry", daemon=True).start()
+        return {"status": "retrying", "message": "Đang thử kết nối lại Local AI Hub API…"}
+
+    def rollback_previous_payload(self) -> dict[str, str]:
+        """Restore only the verified installer-owned previous pointer."""
+
+        if not _verified_previous_pointer_available():
+            return {"status": "unavailable", "message": "Chưa có phiên bản trước đã được xác minh để khôi phục."}
+        try:
+            from src.services.app_update import app_update_service
+
+            result = app_update_service().rollback()
+            if result.get("status") != "rolled_back":
+                return {"status": "error", "message": "Không thể khôi phục phiên bản trước; Hub vẫn giữ nguyên dữ liệu."}
+            install_root = Path(os.environ.get("LOCALAIHUB_INSTALL_ROOT") or ROOT).absolute()
+            launcher = install_root / "LocalAIHub.exe"
+            if not launcher.is_file() or launcher.is_symlink():
+                return {"status": "error", "message": "Không tìm thấy launcher ổn định để khởi động lại."}
+            subprocess.Popen(
+                [str(launcher)], cwd=str(install_root), env=dict(os.environ),
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                close_fds=True, creationflags=int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0,
+            )
+            self._destroy_window()
+            return {"status": "relaunching", "message": "Đã khôi phục phiên bản trước; Hub đang khởi động lại an toàn."}
+        except Exception:
+            return {"status": "error", "message": "Không thể khôi phục phiên bản trước; Hub vẫn giữ nguyên dữ liệu."}
+
     def _select_component_source(self, component_id: str) -> dict[str, object]:
         """Open the native picker and return only a short-lived selection ID.
 
@@ -620,9 +655,48 @@ def _error_html(message: str) -> str:
     code = message if message in _STARTUP_ERROR_MESSAGES else API_STARTUP_FAILED
     safe = html.escape(_STARTUP_ERROR_MESSAGES[code])
     code_label = html.escape(code)
+    payload_label = html.escape(_current_payload_short_sha())
+    rollback_button = '<button class="secondary" onclick="choose(\'rollback_previous_payload\')">Khôi phục phiên bản trước</button>' if _verified_previous_pointer_available() else ''
     return f"""<!doctype html><html lang=\"vi\"><meta charset=\"utf-8\"><title>Local AI Hub</title>
-    <style>html,body{{margin:0;height:100%;background:#0b1020;color:#edf2ff;font-family:Segoe UI,system-ui,sans-serif}}main{{height:100%;display:grid;place-content:center;text-align:center;gap:14px;padding:32px}}p{{max-width:620px;color:#efb2bd;line-height:1.5}}</style>
-    <main><strong>Không thể khởi động Local AI Hub</strong><p data-error-code=\"{code_label}\">{safe}</p></main></html>"""
+    <style>html,body{{margin:0;height:100%;background:#0b1020;color:#edf2ff;font-family:Segoe UI,system-ui,sans-serif}}main{{max-width:680px;height:100%;margin:auto;display:grid;align-content:center;gap:14px;padding:32px;box-sizing:border-box}}h1{{font-size:24px;margin:0}}p{{max-width:620px;color:#b7c3df;line-height:1.5}}.code{{color:#efb2bd;font-family:ui-monospace,Consolas,monospace}}.actions{{display:flex;flex-wrap:wrap;gap:10px}}button{{border:1px solid #45639d;border-radius:9px;background:#182340;color:#edf2ff;padding:10px 14px;font:inherit;cursor:pointer}}button.primary{{background:#4d7dff;border-color:#80aaff}}button.secondary{{background:#2b2742;border-color:#9c86ff}}button:disabled{{opacity:.65;cursor:wait}}</style>
+    <main><h1>Không thể kết nối Local AI Hub API</h1><p data-error-code=\"{code_label}\">{safe}</p><p>Payload hiện tại: <span class=\"code\">{payload_label}</span></p><p id=\"status\">Hub chưa sẵn sàng; dữ liệu người dùng vẫn được giữ nguyên.</p><div class=\"actions\"><button class=\"primary\" onclick=\"choose('retry_startup')\">Thử lại</button>{rollback_button}</div></main>
+    <script>async function choose(name){{const buttons=[...document.querySelectorAll('button')];const status=document.getElementById('status');const api=window.pywebview&&window.pywebview.api;if(!api||!api[name]){{status.textContent='Desktop bridge chưa sẵn sàng; Hub vẫn được giữ mở an toàn.';return}}buttons.forEach(button=>button.disabled=true);try{{const result=await api[name]();status.textContent=(result&&result.message)||'Đã nhận yêu cầu.';if(result&&result.status==='retrying')setTimeout(()=>window.location.reload(),500);}}catch(_error){{status.textContent='Không thể xử lý yêu cầu phục hồi; hãy thử lại.';buttons.forEach(button=>button.disabled=false)}}}}</script></html>"""
+
+
+def _current_payload_short_sha() -> str:
+    """Return only a bounded payload/build suffix for the recovery screen."""
+
+    try:
+        install_root = Path(os.environ.get("LOCALAIHUB_INSTALL_ROOT") or ROOT)
+        pointer_path = install_root / "current.json"
+        value = json.loads(pointer_path.read_text(encoding="utf-8"))
+        version = str(value.get("version") or "") if isinstance(value, dict) else ""
+        if version.startswith("main-") and len(version) == 17:
+            return version[-12:]
+        return version[:24] or "unknown"
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return "unknown"
+
+
+def _verified_previous_pointer_available() -> bool:
+    """Check the rollback record and manifest without changing installed state."""
+
+    try:
+        install_root = Path(os.environ.get("LOCALAIHUB_INSTALL_ROOT") or ROOT).absolute()
+        value = json.loads((install_root / "update-state" / "previous-current.json").read_text(encoding="utf-8"))
+        if not isinstance(value, dict) or set(value) != {"schema_version", "version", "payload_relative", "manifest_sha256"}:
+            return False
+        if value.get("schema_version") != "v8.0.1-pointer.v1":
+            return False
+        version = str(value.get("version") or "")
+        relative = str(value.get("payload_relative") or "")
+        digest = str(value.get("manifest_sha256") or "")
+        if not version or relative != f"versions/{version}" or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            return False
+        manifest = install_root / relative / "manifest.json"
+        return manifest.is_file() and not manifest.is_symlink() and hashlib.sha256(manifest.read_bytes()).hexdigest() == digest
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return False
 
 
 def _close_prompt_html(detail: dict[str, object]) -> str:
