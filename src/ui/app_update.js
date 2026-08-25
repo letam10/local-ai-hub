@@ -61,7 +61,17 @@ const statusLabel = (value) => ({
   available: "Có bản cập nhật",
   up_to_date: "Đã mới nhất",
   checking: "Đang kiểm tra",
+  downloading: "Đang tải",
+  verifying: "Đang xác minh",
+  staging: "Đang stage",
+  ready_to_restart: "Sẵn sàng khởi động lại",
+  restarting: "Đang khởi động lại",
+  rollback: "Đang rollback",
   auth_required: "Cần đăng nhập GitHub",
+  oauth_configuration_required: "Cần cấu hình OAuth",
+  blocked_active_jobs: "Đang có job hoạt động",
+  incompatible_runtime: "Runtime không tương thích",
+  failed: "Cập nhật thất bại",
   no_artifact: "Chưa có gói cập nhật",
   unavailable: "Updater chưa sẵn sàng",
   activated: "Đã tải xong",
@@ -71,6 +81,10 @@ const statusMessage = (value) => {
   if (value?.status === "available") return "Main CI đã xanh và có payload mới đã được đóng gói. Bạn có thể xem thay đổi trước khi cập nhật.";
   if (value?.status === "up_to_date") return "Local AI Hub đang chạy đúng build main mới nhất đã có artifact.";
   if (value?.status === "auth_required") return "Repo là private. Hãy đăng nhập GitHub CLI một lần trên máy này; Hub không lưu hoặc hiển thị token.";
+  if (value?.status === "oauth_configuration_required") return "Native GitHub Device Flow cần OAuth App client_id do chủ repo cung cấp; vẫn có thể dùng GitHub CLI đã đăng nhập.";
+  if (value?.status === "blocked_active_jobs") return "Không thể cập nhật khi Hub còn job hoạt động. Dữ liệu và payload hiện tại vẫn được giữ nguyên.";
+  if (value?.status === "incompatible_runtime") return "Payload yêu cầu runtime/launcher khác; updater đã fail-closed và chưa đổi current pointer.";
+  if (value?.status === "failed") return "Cập nhật không hoàn tất; payload hiện tại vẫn được giữ nguyên hoặc đã rollback.";
   if (value?.status === "no_artifact") return "Main chưa có update artifact thành công. Hub sẽ không cập nhật từ một build chưa qua CI.";
   if (value?.code === "GITHUB_CLI_REQUIRED") return "Cần cài GitHub CLI (gh) để Hub đọc artifact của repo private mà không nhúng token vào ứng dụng.";
   return String(value?.action || "Không thể xác minh bản cập nhật lúc này; phiên bản đang chạy vẫn được giữ nguyên.");
@@ -124,7 +138,9 @@ const ensureCard = () => {
   const update = make("button", "button button--compact"); update.type = "button"; update.dataset.appUpdateApply = "true"; update.textContent = "Cập nhật Local AI Hub"; update.disabled = true;
   const restart = make("button", "button button--compact"); restart.type = "button"; restart.dataset.appUpdateRestart = "true"; restart.textContent = "Khởi động lại để áp dụng"; restart.hidden = true;
   const rollback = make("button", "button button--compact"); rollback.type = "button"; rollback.dataset.appUpdateRollback = "true"; rollback.textContent = "Quay lại payload trước"; rollback.hidden = true;
-  actions.append(refresh, changes, update, restart, rollback);
+  const auth = make("button", "button button--compact"); auth.type = "button"; auth.dataset.appUpdateAuth = "true"; auth.textContent = "Đăng nhập GitHub"; auth.hidden = true;
+  actions.append(refresh, changes, update, restart, rollback, auth);
+  const authDetail = make("p", "app-update-card__message"); authDetail.dataset.updateAuth = "true"; authDetail.hidden = true; card.append(authDetail);
 
   const changeList = make("ol", "app-update-card__changes"); changeList.dataset.updateChangesList = "true"; changeList.hidden = true;
   card.append(head, builds, message, actions, changeList);
@@ -145,6 +161,11 @@ const render = (card, value) => {
   card.querySelector("[data-update-message]").textContent = statusMessage(value);
   card.querySelector("[data-app-update-changes]").disabled = !value?.latest_build;
   card.querySelector("[data-app-update-apply]").disabled = value?.available !== true;
+  const authButton = card.querySelector("[data-app-update-auth]");
+  const needsAuth = value?.status === "auth_required" || value?.status === "oauth_configuration_required";
+  authButton.hidden = !needsAuth;
+  authButton.disabled = value?.status === "oauth_configuration_required";
+  authButton.textContent = value?.status === "oauth_configuration_required" ? "OAuth cần cấu hình" : "Đăng nhập GitHub";
 };
 
 const check = async (refresh = false) => {
@@ -190,11 +211,12 @@ const applyUpdate = async (card) => {
   if (!window.confirm(`Cập nhật Local AI Hub lên main@${latest}? Payload hiện tại được giữ lại để rollback.`)) return;
   const button = card.querySelector("[data-app-update-apply]");
   button.disabled = true;
+  render(card, { ...(lastStatus || {}), status: "downloading", available: true });
   card.querySelector("[data-update-message]").textContent = "Đang tải, xác minh SHA, stage payload và kiểm tra imports…";
   try {
     const value = await api(API.prepare, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: true }) });
     lastStatus = { ...(lastStatus || {}), status: value.status, available: false, current_payload: value.payload_id, current_build: value.source_commit };
-    card.dataset.state = "activated";
+    card.dataset.state = "ready_to_restart";
     card.querySelector("[data-update-badge]").textContent = "Sẵn sàng khởi động lại";
     card.querySelector("[data-update-current]").textContent = shortBuild(value.source_commit);
     card.querySelector("[data-update-message]").textContent = "Payload mới đã được xác minh và kích hoạt atomically. Launcher, shortcut và DATA_ROOT không thay đổi.";
@@ -209,6 +231,7 @@ const applyUpdate = async (card) => {
 const restart = async (card) => {
   const button = card.querySelector("[data-app-update-restart]");
   button.disabled = true;
+  render(card, { ...(lastStatus || {}), status: "restarting", available: false });
   card.querySelector("[data-update-message]").textContent = "Đang khởi động lại Local AI Hub bằng stable launcher…";
   try {
     const bridge = window.pywebview?.api;
@@ -225,6 +248,7 @@ const rollback = async (card) => {
   if (!window.confirm("Quay current.json về payload trước? File dữ liệu người dùng không bị xóa.")) return;
   const button = card.querySelector("[data-app-update-rollback]");
   button.disabled = true;
+  render(card, { ...(lastStatus || {}), status: "rollback", available: false });
   try {
     const value = await api(API.rollback, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: true }) });
     card.querySelector("[data-update-message]").textContent = `Đã quay pointer về ${value.payload_id}. Khởi động lại để áp dụng.`;
@@ -232,6 +256,22 @@ const rollback = async (card) => {
   } catch (error) {
     card.querySelector("[data-update-message]").textContent = `Không thể rollback: ${error.payload?.code || error.message}`;
   } finally { button.disabled = false; }
+};
+
+const startAuth = async (card) => {
+  const detail = card.querySelector("[data-update-auth]");
+  detail.hidden = false;
+  detail.textContent = "Đang chuẩn bị GitHub Device Flow…";
+  try {
+    const value = await api("/api/app-update/auth/device/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    if (value.status === "device_login_required") {
+      detail.textContent = `Mở ${String(value.verification_uri || "GitHub")} và nhập mã ${String(value.user_code || "")} để xác thực. Token chỉ được lưu trong Credential Manager.`;
+    } else {
+      detail.textContent = statusMessage(value);
+    }
+  } catch (error) {
+    detail.textContent = `Đăng nhập chưa khả dụng: ${error.payload?.code || error.message}`;
+  }
 };
 
 document.addEventListener("click", (event) => {
@@ -242,6 +282,7 @@ document.addEventListener("click", (event) => {
   if (event.target.closest("[data-app-update-apply]")) { applyUpdate(card); return; }
   if (event.target.closest("[data-app-update-restart]")) { restart(card); return; }
   if (event.target.closest("[data-app-update-rollback]")) { rollback(card); }
+  if (event.target.closest("[data-app-update-auth]")) { startAuth(card); }
 });
 
 injectStyle();

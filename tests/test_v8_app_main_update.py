@@ -125,7 +125,7 @@ class V8AppMainUpdateTests(unittest.TestCase):
             previous = __import__("os").environ.get("LOCALAIHUB_INSTALL_ROOT")
             __import__("os").environ["LOCALAIHUB_INSTALL_ROOT"] = str(install)
             try:
-                result = AppUpdateService(runner=runner, gh_path=str(gh)).status(refresh=True)
+                result = AppUpdateService(runner=runner, gh_path=str(gh), allow_test_root=True).status(refresh=True)
             finally:
                 if previous is None:
                     __import__("os").environ.pop("LOCALAIHUB_INSTALL_ROOT", None)
