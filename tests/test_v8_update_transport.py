@@ -43,6 +43,31 @@ class V8UpdateTransportTests(unittest.TestCase):
         self.assertEqual(state.status, "oauth_configuration_required")
         self.assertEqual(native.begin_device_login()["code"], "OAUTH_CONFIGURATION_REQUIRED")
 
+    def test_device_flow_uses_opaque_session_and_supports_bounded_cancel(self) -> None:
+        class Response:
+            def __init__(self, value):
+                self.value = value
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self, limit=-1):
+                return json.dumps(self.value).encode("utf-8")
+
+        def opener(request, timeout=0):
+            if request.full_url.endswith("/login/device/code"):
+                return Response({"device_code": "private-device-code", "user_code": "ABCD-EFGH", "verification_uri": "https://github.com/login/device", "expires_in": 600, "interval": 2})
+            return Response({"error": "authorization_pending"})
+
+        native = GitHubDeviceFlowTransport(client_id="client-1234", store=MemoryCredentialStore(), opener=opener)
+        started = native.begin_device_login()
+        self.assertEqual(started["status"], "device_login_required")
+        self.assertNotIn("device_code", started)
+        self.assertTrue(started["session_id"])
+        pending = native.poll_device_session(started["session_id"])
+        self.assertEqual(pending["status"], "authorization_pending")
+        self.assertEqual(native.cancel_device_session(started["session_id"])["status"], "cancelled")
+
     def test_gh_fallback_is_selected_when_native_is_unconfigured(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             gh = Path(temporary) / "gh.exe"

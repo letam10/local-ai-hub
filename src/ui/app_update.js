@@ -139,7 +139,8 @@ const ensureCard = () => {
   const restart = make("button", "button button--compact"); restart.type = "button"; restart.dataset.appUpdateRestart = "true"; restart.textContent = "Khởi động lại để áp dụng"; restart.hidden = true;
   const rollback = make("button", "button button--compact"); rollback.type = "button"; rollback.dataset.appUpdateRollback = "true"; rollback.textContent = "Quay lại payload trước"; rollback.hidden = true;
   const auth = make("button", "button button--compact"); auth.type = "button"; auth.dataset.appUpdateAuth = "true"; auth.textContent = "Đăng nhập GitHub"; auth.hidden = true;
-  actions.append(refresh, changes, update, restart, rollback, auth);
+  const authCancel = make("button", "button button--compact"); authCancel.type = "button"; authCancel.dataset.appUpdateAuthCancel = "true"; authCancel.textContent = "Hủy đăng nhập"; authCancel.hidden = true;
+  actions.append(refresh, changes, update, restart, rollback, auth, authCancel);
   const authDetail = make("p", "app-update-card__message"); authDetail.dataset.updateAuth = "true"; authDetail.hidden = true; card.append(authDetail);
 
   const changeList = make("ol", "app-update-card__changes"); changeList.dataset.updateChangesList = "true"; changeList.hidden = true;
@@ -166,6 +167,7 @@ const render = (card, value) => {
   authButton.hidden = !needsAuth;
   authButton.disabled = value?.status === "oauth_configuration_required";
   authButton.textContent = value?.status === "oauth_configuration_required" ? "OAuth cần cấu hình" : "Đăng nhập GitHub";
+  card.querySelector("[data-app-update-auth-cancel]").hidden = !card.dataset.authSession;
 };
 
 const check = async (refresh = false) => {
@@ -265,13 +267,50 @@ const startAuth = async (card) => {
   try {
     const value = await api("/api/app-update/auth/device/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     if (value.status === "device_login_required") {
+      card.dataset.authSession = String(value.session_id || "");
       detail.textContent = `Mở ${String(value.verification_uri || "GitHub")} và nhập mã ${String(value.user_code || "")} để xác thực. Token chỉ được lưu trong Credential Manager.`;
+      pollAuth(card, String(value.session_id || ""));
     } else {
       detail.textContent = statusMessage(value);
     }
   } catch (error) {
     detail.textContent = `Đăng nhập chưa khả dụng: ${error.payload?.code || error.message}`;
   }
+};
+
+const pollAuth = async (card, sessionId) => {
+  if (!sessionId) return;
+  const detail = card.querySelector("[data-update-auth]");
+  try {
+    const value = await api("/api/app-update/auth/device/poll", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: sessionId }) });
+    if (value.status === "authorization_pending") {
+      detail.textContent = "Đang chờ xác nhận GitHub… mã xác thực vẫn chỉ hiển thị cục bộ.";
+      window.setTimeout(() => pollAuth(card, sessionId), Math.max(2000, Number(value.retry_after || 5) * 1000));
+      return;
+    }
+    if (value.status === "authenticated") {
+      delete card.dataset.authSession;
+      detail.textContent = "Đã xác thực GitHub an toàn. Đang kiểm tra artifact main…";
+      check(true);
+      return;
+    }
+    detail.textContent = statusMessage(value);
+  } catch (error) {
+    detail.textContent = `Device Flow chưa hoàn tất: ${error.payload?.code || error.message}`;
+  }
+};
+
+const cancelAuth = async (card) => {
+  const sessionId = String(card.dataset.authSession || "");
+  if (!sessionId) return;
+  delete card.dataset.authSession;
+  card.querySelector("[data-update-auth]").textContent = "Đang hủy Device Flow…";
+  try {
+    await api("/api/app-update/auth/device/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: sessionId }) });
+  } catch (error) {
+    card.querySelector("[data-update-auth]").textContent = `Không thể hủy Device Flow: ${error.payload?.code || error.message}`;
+  }
+  render(card, lastStatus || { status: "auth_required" });
 };
 
 document.addEventListener("click", (event) => {
@@ -283,6 +322,7 @@ document.addEventListener("click", (event) => {
   if (event.target.closest("[data-app-update-restart]")) { restart(card); return; }
   if (event.target.closest("[data-app-update-rollback]")) { rollback(card); }
   if (event.target.closest("[data-app-update-auth]")) { startAuth(card); }
+  if (event.target.closest("[data-app-update-auth-cancel]")) { cancelAuth(card); }
 });
 
 injectStyle();

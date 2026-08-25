@@ -546,6 +546,30 @@ class AppUpdateService:
         except TransportError as exc:
             return {"status": "unavailable", "code": exc.code}
 
+    def poll_device_login(self, session_id: str) -> dict[str, Any]:
+        try:
+            if self._transport_override is not None:
+                native = self._transport_override
+            else:
+                if self._transport_selector is None:
+                    self._transport_selector = build_transport(runner=self._runner, gh_path=self._gh_path)
+                native = self._transport_selector.native
+            return native.poll_device_session(session_id)
+        except TransportError as exc:
+            return {"status": "unavailable", "transport": "github_oauth_device", "code": exc.code}
+
+    def cancel_device_login(self, session_id: str) -> dict[str, Any]:
+        try:
+            if self._transport_override is not None:
+                native = self._transport_override
+            else:
+                if self._transport_selector is None:
+                    self._transport_selector = build_transport(runner=self._runner, gh_path=self._gh_path)
+                native = self._transport_selector.native
+            return native.cancel_device_session(session_id)
+        except TransportError as exc:
+            return {"status": "unavailable", "transport": "github_oauth_device", "code": exc.code}
+
     def _validate_staged_imports(self, app_root: Path, runtime_pythonw: Path) -> None:
         environment = dict(os.environ)
         environment.update({"PYTHONPATH": str(app_root), "PYTHONNOUSERSITE": "1", "PYTHONUTF8": "1"})

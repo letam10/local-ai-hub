@@ -20,6 +20,7 @@ from ctypes import wintypes
 import json
 import os
 from pathlib import Path
+import secrets
 import shutil
 import subprocess
 import time
@@ -246,6 +247,7 @@ class GitHubDeviceFlowTransport:
         self.store = store if store is not None else _credential_store()
         self._opener = opener
         self._clock = clock
+        self._device_sessions: dict[str, dict[str, Any]] = {}
 
     def configured(self) -> bool:
         return isinstance(self.client_id, str) and 8 <= len(self.client_id) <= 128 and "\x00" not in self.client_id
@@ -347,14 +349,51 @@ class GitHubDeviceFlowTransport:
         required = ("device_code", "user_code", "verification_uri", "expires_in")
         if any(not isinstance(response.get(key), (str, int)) for key in required):
             raise TransportError("OAUTH_DEVICE_RESPONSE_INVALID")
+        session_id = secrets.token_urlsafe(18)
+        interval = max(2, min(15, int(response.get("interval", DEFAULT_DEVICE_INTERVAL_SECONDS))))
+        expires_in = max(60, min(900, int(response["expires_in"])))
+        self._device_sessions[session_id] = {
+            "device_code": str(response["device_code"]),
+            "interval": interval,
+            "expires_at": self._clock() + expires_in,
+        }
         return {
             "status": "device_login_required",
             "transport": self.name,
+            "session_id": session_id,
             "verification_uri": str(response["verification_uri"]),
             "user_code": str(response["user_code"]),
-            "expires_in": max(60, min(900, int(response["expires_in"]))),
-            "interval": max(2, min(15, int(response.get("interval", DEFAULT_DEVICE_INTERVAL_SECONDS)))),
+            "expires_in": expires_in,
+            "interval": interval,
         }
+
+    def poll_device_session(self, session_id: str) -> dict[str, Any]:
+        """Perform one bounded poll; the UI repeats with the server interval."""
+
+        session = self._device_sessions.get(session_id)
+        if not isinstance(session, dict) or len(session_id) > 128:
+            return {"status": "auth_required", "transport": self.name, "code": "OAUTH_SESSION_INVALID"}
+        if self._clock() >= float(session.get("expires_at", 0)):
+            self._device_sessions.pop(session_id, None)
+            return {"status": "auth_required", "transport": self.name, "code": "OAUTH_DEVICE_TIMEOUT"}
+        response = self._request(GITHUB_ACCESS_TOKEN_URL, data={"client_id": self.client_id or "", "device_code": str(session["device_code"]), "grant_type": "urn:ietf:params:oauth:grant-type:device_code"})
+        token = response.get("access_token")
+        if isinstance(token, str) and token and self.store is not None and self._validate_token(token):
+            if not self.store.write(CREDENTIAL_TARGET, token):
+                raise TransportError("CREDENTIAL_STORE_WRITE_FAILED")
+            self._device_sessions.pop(session_id, None)
+            return {"status": "authenticated", "transport": self.name}
+        error = response.get("error")
+        if error in {"authorization_pending", "slow_down"}:
+            return {"status": "authorization_pending", "transport": self.name, "retry_after": int(session["interval"]) + (2 if error == "slow_down" else 0)}
+        self._device_sessions.pop(session_id, None)
+        if error in {"expired_token", "access_denied"}:
+            return {"status": "auth_required", "transport": self.name, "code": "OAUTH_" + str(error).upper()}
+        raise TransportError("OAUTH_TOKEN_RESPONSE_INVALID")
+
+    def cancel_device_session(self, session_id: str) -> dict[str, Any]:
+        self._device_sessions.pop(session_id, None)
+        return {"status": "cancelled", "transport": self.name}
 
     def poll_device_login(self, device_code: str, *, interval_seconds: int = DEFAULT_DEVICE_INTERVAL_SECONDS, expires_in: int = 900, cancel: Callable[[], bool] | None = None) -> dict[str, Any]:
         if not self.configured() or not isinstance(device_code, str) or not device_code or len(device_code) > 512:

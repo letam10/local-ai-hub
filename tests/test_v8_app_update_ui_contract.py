@@ -16,6 +16,8 @@ class V8AppUpdateUiContractTests(unittest.TestCase):
         self.assertIn(("GET", "/api/app-update/status"), rows)
         self.assertIn(("GET", "/api/app-update/auth/status"), rows)
         self.assertIn(("POST", "/api/app-update/auth/device/start"), rows)
+        self.assertIn(("POST", "/api/app-update/auth/device/poll"), rows)
+        self.assertIn(("POST", "/api/app-update/auth/device/cancel"), rows)
         self.assertIn(("POST", "/api/app-update/auth/logout"), rows)
         self.assertIn(("GET", "/api/app-update/changes"), rows)
         self.assertIn(("POST", "/api/app-update/prepare"), rows)
