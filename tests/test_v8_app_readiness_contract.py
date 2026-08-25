@@ -98,6 +98,8 @@ class V8AppReadinessContractTests(unittest.TestCase):
         self.assertIn('recordLoopbackFrontendEvent("frontend_ready"', app_js)
         self.assertIn('recordFrontendEvent("frontend_bootstrap_completed")', app_js)
         self.assertIn('recordFrontendEvent("frontend_dom_visible", routeId())', app_js)
+        self.assertIn('recordFrontendEvent("frontend_nav_visible", routeId())', app_js)
+        self.assertIn('recordFrontendEvent("frontend_view_visible", routeId())', app_js)
         self.assertIn("requestAnimationFrame", app_js)
         self.assertIn("AbortController", app_js)
         self.assertIn("source_commit", app_js)

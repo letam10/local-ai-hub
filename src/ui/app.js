@@ -909,10 +909,11 @@ const initialize = async () => {
   } catch { /* Keep the explicit partial adapter state. */ }
   render({ focus: "main" });
   await waitForPaint();
-  const visualProof = Boolean(
-    nav?.querySelectorAll(".nav-item").length
-    && view?.textContent?.trim(),
-  );
+  const navVisible = Boolean(nav?.querySelectorAll(".nav-item").length);
+  const viewVisible = Boolean(view?.textContent?.trim());
+  if (navVisible) await recordFrontendEvent("frontend_nav_visible", routeId());
+  if (viewVisible) await recordFrontendEvent("frontend_view_visible", routeId());
+  const visualProof = navVisible && viewVisible;
   if (!visualProof) throw new Error("FRONTEND_DOM_NOT_RENDERED");
   await recordFrontendEvent("frontend_dom_visible", routeId());
   await recordFrontendEvent("frontend_rendered", routeId());
