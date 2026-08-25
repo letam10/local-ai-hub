@@ -163,13 +163,36 @@ def _record_pending_health(root: Path, *, previous: dict[str, Any], payload_id: 
     })
 
 
-def mark_startup_health(app_root: Path, *, health: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Commit or fail-closed a pending update after the new payload starts."""
+def mark_startup_health(
+    app_root: Path,
+    *,
+    health: dict[str, Any] | None = None,
+    frontend_ready: bool = False,
+) -> dict[str, Any]:
+    """Commit or fail-closed a pending update after API *and* UI readiness.
+
+    The native shell may inspect API health while loading the WebView, but it
+    is not allowed to clear the pending marker until the frontend explicitly
+    calls :func:`confirm_frontend_ready` through the desktop bridge.
+    """
 
     root = app_root.absolute()
     pending_path = _pending_health_path(root)
+    if frontend_ready:
+        try:
+            current = load_current_pointer(root)
+            build = _safe_json_file(root / str(current["payload_relative"]) / "build.json", max_bytes=32 * 1024)
+            source_commit = str(build.get("source_commit") or "")
+            payload_id = str(current.get("version") or "")
+            if _SHA_RE.fullmatch(source_commit) and payload_id == f"main-{source_commit[:12]}":
+                if not isinstance(health, dict) or health.get("build_source_commit") != source_commit or health.get("build_payload_id") != payload_id:
+                    return {"status": "frontend_rejected", "code": "FRONTEND_BUILD_MISMATCH"}
+        except (OSError, UnicodeError, json.JSONDecodeError, StableShellError, AppUpdateError):
+            return {"status": "frontend_rejected", "code": "FRONTEND_BUILD_UNAVAILABLE"}
     if not pending_path.is_file() or pending_path.is_symlink():
         return {"status": "not_pending"}
+    if not frontend_ready:
+        return {"status": "frontend_pending", "code": "FRONTEND_READY_REQUIRED"}
     pending = _safe_json_file(pending_path, max_bytes=64 * 1024)
     if pending.get("schema_version") != PENDING_HEALTH_SCHEMA or not isinstance(pending.get("previous"), dict):
         raise AppUpdateError("UPDATE_PENDING_HEALTH_INVALID")
@@ -186,6 +209,8 @@ def mark_startup_health(app_root: Path, *, health: dict[str, Any] | None = None)
         and health.get("app_user_model_id") == "LocalAIHub.Desktop"
         and isinstance(health.get("installation_id"), str)
         and len(health.get("installation_id")) == 32
+        and health.get("build_source_commit") == pending.get("source_commit")
+        and health.get("build_payload_id") == pending.get("payload_id")
     )
     if healthy:
         try:
@@ -676,7 +701,22 @@ class AppUpdateService:
                     ):
                         if child.poll() is not None:
                             raise AppUpdateError("UPDATE_CANDIDATE_API_EXITED")
-                        return {"status": "passed", "port": port, "payload_id": payload_id, "source_commit": source_commit}
+                        try:
+                            with urllib.request.urlopen(f"http://127.0.0.1:{port}/ui/", timeout=1.0) as ui_response:
+                                ui_raw = ui_response.read(256 * 1024 + 1)
+                            ui_text = ui_raw.decode("utf-8")
+                            if len(ui_raw) > 256 * 1024 or "Local AI Hub" not in ui_text or "/ui/app.js" not in ui_text:
+                                raise AppUpdateError("UPDATE_CANDIDATE_FRONTEND_PREFLIGHT_FAILED")
+                            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/bootstrap", timeout=2.0) as bootstrap_response:
+                                bootstrap_raw = bootstrap_response.read(256 * 1024 + 1)
+                            bootstrap = json.loads(bootstrap_raw.decode("utf-8"))
+                            if len(bootstrap_raw) > 256 * 1024 or not isinstance(bootstrap, dict):
+                                raise AppUpdateError("UPDATE_CANDIDATE_BOOTSTRAP_PREFLIGHT_FAILED")
+                        except AppUpdateError:
+                            raise
+                        except (OSError, UnicodeDecodeError, UnicodeError, json.JSONDecodeError, urllib.error.HTTPError, urllib.error.URLError, ValueError) as exc:
+                            raise AppUpdateError("UPDATE_CANDIDATE_FRONTEND_PREFLIGHT_FAILED") from exc
+                        return {"status": "passed", "port": port, "payload_id": payload_id, "source_commit": source_commit, "frontend_static": "passed", "bootstrap": "passed"}
                     time.sleep(0.2)
             raise AppUpdateError("UPDATE_CANDIDATE_API_TIMEOUT")
         finally:

@@ -701,6 +701,31 @@ const applyBootstrap = (payload) => {
   if (payload.workflow_library && typeof payload.workflow_library === "object") state.workflowLibrary = payload.workflow_library;
 };
 
+const confirmFrontendReady = async () => {
+  const bridge = await new Promise((resolve) => {
+    if (globalThis.pywebview?.api) { resolve(globalThis.pywebview.api); return; }
+    // Browser/dev mode has no native pending-health authority to commit.
+    if (!globalThis.pywebview) { resolve(null); return; }
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("pywebviewready", onReady);
+      resolve(value);
+    };
+    const onReady = () => finish(globalThis.pywebview?.api || null);
+    window.addEventListener("pywebviewready", onReady, { once: true });
+    setTimeout(() => finish(globalThis.pywebview?.api || null), 2000);
+  });
+  if (!bridge?.confirm_frontend_ready) {
+    if (!globalThis.pywebview) return true;
+    throw new Error("FRONTEND_BRIDGE_UNAVAILABLE");
+  }
+  const result = await bridge.confirm_frontend_ready();
+  if (!result || result.status !== "ready") throw new Error("FRONTEND_READY_REJECTED");
+  return true;
+};
+
 const refreshFast = async ({ quiet = false, renderView = true } = {}) => {
   const [health, jobs, capabilities, durableJobs] = await Promise.allSettled([getHealth(), getJobs(), getCapabilities(), getDurableJobs()]);
   let failed = false;
@@ -839,8 +864,10 @@ const loadRouteData = async ({ scan = false } = {}) => {
 };
 
 const initialize = async () => {
+  let bootstrapReady = false;
   try {
     applyBootstrap(await getBootstrap());
+    bootstrapReady = true;
   } catch (error) {
     state.apiStatus = "error";
     state.apiError = error.message;
@@ -851,6 +878,15 @@ const initialize = async () => {
     if (library?.status) state.workflowLibrary = library;
   } catch { /* Keep the explicit partial adapter state. */ }
   render({ focus: "main" });
+  if (bootstrapReady) {
+    try {
+      await confirmFrontendReady();
+    } catch {
+      state.apiStatus = "error";
+      state.apiError = "FRONTEND_READY_REJECTED";
+      render({ background: true });
+    }
+  }
   await loadRouteData();
 };
 

@@ -14,7 +14,7 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
-from src.app.stable_shell import StableShellError, resolve_launch_plan
+from src.app.stable_shell import StableShellError, resolve_launch_plan, resolve_verified_running_plan
 
 
 def _creationflags() -> int:
@@ -32,6 +32,7 @@ def _restart_after_update(self: Any) -> dict[str, object]:
     try:
         plan = resolve_launch_plan(install_root)
         running = Path(running_value).expanduser().absolute()
+        running_plan = resolve_verified_running_plan(install_root, running)
     except (OSError, ValueError, StableShellError):
         return {"status": "blocked", "code": "UPDATE_POINTER_INVALID"}
     try:
@@ -55,26 +56,26 @@ def _restart_after_update(self: Any) -> dict[str, object]:
     launcher = install_root / "LocalAIHub.exe"
     if not launcher.is_file() or launcher.is_symlink():
         return {"status": "blocked", "code": "STABLE_LAUNCHER_UNAVAILABLE"}
-    watchdog = plan.app_payload / "src" / "app" / "update_watchdog.py"
+    watchdog = running_plan.app_payload / "src" / "app" / "update_watchdog.py"
     if not watchdog.is_file() or watchdog.is_symlink():
         return {"status": "blocked", "code": "UPDATE_WATCHDOG_UNAVAILABLE"}
     environment = dict(os.environ)
     environment.update({
         "LOCALAIHUB_WATCHDOG_INSTALL_ROOT": str(install_root),
-        "LOCALAIHUB_WATCHDOG_APP_ROOT": str(plan.app_payload),
+        "LOCALAIHUB_WATCHDOG_APP_ROOT": str(running_plan.app_payload),
         "LOCALAIHUB_WATCHDOG_WAIT_PID": str(os.getpid()),
         "LOCALAIHUB_WATCHDOG_TIMEOUT": "30",
         "LOCALAIHUB_INSTALL_ROOT": str(install_root),
-        "LOCALAIHUB_APP_ROOT": str(plan.app_payload),
-        "LOCALAIHUB_DATA_ROOT": str(plan.data_root),
-        "PYTHONPATH": str(plan.app_payload),
+        "LOCALAIHUB_APP_ROOT": str(running_plan.app_payload),
+        "LOCALAIHUB_DATA_ROOT": str(running_plan.data_root),
+        "PYTHONPATH": str(running_plan.app_payload),
         "PYTHONNOUSERSITE": "1",
         "PYTHONUTF8": "1",
     })
     try:
         subprocess.Popen(
-            [str(plan.runtime_pythonw), "-m", "src.app.update_watchdog"],
-            cwd=str(plan.app_payload), env=environment,
+            [str(running_plan.runtime_pythonw), "-m", "src.app.update_watchdog"],
+            cwd=str(running_plan.app_payload), env=environment,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True, creationflags=_creationflags(),
         )

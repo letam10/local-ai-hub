@@ -9,8 +9,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from src.app.main import _error_html, _verified_previous_pointer_available
-from src.app.stable_shell import POINTER_SCHEMA, PRODUCT_SCHEMA, VERSION_MANIFEST_SCHEMA, atomic_activate_pointer, load_current_pointer, resolve_launch_plan
+from src.app.main import DesktopBridge, FRONTEND_BOOTSTRAP_TIMEOUT, WEBVIEW_NAVIGATION_FAILED, _error_html, _load_ui_when_ready, _verified_previous_pointer_available
+from src.app.stable_shell import POINTER_SCHEMA, PRODUCT_SCHEMA, VERSION_MANIFEST_SCHEMA, StableShellError, atomic_activate_pointer, load_current_pointer, resolve_launch_plan, resolve_verified_running_plan
+from src.app.update_bridge import _restart_after_update
 from src.app.update_watchdog import _rollback_previous
 from src.services.app_update import AppUpdateError, AppUpdateService, UPDATE_SCHEMA
 from src.services.app_update import UpdateCandidate
@@ -39,6 +40,15 @@ class _HealthResponse:
 
     def read(self, _limit: int = 0) -> bytes:
         return json.dumps(self._value).encode("utf-8")
+
+
+class _RawResponse(_HealthResponse):
+    def __init__(self, raw: bytes):
+        self._raw = raw
+        self.status = 200
+
+    def read(self, _limit: int = 0) -> bytes:
+        return self._raw
 
 
 class _Child:
@@ -116,7 +126,7 @@ class V8P0StartupRecoveryTests(unittest.TestCase):
             data_root = root / "work" / "candidate-data"
             expected = api_identity(product_version=PRODUCT_VERSION, installation_root=root, app_root=app, data_root=data_root)
             body = {"status": "healthy", **expected, "api_protocol_version": API_PROTOCOL_VERSION, "build_source_commit": source, "build_payload_id": payload_id}
-            with patch("src.services.app_update.subprocess.Popen", return_value=child) as popen, patch("src.services.app_update.urllib.request.urlopen", return_value=_HealthResponse(body)), patch("src.services.app_update.terminate_owned_process", side_effect=lambda process: process.terminate()):
+            with patch("src.services.app_update.subprocess.Popen", return_value=child) as popen, patch("src.services.app_update.urllib.request.urlopen", side_effect=[_HealthResponse(body), _RawResponse(b'<title>Local AI Hub</title><script src="/ui/app.js"></script>'), _HealthResponse({"health": body})]), patch("src.services.app_update.terminate_owned_process", side_effect=lambda process: process.terminate()):
                 result = AppUpdateService(transport=_ReadyTransport(), allow_test_root=True)._preflight_candidate_api(
                     install_root=root, app_root=app, runtime_pythonw=runtime, payload_id=payload_id,
                     source_commit=source, work_root=root / "work",
@@ -199,6 +209,125 @@ class V8P0StartupRecoveryTests(unittest.TestCase):
             plan = resolve_launch_plan(root, allow_test_root=True)
             self.assertEqual(plan.environment["LOCALAIHUB_BUILD_SHA"], "a" * 40)
             self.assertEqual(plan.environment["LOCALAIHUB_BUILD_PAYLOAD"], "main-aaaaaaaaaaaa")
+
+    def test_frontend_ready_handshake_clears_pending_only_after_exact_health(self):
+        with self._temp() as temporary:
+            root = Path(temporary) / "install"
+            self._install(root, current="main-aaaaaaaaaaaa", current_commit="a" * 40, previous="8.0.1")
+            previous = json.loads((root / "update-state" / "previous-current.json").read_text())
+            (root / "update-state" / "pending-health.json").write_text(json.dumps({
+                "schema_version": "local-ai-hub-pending-health.v1", "payload_id": "main-aaaaaaaaaaaa",
+                "source_commit": "a" * 40, "previous": previous,
+            }), encoding="utf-8")
+            data_root = root / "data"
+            health = {"status": "healthy", **api_identity(product_version=PRODUCT_VERSION, installation_root=root, data_root=data_root), "api_protocol_version": API_PROTOCOL_VERSION, "build_source_commit": "a" * 40, "build_payload_id": "main-aaaaaaaaaaaa"}
+            with patch.dict(os.environ, {"LOCALAIHUB_INSTALL_ROOT": str(root), "LOCALAIHUB_PORT": "8765"}, clear=False), patch("src.app.main.urllib.request.urlopen", return_value=_HealthResponse(health)), patch("src.app.main._record_startup_event"):
+                bridge = DesktopBridge()
+                result = bridge.confirm_frontend_ready()
+            self.assertEqual(result["status"], "ready")
+            self.assertFalse((root / "update-state" / "pending-health.json").exists())
+            self.assertTrue(bridge._frontend_ready_event.is_set())
+
+    def test_navigation_failure_and_frontend_timeout_keep_pending_and_show_distinct_ui(self):
+        class Window:
+            def __init__(self, fail=False):
+                self.fail = fail
+                self.loaded_html = []
+                self.loaded_urls = []
+            def load_url(self, url):
+                if self.fail:
+                    raise RuntimeError("navigation")
+                self.loaded_urls.append(url)
+            def load_html(self, value):
+                self.loaded_html.append(value)
+
+        with patch("src.app.main.ensure_api", return_value=None), patch("src.app.main._probe_api", return_value=("compatible_owned_or_reusable", {})), patch("src.app.main._record_startup_event"):
+            navigation_window = Window(fail=True)
+            _load_ui_when_ready(navigation_window, DesktopBridge())
+            self.assertIn(WEBVIEW_NAVIGATION_FAILED, navigation_window.loaded_html[0])
+            timeout_window = Window()
+            with patch("src.app.main.FRONTEND_READY_TIMEOUT_SECONDS", 0.01):
+                _load_ui_when_ready(timeout_window, DesktopBridge())
+            self.assertIn(FRONTEND_BOOTSTRAP_TIMEOUT, timeout_window.loaded_html[0])
+
+    def test_watchdog_bridge_uses_old_verified_runtime_when_new_runtime_is_missing(self):
+        with self._temp() as temporary:
+            root = Path(temporary) / "install"
+            old_app = root / "versions" / "old" / "app"
+            new_app = root / "versions" / "main-bbbbbbbbbbbb" / "app"
+            old_app.mkdir(parents=True)
+            new_app.mkdir(parents=True)
+            (old_app / "src" / "app").mkdir(parents=True)
+            (old_app / "src" / "app" / "update_watchdog.py").write_text("# old watchdog\n", encoding="utf-8")
+            (root / "LocalAIHub.exe").write_bytes(b"launcher")
+            old_runtime = root / "versions" / "old" / "runtime" / "Python312" / "pythonw.exe"
+            old_runtime.parent.mkdir(parents=True)
+            old_runtime.write_bytes(b"old-runtime")
+            new_runtime = root / "versions" / "main-bbbbbbbbbbbb" / "runtime" / "Python312" / "pythonw.exe"  # deliberately missing
+            old_plan = SimpleNamespace(app_payload=old_app, runtime_pythonw=old_runtime, data_root=root / "data", version="old")
+            new_plan = SimpleNamespace(app_payload=new_app, runtime_pythonw=new_runtime, data_root=root / "data", version="main-bbbbbbbbbbbb")
+            captured = {}
+            class Bridge:
+                def _destroy_window(self):
+                    captured["destroyed"] = True
+            with patch.dict(os.environ, {"LOCALAIHUB_INSTALL_ROOT": str(root), "LOCALAIHUB_APP_ROOT": str(old_app)}, clear=False), patch("src.app.update_bridge.resolve_launch_plan", return_value=new_plan), patch("src.app.update_bridge.resolve_verified_running_plan", return_value=old_plan), patch("src.app.update_bridge.subprocess.Popen", return_value=SimpleNamespace()) as popen, patch("src.app.update_bridge.importlib.import_module", return_value=SimpleNamespace(_prepare_owned_api_close=lambda: {"verification": "verified", "active_jobs": 0})):
+                result = _restart_after_update(Bridge())
+            self.assertEqual(result["status"], "completed")
+            command = popen.call_args.args[0]
+            self.assertEqual(command[:2], [str(old_runtime), "-m"])
+            self.assertEqual(popen.call_args.kwargs["cwd"], str(old_app))
+            self.assertEqual(popen.call_args.kwargs["env"]["LOCALAIHUB_APP_ROOT"], str(old_app))
+            self.assertTrue(captured["destroyed"])
+
+    def test_watchdog_bridge_blocks_old_payload_ownership_mismatch(self):
+        with self._temp() as temporary:
+            root = Path(temporary) / "install"
+            root.mkdir(parents=True)
+            class Bridge:
+                def _destroy_window(self):
+                    raise AssertionError("must not destroy")
+            with patch.dict(os.environ, {"LOCALAIHUB_INSTALL_ROOT": str(root), "LOCALAIHUB_APP_ROOT": str(root / "outside" )}, clear=False), patch("src.app.update_bridge.resolve_launch_plan", return_value=SimpleNamespace(app_payload=root / "new", version="main-bbbbbbbbbbbb")), patch("src.app.update_bridge.resolve_verified_running_plan", side_effect=StableShellError("RUNNING_PAYLOAD_OWNERSHIP_INVALID")), patch("src.app.update_bridge.subprocess.Popen") as popen:
+                result = _restart_after_update(Bridge())
+            self.assertEqual(result["status"], "blocked")
+            popen.assert_not_called()
+
+    def test_verified_running_plan_binds_old_app_to_installation_versions_root(self):
+        with self._temp() as temporary:
+            root = Path(temporary) / "install"
+            self._install(root, current="old", current_commit="c" * 40)
+            running = root / "versions" / "old" / "app"
+            plan = resolve_verified_running_plan(root, running, allow_test_root=True)
+            self.assertEqual(plan.app_payload, running)
+            self.assertEqual(plan.runtime_pythonw.name, "pythonw.exe")
+            with self.assertRaises(StableShellError):
+                resolve_verified_running_plan(root, root / "outside" / "app", allow_test_root=True)
+
+    def test_first_watchdog_bootstrap_is_explicit_and_exact_commit_bound(self):
+        script = (Path(__file__).resolve().parents[1] / "scripts" / "bootstrap_first_watchdog_payload.py").read_text(encoding="utf-8")
+        self.assertIn("--expected-commit", script)
+        self.assertIn("--activate", script)
+        self.assertIn("EXACT_MAIN_ARTIFACT_UNAVAILABLE", script)
+        self.assertIn("BOOTSTRAP_FAILURE_POINTER_CHANGED", script)
+
+    def test_first_watchdog_bootstrap_failure_preserves_current_pointer(self):
+        from scripts import bootstrap_first_watchdog_payload as bootstrap
+
+        with self._temp() as temporary:
+            root = Path(temporary) / "install"
+            self._install(root, current="old", current_commit="c" * 40)
+            before = load_current_pointer(root)
+            expected = "d" * 40
+            class Candidate:
+                source_commit = expected
+            class Service:
+                def _latest_candidate(self):
+                    return Candidate()
+                def prepare(self):
+                    raise RuntimeError("fixture_preflight_failed")
+            with patch.object(bootstrap, "_source_commit", return_value=expected), patch.object(bootstrap, "AppUpdateService", return_value=Service()):
+                with self.assertRaisesRegex(RuntimeError, "fixture_preflight_failed"):
+                    bootstrap.run(source_root=root, install_root=root, expected_commit=expected, activate=True)
+            self.assertEqual(load_current_pointer(root), before)
 
 
 if __name__ == "__main__":
