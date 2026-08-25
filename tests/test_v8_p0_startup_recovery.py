@@ -13,7 +13,13 @@ from src.app.main import DesktopBridge, FRONTEND_BOOTSTRAP_TIMEOUT, WEBVIEW_NAVI
 from src.app.stable_shell import POINTER_SCHEMA, PRODUCT_SCHEMA, VERSION_MANIFEST_SCHEMA, StableShellError, atomic_activate_pointer, load_current_pointer, resolve_launch_plan, resolve_verified_running_plan
 from src.app.update_bridge import _restart_after_update
 from src.app.update_watchdog import _rollback_previous
-from src.services.app_update import AppUpdateError, AppUpdateService, UPDATE_SCHEMA
+from src.services.app_update import (
+    AppUpdateError,
+    AppUpdateService,
+    CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS,
+    CANDIDATE_BOOTSTRAP_PREFLIGHT_TIMEOUT_SECONDS,
+    UPDATE_SCHEMA,
+)
 from src.services.app_update import UpdateCandidate
 from src.shared.runtime_identity import API_PROTOCOL_VERSION, APP_USER_MODEL_ID, PRODUCT_ID, api_identity
 from src.shared.version import PRODUCT_VERSION
@@ -138,6 +144,10 @@ class V8P0StartupRecoveryTests(unittest.TestCase):
             self.assertNotEqual(environment["LOCALAIHUB_PORT"], "8765")
             self.assertEqual(environment["LOCALAIHUB_BUILD_SHA"], source)
             self.assertEqual(child.returncode, 0)
+
+    def test_candidate_bootstrap_preflight_allows_populated_data_root_latency(self):
+        self.assertGreaterEqual(CANDIDATE_BOOTSTRAP_PREFLIGHT_TIMEOUT_SECONDS, 10.0)
+        self.assertLess(CANDIDATE_BOOTSTRAP_PREFLIGHT_TIMEOUT_SECONDS, CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS)
 
     def test_import_pass_api_start_failure_keeps_current_pointer_and_preserves_staging(self):
         with self._temp() as temporary:

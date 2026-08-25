@@ -61,6 +61,11 @@ MAX_EXTRACTED_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_FILES = 12_000
 CACHE_SECONDS = 120.0
 CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS = 30.0
+# Bootstrap composes a bounded server-owned snapshot and may legitimately
+# take several seconds on a populated local DATA_ROOT.  Keep this timeout
+# finite, but do not reject a healthy candidate merely because the first
+# snapshot exceeds the health probe's short request window.
+CANDIDATE_BOOTSTRAP_PREFLIGHT_TIMEOUT_SECONDS = 15.0
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PAYLOAD_RE = re.compile(r"^main-[0-9a-f]{12}$")
@@ -715,7 +720,10 @@ class AppUpdateService:
                             ui_text = ui_raw.decode("utf-8")
                             if len(ui_raw) > 256 * 1024 or "Local AI Hub" not in ui_text or "/ui/app.js" not in ui_text:
                                 raise AppUpdateError("UPDATE_CANDIDATE_FRONTEND_PREFLIGHT_FAILED")
-                            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/bootstrap", timeout=2.0) as bootstrap_response:
+                            with urllib.request.urlopen(
+                                f"http://127.0.0.1:{port}/api/bootstrap",
+                                timeout=CANDIDATE_BOOTSTRAP_PREFLIGHT_TIMEOUT_SECONDS,
+                            ) as bootstrap_response:
                                 bootstrap_raw = bootstrap_response.read(256 * 1024 + 1)
                             bootstrap = json.loads(bootstrap_raw.decode("utf-8"))
                             if len(bootstrap_raw) > 256 * 1024 or not isinstance(bootstrap, dict):
@@ -886,5 +894,5 @@ def app_update_service() -> AppUpdateService:
 __all__ = [
     "AppUpdateError", "AppUpdateService", "BUILD_INFO_SCHEMA", "REPOSITORY", "UPDATE_ARTIFACT_NAME",
     "UPDATE_CONTRACT_NAME", "UPDATE_CONTRACT_SCHEMA", "UPDATE_KIND_APP_ONLY", "UPDATE_KIND_FULL",
-    "PENDING_HEALTH_SCHEMA", "CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS", "UPDATE_SCHEMA", "app_update_service", "mark_startup_health", "_runtime_inventory_hash", "_safe_extract_app_archive", "_safe_update_contract", "_safe_update_manifest",
+    "PENDING_HEALTH_SCHEMA", "CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS", "CANDIDATE_BOOTSTRAP_PREFLIGHT_TIMEOUT_SECONDS", "UPDATE_SCHEMA", "app_update_service", "mark_startup_health", "_runtime_inventory_hash", "_safe_extract_app_archive", "_safe_update_contract", "_safe_update_manifest",
 ]
