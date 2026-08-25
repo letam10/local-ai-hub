@@ -13,12 +13,13 @@ from ..router import ApiRequest, Router
 
 def _error(exc: AppUpdateError) -> ApiResponse:
     code = exc.code
-    status = 409 if code.startswith(("UPDATE_", "ROLLBACK_")) else 503
-    return ApiResponse(status, {"status": "blocked", "code": code, "error": str(exc), "execution": "not_run"})
+    status_code = 409 if code.startswith(("UPDATE_", "ROLLBACK_")) else 503
+    return ApiResponse(status_code, {"status": "blocked", "code": code, "error": str(exc), "execution": "not_run"})
 
 
 def status(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
-    refresh = request.query.get("refresh") == "1"
+    refresh_values = request.query.get("refresh", [])
+    refresh = bool(refresh_values and refresh_values[-1] == "1")
     return ApiResponse(200, app_update_service().status(refresh=refresh))
 
 
