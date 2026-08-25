@@ -152,16 +152,6 @@ const recordLoopbackFrontendEvent = async (event, route = null) => {
   finally { clearTimeout(timeout); }
 };
 const recordFrontendEvent = async (event, route = null) => {
-  const recorder = globalThis.pywebview?.api?.frontend?.record;
-  if (typeof recorder === "function") {
-    try {
-      const nativeResult = await Promise.race([
-        recorder(event, route),
-        new Promise((resolve) => setTimeout(() => resolve({ status: "timeout" }), 1500)),
-      ]);
-      if (nativeResult?.status === "recorded" || nativeResult?.status === "ready") return nativeResult;
-    } catch { /* fall back to the identity-bound loopback signal */ }
-  }
   return recordLoopbackFrontendEvent(event, route);
 };
 const showFrontendBootstrapFailure = async () => {
@@ -755,32 +745,9 @@ const confirmFrontendReady = async () => {
   if (globalThis.pywebview && !signalRecorded) {
     throw new Error(signal?.code || "FRONTEND_READY_SIGNAL_REJECTED");
   }
-  if (!globalThis.pywebview) return true;
-  const bridge = await new Promise((resolve) => {
-    if (globalThis.pywebview?.api) { resolve(globalThis.pywebview.api); return; }
-    // Browser/dev mode has no native pending-health authority to commit.
-    if (!globalThis.pywebview) { resolve(null); return; }
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      window.removeEventListener("pywebviewready", onReady);
-      resolve(value);
-    };
-    const onReady = () => finish(globalThis.pywebview?.api || null);
-    window.addEventListener("pywebviewready", onReady, { once: true });
-    setTimeout(() => finish(globalThis.pywebview?.api || null), 2000);
-  });
-  if (typeof bridge?.frontend?.record !== "function") {
-    if (!globalThis.pywebview) return true;
-    throw new Error("FRONTEND_BRIDGE_UNAVAILABLE");
-  }
-  try { await bridge.frontend?.record?.("webview_navigation_completed", null); } catch { /* bounded telemetry only */ }
-  const result = await Promise.race([
-    bridge.frontend.record("frontend_ready"),
-    new Promise((_, reject) => setTimeout(() => reject(new Error("FRONTEND_READY_TIMEOUT")), 3000)),
-  ]);
-  if (!result || result.status !== "ready") throw new Error("FRONTEND_READY_REJECTED");
+  // The desktop startup thread consumes this event and performs the native
+  // health/pending-marker commit.  Never call a potentially blocking native
+  // WebView bridge method from the renderer's critical path.
   return true;
 };
 

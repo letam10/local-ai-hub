@@ -96,10 +96,8 @@ class V8AppReadinessContractTests(unittest.TestCase):
         self.assertIn('recordLoopbackFrontendEvent("frontend_ready"', app_js)
         self.assertIn("AbortController", app_js)
         self.assertIn("source_commit", app_js)
-        self.assertIn("Promise.race", app_js)
-        self.assertIn("FRONTEND_READY_TIMEOUT", app_js)
-        self.assertIn("bridge?.frontend?.record", app_js)
-        self.assertIn('bridge.frontend.record("frontend_ready")', app_js)
+        self.assertIn("potentially blocking native", app_js)
+        self.assertNotIn('bridge.frontend.record("frontend_ready")', app_js)
         self.assertIn("HTTP 200 của API không đủ", index_html)
 
 
