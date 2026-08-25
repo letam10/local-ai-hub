@@ -894,6 +894,7 @@ const initialize = async () => {
   try {
     applyBootstrap(await getBootstrap());
     bootstrapReady = true;
+    await recordFrontendEvent("frontend_bootstrap_completed");
   } catch (error) {
     state.apiStatus = "error";
     state.apiError = error.message;

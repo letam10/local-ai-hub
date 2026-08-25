@@ -27,6 +27,7 @@ _EVENTS = frozenset({
     "webview_navigation_started",
     "webview_navigation_completed",
     "frontend_bootstrap_started",
+    "frontend_bootstrap_completed",
     "frontend_rendered",
     "route_rendered",
     "frontend_ready",
@@ -40,6 +41,7 @@ _ROUTES = frozenset({"dashboard", "models", "diagnostics", "settings"})
 _MAX_EVENTS = 64
 _FRONTEND_SIGNAL_EVENTS = frozenset({
     "frontend_bootstrap_started",
+    "frontend_bootstrap_completed",
     "frontend_rendered",
     "frontend_js_bootstrap_failed",
     "frontend_ready_rejected",

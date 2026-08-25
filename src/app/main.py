@@ -852,7 +852,11 @@ def _load_ui_when_ready(window: object, bridge: DesktopBridge | None = None) -> 
     deadline = time.monotonic() + FRONTEND_READY_TIMEOUT_SECONDS
     while not bridge._frontend_ready_event.is_set() and time.monotonic() < deadline:
         state = load_state(install_root)
-        if state.get("pid") == os.getpid() and event_seen(state, "frontend_ready"):
+        bootstrap_rendered = (
+            event_seen(state, "frontend_bootstrap_completed")
+            and event_seen(state, "frontend_rendered", route="dashboard")
+        )
+        if state.get("pid") == os.getpid() and (event_seen(state, "frontend_ready") or bootstrap_rendered):
             result = bridge.confirm_frontend_ready()
             if result.get("status") == "ready":
                 bridge._frontend_ready_event.set()

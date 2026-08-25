@@ -307,6 +307,7 @@ class V8P0StartupRecoveryTests(unittest.TestCase):
             (root / "versions" / payload_id / "build.json").write_text(json.dumps({"source_commit": "a" * 40}), encoding="utf-8")
             pid = os.getpid()
             record_event(root, "desktop_started", status="starting", pid=pid)
+            record_event(root, "frontend_bootstrap_completed", status="running", pid=pid)
             record_event(root, "frontend_rendered", status="running", route="dashboard", pid=pid)
             record_event(root, "frontend_ready", status="running", pid=pid)
             bridge = DesktopBridge()
