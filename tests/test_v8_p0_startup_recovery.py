@@ -18,7 +18,7 @@ from src.shared.runtime_identity import API_PROTOCOL_VERSION, APP_USER_MODEL_ID,
 from src.shared.version import PRODUCT_VERSION
 
 
-TASK_TEMP = Path("D:/LocalAIHub/Temp")
+TASK_TEMP = Path(os.environ.get("LOCALAIHUB_TEST_TEMP") or tempfile.gettempdir())
 
 
 class _ReadyTransport:
