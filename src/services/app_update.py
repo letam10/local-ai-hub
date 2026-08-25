@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import threading
@@ -34,8 +35,9 @@ from src.app.stable_shell import (
     load_current_pointer,
     resolve_launch_plan,
 )
-from src.shared.runtime_identity import API_PROTOCOL_VERSION
+from src.shared.runtime_identity import API_PROTOCOL_VERSION, api_identity
 from src.shared.version import PRODUCT_VERSION
+from src.services.process_manager.managed import terminate_owned_process
 from src.services.update_transport import AuthState, TransportError, TransportSelector, build_transport
 
 REPOSITORY = "letam10/local-ai-hub"
@@ -58,6 +60,7 @@ MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_FILES = 12_000
 CACHE_SECONDS = 120.0
+CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS = 30.0
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PAYLOAD_RE = re.compile(r"^main-[0-9a-f]{12}$")
@@ -581,6 +584,123 @@ class AppUpdateService:
         if result.returncode != 0:
             raise AppUpdateError("UPDATE_IMPORT_PREFLIGHT_FAILED")
 
+    def _preflight_candidate_api(
+        self,
+        *,
+        install_root: Path,
+        app_root: Path,
+        runtime_pythonw: Path,
+        payload_id: str,
+        source_commit: str,
+        work_root: Path,
+    ) -> dict[str, Any]:
+        """Start a staged candidate on an owned ephemeral loopback port.
+
+        This probe is deliberately independent of the production API port and
+        data root.  The candidate must return the same bounded product/API
+        identity plus the exact staged build identity while its child remains
+        alive.  No pointer/history/pending marker is written until this proof
+        succeeds.
+        """
+
+        if not _SHA_RE.fullmatch(source_commit) or not _PAYLOAD_RE.fullmatch(payload_id):
+            raise AppUpdateError("UPDATE_CANDIDATE_IDENTITY_INVALID")
+        if not app_root.is_dir() or app_root.is_symlink() or not runtime_pythonw.is_file() or runtime_pythonw.is_symlink():
+            raise AppUpdateError("UPDATE_CANDIDATE_RUNTIME_UNAVAILABLE")
+        try:
+            preflight_data = work_root / "candidate-data"
+            preflight_data.mkdir(parents=True, exist_ok=False)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                    probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                probe.bind(("127.0.0.1", 0))
+                port = int(probe.getsockname()[1])
+        except (OSError, ValueError) as exc:
+            raise AppUpdateError("UPDATE_CANDIDATE_PORT_UNAVAILABLE") from exc
+
+        environment = dict(os.environ)
+        environment.update({
+            "LOCALAIHUB_INSTALL_ROOT": str(install_root),
+            "LOCALAIHUB_APP_ROOT": str(app_root),
+            "LOCALAIHUB_DATA_ROOT": str(preflight_data),
+            "LOCALAIHUB_PORT": str(port),
+            "LOCALAIHUB_BIND_HOST": "127.0.0.1",
+            "LOCALAIHUB_BUILD_SHA": source_commit,
+            "LOCALAIHUB_BUILD_PAYLOAD": payload_id,
+            "LOCALAIHUB_PREFLIGHT": "1",
+            "PYTHONPATH": str(app_root),
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONUTF8": "1",
+        })
+        log_path = work_root / "candidate-api-preflight.log"
+        child: subprocess.Popen[object] | None = None
+        expected_identity = api_identity(
+            product_version=PRODUCT_VERSION,
+            installation_root=install_root,
+            app_root=app_root,
+            data_root=preflight_data,
+        )
+        deadline = time.monotonic() + CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS
+        try:
+            with log_path.open("ab") as log:
+                try:
+                    child = subprocess.Popen(
+                        [str(runtime_pythonw), "-m", "src.services.api.api_server"],
+                        cwd=str(app_root),
+                        env=environment,
+                        stdin=subprocess.DEVNULL,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        close_fds=True,
+                        creationflags=self._creationflags(),
+                    )
+                except (OSError, ValueError) as exc:
+                    raise AppUpdateError("UPDATE_CANDIDATE_API_START_FAILED") from exc
+                while time.monotonic() < deadline:
+                    if child.poll() is not None:
+                        raise AppUpdateError("UPDATE_CANDIDATE_API_EXITED")
+                    try:
+                        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.5) as response:
+                            raw = response.read(128 * 1024 + 1)
+                        payload = json.loads(raw.decode("utf-8"))
+                    except (OSError, UnicodeDecodeError, json.JSONDecodeError, urllib.error.HTTPError, urllib.error.URLError, ValueError):
+                        time.sleep(0.2)
+                        continue
+                    if (
+                        isinstance(payload, dict)
+                        and payload.get("status") == "healthy"
+                        and all(payload.get(key) == value for key, value in expected_identity.items())
+                        and payload.get("api_protocol_version") == API_PROTOCOL_VERSION
+                        and payload.get("build_source_commit") == source_commit
+                        and payload.get("build_payload_id") == payload_id
+                    ):
+                        if child.poll() is not None:
+                            raise AppUpdateError("UPDATE_CANDIDATE_API_EXITED")
+                        return {"status": "passed", "port": port, "payload_id": payload_id, "source_commit": source_commit}
+                    time.sleep(0.2)
+            raise AppUpdateError("UPDATE_CANDIDATE_API_TIMEOUT")
+        finally:
+            if child is not None:
+                try:
+                    terminate_owned_process(child)
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _preserve_failed_staging(root: Path, work: Path, source_commit: str) -> None:
+        """Keep failed candidate payload/logs available for forensic review."""
+
+        if not work.exists():
+            return
+        destination = root / "staging" / "failures" / f"main-{source_commit[:12]}-{os.getpid()}"
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(work, destination)
+        except OSError:
+            # The original work tree is left in place rather than risking a
+            # destructive cleanup after a failed activation proof.
+            return
+
     def prepare(self) -> dict[str, Any]:
         """Download, validate, stage and atomically activate the latest main payload."""
         with self._lock:
@@ -594,7 +714,7 @@ class AppUpdateService:
             current = self._current_build(root)
             if current["commit"] == candidate.source_commit:
                 return {"status": "up_to_date", "restart_required": False, "source_commit": candidate.source_commit}
-            plan = resolve_launch_plan(root)
+            plan = resolve_launch_plan(root, allow_test_root=self._allow_test_root)
             staging_root = root / "staging"
             staging_root.mkdir(parents=True, exist_ok=True)
             work = staging_root / f"main-update-{candidate.source_commit[:12]}-{os.getpid()}"
@@ -640,6 +760,14 @@ class AppUpdateService:
                 if not runtime_pythonw.is_file():
                     raise AppUpdateError("STAGED_RUNTIME_UNAVAILABLE")
                 self._validate_staged_imports(stage_payload / "app", runtime_pythonw)
+                self._preflight_candidate_api(
+                    install_root=root,
+                    app_root=stage_payload / "app",
+                    runtime_pythonw=runtime_pythonw,
+                    payload_id=version,
+                    source_commit=candidate.source_commit,
+                    work_root=work,
+                )
                 manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
                 if target.exists():
                     existing = target / "build.json"
@@ -662,7 +790,11 @@ class AppUpdateService:
                     "restart_required": True, "launcher_changed": False, "data_root_changed": False,
                     "update_kind": update_kind, "runtime_contract": contract["runtime_contract"],
                 }
+            except AppUpdateError:
+                self._preserve_failed_staging(root, work, candidate.source_commit)
+                raise
             except (OSError, UnicodeError, json.JSONDecodeError, zipfile.BadZipFile, StableShellError) as exc:
+                self._preserve_failed_staging(root, work, candidate.source_commit)
                 if isinstance(exc, AppUpdateError):
                     raise
                 raise AppUpdateError("UPDATE_PREPARE_FAILED", type(exc).__name__) from exc
@@ -706,5 +838,5 @@ def app_update_service() -> AppUpdateService:
 __all__ = [
     "AppUpdateError", "AppUpdateService", "BUILD_INFO_SCHEMA", "REPOSITORY", "UPDATE_ARTIFACT_NAME",
     "UPDATE_CONTRACT_NAME", "UPDATE_CONTRACT_SCHEMA", "UPDATE_KIND_APP_ONLY", "UPDATE_KIND_FULL",
-    "PENDING_HEALTH_SCHEMA", "UPDATE_SCHEMA", "app_update_service", "mark_startup_health", "_runtime_inventory_hash", "_safe_extract_app_archive", "_safe_update_contract", "_safe_update_manifest",
+    "PENDING_HEALTH_SCHEMA", "CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS", "UPDATE_SCHEMA", "app_update_service", "mark_startup_health", "_runtime_inventory_hash", "_safe_extract_app_archive", "_safe_update_contract", "_safe_update_manifest",
 ]

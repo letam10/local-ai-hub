@@ -523,6 +523,7 @@ def health(*, probe_gpu: bool = False) -> dict[str, Any]:
         "service": "Local AI Hub",
         "version": PRODUCT_VERSION,
         **identity,
+        **_build_identity(),
         "time": _now(),
         "bind": f"{bind_host}:{bind_port}",
         "disk": disk,
@@ -531,6 +532,21 @@ def health(*, probe_gpu: bool = False) -> dict[str, Any]:
         "active_jobs": len(active),
         "loaded_models": [],
     }
+
+
+def _build_identity() -> dict[str, str]:
+    """Expose optional staged-build identity without leaking filesystem paths.
+
+    The updater sets these two bounded environment values only for a staged
+    candidate (and the verified payload launch environment).  Legacy/checkouts
+    that do not provide them retain the historical health shape.
+    """
+
+    source_commit = str(os.environ.get("LOCALAIHUB_BUILD_SHA") or "")
+    payload_id = str(os.environ.get("LOCALAIHUB_BUILD_PAYLOAD") or "")
+    if not re.fullmatch(r"[0-9a-f]{40}", source_commit) or not re.fullmatch(r"main-[0-9a-f]{12}", payload_id):
+        return {}
+    return {"build_source_commit": source_commit, "build_payload_id": payload_id}
 
 
 def capability_control_plane(*, hardware: dict[str, Any] | None = None, sources: dict[str, dict[str, Any]] | None = None, mode: str | None = None) -> dict[str, Any]:
