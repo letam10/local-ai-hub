@@ -155,7 +155,19 @@ const recordFrontendEvent = async (event, route = null) => {
   return recordLoopbackFrontendEvent(event, route);
 };
 const waitForPaint = () => new Promise((resolve) => {
-  requestAnimationFrame(() => requestAnimationFrame(resolve));
+  let settled = false;
+  const finish = () => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeout);
+    resolve();
+  };
+  const timeout = setTimeout(finish, 500);
+  if (typeof requestAnimationFrame !== "function") {
+    finish();
+    return;
+  }
+  requestAnimationFrame(() => requestAnimationFrame(finish));
 });
 const showFrontendBootstrapFailure = async () => {
   await recordFrontendEvent("frontend_js_bootstrap_failed");
