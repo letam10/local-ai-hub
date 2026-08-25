@@ -15,7 +15,12 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import zipfile
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from src.shared.version import PRODUCT_VERSION
 
@@ -34,7 +39,7 @@ def sha256(path: Path) -> str:
 
 
 def git(*args: str) -> str:
-    result = subprocess.run(["git", *args], text=True, capture_output=True, check=True)
+    result = subprocess.run(["git", *args], cwd=ROOT, text=True, capture_output=True, check=True)
     return result.stdout.strip()
 
 
@@ -48,16 +53,15 @@ def tracked_files(root: Path) -> list[Path]:
 
 
 def build(output: Path) -> dict[str, object]:
-    root = Path(__file__).resolve().parents[1]
     source_commit = os.environ.get("GITHUB_SHA") or git("rev-parse", "HEAD")
     if len(source_commit) != 40 or any(char not in "0123456789abcdef" for char in source_commit):
         raise RuntimeError("source_commit_invalid")
     output.mkdir(parents=True, exist_ok=True)
     archive = output / ARCHIVE_NAME
-    paths = tracked_files(root)
+    paths = tracked_files(ROOT)
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as bundle:
         for relative in paths:
-            source = root / relative
+            source = ROOT / relative
             info = zipfile.ZipInfo(f"app/{relative.as_posix()}", date_time=(1980, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o100644 << 16
