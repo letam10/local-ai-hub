@@ -119,6 +119,7 @@ export const openArtifact = (id) => request(`/api/artifacts/${encodeURIComponent
 export const launchApplication = (id) => request(`/api/applications/${encodeURIComponent(id)}/launch`, { method: "POST" });
 export const closeOwnedBackends = () => request("/api/lifecycle/close", { method: "POST" });
 export const scanStorage = () => request("/api/storage/scan", { method: "POST" });
+export const getStorageScan = () => request("/api/storage/scan");
 export const getComfyAdvanced = () => request("/api/comfyui/advanced");
 export const startComfyAdvanced = () => request("/api/comfyui/advanced/start", { method: "POST" });
 export const getComfyBridgeWorkflows = () => request("/api/comfyui/workflows");

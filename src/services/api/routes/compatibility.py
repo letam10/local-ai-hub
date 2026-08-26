@@ -15,11 +15,20 @@ def models(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) 
 
 
 def storage(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
-    return ApiResponse(200, context.call("storage_summary"))
+    # Keep the storage page responsive: the first request starts one bounded
+    # background scan and returns its current path-free projection.
+    scanner = context.get("start_storage_scan")
+    return ApiResponse(200, scanner() if callable(scanner) else context.call("storage_summary"))
 
 
 def storage_scan(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
-    return ApiResponse(200, context.call("storage_summary", force=True))
+    scanner = context.get("start_storage_scan")
+    return ApiResponse(200, scanner(force=True) if callable(scanner) else context.call("storage_summary", force=True))
+
+
+def storage_scan_status(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    snapshot = context.get("storage_scan_snapshot")
+    return ApiResponse(200, snapshot() if callable(snapshot) else context.call("storage_summary"))
 
 
 def applications(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
@@ -36,5 +45,6 @@ def register(router: Router) -> None:
     router.register(route_id="compat.models", method="GET", path="/models", domain="models", owner=owner, handler=models)
     router.register(route_id="compat.storage", method="GET", path="/api/storage", domain="storage", owner=owner, handler=storage)
     router.register(route_id="compat.storage_scan", method="POST", path="/api/storage/scan", domain="storage", owner=owner, handler=storage_scan)
+    router.register(route_id="compat.storage_scan_status", method="GET", path="/api/storage/scan", domain="storage", owner=owner, handler=storage_scan_status)
     router.register(route_id="applications.list", method="GET", path="/api/applications", domain="applications", owner=owner, handler=applications)
     router.register(route_id="applications.launch", method="POST", path="/api/applications/{application_id}/launch", domain="applications", owner=owner, handler=launch)

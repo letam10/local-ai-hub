@@ -109,6 +109,7 @@ const renderWhisper = createWhisperRenderer({ component, tool, heading, statusPi
 const renderVoice = createVoiceRenderer({ component, tool, heading, capability, card, field, file, button, formResult });
 const { renderImageQuickV5, renderImage } = createImageAiRenderer({ tool, heading, escapeHtml, formatStatus, workspaceState, imageWorkflowRail, card, field, file, button, formResult });
 const renderMedia = createMediaRenderer({ component, tool, mediaCapabilityEvidence, heading, statusPill, mediaEvidencePanel, workspaceState, videoWorkflowRail, card, file, files, field, formResult, escapeHtml });
+const renderVideo = (state) => (typeof renderMedia.video === "function" ? renderMedia.video(state) : renderMedia(state));
 const renderAnime = createAnimesrRenderer({ component, tool, heading, statusPill, workspaceState, card, file, field, button, formResult });
 const renderCreativeWorkspace = createProjectsRenderer({ heading, card, cardDynamic, field, fieldDynamic, button, escapeHtml, uiTextHtml, statusPill, workflowLibraryState, formatGb });
 const { renderImageMaskStudio, renderComfyAdvancedV5 } = createImageMaskRenderer({ heading, card, field, file, button, escapeHtml, statusPill });
@@ -143,6 +144,7 @@ export function renderPage(route, state) {
     voice: renderVoice,
     image: renderImageQuickV5,
     media: renderMedia,
+    video: renderVideo,
     animesr: renderAnime,
     projects: renderCreativeWorkspace,
     jobs: renderJobsFeature,
@@ -151,11 +153,12 @@ export function renderPage(route, state) {
     diagnostics: renderDiagnosticsFeature,
     settings: renderSettingsFeature,
   };
-  const pageRoute = route === "video" ? "media" : route;
+  const pageRoute = route;
   const nodeCopy = {
     image: "Compose FLUX/Qwen, SAM2 mask và image transforms trong cùng graph; preset JSON được track, workflow cá nhân autosave local.",
     sam2: "Advanced workflow: Grounding DINO → SAM2 → mask/composite/export. GPU nodes chỉ chạy khi bấm Run Graph.",
     media: "Build video creative graph: input/prompt → transform hoặc generation contract → upscale/interpolate → encode → preview/export. Encode chỉ hiện capability FFmpeg thực tế.",
+    video: "Không gian sáng tạo video riêng: dựng pipeline video, xem capability và chuẩn bị node graph trước khi chạy bounded smoke.",
     animesr: "Advanced order do bạn chọn: Load → AnimeSR → Frame Interpolation → Encode. AnimeSR/RIFE vẫn partial cho tới smoke riêng.",
   };
   const nodeScope = Object.prototype.hasOwnProperty.call(nodeCopy, pageRoute) ? pageRoute : null;
@@ -172,7 +175,7 @@ export function renderPage(route, state) {
     return localizeLegacyMarkup(`${imageModuleTabs(state)}${renderImageQuickV5(state)}`);
   }
   if (nodeScope && activeTab(state, nodeScope) === "nodes") {
-    return localizeLegacyMarkup(`${heading("ADVANCED WORKFLOW", `${nodeScope === "sam2" ? "SAM2" : nodeScope === "animesr" ? "AnimeSR" : nodeScope === "media" ? "Media" : "Image AI"} Nodes`, "Node editor chạy offline trong cửa sổ Local AI Hub.")}${moduleTabs(state, nodeScope)}${nodeStudio(nodeScope, nodeCopy[nodeScope])}`);
+    return localizeLegacyMarkup(`${heading("ADVANCED WORKFLOW", `${nodeScope === "sam2" ? "SAM2" : nodeScope === "animesr" ? "AnimeSR" : nodeScope === "media" ? "Media" : nodeScope === "video" ? "Video" : "Image AI"} Nodes`, "Node editor chạy offline trong cửa sổ Local AI Hub.")}${moduleTabs(state, nodeScope)}${nodeStudio(nodeScope, nodeCopy[nodeScope])}`);
   }
   const page = (pages[pageRoute] || renderDashboard)(state);
   return localizeLegacyMarkup(nodeScope ? `${moduleTabs(state, nodeScope)}${page}` : page);

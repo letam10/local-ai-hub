@@ -152,6 +152,21 @@ process.stdout.write(renderPage({json.dumps(route)}, {payload}));
         for marker in ("status-pill[data-severity=\"error\"]", ".workflow-mini-graph", ".asset-preview-skeleton", ".graph-inspector"):
             self.assertIn(marker, css)
 
+    def test_video_route_is_distinct_and_socket_colors_are_explicit(self) -> None:
+        pages = (ROOT / "src/ui/pages.js").read_text(encoding="utf-8")
+        media = (ROOT / "src/ui/features/media/render.js").read_text(encoding="utf-8")
+        studio = (ROOT / "src/ui/features/node_studio/studio.js").read_text(encoding="utf-8")
+        registry = (ROOT / "src/services/node_studio/registry.py").read_text(encoding="utf-8")
+        self.assertIn("video: renderVideo", pages)
+        self.assertNotIn('const pageRoute = route === "video" ? "media" : route;', pages)
+        self.assertIn('const renderVideo', pages)
+        self.assertIn('videoWorkflowRail(state, "video")', media)
+        self.assertIn('data-workspace-tab="video:nodes"', media)
+        for port_type in ("IMAGE", "MASK", "VIDEO", "AUDIO", "TEXT", "NUMBER", "BOOLEAN", "MODEL", "METADATA"):
+            self.assertIn(port_type, studio)
+        self.assertIn("input.color = socketColor(port.type)", studio)
+        self.assertIn('"video": {"utility", "media", "video", "annotation"}', registry)
+
     def test_job_routes_are_in_generated_inventory(self) -> None:
         inventory = json.loads((ROOT / "architecture/api_routes.yaml").read_text(encoding="utf-8"))
         route_ids = {item["route_id"] for item in inventory["routes"]}

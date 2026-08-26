@@ -28,7 +28,7 @@ from src.services.image_mask_studio import StudioConflictError, image_mask_studi
 from src.services.job_manager.manager import job_manager
 from src.services.project_manager import project_manager
 from src.services.runtime_registry import applications, launch
-from src.services.storage_manager.overview import dashboard_volume_snapshot
+from src.services.storage_manager.overview import dashboard_volume_snapshot, start_storage_scan, storage_scan_snapshot
 from src.shared.paths.registry import APP_ROOT, ROOT
 from src.shared.version import PRODUCT_VERSION
 
@@ -301,6 +301,8 @@ def _api_context() -> ApiContext:
             "submit_tool": submit_tool,
             "storage_" + "summary": lambda force=False: getattr(__import__("src.services.storage_manager.overview", fromlist=["storage_" + "summary"]), "storage_" + "summary")(force=force),
             "dashboard_volume_snapshot": dashboard_volume_snapshot,
+            "start_storage_scan": start_storage_scan,
+            "storage_scan_snapshot": storage_scan_snapshot,
             "applications": applications,
             "launch_application": launch,
             "workflow_library_payload": _workflow_library_payload,
@@ -325,6 +327,8 @@ def _api_context() -> ApiContext:
             "settings_payload": _settings_payload,
             "image_mask_studio": image_mask_studio,
             "submit_tool": submit_tool,
+            "start_storage_scan": start_storage_scan,
+            "storage_scan_snapshot": storage_scan_snapshot,
             "image_mask_link_project": lambda session_id, payload: __import__("src.services.api.context", fromlist=["_link_image_mask_project"])._link_image_mask_project(image_mask_studio, project_manager, session_id, payload),
         })
     return _api_context_cache

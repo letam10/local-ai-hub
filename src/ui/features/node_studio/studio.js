@@ -32,12 +32,15 @@ const LEGACY_PREFIX = "local-ai-hub-node-studio-v1";
 const WORKFLOW_INDEX_PREFIX = "local-ai-hub-workflows-v1";
 const MAX_HISTORY = 60;
 const MAX_RECENT_WORKFLOWS = 12;
-const PRESET_BY_SCOPE = { image: "image_create_upscale", sam2: "sam2_segment", media: "video_creative_pipeline", animesr: "animesr_pipeline" };
+const PRESET_BY_SCOPE = { image: "image_create_upscale", sam2: "sam2_segment", media: "video_creative_pipeline", video: "video_creative_pipeline", animesr: "animesr_pipeline" };
 const TYPE_COLORS = {
   IMAGE: "#cf7cff", MASK: "#42c6a0", VIDEO: "#f17c8e", AUDIO: "#f1ad5f",
   TEXT: "#6c8cff", NUMBER: "#a9c6ff", BOOLEAN: "#e5d66a", MODEL: "#e291c7", METADATA: "#8794ad",
 };
 const CATEGORY_COLORS = { utility: "#6c8cff", image: "#cf7cff", vision: "#42c6a0", media: "#f1ad5f", video: "#f17c8e", annotation: "#8794ad" };
+const SOCKET_TYPES = Object.freeze(["IMAGE", "MASK", "VIDEO", "AUDIO", "TEXT", "NUMBER", "BOOLEAN", "MODEL", "METADATA"]);
+const socketColor = (type) => TYPE_COLORS[String(type || "").toUpperCase()] || TYPE_COLORS.METADATA;
+const isMediaScope = (scope) => scope === "media" || scope === "video";
 const NODE_COPY = Object.freeze({
   utility: "Tiện ích", image: "Hình ảnh", vision: "Thị giác", media: "Media", video: "Video", annotation: "Chú thích",
   "Load Image": "Tải ảnh", "Load Video": "Tải video", "Load Audio": "Tải âm thanh", "Load Subtitle": "Tải phụ đề", "Prompt / Text": "Prompt / Văn bản", Number: "Số", Boolean: "Đúng / Sai", "Point Input": "Điểm đầu vào", "Box Input": "Hộp đầu vào", "Preview Image": "Xem trước ảnh", "Preview Video": "Xem trước video", "Save Image": "Lưu ảnh", "Save Video": "Lưu video", "Export Mask": "Xuất mask", "Export Video": "Xuất video", Comment: "Ghi chú", Group: "Nhóm", Resolution: "Độ phân giải", Seed: "Seed", "Steps / Sampler": "Steps / Bộ lấy mẫu", "FLUX Generate": "Tạo ảnh FLUX", "Qwen Image Generate": "Tạo ảnh Qwen", "Image Edit / Image-to-Image": "Sửa ảnh / Ảnh sang ảnh", "AnimeSR Upscale": "Nâng cấp AnimeSR", "Real-ESRGAN": "Real-ESRGAN", "Frame Interpolation": "Nội suy khung hình", Encode: "Mã hóa", "Subtitle Burn": "Ghi phụ đề", "Extract Frames": "Tách khung hình", Rotate: "Xoay", FPS: "FPS", "Extract Audio": "Tách âm thanh", "Replace Audio": "Thay âm thanh", Resize: "Đổi kích thước", "ComfyUI Workflow": "Workflow ComfyUI", "Video Generate (backend partial)": "Tạo video (backend một phần)", "Video Transform": "Biến đổi video", "Video Upscale (AnimeSR / FFmpeg)": "Nâng cấp video (AnimeSR / FFmpeg)", "Video Grade": "Hiệu chỉnh video", "Logo / Image Overlay": "Phủ logo / ảnh", "Video Generate": "Tạo video", "Video Transform": "Biến đổi video", "Text Overlay (unavailable)": "Phủ chữ (chưa khả dụng)", "Trim / Cut": "Cắt", Concat: "Nối", Crop: "Cắt khung", Flip: "Lật", "Audio Loudness": "Độ lớn âm thanh", "Color / Levels": "Màu / mức sáng", "Image Compare A/B": "So sánh ảnh A/B", "Mask Apply": "Áp dụng mask", "Mask Composite": "Ghép mask", "Mask Preview": "Xem trước mask", "Probe Audio": "Đọc metadata âm thanh", "Probe Video": "Đọc metadata video", "Grounding DINO": "Grounding DINO", "Grounding Prompt": "Prompt Grounding", "RF-DETR Detect": "Phát hiện RF-DETR", "SAM2 Segment": "Phân vùng SAM2", "SAM2 Track": "Theo dõi SAM2", "Upscale Image (FFmpeg fallback)": "Nâng cấp ảnh (FFmpeg dự phòng)",
@@ -186,7 +189,7 @@ const MEDIA_RUN_GATED_REASON = "Run Graph is unavailable for Media until every n
 const MEDIA_RUN_EMPTY_REASON = "Add an exactly evidenced media operation before running this graph.";
 const isVerifiedMediaOperationScope = (value) => Boolean(value && value.status === "operational" && value.execution === "completed" && value.evidenceVerified === true && Array.isArray(value.availableOperations) && value.availableOperations.length === MEDIA_OPERATION_SCOPE_IDS.length && MEDIA_OPERATION_SCOPE_IDS.every((id, index) => value.availableOperations[index] === id) && value.operationStatus && Object.keys(value.operationStatus).sort().join("|") === MEDIA_OPERATION_SCOPE_IDS.slice().sort().join("|") && MEDIA_OPERATION_SCOPE_IDS.every((id) => value.operationStatus[id] === "operational"));
 export function mediaGraphRunEligibility(scope, graph, operationScope) {
-  if (scope !== "media") return { eligible: true, reason: "" };
+  if (scope !== "media" && scope !== "video") return { eligible: true, reason: "" };
   if (!isVerifiedMediaOperationScope(operationScope)) return { eligible: false, reason: MEDIA_RUN_GATED_REASON };
   const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
   if (!nodes.length) return { eligible: false, reason: MEDIA_RUN_EMPTY_REASON };
@@ -571,7 +574,7 @@ class HubGraphEditor {
       this.operationScope = normalizeOperationScope(registryPayload.operation_scope);
       this.applyEncoderCapabilities(registryPayload.encoder_capabilities);
       this.availability = availabilityPayload.availability || registryPayload.availability || { counts: {}, nodes: [] };
-      this.presets = (presetPayload.presets || []).filter((item) => item.scope === this.scope);
+      this.presets = (presetPayload.presets || []).filter((item) => item.scope === this.scope || (this.scope === "video" && item.scope === "media"));
       this.workflowIndex = readWorkflowIndex(this.scope);
       this.configureLiteGraph();
       const saved = this.readLocalGraph();
@@ -630,7 +633,7 @@ class HubGraphEditor {
   }
 
   operationEvidenceFor(definition) {
-    if (this.scope !== "media" || !MEDIA_OPERATION_SCOPE_IDS.includes(definition?.type)) return null;
+    if (!isMediaScope(this.scope) || !MEDIA_OPERATION_SCOPE_IDS.includes(definition?.type)) return null;
     const id = definition.type;
     const status = this.operationScope.operationStatus[id] || "partial";
     return {
@@ -647,7 +650,7 @@ class HubGraphEditor {
 
   operationAvailabilityFor(definition) {
     const evidence = this.operationEvidenceFor(definition);
-    if (this.scope !== "media") return evidence || definition?.availability || { status: definition?.status || "operational", reason: "", action: "" };
+    if (!isMediaScope(this.scope)) return evidence || definition?.availability || { status: definition?.status || "operational", reason: "", action: "" };
     if (evidence) return evidence;
     return {
       status: "partial",
@@ -668,7 +671,7 @@ class HubGraphEditor {
   }
 
   operationScopeSummary() {
-    if (this.scope !== "media") return nodeText("Media operation scope is not applied to this workspace; no execution is claimed.");
+    if (!isMediaScope(this.scope)) return nodeText("Media operation scope is not applied to this workspace; no execution is claimed.");
     if (this.operationScope.evidenceVerified) return nodeText("Exact media evidence is published for video grade, logo overlay and encode; opening Node Studio does not execute a worker.");
     return nodeText("No exact media evidence is verified in this server snapshot; scoped nodes remain partial and no execution is claimed.");
   }
@@ -676,8 +679,8 @@ class HubGraphEditor {
   operationEvidenceMarkup(definition = null) {
     const evidence = this.operationEvidenceFor(definition);
     const title = evidence ? nodeText(`${evidence.label} evidence`) : nodeText("Media operation evidence");
-    const generic = this.scope === "media" && !evidence;
-    const status = evidence?.status || (generic ? "partial" : this.scope === "media" ? this.operationScope.status : "unavailable");
+    const generic = isMediaScope(this.scope) && !evidence;
+    const status = evidence?.status || (generic ? "partial" : isMediaScope(this.scope) ? this.operationScope.status : "unavailable");
     const reason = evidence?.reason || (generic ? nodeText("This node is outside the exact published media operation scope.") : this.operationScopeSummary());
     const nextAction = evidence?.nextAction || (generic ? nodeText("Use only the three exactly evidenced media operations.") : safeOperationScopeText(this.operationScope.nextAction, MEDIA_OPERATION_SCOPE_FALLBACK.nextAction));
     const execution = evidence?.execution || (generic ? "not_run" : this.operationScope.execution);
@@ -862,11 +865,19 @@ class HubGraphEditor {
         this.properties = Object.fromEntries((captured.properties || []).map((property) => [property.name, clone(property.default)]));
         for (const port of captured.inputs || []) {
           this.addInput(nodeText(port.label || port.name), port.type, { hubPort: port.name, required: Boolean(port.required), multi: Boolean(port.multi) });
-          this.inputs[this.inputs.length - 1].hubPort = port.name;
+          const input = this.inputs[this.inputs.length - 1];
+          input.hubPort = port.name;
+          input.color = socketColor(port.type);
+          input.color_on = socketColor(port.type);
+          input.color_off = socketColor(port.type);
         }
         for (const port of captured.outputs || []) {
           this.addOutput(nodeText(port.label || port.name), port.type, { hubPort: port.name });
-          this.outputs[this.outputs.length - 1].hubPort = port.name;
+          const output = this.outputs[this.outputs.length - 1];
+          output.hubPort = port.name;
+          output.color = socketColor(port.type);
+          output.color_on = socketColor(port.type);
+          output.color_off = socketColor(port.type);
         }
         this.color = CATEGORY_COLORS[captured.category] || "#8794ad";
         this.bgcolor = "#172039";
@@ -935,7 +946,7 @@ class HubGraphEditor {
           <div class="graph-guide__content">
             <div class="graph-guide__section">
               <strong>1. Khái niệm Typed Sockets & Dữ liệu</strong>
-              <p>Mỗi cổng (socket) trên node được quy định kiểu dữ liệu nghiêm ngặt: <code>IMAGE</code> (tím), <code>MASK</code> (xanh lục), <code>VIDEO</code> (hồng đỏ), <code>AUDIO</code> (cam), <code>TEXT</code> (lam), <code>NUMBER</code> (xanh nhạt), <code>BOOLEAN</code> (vàng), <code>METADATA</code> (xám). Socket đầu vào không hỗ trợ đa kết nối (non-multi) sẽ từ chối kết nối thứ hai để tránh xung đột.</p>
+              <p>Mỗi cổng (socket) trên node được quy định kiểu dữ liệu nghiêm ngặt: <code>IMAGE</code> (tím), <code>MASK</code> (xanh lục), <code>VIDEO</code> (hồng đỏ), <code>AUDIO</code> (cam), <code>TEXT</code> (lam), <code>NUMBER</code> (xanh nhạt), <code>BOOLEAN</code> (vàng), <code>MODEL</code> (hồng tím), <code>METADATA</code> (xám). Socket đầu vào không hỗ trợ đa kết nối (non-multi) sẽ từ chối kết nối thứ hai để tránh xung đột.</p>
             </div>
             <div class="graph-guide__section">
               <strong>2. Thao tác Canvas & Phím tắt</strong>
@@ -963,7 +974,7 @@ class HubGraphEditor {
             <div class="graph-guide__templates">
               <strong>Mở template workflow mẫu trong Hub Nodes:</strong>
               <div class="graph-guide__template-buttons">
-                ${this.presets.filter((item) => item.scope === this.scope).map((item) => `<button class="button button--compact" type="button" data-graph-guide-preset="${escapeHtml(item.id)}" title="${escapeHtml(item.description || "")}">Mở template: ${escapeHtml(item.title || item.id)}</button>`).join("") || "<span>Chưa có template mẫu cho workspace này.</span>"}
+                ${this.presets.filter((item) => item.scope === this.scope || (this.scope === "video" && item.scope === "media")).map((item) => `<button class="button button--compact" type="button" data-graph-guide-preset="${escapeHtml(item.id)}" title="${escapeHtml(item.description || "")}">Mở template: ${escapeHtml(item.title || item.id)}</button>`).join("") || "<span>Chưa có template mẫu cho workspace này.</span>"}
               </div>
             </div>
           </div>
@@ -1447,9 +1458,9 @@ class HubGraphEditor {
     const preview = this.renderArtifactPreview(artifactCollection, state);
     const operationEvidence = this.operationEvidenceFor(definition);
     const availability = this.operationAvailabilityFor(definition);
-    const action = this.scope === "media" && !operationEvidence ? availability.action : state.next_action || availability.action;
-    const displayStatus = this.scope === "media" && !operationEvidence ? availability.status : state.status || availability.status;
-    const displayMessage = this.scope === "media" && !operationEvidence ? availability.reason : state.message || state.error || availability.reason || "";
+    const action = isMediaScope(this.scope) && !operationEvidence ? availability.action : state.next_action || availability.action;
+    const displayStatus = isMediaScope(this.scope) && !operationEvidence ? availability.status : state.status || availability.status;
+    const displayMessage = isMediaScope(this.scope) && !operationEvidence ? availability.reason : state.message || state.error || availability.reason || "";
     const validation = this.validation ? (this.validation.errors?.length ? `${this.validation.errors.length} error(s)` : "valid") : "not_run";
     const dirty = this.dirty.has(node.hubId) ? "dirty" : "clean";
     const cache = state.cache_hit === true ? "hit" : state.cache_hit === false ? "miss" : "not_run";
@@ -1460,7 +1471,7 @@ class HubGraphEditor {
     const capability = `<div class="graph-inspector__capability" data-status="${escapeHtml(displayStatus)}"><div class="graph-inspector__capability-head"><strong>${escapeHtml(nodeText(displayStatus))}</strong><span class="status-pill" data-status="${escapeHtml(displayStatus)}">${escapeHtml(nodeText(displayStatus))}</span></div><p>${escapeHtml(nodeText(displayMessage || "Snapshot chưa công bố thêm giải thích."))}</p></div>`;
     const nextAction = action || "Chưa có hành động tiếp theo trong snapshot này.";
     this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(nodeText(definition?.category || "node"))}</span><h3>${escapeHtml(nodeText(definition?.title || node.hubType))}</h3><p>${escapeHtml(nodeText(definition?.description || ""))}</p></div></div><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Capability"))}</strong>${capability}</section><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Bước tiếp theo"))}</strong><div class="graph-action-hint"><span>${escapeHtml(nodeText(nextAction))}</span></div></section><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Execution status"))}</strong><dl class="graph-status-list">${statusRows}</dl></section>${preview ? `<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Artifact"))}</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Parameters"))}</strong>${(definition?.properties || []).map((property) => propertyControl(node, property)).join("") || `<p class="graph-empty">${escapeHtml(nodeText("Node này không có property."))}</p>`}</section>`;
-    if (this.scope === "media") {
+    if (isMediaScope(this.scope)) {
       this.inspectorElement.querySelector(".graph-inspector__head")?.insertAdjacentHTML("afterend", this.operationEvidenceMarkup(operationEvidence ? definition : null));
       const inspectorState = this.inspectorElement.querySelector(".graph-node-state");
       inspectorState?.setAttribute("data-operation-scope-status", operationEvidence?.status || this.operationScope.status);
@@ -1655,7 +1666,7 @@ class HubGraphEditor {
       this.nodeStates.clear();
       this.runProvenance = [];
       this.dirty = new Set((result.graph.nodes || []).map((node) => node.id));
-      this.graphData = result.graph;
+      this.graphData = { ...result.graph, scope: this.scope };
       this.savedFingerprint = quiet ? graphFingerprint(result.graph) : "";
       this.recovered = false;
       this.unsaved = !quiet;

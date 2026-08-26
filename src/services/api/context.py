@@ -141,6 +141,7 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         "node_run_snapshot": lambda run_id: __import__("src.services.node_studio.state", fromlist=["graph_runs"]).graph_runs.snapshot(run_id),
         "model_summary": model_summary, "model_manager_inspect": lambda model_id: model_service().inspect(model_id),
         "storage_summary": get("storage_summary"), "dashboard_volume_snapshot": get("dashboard_volume_snapshot"),
+        "start_storage_scan": get("start_storage_scan"), "storage_scan_snapshot": get("storage_scan_snapshot"),
         "applications": get("applications"), "launch_application": get("launch_application"),
         "workflow_library_payload": get("workflow_library_payload"),
         "comfy_health": get("comfy_health"), "comfy_start": get("comfy_start"),

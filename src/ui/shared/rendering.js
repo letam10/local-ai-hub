@@ -97,6 +97,7 @@ const READINESS_STATUS_LABELS = Object.freeze({
   not_applicable: "Not applicable",
   unsupported: "Unsupported",
   recovery_required: "Recovery required",
+  stale_session: "Stale session",
   incompatible: "Incompatible",
   attention: "Needs attention",
   external_managed: "External app",
@@ -117,7 +118,7 @@ const readinessStatusLabel = (value) => {
 const STATUS_SEVERITY = Object.freeze({
   operational: "success", healthy: "success", ready: "success", clean: "success", available: "success", installed: "success", running: "success", completed: "success",
   partial: "warning", degraded: "warning", needs_setup: "warning", unavailable: "warning", missing: "warning", not_installed: "warning", attention: "warning", cancelling: "warning",
-  error: "error", failed: "error", blocked: "error", incompatible: "error", recovery_required: "error",
+  error: "error", failed: "error", blocked: "error", incompatible: "error", recovery_required: "error", stale_session: "warning",
   not_run: "neutral", planned: "neutral", not_published: "neutral", waiting: "neutral", starting: "neutral", queued: "neutral", cancelled: "neutral", interrupted: "neutral", unknown: "neutral",
   not_applicable: "muted", unsupported: "muted", external_managed: "muted",
 });
@@ -535,6 +536,7 @@ const jobRecoverySnapshot = (state) => {
       status,
       progress,
       resumable: item.resumable === true,
+      errorCode: safeUiIdentifier(item.error_code || (item.result && item.result.failure_code), ""),
       reason: safeUiText(item.reason || item.error || detail?.error || detail?.reason || detail?.message, "Chưa có nguyên nhân an toàn trong snapshot này."),
       nextAction: safeUiText(item.next_action, "Kiểm tra backend liên quan rồi tạo lại tác vụ nếu cần."),
       lifecycle: detail?.lifecycle || durableLifecycle,
@@ -667,15 +669,15 @@ const imageWorkflowRail = (state) => {
     </div>
   </section>`;
 };
-const videoWorkflowRail = (state) => {
+const videoWorkflowRail = (state, scope = "media") => {
   const transform = tool(state, "run_media_operation");
   const upscale = tool(state, "upscale_anime_video");
   return `<section class="video-workflow-rail" aria-label="Video workflow">
     <div class="video-workflow-rail__intro"><div><span class="eyebrow">${uiTextHtml("VIDEO WORKFLOW")}</span><h2>Luồng xử lý video chuẩn</h2><p>Chuỗi pipeline chuẩn: <b>${uiTextHtml("Load Video")}</b> → <b>${uiTextHtml("Transform")}</b> → <b>${uiTextHtml("Upscale")}</b> → <b>RIFE</b> → <b>${uiTextHtml("Grade")}</b> → <b>${uiTextHtml("Subtitle / Logo")}</b> → <b>${uiTextHtml("Audio")}</b> → <b>${uiTextHtml("Encode")}</b> → <b>${uiTextHtml("Preview")}</b> → <b>${uiTextHtml("Save")}</b>.</p></div><span class="tag">video · streaming · DAG</span></div>
     <div class="video-workflow-rail__steps">
-      <article><span>01</span><strong>${uiTextHtml("Load & Transform")}</strong><small>Đầu vào video và tiền xử lý FFmpeg</small>${statusPill(transform.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Mở template</button></article>
-      <article><span>02</span><strong>${uiTextHtml("Upscale & RIFE & Grade")}</strong><small>AnimeSR · Nội suy FPS · ${uiTextHtml("Color grade")}</small>${statusPill(upscale.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Mở template</button></article>
-      <article><span>03</span><strong>${uiTextHtml("Subtitle, Encode & Save")}</strong><small>Chèn phụ đề / Logo · ${uiTextHtml("Encode")} · Xuất file</small>${statusPill(transform.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Xem pipeline</button></article>
+      <article><span>01</span><strong>${uiTextHtml("Load & Transform")}</strong><small>Đầu vào video và tiền xử lý FFmpeg</small>${statusPill(transform.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="${scope}:nodes">Mở template</button></article>
+      <article><span>02</span><strong>${uiTextHtml("Upscale & RIFE & Grade")}</strong><small>AnimeSR · Nội suy FPS · ${uiTextHtml("Color grade")}</small>${statusPill(upscale.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="${scope}:nodes">Mở template</button></article>
+      <article><span>03</span><strong>${uiTextHtml("Subtitle, Encode & Save")}</strong><small>Chèn phụ đề / Logo · ${uiTextHtml("Encode")} · Xuất file</small>${statusPill(transform.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="${scope}:nodes">Xem pipeline</button></article>
     </div>
   </section>`;
 };

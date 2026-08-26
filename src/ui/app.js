@@ -56,6 +56,7 @@ import {
   createComponentMaintenancePlan,
   confirmComponentMaintenance,
   getStorage,
+  getStorageScan,
   getProject,
   getSettings,
   patchSettings,
@@ -124,6 +125,7 @@ const state = {
   creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
   workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trong V5-D trước khi đồng bộ." },
+  storageScan: { status: "idle", progress: 0, exact: false },
   productionCatalog: { status: "partial", models: [], runtimes: [] }, updateCenter: { settings: { policy: "manual" }, records: [] }, modelFilters: { query: "", category: "", installed: "all" }, modelActionStatus: "", settingsActionStatus: "",
   featureRegistry: FEATURE_REGISTRY,
 };
@@ -196,6 +198,7 @@ const workflowLibraryAdapter = createWorkflowLibraryAdapter(null, {
   confirm_migration: ({ entries, expected_revision }) => confirmWorkflowLibraryMigration(entries, expected_revision),
 });
 let routeLoad = null;
+let storagePollGeneration = 0;
 let desktopCloseLayer = null;
 let artifactPreviewOpener = null;
 let disposeImageMaskCanvases = () => {};
@@ -838,16 +841,43 @@ const refreshImageMaskStudio = async ({ renderView = true, before = "", after = 
   }
 };
 
+const pollStorageScan = (scanId = "") => {
+  const generation = ++storagePollGeneration;
+  let attempts = 0;
+  const poll = async () => {
+    if (generation !== storagePollGeneration || routeId() !== "models" || attempts >= 120) return;
+    attempts += 1;
+    try {
+      const result = await getStorageScan();
+      const scan = result?.scan || {};
+      if (scanId && scan.scan_id && scan.scan_id !== scanId) return;
+      state.storage = result || state.storage;
+      state.storageScan = scan;
+      render();
+      if (scan.status === "running") {
+        window.setTimeout(poll, 500);
+      }
+    } catch {
+      // Keep the last bounded snapshot visible; a later manual refresh can retry.
+    }
+  };
+  window.setTimeout(poll, 250);
+};
+
 const loadRouteData = async ({ scan = false } = {}) => {
   const route = routeId();
   if (route === "models") {
     if (routeLoad) return routeLoad;
     routeLoad = Promise.allSettled([getModels(), scan ? scanStorage() : getStorage(), getProductionCatalog(), getUpdateSettings()]).then((results) => {
       if (results[0].status === "fulfilled") state.models = results[0].value.models || [];
-      if (results[1].status === "fulfilled") state.storage = results[1].value || {};
+      if (results[1].status === "fulfilled") {
+        state.storage = results[1].value || {};
+        state.storageScan = state.storage.scan || state.storageScan;
+      }
       if (results[2].status === "fulfilled") state.productionCatalog = results[2].value || state.productionCatalog;
       if (results[3].status === "fulfilled") state.updateCenter = { ...state.updateCenter, settings: results[3].value || state.updateCenter.settings };
       render();
+      if (state.storageScan?.status === "running") pollStorageScan(state.storageScan.scan_id || "");
     }).catch(() => {}).finally(() => { routeLoad = null; });
     return routeLoad;
   }
@@ -1668,7 +1698,7 @@ document.addEventListener("click", async (event) => {
   const galleryUse = event.target.closest("[data-gallery-use]");
   if (galleryUse) {
     state.pendingGalleryPreset = galleryUse.dataset.galleryUse || null;
-    const scope = ["image", "media", "sam2", "animesr"].includes(galleryUse.dataset.galleryScope) ? galleryUse.dataset.galleryScope : "image";
+    const scope = ["image", "media", "video", "sam2", "animesr"].includes(galleryUse.dataset.galleryScope) ? galleryUse.dataset.galleryScope : "image";
     state.workspaceTabs[scope] = "nodes";
     window.location.hash = `#/${scope}`;
     showToast("Đang mở template trong Hub Nodes; trạng thái backend vẫn theo preflight.");
@@ -1969,7 +1999,7 @@ document.addEventListener("click", async (event) => {
     render();
     try {
       await loadRouteData({ scan: true });
-      state.modelActionStatus = "Đã cập nhật snapshot storage; tổng có thể là partial nếu vượt ngân sách quét.";
+      state.modelActionStatus = "Đã bắt đầu quét storage nền; số liệu sẽ cập nhật dần và chỉ chính xác khi tiến độ đạt 100%.";
       showToast(state.modelActionStatus, "success");
       render();
     } catch (error) {
@@ -2185,7 +2215,7 @@ document.addEventListener("keydown", async (event) => {
 });
 
 window.addEventListener("resize", syncSidebarState);
-window.addEventListener("hashchange", async () => { render({ focus: "main" }); await loadRouteData(); });
+window.addEventListener("hashchange", async () => { storagePollGeneration += 1; render({ focus: "main" }); await loadRouteData(); });
 syncSidebarState();
 applyTheme(currentTheme());
 setLanguage(currentLanguage());

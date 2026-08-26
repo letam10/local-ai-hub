@@ -1,6 +1,6 @@
 export function createMediaRenderer(deps) {
   const { component, tool, mediaCapabilityEvidence, heading, statusPill, mediaEvidencePanel, workspaceState, videoWorkflowRail, card, file, files, field, formResult, escapeHtml, uiTextHtml } = deps;
-  return function renderMedia(state) {
+  const renderMediaPage = function renderMedia(state) {
       const item = component(state, "ffmpeg");
       const genericTool = tool(state, "run_media_operation");
       const mediaEvidence = mediaCapabilityEvidence(state);
@@ -17,4 +17,23 @@ export function createMediaRenderer(deps) {
           ${card("Media safety boundary", `<ul class="notice-list"><li>Only exact server-owned evidence can be operational.</li><li>Generic actions remain explanatory and cannot submit a runtime request here.</li><li>Artifact previews use opaque Hub URLs and native metadata/range transport.</li></ul>`, "", "card--flat")}
         </div>`;
   };
+  // Video Creative is intentionally a separate route from the generic Media
+  // contract.  It presents the video pipeline and Node Studio entry point
+  // without pretending that generic media operations are executable.
+  renderMediaPage.video = function renderVideo(state) {
+    const genericTool = tool(state, "run_media_operation");
+    const videoContract = {
+      ...genericTool,
+      tool_status: "partial",
+      status: "partial",
+      reason: "Video workflow actions remain partial until the exact server-owned evidence is available.",
+      action: "Open Video Node Studio to edit a typed graph; no worker starts from this page.",
+    };
+    return heading("VIDEO", "Sáng tạo video", "Không gian riêng cho pipeline video: nhập, biến đổi, nâng cấp, mã hóa và xuất artifact.", statusPill("partial", "Partial"))
+      + mediaEvidencePanel(state, "video")
+      + videoWorkflowRail(state, "video")
+      + workspaceState("Thao tác video", videoContract, "Mở Node Studio video để chỉnh graph; chỉ chạy khi backend và bằng chứng cho phép.")
+      + `<div class="workspace-grid workspace-grid--two"><section class="card video-route-card"><div class="card-title-row"><div><span class="eyebrow">VIDEO NODES</span><h2>Pipeline video typed</h2><p>Load Video → Transform → AnimeSR/RIFE → Grade → Encode → Preview → Save.</p></div></div><button class="button button--primary" type="button" data-workspace-tab="video:nodes">Mở Node Studio video</button></section>${card("Ranh giới an toàn", `<ul class="notice-list"><li>Chỉ artifact opaque do Hub quản lý mới được dùng làm đầu vào.</li><li>Node partial/unavailable không được xem là đã chạy.</li><li>Trang này không tự khởi động FFmpeg, GPU hay provider.</li></ul>`, "", "card--flat")}</div>`;
+  };
+  return renderMediaPage;
 }

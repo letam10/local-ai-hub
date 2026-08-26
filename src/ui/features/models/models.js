@@ -49,9 +49,22 @@ export function renderProductionModels({ productionCatalog, legacyModels, storag
     const partial = value?.complete === false || value?.status === "partial";
     return partial ? `${uiTextHtml("At least")} ${size} ${uiTextHtml("— not fully scanned")}` : size;
   };
+  const scan = storage?.scan && typeof storage.scan === "object" ? storage.scan : {};
+  const scanStatus = String(scan.status || storage?.status || "idle");
+  const scanProgress = Math.max(0, Math.min(100, Number.isFinite(Number(scan.progress)) ? Number(scan.progress) : scanStatus === "completed" ? 100 : 0));
+  const scanLabel = scanStatus === "running"
+    ? `Đang quét nền · ${scanProgress}%${scan.current_area ? ` · ${escapeHtml(scan.current_area)}` : ""}`
+    : scanStatus === "completed" && scan.exact === true
+      ? "Đã quét xong · tổng chính xác"
+      : scanStatus === "partial"
+        ? "Đã quét trong giới hạn · tổng tối thiểu"
+        : scanStatus === "unavailable"
+          ? "Quét storage chưa khả dụng"
+          : "Chưa có lần quét storage";
+  const scanBanner = `<div class="storage-scan-status" data-storage-scan-status="${escapeHtml(scanStatus)}" data-storage-scan-progress="${escapeHtml(String(scanProgress))}" role="status"><div class="card-title-row"><strong>${scanLabel}</strong><span>${scan.exact === true ? "chính xác" : "có giới hạn"}</span></div><div class="progress-track" role="progressbar" aria-label="Tiến độ quét storage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${scanProgress}"><div class="progress-bar" style="width:${scanProgress}%"></div></div><small>${escapeHtml(scan.reason || storage?.reason || "Số liệu được đọc theo ngân sách giới hạn; không quét vô hạn.")}</small></div>`;
   return heading("STORAGE", "Models & Storage", "Model store canonical không nhân bản. Legacy cleanup chỉ xử lý mục đã phân loại và xác minh, không tự xoá UNKNOWN hoặc user media.", `<button class="button" type="button" data-refresh-storage>Quét lại</button>`) + `
     <div class="workspace-grid workspace-grid--two">
-      ${card("Dung lượng", `<div class="row-list">${areas.map(([name, value]) => `<div class="row-item"><span>${escapeHtml(name)}</span><strong>${storageAreaValue(value)}</strong></div>`).join("") || `<div class="empty-state compact">Chưa có số liệu storage.</div>`}</div>`)}
+      ${card("Dung lượng", scanBanner + `<div class="row-list">${areas.map(([name, value]) => `<div class="row-item"><span>${escapeHtml(name)}</span><strong>${storageAreaValue(value)}</strong></div>`).join("") || `<div class="empty-state compact">Đang chờ snapshot storage.</div>`}</div>`)}
       ${card("Legacy cleanup", `<div class="metric-inline"><strong>${escapeHtml(storage?.legacy_counts?.total || 0)}</strong><span>${uiTextHtml("legacy paths inventoried")}</span></div><div class="callout callout--warning">${uiTextHtml("Cleanup V3 separates REAL_DIRECTORY/JUNCTION, checks references and user data first. Active or unknown items are retained with reason/rollback.")}</div>`, "", "card--flat")}
     </div>
     ${card("AI Models & Components", controls + table, "", "card--wide")}${updateCard}`;

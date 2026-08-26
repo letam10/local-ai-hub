@@ -75,6 +75,7 @@ _RESULT_SCALAR_KEYS = {
     "next_action",
     "error",
     "message",
+    "failure_code",
 }
 def _job_fingerprint(record: dict[str, Any]) -> str:
     """Return an opaque legacy-job binding for produced artifact provenance."""
@@ -513,6 +514,12 @@ def public_job(record: dict[str, Any]) -> dict[str, Any]:
     if result.get("error"):
         result["error"] = publicize(result["error"])
     status = str(record.get("status"))
+    failure_code = record.get("failure_code")
+    if not isinstance(failure_code, str):
+        raw_result = record.get("result")
+        failure_code = raw_result.get("failure_code") if isinstance(raw_result, dict) else None
+    if isinstance(failure_code, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", failure_code):
+        result["error_code"] = failure_code
     resumable = bool(record.get("resume_data")) and status in RETRYABLE_STATUSES and record.get("resume_available") is True
     result["resumable"] = resumable
     if (status in RETRYABLE_STATUSES or status == "interrupted") and not resumable and not result.get("next_action"):
