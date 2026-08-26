@@ -75,6 +75,14 @@ def durable_resume(request: ApiRequest, context: ApiContext, params: Mapping[str
     return ApiResponse(status, result)
 
 
+def durable_retry(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    """Explicit NEW-JOB retry; the historical durable record stays terminal."""
+
+    result = context.call("retry_durable_job", params["job_id"])
+    status = {"conflict": 409, "invalid": 400, "unavailable": 503}.get(result.get("status"), 202 if result.get("status") == "queued" else 200)
+    return ApiResponse(status, result)
+
+
 def register(router: Router) -> None:
     owner = "src/services/api/routes/jobs.py"
     router.register(route_id="jobs.list", method="GET", path="/api/jobs", domain="jobs", owner=owner, handler=list_jobs)
@@ -88,3 +96,4 @@ def register(router: Router) -> None:
     router.register(route_id="jobs.durable_list", method="GET", path="/api/durable-jobs", domain="jobs", owner=owner, handler=durable)
     router.register(route_id="jobs.durable_admit", method="POST", path="/api/durable-jobs", domain="jobs", owner=owner, handler=durable_admit)
     router.register(route_id="jobs.durable_resume", method="POST", path="/api/durable-jobs/{job_id}/resume", domain="jobs", owner=owner, handler=durable_resume)
+    router.register(route_id="jobs.durable_retry", method="POST", path="/api/durable-jobs/{job_id}/retry", domain="jobs", owner=owner, handler=durable_retry)

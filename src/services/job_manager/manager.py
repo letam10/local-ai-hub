@@ -118,8 +118,10 @@ class HubJobManager:
         *,
         device: str | None = None,
         heavy: bool = True,
+        retry_of: str | None = None,
+        attempt: int = 1,
     ) -> dict[str, Any]:
-        record = create_job(tool, payload, device=device, resume_data=payload)
+        record = create_job(tool, payload, device=device, resume_data=payload, retry_of=retry_of, attempt=attempt)
         scope_required = tool in JOB_OUTPUT_SCOPE_TOOLS or requires_published_artifact(tool)
         if scope_required:
             scope = artifact_store.begin_job_output_scope(str(record.get("id") or ""))
@@ -358,7 +360,17 @@ class HubJobManager:
             return False, "Job không còn runner trong phiên Hub hiện tại; hãy tạo lại tác vụ từ workspace."
         device = spec.device if spec else record.get("device")
         heavy = spec.heavy if spec else bool(record.get("heavy", True))
-        return True, self.submit(str(record.get("tool") or "job"), payload, runner, device=device, heavy=heavy)
+        raw_attempt = record.get("attempt", 1)
+        attempt = raw_attempt if isinstance(raw_attempt, int) and not isinstance(raw_attempt, bool) and 1 <= raw_attempt <= 9_999 else 1
+        return True, self.submit(
+            str(record.get("tool") or "job"),
+            payload,
+            runner,
+            device=device,
+            heavy=heavy,
+            retry_of=job_id,
+            attempt=attempt + 1,
+        )
 
 
 job_manager = HubJobManager()

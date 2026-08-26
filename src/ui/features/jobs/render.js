@@ -20,7 +20,7 @@ export function createJobsRenderer(deps) {
     const page = Number.isInteger(state.jobPage) && state.jobPage > 0 ? state.jobPage : 1;
     const pageSize = 50;
     const filtered = recovery.records.filter((job) => {
-      const active = ACTIVE.has(job.status);
+      const active = job.active === true;
       const tabOk = tabFilter === "all" || (tabFilter === "active" && active) || (tabFilter === "attention" && ["failed", "unavailable", "cancelled", "interrupted"].includes(job.status)) || (tabFilter === "completed" && job.status === "completed");
       const queryOk = !query || `${job.title} ${job.tool} ${job.id} ${job.reason}`.toLowerCase().includes(query);
       const typeOk = typeFilter === "all" || job.jobType === typeFilter;
@@ -34,13 +34,15 @@ export function createJobsRenderer(deps) {
     const safePage = Math.min(page, pageCount);
     const pageItems = filtered.slice((safePage - 1) * pageSize, safePage * pageSize);
     const rows = pageItems.map((job) => {
-      const active = ACTIVE.has(job.status);
+      const active = job.active === true;
       const terminal = TERMINAL.has(job.status);
       const durable = job.source === "durable";
+      const durableReconstructOnly = durable && job.retryMode === "reconstruct_only";
+      const reconstructOnlyPending = job.reconstructOnlyPending === true;
       const actions = active && !durable && job.actionId
         ? `<button class="button button--compact button--danger" type="button" data-focus-key="job-action-cancel" data-cancel-job="${escapeHtml(job.actionId)}">${uiTextHtml("Hủy tác vụ")}</button>`
         : job.resumable && job.actionId
-          ? `<button class="button button--compact" type="button" data-focus-key="job-action-resume" data-resume-${durable ? "durable-" : ""}job="${escapeHtml(job.id)}">${uiTextHtml(job.status === "cancelled" ? "Tiếp tục" : "Thử lại")}</button>`
+          ? `<button class="button button--compact" type="button" data-focus-key="job-action-resume" ${durable ? `data-resume-durable-job="${escapeHtml(job.id)}"` : `data-resume-job="${escapeHtml(job.id)}"`}>${uiTextHtml(durableReconstructOnly ? "Tạo lại tác vụ" : job.status === "cancelled" ? "Tiếp tục" : "Thử lại")}</button>`
           : "";
       const deleteAction = terminal && !durable ? `<button class="button button--compact button--danger" type="button" data-delete-job="${escapeHtml(job.id)}">Xóa khỏi lịch sử</button>` : "";
       const timestampRows = [["Tạo lúc", job.createdAt], ["Bắt đầu", job.startedAt], ["Kết thúc", job.finishedAt], ["Thời lượng", durationText(job)]].filter(([, value]) => value).map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
@@ -48,9 +50,19 @@ export function createJobsRenderer(deps) {
       const reason = job.reason || "Tác vụ chưa công bố nguyên nhân chi tiết.";
       const impact = statusImpact(job.status, job.title);
       const explanation = statusExplanation({ name: job.title, technicalId: job.id, purpose: `Tác vụ ${job.jobType} xử lý dữ liệu trong Hub.`, status: job.status, reason, impact, nextAction: job.nextAction, compact: true });
-      const lifecycle = job.lifecycle || (active ? "Đang xử lý" : job.status === "completed" ? "Đã hoàn tất" : "Đã kết thúc");
+      const errorCode = job.errorCode ? `<p class="job-error-code"><strong>Mã lỗi</strong> <code>${escapeHtml(job.errorCode)}</code></p>` : "";
+      const retryExplanation = durableReconstructOnly && job.resumable
+        ? `<span class="job-action-note">Tạo lại chỉ tạo bản ghi mới; chưa thực thi trong V8.</span>`
+        : "";
+      const noAction = actions || deleteAction
+        ? ""
+        : terminal && !job.resumable
+          ? `<span class="job-action-note">${durable ? "Không thể tạo lại tác vụ từ snapshot này." : "Không thể thử lại trong phiên này."} ${escapeHtml(job.nextAction || "Hãy tạo lại tác vụ từ workspace.")}</span>`
+          : `<span class="job-action-note">Không có thao tác an toàn nào cho snapshot này.</span>`;
+      const lifecycle = reconstructOnlyPending ? "Đã tạo · chưa thực thi" : job.lifecycle || (active ? "Đang xử lý" : job.status === "completed" ? "Đã hoàn tất" : "Đã kết thúc");
       const sourceLabel = job.source === "durable" ? "Durable" : "Hot";
-      return `<article class="job-card" id="job-${escapeHtml(job.id)}" data-job-id="${escapeHtml(job.id)}" data-job-source="${escapeHtml(job.source)}" data-job-status="${escapeHtml(job.status)}" data-job-resumable="${job.resumable === true}"><div class="job-card__header"><div><div class="job-card__title"><strong>${escapeHtml(job.title)}</strong><span class="sr-only" data-job-source-label="${escapeHtml(job.source)}">${sourceLabel}</span><span class="tag job-source">${escapeHtml(job.source === "durable" ? "Durable" : "Lịch sử Hub")}</span></div><div class="row-meta">Loại: ${escapeHtml(job.jobType)} · ${escapeHtml(job.id)}</div></div>${statusPill(job.status, readinessStatusLabel(job.status))}</div><div class="job-card__summary"><div><span>Trạng thái</span><strong>${escapeHtml(lifecycle)}</strong><span class="sr-only">Lifecycle</span></div><div><span>Đầu ra</span><strong>${job.artifacts.length ? "Có artifact" : "Chưa có artifact"}</strong></div><div><span>Khôi phục</span><strong>${job.resumable ? "Có thể thử lại" : "Không có"}</strong><span class="sr-only">Recovery reason</span></div></div><div class="progress-track" role="progressbar" aria-label="${escapeHtml(job.title)} tiến độ" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${job.progress}"><div class="progress-bar" style="width:${job.progress}%"></div></div>${job.lifecycleNote ? `<p class="job-message">${escapeHtml(job.lifecycleNote)}</p>` : ""}${explanation}<div class="job-timestamps">${timestampRows}</div>${provenanceList(job.provenance)}${artifactSummary}<div class="form-actions">${actions}${deleteAction}${actions || deleteAction ? "" : `<span class="job-action-note">Không có thao tác an toàn nào cho snapshot này.</span>`}</div></article>`;
+      const recoveryLabel = reconstructOnlyPending ? "Đã tạo · chưa thực thi" : durableReconstructOnly ? (job.resumable ? "Có thể tạo lại" : "Không thể tạo lại") : (job.resumable ? "Có thể thử lại" : "Không có");
+      return `<article class="job-card" id="job-${escapeHtml(job.id)}" data-job-id="${escapeHtml(job.id)}" data-job-source="${escapeHtml(job.source)}" data-job-status="${escapeHtml(job.status)}" data-job-resumable="${job.resumable === true}"><div class="job-card__header"><div><div class="job-card__title"><strong>${escapeHtml(job.title)}</strong><span class="sr-only" data-job-source-label="${escapeHtml(job.source)}">${sourceLabel}</span><span class="tag job-source">${escapeHtml(job.source === "durable" ? "Durable" : "Lịch sử Hub")}</span></div><div class="row-meta">Loại: ${escapeHtml(job.jobType)} · ${escapeHtml(job.id)}</div></div>${statusPill(job.status, readinessStatusLabel(job.status))}</div><div class="job-card__summary"><div><span>Trạng thái</span><strong>${escapeHtml(lifecycle)}</strong><span class="sr-only">Lifecycle</span></div><div><span>Đầu ra</span><strong>${job.artifacts.length ? "Có artifact" : "Chưa có artifact"}</strong></div><div><span>Khôi phục</span><strong>${recoveryLabel}</strong><span class="sr-only">Recovery reason</span></div></div><div class="progress-track" role="progressbar" aria-label="${escapeHtml(job.title)} tiến độ" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${job.progress}"><div class="progress-bar" style="width:${job.progress}%"></div></div>${job.lifecycleNote ? `<p class="job-message">${escapeHtml(job.lifecycleNote)}</p>` : ""}${errorCode}${explanation}<div class="job-timestamps">${timestampRows}</div>${provenanceList(job.provenance)}${artifactSummary}<div class="form-actions">${actions}${deleteAction}${retryExplanation}${noAction}</div></article>`;
     }).join("");
     const filters = [["all", "Tất cả"], ["active", "Đang chạy"], ["attention", "Cần chú ý"], ["completed", "Đã hoàn tất"]].map(([id, label]) => `<button class="tab ${tabFilter === id ? "is-selected" : ""}" type="button" data-focus-key="job-filter-${id}" data-job-filter="${id}" aria-pressed="${tabFilter === id}">${uiTextHtml(label)}</button>`).join("");
     const types = [...new Set(recovery.records.map((item) => item.jobType).filter(Boolean))].sort();

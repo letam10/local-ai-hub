@@ -67,6 +67,19 @@
     </div>
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
     <div id="artifact-preview-layer" class="artifact-preview-layer" aria-live="polite"></div>
+    <script>
+      globalThis.__localAiHubFrontendStarted = false;
+      globalThis.__localAiHubFrontendReady = false;
+      setTimeout(() => {
+        if (globalThis.__localAiHubFrontendStarted) return;
+        const status = document.querySelector("#top-status");
+        const endpoint = document.querySelector("#api-endpoint");
+        const view = document.querySelector("#module-view");
+        if (status) status.textContent = "Không thể khởi động giao diện";
+        if (endpoint) endpoint.textContent = "Frontend chưa sẵn sàng";
+        if (view) view.innerHTML = "<section class=\"empty-state startup-recovery\" role=\"alert\"><strong>Không thể tải giao diện Local AI Hub</strong><span>Frontend JavaScript không khởi động trong thời gian giới hạn.</span><span>HTTP 200 của API không đủ để xác nhận app đã chạy.</span></section>";
+      }, 15000);
+    </script>
     <!-- Pinned, local-only graph editor dependency. No CDN request is made. -->
     <script src="/ui/vendor/litegraph.js"></script>
     <script type="module" src="/ui/app.js"></script>

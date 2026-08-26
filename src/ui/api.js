@@ -69,6 +69,7 @@ export const deleteJobHistory = (id) => request(`/api/jobs/${encodeURIComponent(
 export const clearTerminalJobHistory = (confirmed = false) => request("/api/jobs/history/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: Boolean(confirmed) }) });
 export const getDurableJobs = () => request("/api/durable-jobs");
 export const resumeDurableJob = (id) => request(`/api/durable-jobs/${encodeURIComponent(id)}/resume`, { method: "POST" });
+export const retryDurableJob = (id) => request(`/api/durable-jobs/${encodeURIComponent(id)}/retry`, { method: "POST" });
 export const getLifecycle = () => request("/api/lifecycle");
 export const getCapabilities = () => request("/api/capabilities");
 export const getWorkflowLibrary = () => request("/api/workflow-library");
@@ -119,6 +120,8 @@ export const openArtifact = (id) => request(`/api/artifacts/${encodeURIComponent
 export const launchApplication = (id) => request(`/api/applications/${encodeURIComponent(id)}/launch`, { method: "POST" });
 export const closeOwnedBackends = () => request("/api/lifecycle/close", { method: "POST" });
 export const scanStorage = () => request("/api/storage/scan", { method: "POST" });
+export const getStorageScan = () => request("/api/storage/scan");
+export const cancelStorageScan = (scanId = "") => request(`/api/storage/scan/cancel${scanId ? `?scan_id=${encodeURIComponent(scanId)}` : ""}`, { method: "POST" });
 export const getComfyAdvanced = () => request("/api/comfyui/advanced");
 export const startComfyAdvanced = () => request("/api/comfyui/advanced/start", { method: "POST" });
 export const getComfyBridgeWorkflows = () => request("/api/comfyui/workflows");

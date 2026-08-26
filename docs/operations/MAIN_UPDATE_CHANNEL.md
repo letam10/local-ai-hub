@@ -54,7 +54,8 @@ untouched.  The production API port and persistent data root are not used by
 this probe.
 
 Restart is guarded by `src.app.update_watchdog`, an updater-owned helper started
-from the reviewed candidate runtime.  It waits for the old desktop PID, starts
+from the currently running old verified payload/runtime before the old desktop
+closes.  It waits for the old desktop PID, starts
 the stable launcher, and accepts the new payload only after the pending-health
 marker is cleared by matching health/build identity.  On crash, identity
 mismatch, or timeout it terminates only the launcher process it started,

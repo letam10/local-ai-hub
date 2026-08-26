@@ -61,10 +61,27 @@ MAX_EXTRACTED_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_FILES = 12_000
 CACHE_SECONDS = 120.0
 CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS = 30.0
+# Bootstrap composes a bounded server-owned snapshot and may legitimately
+# take several seconds on a populated local DATA_ROOT.  Keep this timeout
+# finite, but do not reject a healthy candidate merely because the first
+# snapshot exceeds the health probe's short request window.
+CANDIDATE_BOOTSTRAP_PREFLIGHT_TIMEOUT_SECONDS = 15.0
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PAYLOAD_RE = re.compile(r"^main-[0-9a-f]{12}$")
 _RUNTIME_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _classify_channel_relation(compare_status: object) -> str:
+    """Map GitHub compare semantics to the safe updater decision."""
+
+    value = str(compare_status or "").casefold()
+    return {
+        "identical": "same",
+        "ahead": "forward_update_available",
+        "behind": "blocked_current_ahead_of_main",
+        "diverged": "blocked_channel_diverged",
+    }.get(value, "channel_relation_unavailable")
 
 
 class AppUpdateError(RuntimeError):
@@ -163,13 +180,44 @@ def _record_pending_health(root: Path, *, previous: dict[str, Any], payload_id: 
     })
 
 
-def mark_startup_health(app_root: Path, *, health: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Commit or fail-closed a pending update after the new payload starts."""
+def mark_startup_health(
+    app_root: Path,
+    *,
+    health: dict[str, Any] | None = None,
+    frontend_ready: bool = False,
+) -> dict[str, Any]:
+    """Commit or fail-closed a pending update after API *and* UI readiness.
+
+    The native shell may inspect API health while loading the WebView, but it
+    is not allowed to clear the pending marker until the frontend explicitly
+    calls :func:`confirm_frontend_ready` through the desktop bridge.
+    """
 
     root = app_root.absolute()
     pending_path = _pending_health_path(root)
-    if not pending_path.is_file() or pending_path.is_symlink():
+    pending_exists = pending_path.is_file() and not pending_path.is_symlink()
+    if frontend_ready:
+        try:
+            current = load_current_pointer(root)
+            build_path = root / str(current["payload_relative"]) / "build.json"
+            if not build_path.is_file() or build_path.is_symlink():
+                if not pending_exists:
+                    return {"status": "not_pending"}
+                raise AppUpdateError("FRONTEND_BUILD_UNAVAILABLE")
+            build = _safe_json_file(build_path, max_bytes=32 * 1024)
+            source_commit = str(build.get("source_commit") or "")
+            payload_id = str(current.get("version") or "")
+            if _SHA_RE.fullmatch(source_commit) and payload_id == f"main-{source_commit[:12]}":
+                if not isinstance(health, dict) or health.get("build_source_commit") != source_commit or health.get("build_payload_id") != payload_id:
+                    return {"status": "frontend_rejected", "code": "FRONTEND_BUILD_MISMATCH"}
+        except (OSError, UnicodeError, json.JSONDecodeError, StableShellError, AppUpdateError):
+            if not pending_exists:
+                return {"status": "not_pending"}
+            return {"status": "frontend_rejected", "code": "FRONTEND_BUILD_UNAVAILABLE"}
+    if not pending_exists:
         return {"status": "not_pending"}
+    if not frontend_ready:
+        return {"status": "frontend_pending", "code": "FRONTEND_READY_REQUIRED"}
     pending = _safe_json_file(pending_path, max_bytes=64 * 1024)
     if pending.get("schema_version") != PENDING_HEALTH_SCHEMA or not isinstance(pending.get("previous"), dict):
         raise AppUpdateError("UPDATE_PENDING_HEALTH_INVALID")
@@ -186,6 +234,8 @@ def mark_startup_health(app_root: Path, *, health: dict[str, Any] | None = None)
         and health.get("app_user_model_id") == "LocalAIHub.Desktop"
         and isinstance(health.get("installation_id"), str)
         and len(health.get("installation_id")) == 32
+        and health.get("build_source_commit") == pending.get("source_commit")
+        and health.get("build_payload_id") == pending.get("payload_id")
     )
     if healthy:
         try:
@@ -420,6 +470,19 @@ class AppUpdateService:
             commit = "unknown"
         return {"commit": commit, "payload_id": plan.version}
 
+    def _channel_relation(self, current_commit: str, candidate_commit: str) -> str:
+        """Prove update ancestry before exposing or preparing a main update."""
+
+        if current_commit in {"legacy", "unknown"} or not _SHA_RE.fullmatch(current_commit):
+            return "legacy_or_unbound"
+        if current_commit == candidate_commit:
+            return "same"
+        try:
+            comparison = self._api_json(f"repos/{REPOSITORY}/compare/{current_commit}...{candidate_commit}")
+        except AppUpdateError:
+            return "channel_relation_unavailable"
+        return _classify_channel_relation(comparison.get("status"))
+
     def status(self, *, refresh: bool = False) -> dict[str, Any]:
         with self._lock:
             now = time.monotonic()
@@ -444,15 +507,41 @@ class AppUpdateService:
                             "latest_build": None, "transport": "github_cli", "action": "Chờ main CI tạo update artifact thành công.",
                         }
                     else:
-                        available = current["commit"] != candidate.source_commit
-                        result = {
+                        relation = self._channel_relation(current["commit"], candidate.source_commit)
+                        if relation == "blocked_current_ahead_of_main":
+                            result = {
+                                "status": relation, "available": False, "product_version": PRODUCT_VERSION,
+                                "current_build": current["commit"], "current_payload": current["payload_id"],
+                                "latest_build": candidate.source_commit, "latest_payload": f"main-{candidate.source_commit[:12]}",
+                                "run_id": candidate.run_id, "artifact_id": candidate.artifact_id, "transport": auth.transport,
+                                "action": "Bản đang chạy chứa thay đổi chưa được tích hợp vào main; Hub sẽ không tự hạ cấp.",
+                            }
+                        elif relation == "blocked_channel_diverged":
+                            result = {
+                                "status": relation, "available": False, "product_version": PRODUCT_VERSION,
+                                "current_build": current["commit"], "current_payload": current["payload_id"],
+                                "latest_build": candidate.source_commit, "latest_payload": f"main-{candidate.source_commit[:12]}",
+                                "run_id": candidate.run_id, "artifact_id": candidate.artifact_id, "transport": auth.transport,
+                                "action": "Bản đang chạy và main đã tách lịch sử; không tự thay đổi payload.",
+                            }
+                        elif relation == "channel_relation_unavailable":
+                            result = {
+                                "status": relation, "available": False, "product_version": PRODUCT_VERSION,
+                                "current_build": current["commit"], "current_payload": current["payload_id"],
+                                "latest_build": candidate.source_commit, "latest_payload": f"main-{candidate.source_commit[:12]}",
+                                "transport": auth.transport,
+                                "action": "Không xác minh được ancestry của payload; Hub không tự cài đặt.",
+                            }
+                        else:
+                            available = relation == "forward_update_available" or (relation == "legacy_or_unbound" and current["commit"] != candidate.source_commit)
+                            result = {
                             "status": "available" if available else "up_to_date", "available": available,
                             "product_version": PRODUCT_VERSION, "current_build": current["commit"],
                             "current_payload": current["payload_id"], "latest_build": candidate.source_commit,
                             "latest_payload": f"main-{candidate.source_commit[:12]}", "run_id": candidate.run_id,
                             "artifact_id": candidate.artifact_id, "transport": auth.transport,
                             "action": "Cập nhật Local AI Hub" if available else "Bạn đang dùng build main mới nhất.",
-                        }
+                            }
             except AppUpdateError as exc:
                 result = {
                     "status": "unavailable", "available": False, "product_version": PRODUCT_VERSION,
@@ -676,7 +765,25 @@ class AppUpdateService:
                     ):
                         if child.poll() is not None:
                             raise AppUpdateError("UPDATE_CANDIDATE_API_EXITED")
-                        return {"status": "passed", "port": port, "payload_id": payload_id, "source_commit": source_commit}
+                        try:
+                            with urllib.request.urlopen(f"http://127.0.0.1:{port}/ui/", timeout=1.0) as ui_response:
+                                ui_raw = ui_response.read(256 * 1024 + 1)
+                            ui_text = ui_raw.decode("utf-8")
+                            if len(ui_raw) > 256 * 1024 or "Local AI Hub" not in ui_text or "/ui/app.js" not in ui_text:
+                                raise AppUpdateError("UPDATE_CANDIDATE_FRONTEND_PREFLIGHT_FAILED")
+                            with urllib.request.urlopen(
+                                f"http://127.0.0.1:{port}/api/bootstrap",
+                                timeout=CANDIDATE_BOOTSTRAP_PREFLIGHT_TIMEOUT_SECONDS,
+                            ) as bootstrap_response:
+                                bootstrap_raw = bootstrap_response.read(256 * 1024 + 1)
+                            bootstrap = json.loads(bootstrap_raw.decode("utf-8"))
+                            if len(bootstrap_raw) > 256 * 1024 or not isinstance(bootstrap, dict):
+                                raise AppUpdateError("UPDATE_CANDIDATE_BOOTSTRAP_PREFLIGHT_FAILED")
+                        except AppUpdateError:
+                            raise
+                        except (OSError, UnicodeDecodeError, UnicodeError, json.JSONDecodeError, urllib.error.HTTPError, urllib.error.URLError, ValueError) as exc:
+                            raise AppUpdateError("UPDATE_CANDIDATE_FRONTEND_PREFLIGHT_FAILED") from exc
+                        return {"status": "passed", "port": port, "payload_id": payload_id, "source_commit": source_commit, "frontend_static": "passed", "bootstrap": "passed"}
                     time.sleep(0.2)
             raise AppUpdateError("UPDATE_CANDIDATE_API_TIMEOUT")
         finally:
@@ -714,6 +821,13 @@ class AppUpdateService:
             current = self._current_build(root)
             if current["commit"] == candidate.source_commit:
                 return {"status": "up_to_date", "restart_required": False, "source_commit": candidate.source_commit}
+            relation = self._channel_relation(current["commit"], candidate.source_commit)
+            if relation == "blocked_current_ahead_of_main":
+                raise AppUpdateError("UPDATE_CURRENT_AHEAD_OF_MAIN")
+            if relation == "blocked_channel_diverged":
+                raise AppUpdateError("UPDATE_CHANNEL_DIVERGED")
+            if relation == "channel_relation_unavailable" and current["commit"] not in {"legacy", "unknown"}:
+                raise AppUpdateError("UPDATE_CHANNEL_RELATION_UNAVAILABLE")
             plan = resolve_launch_plan(root, allow_test_root=self._allow_test_root)
             staging_root = root / "staging"
             staging_root.mkdir(parents=True, exist_ok=True)
@@ -838,5 +952,5 @@ def app_update_service() -> AppUpdateService:
 __all__ = [
     "AppUpdateError", "AppUpdateService", "BUILD_INFO_SCHEMA", "REPOSITORY", "UPDATE_ARTIFACT_NAME",
     "UPDATE_CONTRACT_NAME", "UPDATE_CONTRACT_SCHEMA", "UPDATE_KIND_APP_ONLY", "UPDATE_KIND_FULL",
-    "PENDING_HEALTH_SCHEMA", "CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS", "UPDATE_SCHEMA", "app_update_service", "mark_startup_health", "_runtime_inventory_hash", "_safe_extract_app_archive", "_safe_update_contract", "_safe_update_manifest",
+    "PENDING_HEALTH_SCHEMA", "CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS", "CANDIDATE_BOOTSTRAP_PREFLIGHT_TIMEOUT_SECONDS", "UPDATE_SCHEMA", "app_update_service", "mark_startup_health", "_runtime_inventory_hash", "_safe_extract_app_archive", "_safe_update_contract", "_safe_update_manifest",
 ]

@@ -388,6 +388,7 @@ SCOPE_CATEGORIES = {
     "image": {"utility", "image", "vision", "annotation"},
     "sam2": {"utility", "image", "vision", "annotation"},
     "media": {"utility", "media", "video", "annotation"},
+    "video": {"utility", "media", "video", "annotation"},
     "animesr": {"utility", "media", "video", "annotation"},
 }
 

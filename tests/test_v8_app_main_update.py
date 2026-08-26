@@ -18,6 +18,7 @@ from src.services.app_update import (
     AppUpdateError,
     AppUpdateService,
     UPDATE_SCHEMA,
+    _classify_channel_relation,
     _safe_extract_app_archive,
     _safe_update_manifest,
 )
@@ -38,6 +39,13 @@ class V8AppMainUpdateTests(unittest.TestCase):
             "archive_sha256": "b" * 64,
             "file_count": 2,
         }
+
+    def test_channel_relation_blocks_ahead_and_diverged_current_payloads(self) -> None:
+        self.assertEqual(_classify_channel_relation("identical"), "same")
+        self.assertEqual(_classify_channel_relation("ahead"), "forward_update_available")
+        self.assertEqual(_classify_channel_relation("behind"), "blocked_current_ahead_of_main")
+        self.assertEqual(_classify_channel_relation("diverged"), "blocked_channel_diverged")
+        self.assertEqual(_classify_channel_relation("unknown"), "channel_relation_unavailable")
 
     def test_update_manifest_binds_exact_main_commit(self) -> None:
         value = self._manifest()

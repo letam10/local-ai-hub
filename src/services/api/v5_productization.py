@@ -74,6 +74,14 @@ _LIFECYCLE_JOB_ID = re.compile(r"jobv5_[a-f0-9]{32}")
 _LIFECYCLE_FINGERPRINT = re.compile(r"[a-f0-9]{64}")
 
 
+def _is_reconstruct_only_pending(item: Mapping[str, Any], *, durable: bool, status: str) -> bool:
+    """Identify a durable queued record that has no dispatching worker."""
+
+    if not durable or status != "queued":
+        return False
+    return item.get("retry_mode") == "reconstruct_only" or item.get("execution") == "not_run"
+
+
 def _status(value: object, fallback: str = "partial") -> str:
     candidate = str(value or fallback)
     return candidate if candidate in _STATUS_ALLOWLIST else fallback
@@ -616,11 +624,15 @@ def project_job_recovery(jobs: object) -> dict[str, Any]:
         progress = max(0, min(100, int(raw_progress))) if type(raw_progress) in {int, float} and math.isfinite(raw_progress) else 0
         job_id = item.get("id")
         safe_job_id = job_id if isinstance(job_id, str) and _LIFECYCLE_JOB_ID.fullmatch(job_id) else _safe_id(job_id, "job")
+        reconstruct_only_pending = _is_reconstruct_only_pending(item, durable=durable, status=status)
+        active = status in _ACTIVE_JOB_STATES and not reconstruct_only_pending
         record: dict[str, Any] = {
             "id": safe_job_id,
             "tool": _safe_id(item.get("tool"), "job"),
             "source": "durable" if durable else _safe_id(item.get("source"), "legacy"),
             "status": status,
+            "active": active,
+            "reconstruct_only_pending": reconstruct_only_pending,
             "progress": progress,
             "resumable": bool(resumable) and status in _ATTENTION_JOB_STATES,
             "next_action": recovery["next_action"] if recovery is not None else _text(
@@ -628,13 +640,24 @@ def project_job_recovery(jobs: object) -> dict[str, Any]:
                 "Review the job state and create a new task when recovery is unavailable.",
             ),
         }
+        # V8 durable recovery intentionally reconstructs a new record only.  The
+        # projection must make that contract explicit so clients cannot present
+        # a queued dry-run as an executing retry.  Legacy hot jobs keep their
+        # existing same-session runner semantics and do not receive this label.
+        if durable:
+            record.update({
+                "execution": "not_run",
+                "dry_run": True,
+                "retry_mode": "reconstruct_only",
+                "actual_retry_execution": False,
+            })
         if recovery is not None:
             record["recovery"] = recovery
             record["lifecycle"] = _project_lifecycle(item.get("lifecycle"), status)
             record["artifacts"] = _project_artifacts(item.get("artifacts"))
         records.append(record)
         counts["total"] += 1
-        if status in _ACTIVE_JOB_STATES:
+        if active:
             counts["active"] += 1
         if status in _ATTENTION_JOB_STATES:
             counts["attention"] += 1
@@ -779,7 +802,12 @@ def resume_durable_job(
     *,
     registry: ServerOwnedAdapterRegistry | None = None,
 ) -> dict[str, Any]:
-    """Attempt V5-A resume only through the server-owned adapter registry."""
+    """Compatibility resume entry point; eligible recovery creates a NEW job.
+
+    The old durable record is never reopened or rewritten.  ``retry_durable_job``
+    is the explicit name used by the current UI, while this function remains for
+    clients that already called the original ``/resume`` route.
+    """
 
     if not isinstance(job_id, str) or not _LIFECYCLE_JOB_ID.fullmatch(job_id):
         return {"status": "invalid", "execution": "not_run", "dry_run": True, "next_action": "Use the opaque durable job ID returned by Hub."}
@@ -832,9 +860,40 @@ def resume_durable_job(
                 "recovery": {**decision, "status": "unavailable", "action": "CREATE_NEW_JOB", "action_available": False, "reason": RECOVERY_REASON_INVALID, "next_action": RECOVERY_NEXT_CREATE},
                 "next_action": RECOVERY_NEXT_CREATE,
             }
-        return {"status": "queued", "execution": "not_run", "dry_run": True, "job": resumed, "recovery": decision}
+        return {
+            "status": "queued",
+            "execution": "not_run",
+            "dry_run": True,
+            "retry_mode": "reconstruct_only",
+            "actual_retry_execution": False,
+            "next_action": "A new durable task was created from the retained request, but it was not executed in V8.",
+            "job": resumed,
+            "recovery": decision,
+        }
     finally:
         engine.close()
+
+
+def retry_durable_job(
+    job_id: str,
+    path: Path = DURABLE_JOBS_PATH,
+    *,
+    registry: ServerOwnedAdapterRegistry | None = None,
+) -> dict[str, Any]:
+    """Queue a safe NEW durable job from retained server-owned request data."""
+
+    result = resume_durable_job(job_id, path, registry=registry)
+    if result.get("status") == "queued":
+        result = {
+            **result,
+            "retry_contract": "new_job",
+            "retry_mode": "reconstruct_only",
+            "actual_retry_execution": False,
+            "historical_record_preserved": True,
+        }
+    else:
+        result = {**result, "retry_contract": "unavailable", "historical_record_preserved": True}
+    return result
 
 
 def project_workflow_library(value: object) -> dict[str, Any]:
@@ -954,4 +1013,5 @@ __all__ = [
     "project_storage_projection",
     "project_workflow_library",
     "resume_durable_job",
+    "retry_durable_job",
 ]

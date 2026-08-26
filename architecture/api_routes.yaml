@@ -98,6 +98,63 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "app_updates.auth_status",
+      "method": "GET",
+      "path": "/api/app-update/auth/status",
+      "domain": "app_updates",
+      "owner": "src/services/api/routes/app_updates.py",
+      "service": "app_updates",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "app_updates.changes",
+      "method": "GET",
+      "path": "/api/app-update/changes",
+      "domain": "app_updates",
+      "owner": "src/services/api/routes/app_updates.py",
+      "service": "app_updates",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "app_updates.status",
+      "method": "GET",
+      "path": "/api/app-update/status",
+      "domain": "app_updates",
+      "owner": "src/services/api/routes/app_updates.py",
+      "service": "app_updates",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "applications.list",
       "method": "GET",
       "path": "/api/applications",
@@ -1314,6 +1371,25 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "compat.storage_scan_status",
+      "method": "GET",
+      "path": "/api/storage/scan",
+      "domain": "storage",
+      "owner": "src/services/api/routes/compatibility.py",
+      "service": "storage",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "updates.plan_lookup",
       "method": "GET",
       "path": "/api/updates/plans/{plan_id}",
@@ -1586,6 +1662,120 @@
       "domain": "settings",
       "owner": "src/services/api/routes/settings.py",
       "service": "settings",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "app_updates.auth_device_cancel",
+      "method": "POST",
+      "path": "/api/app-update/auth/device/cancel",
+      "domain": "app_updates",
+      "owner": "src/services/api/routes/app_updates.py",
+      "service": "app_updates",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "app_updates.auth_device_poll",
+      "method": "POST",
+      "path": "/api/app-update/auth/device/poll",
+      "domain": "app_updates",
+      "owner": "src/services/api/routes/app_updates.py",
+      "service": "app_updates",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "app_updates.auth_device_start",
+      "method": "POST",
+      "path": "/api/app-update/auth/device/start",
+      "domain": "app_updates",
+      "owner": "src/services/api/routes/app_updates.py",
+      "service": "app_updates",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "app_updates.auth_logout",
+      "method": "POST",
+      "path": "/api/app-update/auth/logout",
+      "domain": "app_updates",
+      "owner": "src/services/api/routes/app_updates.py",
+      "service": "app_updates",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "app_updates.prepare",
+      "method": "POST",
+      "path": "/api/app-update/prepare",
+      "domain": "app_updates",
+      "owner": "src/services/api/routes/app_updates.py",
+      "service": "app_updates",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "app_updates.rollback",
+      "method": "POST",
+      "path": "/api/app-update/rollback",
+      "domain": "app_updates",
+      "owner": "src/services/api/routes/app_updates.py",
+      "service": "app_updates",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2191,6 +2381,25 @@
       "route_id": "jobs.durable_resume",
       "method": "POST",
       "path": "/api/durable-jobs/{job_id}/resume",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/jobs.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "jobs.durable_retry",
+      "method": "POST",
+      "path": "/api/durable-jobs/{job_id}/retry",
       "domain": "jobs",
       "owner": "src/services/api/routes/jobs.py",
       "service": "jobs",
@@ -2818,6 +3027,25 @@
       "route_id": "compat.storage_scan",
       "method": "POST",
       "path": "/api/storage/scan",
+      "domain": "storage",
+      "owner": "src/services/api/routes/compatibility.py",
+      "service": "storage",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "compat.storage_scan_cancel",
+      "method": "POST",
+      "path": "/api/storage/scan/cancel",
       "domain": "storage",
       "owner": "src/services/api/routes/compatibility.py",
       "service": "storage",

@@ -849,7 +849,14 @@ class DurableWorkEngine:
             return False, self._store_unavailable(job_id)
 
     def retry(self, job_id: str, *, start: bool = False) -> dict[str, Any]:
-        """Create a new attempt only when a persisted descriptor is reconstructable."""
+        """Create a NEW job without mutating the terminal historical record.
+
+        The persisted ``job_spec`` is the only reproducible input accepted here.
+        It is revalidated against the current server-owned adapter registry and
+        current source-artifact preflight before a new record is admitted.  No
+        filesystem path, secret, user-media reference, or old artifact is
+        fabricated or deleted as part of retry.
+        """
 
         record = self.store.get(job_id)
         if record is None or str(record.get("status")) not in RETRYABLE_JOB_STATES:
@@ -860,7 +867,10 @@ class DurableWorkEngine:
             raise JobContractError("INVALID_PERSISTED_DESCRIPTOR", "Create a new allowlisted job descriptor.") from exc
         if not spec.descriptor.reconstructable or not _current_adapter_input_valid(spec) or not self.registry.contains(spec.descriptor.adapter_id):
             raise JobContractError("JOB_NOT_RECONSTRUCTABLE", "Create a new allowlisted job descriptor.")
-        attempt = int(record.get("attempt") or 1) + 1
+        raw_attempt = record.get("attempt", 1)
+        if isinstance(raw_attempt, bool) or not isinstance(raw_attempt, int) or not 1 <= raw_attempt <= 9_999:
+            raise JobContractError("INVALID_PERSISTED_DESCRIPTOR", "Create a new allowlisted job descriptor.")
+        attempt = raw_attempt + 1
         return self.submit(spec.to_mapping(), start=start, retry_of=job_id, attempt=attempt)
 
     resume = retry

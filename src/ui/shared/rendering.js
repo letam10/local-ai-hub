@@ -97,6 +97,7 @@ const READINESS_STATUS_LABELS = Object.freeze({
   not_applicable: "Not applicable",
   unsupported: "Unsupported",
   recovery_required: "Recovery required",
+  stale_session: "Stale session",
   incompatible: "Incompatible",
   attention: "Needs attention",
   external_managed: "External app",
@@ -117,7 +118,7 @@ const readinessStatusLabel = (value) => {
 const STATUS_SEVERITY = Object.freeze({
   operational: "success", healthy: "success", ready: "success", clean: "success", available: "success", installed: "success", running: "success", completed: "success",
   partial: "warning", degraded: "warning", needs_setup: "warning", unavailable: "warning", missing: "warning", not_installed: "warning", attention: "warning", cancelling: "warning",
-  error: "error", failed: "error", blocked: "error", incompatible: "error", recovery_required: "error",
+  error: "error", failed: "error", blocked: "error", incompatible: "error", recovery_required: "error", stale_session: "warning",
   not_run: "neutral", planned: "neutral", not_published: "neutral", waiting: "neutral", starting: "neutral", queued: "neutral", cancelled: "neutral", interrupted: "neutral", unknown: "neutral",
   not_applicable: "muted", unsupported: "muted", external_managed: "muted",
 });
@@ -519,10 +520,16 @@ const jobRecoverySnapshot = (state) => {
     const detail = jobSource === "hot" ? hotDetails.get(actionId) || hotDetails.get(id) : null;
     const durableArtifacts = jobSource === "durable" ? safeJobArtifacts(item.artifacts) : [];
     const durableProvenance = jobSource === "durable" ? safeJobProvenance(item.provenance) : [];
+    const status = safeJobStatus(item.status);
+    const reconstructOnlyPending = jobSource === "durable" && status === "queued" && (
+      item.reconstruct_only_pending === true
+      || item.retry_mode === "reconstruct_only"
+      || item.execution === "not_run"
+    );
+    const active = ["queued", "starting", "running", "cancelling"].includes(status) && !reconstructOnlyPending;
     const durableLifecycle = jobSource === "durable" && item.lifecycle && typeof item.lifecycle === "object" && !Array.isArray(item.lifecycle)
       ? safeUiText(item.lifecycle.state || item.lifecycle_status, "")
       : safeUiText(item.lifecycle_status, "");
-    const status = safeJobStatus(item.status);
     const progress = Number.isInteger(item.progress) && item.progress >= 0 && item.progress <= 100 ? item.progress : 0;
     return [{
       id,
@@ -533,8 +540,15 @@ const jobRecoverySnapshot = (state) => {
       source: jobSource,
       sourceLabel: jobSource === "durable" ? "Durable" : "Hot",
       status,
+      active,
+      reconstructOnlyPending,
       progress,
       resumable: item.resumable === true,
+      retryMode: jobSource === "durable" ? "reconstruct_only" : "same_session",
+      execution: jobSource === "durable" ? "not_run" : "",
+      dryRun: jobSource === "durable" && item.dry_run === true,
+      actualRetryExecution: jobSource === "durable" ? false : null,
+      errorCode: safeUiIdentifier(item.error_code || (item.result && item.result.failure_code), ""),
       reason: safeUiText(item.reason || item.error || detail?.error || detail?.reason || detail?.message, "Chưa có nguyên nhân an toàn trong snapshot này."),
       nextAction: safeUiText(item.next_action, "Kiểm tra backend liên quan rồi tạo lại tác vụ nếu cần."),
       lifecycle: detail?.lifecycle || durableLifecycle,
@@ -570,14 +584,14 @@ const jobRecoverySnapshot = (state) => {
     return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
   });
   const derivedCounts = {
-    active: records.filter((item) => ["queued", "starting", "running", "cancelling"].includes(item.status)).length,
+    active: records.filter((item) => item.active === true).length,
     attention: records.filter((item) => ["failed", "unavailable", "cancelled", "interrupted"].includes(item.status)).length,
     interrupted: records.filter((item) => item.status === "interrupted").length,
     recoverable: records.filter((item) => item.resumable === true).length,
     total: records.length,
   };
   const publishedCounts = productJobs.counts && typeof productJobs.counts === "object" && !Array.isArray(productJobs.counts) ? productJobs.counts : {};
-  const counts = Object.fromEntries(Object.keys(derivedCounts).map((key) => [key, safeJobCount(publishedCounts[key], derivedCounts[key])]));
+  const counts = Object.fromEntries(Object.keys(derivedCounts).map((key) => [key, key === "active" ? derivedCounts.active : safeJobCount(publishedCounts[key], derivedCounts[key])]));
   const fallbackStatus = counts.attention > 0 ? "partial" : "ready";
   return {
     source: hasCanonical ? "productization.jobs" : "legacy job snapshot fallback",
@@ -667,15 +681,15 @@ const imageWorkflowRail = (state) => {
     </div>
   </section>`;
 };
-const videoWorkflowRail = (state) => {
+const videoWorkflowRail = (state, scope = "media") => {
   const transform = tool(state, "run_media_operation");
   const upscale = tool(state, "upscale_anime_video");
   return `<section class="video-workflow-rail" aria-label="Video workflow">
     <div class="video-workflow-rail__intro"><div><span class="eyebrow">${uiTextHtml("VIDEO WORKFLOW")}</span><h2>Luồng xử lý video chuẩn</h2><p>Chuỗi pipeline chuẩn: <b>${uiTextHtml("Load Video")}</b> → <b>${uiTextHtml("Transform")}</b> → <b>${uiTextHtml("Upscale")}</b> → <b>RIFE</b> → <b>${uiTextHtml("Grade")}</b> → <b>${uiTextHtml("Subtitle / Logo")}</b> → <b>${uiTextHtml("Audio")}</b> → <b>${uiTextHtml("Encode")}</b> → <b>${uiTextHtml("Preview")}</b> → <b>${uiTextHtml("Save")}</b>.</p></div><span class="tag">video · streaming · DAG</span></div>
     <div class="video-workflow-rail__steps">
-      <article><span>01</span><strong>${uiTextHtml("Load & Transform")}</strong><small>Đầu vào video và tiền xử lý FFmpeg</small>${statusPill(transform.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Mở template</button></article>
-      <article><span>02</span><strong>${uiTextHtml("Upscale & RIFE & Grade")}</strong><small>AnimeSR · Nội suy FPS · ${uiTextHtml("Color grade")}</small>${statusPill(upscale.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Mở template</button></article>
-      <article><span>03</span><strong>${uiTextHtml("Subtitle, Encode & Save")}</strong><small>Chèn phụ đề / Logo · ${uiTextHtml("Encode")} · Xuất file</small>${statusPill(transform.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="media:nodes">Xem pipeline</button></article>
+      <article><span>01</span><strong>${uiTextHtml("Load & Transform")}</strong><small>Đầu vào video và tiền xử lý FFmpeg</small>${statusPill(transform.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="${scope}:nodes">Mở template</button></article>
+      <article><span>02</span><strong>${uiTextHtml("Upscale & RIFE & Grade")}</strong><small>AnimeSR · Nội suy FPS · ${uiTextHtml("Color grade")}</small>${statusPill(upscale.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="${scope}:nodes">Mở template</button></article>
+      <article><span>03</span><strong>${uiTextHtml("Subtitle, Encode & Save")}</strong><small>Chèn phụ đề / Logo · ${uiTextHtml("Encode")} · Xuất file</small>${statusPill(transform.tool_status || "partial")}<button class="button button--compact" type="button" data-workspace-tab="${scope}:nodes">Xem pipeline</button></article>
     </div>
   </section>`;
 };

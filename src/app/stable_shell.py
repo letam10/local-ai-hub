@@ -276,6 +276,57 @@ def resolve_launch_plan(app_root: Path, *, allow_test_root: bool = False) -> Lau
     return LaunchPlan(root, installation.data_root, version, payload_root, app_payload, runtime_pythonw, (str(runtime_pythonw), "-m", "src.app.launcher"), environment)
 
 
+def resolve_verified_running_plan(app_root: Path, running_app_root: Path, *, allow_test_root: bool = False) -> LaunchPlan:
+    """Resolve the payload that is currently running, independent of current.json.
+
+    During an update ``current.json`` already points at the candidate while the
+    desktop process is still executing the old payload.  This helper validates
+    that old payload's complete no-reparse chain, manifest, runtime and
+    installation ownership before it is allowed to host the restart watchdog.
+    """
+
+    root = app_root.absolute()
+    installation = load_installation_config(root, allow_test_root=allow_test_root)
+    running = running_app_root.absolute()
+    _safe_chain(running, root)
+    payload_root = running.parent
+    versions_root = root / "versions"
+    if payload_root.parent != versions_root or _is_reparse(payload_root) or _is_reparse(versions_root):
+        raise StableShellError("RUNNING_PAYLOAD_OWNERSHIP_INVALID")
+    manifest_path = _under(payload_root, "manifest.json", require_file=True)
+    manifest = _load_json(manifest_path)
+    expected = {"schema_version", "product_id", "version", "app_relative", "runtime_relative", "entrypoint"}
+    if set(manifest) != expected or manifest.get("schema_version") != VERSION_MANIFEST_SCHEMA or manifest.get("product_id") != PRODUCT_ID:
+        raise StableShellError("RUNNING_MANIFEST_INVALID")
+    version = _safe_version(manifest.get("version"))
+    if manifest.get("entrypoint") != "src.app.launcher":
+        raise StableShellError("RUNNING_ENTRYPOINT_INVALID")
+    app_payload = _under(payload_root, _safe_relative(manifest.get("app_relative")))
+    if app_payload != running or not app_payload.is_dir():
+        raise StableShellError("RUNNING_PAYLOAD_OWNERSHIP_INVALID")
+    runtime_pythonw = _under(payload_root, _safe_relative(manifest.get("runtime_relative")), require_file=True)
+    if runtime_pythonw.suffix.casefold() != ".exe" or runtime_pythonw.name.casefold() != "pythonw.exe":
+        raise StableShellError("RUNTIME_INVALID")
+    environment = dict(os.environ)
+    environment.update({
+        "LOCALAIHUB_INSTALL_ROOT": str(root),
+        "LOCALAIHUB_APP_ROOT": str(app_payload),
+        "LOCALAIHUB_DATA_ROOT": str(installation.data_root),
+        "PYTHONPATH": str(app_payload),
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONUTF8": "1",
+    })
+    build_path = payload_root / "build.json"
+    try:
+        build = _load_json(build_path) if build_path.is_file() and not build_path.is_symlink() else {}
+        source_commit = build.get("source_commit") if isinstance(build, dict) else None
+        if isinstance(source_commit, str) and re.fullmatch(r"[0-9a-f]{40}", source_commit) and version == f"main-{source_commit[:12]}":
+            environment.update({"LOCALAIHUB_BUILD_SHA": source_commit, "LOCALAIHUB_BUILD_PAYLOAD": version})
+    except (OSError, StableShellError, UnicodeError, json.JSONDecodeError):
+        pass
+    return LaunchPlan(root, installation.data_root, version, payload_root, app_payload, runtime_pythonw, (str(runtime_pythonw), "-m", "src.app.launcher"), environment)
+
+
 def atomic_activate_pointer(app_root: Path, *, version: str, manifest_sha256: str) -> dict[str, Any]:
     root = app_root.absolute()
     _safe_version(version)
@@ -319,5 +370,5 @@ def atomic_activate_pointer(app_root: Path, *, version: str, manifest_sha256: st
 __all__ = [
     "APP_USER_MODEL_ID", "CURRENT_NAME", "ICON_NAME", "InstallationConfig", "LaunchPlan",
     "StableShellError", "atomic_activate_pointer", "load_current_pointer", "load_installation_config",
-    "load_product_manifest", "resolve_launch_plan",
+    "load_product_manifest", "resolve_launch_plan", "resolve_verified_running_plan",
 ]

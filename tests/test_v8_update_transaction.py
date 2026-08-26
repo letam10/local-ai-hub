@@ -46,11 +46,23 @@ class V8UpdateTransactionTests(unittest.TestCase):
             old_commit, new_commit = self._installation(root)
             previous = {"schema_version": POINTER_SCHEMA, "version": "old", "payload_relative": "versions/old", "manifest_sha256": hashlib.sha256((root / "versions" / "old" / "manifest.json").read_bytes()).hexdigest()}
             _record_pending_health(root, previous=previous, payload_id="new", source_commit=new_commit)
-            result = mark_startup_health(root, health={"product_id": "LocalAIHub", "product_version": "8.0.1", "api_protocol_version": "v8-api.v1", "app_user_model_id": "LocalAIHub.Desktop", "installation_id": "c" * 32})
+            result = mark_startup_health(root, health={"product_id": "LocalAIHub", "product_version": "8.0.1", "api_protocol_version": "v8-api.v1", "app_user_model_id": "LocalAIHub.Desktop", "installation_id": "c" * 32, "build_source_commit": new_commit, "build_payload_id": "new"}, frontend_ready=True)
             self.assertEqual(result["status"], "healthy")
             self.assertFalse((root / "update-state" / "pending-health.json").exists())
             self.assertEqual(load_current_pointer(root)["version"], "new")
             self.assertEqual(old_commit, "a" * 40)
+
+    def test_api_health_without_frontend_ready_keeps_pending_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "install"
+            root.mkdir()
+            _old_commit, new_commit = self._installation(root)
+            previous = {"schema_version": POINTER_SCHEMA, "version": "old", "payload_relative": "versions/old", "manifest_sha256": hashlib.sha256((root / "versions" / "old" / "manifest.json").read_bytes()).hexdigest()}
+            _record_pending_health(root, previous=previous, payload_id="new", source_commit=new_commit)
+            result = mark_startup_health(root, health={"product_id": "LocalAIHub", "product_version": "8.0.1", "api_protocol_version": "v8-api.v1", "app_user_model_id": "LocalAIHub.Desktop", "installation_id": "c" * 32, "build_source_commit": new_commit, "build_payload_id": "new"})
+            self.assertEqual(result["status"], "frontend_pending")
+            self.assertTrue((root / "update-state" / "pending-health.json").is_file())
+            self.assertEqual(load_current_pointer(root)["version"], "new")
 
     def test_failed_health_rolls_back_pointer_without_touching_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -60,7 +72,7 @@ class V8UpdateTransactionTests(unittest.TestCase):
             old_manifest = root / "versions" / "old" / "manifest.json"
             previous = {"schema_version": POINTER_SCHEMA, "version": "old", "payload_relative": "versions/old", "manifest_sha256": hashlib.sha256(old_manifest.read_bytes()).hexdigest()}
             _record_pending_health(root, previous=previous, payload_id="new", source_commit=new_commit)
-            result = mark_startup_health(root, health={"product_id": "wrong"})
+            result = mark_startup_health(root, health={"product_id": "wrong"}, frontend_ready=True)
             self.assertEqual(result["status"], "rollback")
             self.assertEqual(load_current_pointer(root)["version"], "old")
             self.assertTrue((root / "versions" / "new" / "build.json").is_file())

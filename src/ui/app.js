@@ -36,7 +36,7 @@ import {
   deleteJobHistory,
   clearTerminalJobHistory,
   getDurableJobs,
-  resumeDurableJob,
+  retryDurableJob,
   getWorkflowLibrary,
   saveWorkflowLibrary,
   deleteWorkflowLibrary,
@@ -56,6 +56,7 @@ import {
   createComponentMaintenancePlan,
   confirmComponentMaintenance,
   getStorage,
+  getStorageScan,
   getProject,
   getSettings,
   patchSettings,
@@ -86,6 +87,7 @@ import {
   saveImageMaskSession,
   saveComfyBridgeWorkflow,
   scanStorage,
+  cancelStorageScan,
   startComfyAdvanced,
   submitJob,
   updateAsset,
@@ -109,7 +111,11 @@ import {
   confirmComponentUpdate,
   rollbackComponentUpdate,
 } from "./api.js";
+// The compatibility resumeDurableJob endpoint remains available for older
+// clients; this UI deliberately uses retryDurableJob so V8 says "new record,
+// not executed" truthfully.
 import { disposeNodeStudios, mountNodeStudios } from "./features/node_studio/studio.js";
+import { createStorageScanPoller, STORAGE_SCAN_ACTIVE_STATES } from "./storage_scan_polling.js";
 import { mountImageMaskCanvases } from "./image_mask_studio.js";
 import { createWorkflowLibraryAdapter } from "./workflow_library.js";
 import { NAVIGATION, jobRecoverySnapshot, renderPage } from "./pages.js";
@@ -117,17 +123,67 @@ import { currentLanguage, localizeDocument, setLanguage, translateText } from ".
 import { FEATURE_REGISTRY } from "./core/feature_registry.js";
 import { confirmComponentInstall, getProductionCatalog, planComponentInstall } from "./shared/api/catalog.js";
 
+globalThis.__localAiHubFrontendStarted = true;
+
 const state = {
   health: {}, capabilities: {}, productization: {}, components: [], componentManager: {}, componentPlans: {}, tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", jobQuery: "", jobTypeFilter: "all", jobSort: "newest", jobPage: 1, apiStatus: "loading", apiError: "",
   creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
   workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trong V5-D trước khi đồng bộ." },
+  storageScan: { status: "idle", progress: 0, exact: false },
   productionCatalog: { status: "partial", models: [], runtimes: [] }, updateCenter: { settings: { policy: "manual" }, records: [] }, modelFilters: { query: "", category: "", installed: "all" }, modelActionStatus: "", settingsActionStatus: "",
   featureRegistry: FEATURE_REGISTRY,
 };
 const view = document.querySelector("#module-view");
 const nav = document.querySelector("#sidebar-nav");
 const topStatus = document.querySelector("#top-status");
+const recordLoopbackFrontendEvent = async (event, route = null) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2000);
+  try {
+    const health = state.health || {};
+    const response = await fetch("/api/desktop/readiness", {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        event,
+        route,
+        source_commit: health.build_source_commit || null,
+        payload_id: health.build_payload_id || null,
+      }),
+    });
+    const result = await response.json();
+    return result && typeof result === "object" ? result : { status: "unavailable" };
+  } catch { return { status: "unavailable" }; }
+  finally { clearTimeout(timeout); }
+};
+const recordFrontendEvent = async (event, route = null) => {
+  return recordLoopbackFrontendEvent(event, route);
+};
+const waitForPaint = () => new Promise((resolve) => {
+  let settled = false;
+  const finish = () => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeout);
+    resolve();
+  };
+  const timeout = setTimeout(finish, 500);
+  if (typeof requestAnimationFrame !== "function") {
+    finish();
+    return;
+  }
+  requestAnimationFrame(() => requestAnimationFrame(finish));
+});
+const showFrontendBootstrapFailure = async () => {
+  await recordFrontendEvent("frontend_js_bootstrap_failed");
+  globalThis.__localAiHubFrontendReady = false;
+  const message = "Giao diện Local AI Hub không hoàn tất khởi tạo. Hãy thử lại hoặc khôi phục phiên bản trước.";
+  if (topStatus) topStatus.textContent = "Không thể khởi động giao diện";
+  if (apiEndpoint) apiEndpoint.textContent = "Frontend chưa sẵn sàng";
+  if (view) view.innerHTML = `<section class="empty-state startup-recovery" role="alert"><strong>Không thể khởi động giao diện Local AI Hub</strong><span>${message}</span><span>API có thể vẫn phản hồi, nhưng HTTP không được xem là bằng chứng app đã chạy.</span></section>`;
+};
 const diskMetric = document.querySelector("#disk-metric");
 const gpuMetric = document.querySelector("#gpu-metric");
 const apiEndpoint = document.querySelector("#api-endpoint");
@@ -680,6 +736,7 @@ const render = ({ background = false, focus = "" } = {}) => {
   }
   if (languageSelect) languageSelect.value = currentLanguage();
   localizeDocument(document);
+  void recordFrontendEvent("route_rendered", routeId());
   return true;
 };
 
@@ -699,6 +756,21 @@ const applyBootstrap = (payload) => {
   state.settings = payload.settings || {};
   state.lifecycle = payload.lifecycle || {};
   if (payload.workflow_library && typeof payload.workflow_library === "object") state.workflowLibrary = payload.workflow_library;
+};
+
+const confirmFrontendReady = async () => {
+  // Persist the identity-bound proof before asking the native bridge to clear
+  // pending health.  This makes a WebView/native bridge delay observable to
+  // the desktop wait loop without treating HTTP status as readiness.
+  const signal = await recordLoopbackFrontendEvent("frontend_ready", routeId());
+  const signalRecorded = signal?.status === "recorded" || signal?.status === "ready";
+  if (globalThis.pywebview && !signalRecorded) {
+    throw new Error(signal?.code || "FRONTEND_READY_SIGNAL_REJECTED");
+  }
+  // The desktop startup thread consumes this event and performs the native
+  // health/pending-marker commit.  Never call a potentially blocking native
+  // WebView bridge method from the renderer's critical path.
+  return true;
 };
 
 const refreshFast = async ({ quiet = false, renderView = true } = {}) => {
@@ -773,16 +845,137 @@ const refreshImageMaskStudio = async ({ renderView = true, before = "", after = 
   }
 };
 
+const updateStorageScanDom = (result) => {
+  // Polling a storage scan must not tear down the module DOM (and must not
+  // remount canvases, reset focus, or reload the whole WebView).  Update only
+  // the bounded status/area projection that the Models page owns.
+  if (routeId() !== "models") return;
+  const scan = result?.scan && typeof result.scan === "object" ? result.scan : {};
+  const status = String(scan.status || result?.status || "idle");
+  const mode = String(scan.mode || result?.scan_mode || "fast");
+  const progress = Math.max(0, Math.min(100, Number.isFinite(Number(scan.progress)) ? Number(scan.progress) : 0));
+  const banner = view.querySelector("[data-storage-scan-status]");
+  if (!banner) { render(); return; }
+  banner.dataset.storageScanStatus = status;
+  banner.dataset.storageScanMode = mode;
+  banner.dataset.storageScanProgress = String(progress);
+  const title = banner.querySelector(".card-title-row strong");
+  if (title) {
+    const area = scan.current_area ? ` · ${scan.current_area}` : "";
+    title.textContent = scan.polling_limited === true
+      ? "Quét vẫn đang chạy nền"
+      : status === "running"
+      ? `${mode === "deep_exact" ? "Đang tính chính xác" : "Đang quét nhanh"} · ${progress}%${area}`
+      : status === "cancelling" ? "Đang hủy quét …"
+        : status === "completed" && scan.exact === true ? "Đã quét xong · tổng chính xác"
+          : status === "partial" ? "Đã quét một phần · tổng chưa đủ"
+            : status === "cancelled" ? "Đã hủy quét · tổng chưa đủ"
+              : status === "unavailable" ? "Quét storage chưa khả dụng" : "Chưa có lần quét storage";
+  }
+  const badge = banner.querySelector(".card-title-row span");
+  if (badge) badge.textContent = scan.exact === true ? "chính xác" : status === "running" ? "đang đếm" : "có giới hạn";
+  const bar = banner.querySelector(".progress-bar");
+  const track = banner.querySelector("[role=progressbar]");
+  if (bar) bar.style.width = `${progress}%`;
+  if (track) track.setAttribute("aria-valuenow", String(progress));
+  const liveBytes = banner.querySelector("[data-storage-total-bytes]");
+  const countedBytes = Number(scan.total_bytes_counted ?? 0);
+  if (liveBytes) liveBytes.textContent = formatGb(countedBytes);
+  const liveBytesRaw = banner.querySelector("[data-storage-total-bytes-raw]");
+  if (liveBytesRaw) liveBytesRaw.textContent = `${Number.isFinite(countedBytes) ? countedBytes.toLocaleString() : "0"} bytes`;
+  const liveFiles = banner.querySelector("[data-storage-files-scanned]");
+  if (liveFiles) liveFiles.textContent = `${Number(scan.files_scanned || 0)} tệp đã đếm`;
+  const liveArea = banner.querySelector("[data-storage-current-area]");
+  if (liveArea) liveArea.textContent = scan.current_area || "";
+  const reason = banner.querySelector("[data-storage-scan-reason]");
+  if (reason) reason.textContent = scan.reason || result?.reason || "";
+  const pollingNotice = banner.querySelector("[data-storage-polling-notice]");
+  if (pollingNotice) {
+    pollingNotice.textContent = scan.polling_limited === true
+      ? (scan.polling_message || "Quét vẫn đang chạy nền; bấm Theo dõi tiếp để cập nhật.")
+      : "";
+    pollingNotice.hidden = scan.polling_limited !== true;
+  }
+
+  const areas = result?.areas && typeof result.areas === "object" ? result.areas : {};
+  const list = view.querySelector("[data-storage-area-list]");
+  if (list) {
+    Object.entries(areas).forEach(([name, value]) => {
+      let row = list.querySelector(`[data-storage-area="${CSS.escape(name)}"]`);
+      if (!row) {
+        row = document.createElement("div");
+        row.className = "row-item";
+        row.dataset.storageArea = name;
+        row.innerHTML = "<span></span><strong data-storage-area-value></strong><small data-storage-area-count></small>";
+        list.append(row);
+      }
+      const label = row.querySelector("span");
+      const valueNode = row.querySelector("[data-storage-area-value]");
+      const countNode = row.querySelector("[data-storage-area-count]");
+      const bytes = Number(value?.bytes || 0);
+      const partial = value?.complete === false || value?.status === "partial" || value?.status === "running";
+      if (label) label.textContent = name;
+      if (valueNode) valueNode.textContent = partial ? `Ít nhất ${formatGb(bytes)}` : formatGb(bytes);
+      if (countNode) countNode.textContent = `${Number(value?.files_scanned ?? value?.entries_scanned ?? 0)} tệp`;
+    });
+  }
+  const action = view.querySelector("[data-storage-scan-action]");
+  if (action) {
+    const canCancel = (status === "running" || status === "cancelling") && mode === "deep_exact";
+    const buttons = [];
+    if (scan.polling_limited === true && STORAGE_SCAN_ACTIVE_STATES.includes(status)) {
+      buttons.push(`<button class="button" type="button" data-resume-storage-polling="${escapeHtml(scan.scan_id || "")}">Theo dõi tiếp</button>`);
+    }
+    if (canCancel) {
+      buttons.push(`<button class="button button--danger" type="button" data-cancel-storage-scan="${escapeHtml(scan.scan_id || "")}"${status === "cancelling" ? " disabled" : ""}>Hủy quét</button>`);
+    }
+    if (!buttons.length) buttons.push(`<button class="button" type="button" data-refresh-storage${status === "cancelling" ? " disabled" : ""}>Quét lại</button>`);
+    action.innerHTML = buttons.join("");
+  }
+};
+
+const storageScanPoller = createStorageScanPoller({
+  getSnapshot: getStorageScan,
+  isRouteActive: () => routeId() === "models",
+  onSnapshot: (result) => {
+    state.storage = result || state.storage;
+    state.storageScan = result?.scan || state.storageScan;
+    updateStorageScanDom(result || {});
+  },
+  onCeiling: (result) => {
+    const currentScan = state.storageScan && typeof state.storageScan === "object" ? state.storageScan : {};
+    if (!STORAGE_SCAN_ACTIVE_STATES.includes(String(currentScan.status || result?.scan?.status || "running"))) return;
+    const limitedScan = {
+      ...currentScan,
+      ...(result?.scan || {}),
+      polling_limited: true,
+      polling_message: "Quét vẫn đang chạy nền; bấm Theo dõi tiếp để cập nhật.",
+    };
+    state.storageScan = limitedScan;
+    state.storage = { ...(state.storage || {}), scan: limitedScan };
+    updateStorageScanDom(state.storage);
+  },
+  onError: () => {
+    // A transient loopback error is retried by the coordinator while the
+    // server-owned worker remains in running/cancelling state.
+  },
+});
+const pollStorageScan = (scanId = "") => storageScanPoller.start(scanId);
+
 const loadRouteData = async ({ scan = false } = {}) => {
   const route = routeId();
   if (route === "models") {
     if (routeLoad) return routeLoad;
     routeLoad = Promise.allSettled([getModels(), scan ? scanStorage() : getStorage(), getProductionCatalog(), getUpdateSettings()]).then((results) => {
       if (results[0].status === "fulfilled") state.models = results[0].value.models || [];
-      if (results[1].status === "fulfilled") state.storage = results[1].value || {};
+      if (results[1].status === "fulfilled") {
+        state.storage = results[1].value || {};
+        state.storageScan = state.storage.scan || state.storageScan;
+      }
       if (results[2].status === "fulfilled") state.productionCatalog = results[2].value || state.productionCatalog;
       if (results[3].status === "fulfilled") state.updateCenter = { ...state.updateCenter, settings: results[3].value || state.updateCenter.settings };
       render();
+      if (STORAGE_SCAN_ACTIVE_STATES.includes(String(state.storageScan?.status || ""))) pollStorageScan(state.storageScan.scan_id || "");
     }).catch(() => {}).finally(() => { routeLoad = null; });
     return routeLoad;
   }
@@ -839,8 +1032,12 @@ const loadRouteData = async ({ scan = false } = {}) => {
 };
 
 const initialize = async () => {
+  await recordFrontendEvent("frontend_bootstrap_started");
+  let bootstrapReady = false;
   try {
     applyBootstrap(await getBootstrap());
+    bootstrapReady = true;
+    await recordFrontendEvent("frontend_bootstrap_completed");
   } catch (error) {
     state.apiStatus = "error";
     state.apiError = error.message;
@@ -851,6 +1048,28 @@ const initialize = async () => {
     if (library?.status) state.workflowLibrary = library;
   } catch { /* Keep the explicit partial adapter state. */ }
   render({ focus: "main" });
+  await waitForPaint();
+  const navVisible = Boolean(nav?.querySelectorAll(".nav-item").length);
+  const viewVisible = Boolean(view?.textContent?.trim());
+  if (navVisible) await recordFrontendEvent("frontend_nav_visible", routeId());
+  if (viewVisible) await recordFrontendEvent("frontend_view_visible", routeId());
+  const visualProof = navVisible && viewVisible;
+  if (!visualProof) throw new Error("FRONTEND_DOM_NOT_RENDERED");
+  await recordFrontendEvent("frontend_dom_visible", routeId());
+  await recordFrontendEvent("frontend_rendered", routeId());
+  globalThis.__localAiHubFrontendRendered = true;
+  globalThis.__localAiHubFrontendBootstrapReady = bootstrapReady;
+  if (bootstrapReady) {
+    try {
+      await confirmFrontendReady();
+    } catch {
+      await recordFrontendEvent("frontend_ready_rejected");
+      state.apiStatus = "error";
+      state.apiError = "FRONTEND_READY_REJECTED";
+      render({ background: true });
+    }
+  }
+  globalThis.__localAiHubFrontendReady = bootstrapReady && state.apiStatus !== "error";
   await loadRouteData();
 };
 
@@ -1577,7 +1796,7 @@ document.addEventListener("click", async (event) => {
   const galleryUse = event.target.closest("[data-gallery-use]");
   if (galleryUse) {
     state.pendingGalleryPreset = galleryUse.dataset.galleryUse || null;
-    const scope = ["image", "media", "sam2", "animesr"].includes(galleryUse.dataset.galleryScope) ? galleryUse.dataset.galleryScope : "image";
+    const scope = ["image", "media", "video", "sam2", "animesr"].includes(galleryUse.dataset.galleryScope) ? galleryUse.dataset.galleryScope : "image";
     state.workspaceTabs[scope] = "nodes";
     window.location.hash = `#/${scope}`;
     showToast("Đang mở template trong Hub Nodes; trạng thái backend vẫn theo preflight.");
@@ -1878,7 +2097,7 @@ document.addEventListener("click", async (event) => {
     render();
     try {
       await loadRouteData({ scan: true });
-      state.modelActionStatus = "Đã cập nhật snapshot storage; tổng có thể là partial nếu vượt ngân sách quét.";
+      state.modelActionStatus = "Đã bắt đầu quét storage nền; số liệu sẽ cập nhật dần và chỉ chính xác khi tiến độ đạt 100%.";
       showToast(state.modelActionStatus, "success");
       render();
     } catch (error) {
@@ -1886,6 +2105,32 @@ document.addEventListener("click", async (event) => {
       showToast(state.modelActionStatus, "error");
       render();
     }
+    return;
+  }
+  const cancelStorageButton = event.target.closest("[data-cancel-storage-scan]");
+  if (cancelStorageButton) {
+    cancelStorageButton.disabled = true;
+    try {
+      const result = await cancelStorageScan(cancelStorageButton.dataset.cancelStorageScan || "");
+      state.storage = result || state.storage;
+      state.storageScan = result?.scan || state.storageScan;
+      updateStorageScanDom(result || {});
+      showToast("Đã gửi yêu cầu hủy quét storage; worker sẽ dừng ở checkpoint gần nhất.", "warning");
+      if (STORAGE_SCAN_ACTIVE_STATES.includes(String(state.storageScan?.status || ""))) pollStorageScan(state.storageScan.scan_id || "");
+    } catch (error) {
+      showToast(error.message || "Không thể hủy quét storage.", "error");
+      cancelStorageButton.disabled = false;
+    }
+    return;
+  }
+  const resumeStoragePollingButton = event.target.closest("[data-resume-storage-polling]");
+  if (resumeStoragePollingButton) {
+    const scanId = resumeStoragePollingButton.dataset.resumeStoragePolling || "";
+    state.storageScan = { ...(state.storageScan || {}), polling_limited: false };
+    state.storage = { ...(state.storage || {}), scan: state.storageScan };
+    updateStorageScanDom(state.storage);
+    pollStorageScan(scanId);
+    showToast("Đã tiếp tục theo dõi scan storage nền.", "success");
     return;
   }
   const checkAllUpdatesButton = event.target.closest("[data-check-all-updates]");
@@ -1999,10 +2244,12 @@ document.addEventListener("click", async (event) => {
   if (durableResume) {
     durableResume.disabled = true;
     try {
-      const result = await resumeDurableJob(durableResume.dataset.resumeDurableJob);
+      const result = await retryDurableJob(durableResume.dataset.resumeDurableJob);
       const refreshed = await refreshFast({ quiet: true });
       if (refreshed === false) render();
-      const message = safeDisplayMessage(result?.next_action, "Durable recovery response received; the server snapshot remains authoritative.");
+      const message = result?.retry_contract === "new_job"
+        ? "Đã tạo tác vụ mới nhưng chưa thực thi; bản ghi lỗi cũ được giữ nguyên."
+        : safeDisplayMessage(result?.next_action, "Không thể tạo lại tác vụ từ snapshot hiện tại.");
       setJobActionStatus(message, result?.status === "unavailable" ? "warning" : "success"); showToast(message, "warning");
     } catch (error) {
       setJobActionStatus(error.message, "error"); showToast(error.message, "error");
@@ -2094,8 +2341,8 @@ document.addEventListener("keydown", async (event) => {
 });
 
 window.addEventListener("resize", syncSidebarState);
-window.addEventListener("hashchange", async () => { render({ focus: "main" }); await loadRouteData(); });
+window.addEventListener("hashchange", async () => { storageScanPoller.stop(); render({ focus: "main" }); await loadRouteData(); });
 syncSidebarState();
 applyTheme(currentTheme());
 setLanguage(currentLanguage());
-initialize();
+initialize().catch(() => { void showFrontendBootstrapFailure(); });

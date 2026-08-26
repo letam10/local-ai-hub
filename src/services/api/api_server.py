@@ -23,11 +23,12 @@ from urllib.parse import parse_qs, unquote, urlparse
 from src.services.artifact_store import DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_UPLOAD_DISK_SAFETY_BYTES
 from src.services.artifact_store import UploadError, describe as describe_artifact, normalize_media_type
 from src.services.artifact_store import open_artifact, resolve as resolve_artifact, stage_upload_stream
+from src.app.readiness import record_frontend_signal
 from src.services.image_mask_studio import StudioConflictError, image_mask_studio
 from src.services.job_manager.manager import job_manager
 from src.services.project_manager import project_manager
 from src.services.runtime_registry import applications, launch
-from src.services.storage_manager.overview import dashboard_volume_snapshot
+from src.services.storage_manager.overview import cancel_storage_scan, dashboard_volume_snapshot, start_storage_scan, storage_scan_snapshot
 from src.shared.paths.registry import APP_ROOT, ROOT
 from src.shared.version import PRODUCT_VERSION
 
@@ -36,7 +37,7 @@ from .core import capability_control_plane, component_statuses, get_job_or_error
 from .jobs import flush as flush_jobs
 from .jobs import reconcile_startup
 from .jobs import clear_terminal_history, delete_job, get_job, list_jobs
-from .v5_productization import admit_durable_job, durable_jobs_snapshot, reconcile_durable_jobs, resume_durable_job
+from .v5_productization import admit_durable_job, durable_jobs_snapshot, reconcile_durable_jobs, resume_durable_job, retry_durable_job
 from src.services.product_surface import project_product_surface
 from .context import ApiContext
 from .router import request_from_handler
@@ -285,6 +286,7 @@ def _api_context() -> ApiContext:
             "durable_jobs_snapshot": durable_jobs_snapshot,
             "admit_durable_job": admit_durable_job,
             "resume_durable_job": resume_durable_job,
+            "retry_durable_job": retry_durable_job,
             "submit_graph": submit_graph,
             "submit_tool": submit_tool,
             "open_artifact": open_artifact,
@@ -300,6 +302,9 @@ def _api_context() -> ApiContext:
             "submit_tool": submit_tool,
             "storage_" + "summary": lambda force=False: getattr(__import__("src.services.storage_manager.overview", fromlist=["storage_" + "summary"]), "storage_" + "summary")(force=force),
             "dashboard_volume_snapshot": dashboard_volume_snapshot,
+            "start_storage_scan": start_storage_scan,
+            "storage_scan_snapshot": storage_scan_snapshot,
+            "cancel_storage_scan": cancel_storage_scan,
             "applications": applications,
             "launch_application": launch,
             "workflow_library_payload": _workflow_library_payload,
@@ -321,9 +326,13 @@ def _api_context() -> ApiContext:
             "durable_jobs_snapshot": durable_jobs_snapshot,
             "admit_durable_job": admit_durable_job,
             "resume_durable_job": resume_durable_job,
+            "retry_durable_job": retry_durable_job,
             "settings_payload": _settings_payload,
             "image_mask_studio": image_mask_studio,
             "submit_tool": submit_tool,
+            "start_storage_scan": start_storage_scan,
+            "storage_scan_snapshot": storage_scan_snapshot,
+            "cancel_storage_scan": cancel_storage_scan,
             "image_mask_link_project": lambda session_id, payload: __import__("src.services.api.context", fromlist=["_link_image_mask_project"])._link_image_mask_project(image_mask_studio, project_manager, session_id, payload),
         })
     return _api_context_cache
@@ -635,9 +644,28 @@ class HubHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:  # noqa: N802
+        path = unquote(urlparse(self.path).path.rstrip("/") or "/")
+        if path == "/api/desktop/readiness":
+            try:
+                payload = self._read_json(strict=True)
+                event = payload.get("event")
+                route = payload.get("route")
+                source_commit = payload.get("source_commit")
+                payload_id = payload.get("payload_id")
+                result = record_frontend_signal(
+                    Path(os.environ.get("LOCALAIHUB_INSTALL_ROOT") or APP_ROOT),
+                    event if isinstance(event, str) else "",
+                    route=route if isinstance(route, str) else None,
+                    source_commit=source_commit if isinstance(source_commit, str) else None,
+                    payload_id=payload_id if isinstance(payload_id, str) else None,
+                )
+                status = 200 if result.get("status") == "recorded" else 409 if result.get("status") == "rejected" else 503
+                self._write(status, result)
+            except (ValueError, TypeError, OSError):
+                self._write(400, {"status": "rejected", "code": "READINESS_REQUEST_INVALID"})
+            return
         if self._dispatch_modular("POST"):
             return
-        path = unquote(urlparse(self.path).path.rstrip("/") or "/")
         if path == "/api/uploads":
             self._upload()
             return

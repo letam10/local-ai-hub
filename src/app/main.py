@@ -32,6 +32,7 @@ from src.shared.runtime_identity import APP_USER_MODEL_ID, API_PROTOCOL_VERSION,
 from src.shared.version import PRODUCT_VERSION
 
 from .desktop_lifecycle import DesktopCloseController
+from .readiness import event_seen, load_state, record_event as record_readiness_event
 from .stable_shell import StableShellError, resolve_launch_plan
 from .tray import WindowsTray
 
@@ -53,12 +54,18 @@ API_IDENTITY_MISMATCH = "API_IDENTITY_MISMATCH"
 API_STARTUP_TIMEOUT = "API_STARTUP_TIMEOUT"
 API_BUNDLED_RUNTIME_UNAVAILABLE = "API_BUNDLED_RUNTIME_UNAVAILABLE"
 API_STARTUP_FAILED = "API_STARTUP_FAILED"
+FRONTEND_BOOTSTRAP_TIMEOUT = "FRONTEND_BOOTSTRAP_TIMEOUT"
+WEBVIEW_NAVIGATION_FAILED = "WEBVIEW_NAVIGATION_FAILED"
+FRONTEND_READY = "frontend_ready"
+FRONTEND_READY_TIMEOUT_SECONDS = 20.0
 _STARTUP_ERROR_MESSAGES = {
     API_STARTUP_EXITED: "Dịch vụ API bundled đã thoát trong khi khởi động. Mở Diagnostics để xem chi tiết.",
     API_IDENTITY_MISMATCH: "Dịch vụ API không thuộc installation này. Mở Diagnostics để xem chi tiết.",
     API_STARTUP_TIMEOUT: "Dịch vụ API không sẵn sàng trong thời gian giới hạn. Mở Diagnostics để xem chi tiết.",
     API_BUNDLED_RUNTIME_UNAVAILABLE: "Payload runtime bundled không hợp lệ hoặc không còn tồn tại. Mở Diagnostics để xem chi tiết.",
     API_STARTUP_FAILED: "Không thể khởi động dịch vụ API. Mở Diagnostics để xem chi tiết.",
+    FRONTEND_BOOTSTRAP_TIMEOUT: "Giao diện Local AI Hub không hoàn tất bootstrap trong thời gian giới hạn. Thử lại hoặc khôi phục phiên bản trước.",
+    WEBVIEW_NAVIGATION_FAILED: "WebView không thể nạp giao diện Local AI Hub. Thử lại hoặc khôi phục phiên bản trước.",
 }
 
 
@@ -223,6 +230,27 @@ def _record_startup_diagnostic(
             handle.write(json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n")
     except (OSError, ValueError):
         pass
+
+
+def _record_startup_event(event: str, *, selected_port: int | None = None, probe_state: str = "unknown", runtime_class: str = "unknown") -> None:
+    """Write bounded lifecycle evidence without paths, tokens, or exceptions."""
+
+    _record_startup_diagnostic(
+        event[:64],
+        selected_port=_configured_port() if selected_port is None else selected_port,
+        probe_state=probe_state,
+        runtime_class=runtime_class,
+    )
+
+
+def _record_desktop_readiness(event: str, *, status: str | None = None, route: str | None = None) -> dict[str, object]:
+    """Persist bounded desktop/frontend evidence, never an HTTP-only claim."""
+
+    try:
+        root = Path(os.environ.get("LOCALAIHUB_INSTALL_ROOT") or ROOT)
+        return record_readiness_event(root, event, status=status, route=route)
+    except (OSError, TypeError, ValueError):
+        return {"status": "unavailable", "code": "READINESS_STATE_UNAVAILABLE"}
 
 
 def ensure_api(timeout_seconds: float = 20.0) -> subprocess.Popen[object] | None:
@@ -455,6 +483,9 @@ class DesktopBridge:
         self._controller: DesktopCloseController | None = None
         self._tray: WindowsTray | None = None
         self._close_prompt_fallback = False
+        self._frontend_ready_event = threading.Event()
+        self._frontend_ready_result: dict[str, object] | None = None
+        self.frontend = _FrontendReadinessBridge(self)
         # Keep the native component picker in a nested bridge namespace so
         # the top-level close API remains the exact three-choice contract.
         self.component_import = _ComponentSelectionBridge(self)
@@ -568,8 +599,39 @@ class DesktopBridge:
         window = self._window
         if window is None:
             return {"status": "error", "message": "Desktop bridge chưa sẵn sàng."}
-        threading.Thread(target=_load_ui_when_ready, args=(window,), name="LocalAIHub-API-retry", daemon=True).start()
+        self._frontend_ready_event.clear()
+        self._frontend_ready_result = None
+        threading.Thread(target=_load_ui_when_ready, args=(window, self), name="LocalAIHub-API-retry", daemon=True).start()
         return {"status": "retrying", "message": "Đang thử kết nối lại Local AI Hub API…"}
+
+    def confirm_frontend_ready(self) -> dict[str, object]:
+        """Accept the frontend bootstrap proof and only then clear pending health."""
+
+        try:
+            with urllib.request.urlopen(f"{_api_base_url()}/health", timeout=2.0) as response:
+                health = json.loads(response.read(128 * 1024 + 1).decode("utf-8"))
+            install_root = Path(os.environ.get("LOCALAIHUB_INSTALL_ROOT") or ROOT)
+            from src.services.app_update import mark_startup_health
+
+            result = mark_startup_health(
+                install_root,
+                health=health if isinstance(health, dict) else None,
+                frontend_ready=True,
+            )
+            if result.get("status") in {"healthy", "not_pending"}:
+                self._frontend_ready_result = {**result, "status": "ready"}
+                self._frontend_ready_event.set()
+                _record_desktop_readiness(FRONTEND_READY, status="ready")
+                state, _payload = _probe_api()
+                _record_startup_event(FRONTEND_READY, probe_state=state, runtime_class="installed_bundled")
+                return dict(self._frontend_ready_result)
+            self._frontend_ready_result = {"status": "error", "code": str(result.get("code") or "FRONTEND_READY_REJECTED")}
+            _record_desktop_readiness("frontend_ready_rejected", status="failed")
+            return dict(self._frontend_ready_result)
+        except Exception:
+            self._frontend_ready_result = {"status": "error", "code": "FRONTEND_READY_REJECTED"}
+            _record_desktop_readiness("frontend_ready_rejected", status="failed")
+            return dict(self._frontend_ready_result)
 
     def rollback_previous_payload(self) -> dict[str, str]:
         """Restore only the verified installer-owned previous pointer."""
@@ -642,6 +704,50 @@ class _ComponentSelectionBridge:
         return self._owner._select_component_source(component_id)
 
 
+class _FrontendReadinessBridge:
+    """Nested, allowlisted telemetry namespace for the native frontend."""
+
+    _EVENTS = frozenset({
+        "webview_navigation_completed",
+        "frontend_bootstrap_started",
+        "frontend_rendered",
+        "frontend_ready",
+        "frontend_js_bootstrap_failed",
+        "frontend_ready_rejected",
+        "frontend_timeout",
+        "route_rendered",
+    })
+
+    def __init__(self, owner: DesktopBridge) -> None:
+        self._owner = owner
+
+    def record(self, event: str, route: str | None = None) -> dict[str, object]:
+        if event not in self._EVENTS:
+            return {"status": "rejected", "code": "READINESS_EVENT_INVALID"}
+        if event == "frontend_ready":
+            result = self._owner.confirm_frontend_ready()
+            if result.get("status") == "ready":
+                _record_startup_event(event, selected_port=_configured_port(), probe_state="frontend", runtime_class="installed_bundled")
+                return result
+            _record_desktop_readiness("frontend_ready_rejected", status="failed")
+            _record_startup_event("frontend_ready_rejected", selected_port=_configured_port(), probe_state="frontend", runtime_class="installed_bundled")
+            return result
+        result = _record_desktop_readiness(event, route=route, status="failed" if "failed" in event or "rejected" in event else "running")
+        _record_startup_event(event, selected_port=_configured_port(), probe_state="frontend", runtime_class="installed_bundled")
+        return result
+
+    def confirm_frontend_ready(self) -> dict[str, object]:
+        """Commit readiness through the namespace already used by telemetry.
+
+        Some pywebview/Edge WebView hosts expose nested API objects reliably
+        before top-level methods become callable. Keeping the confirmation in
+        this allowlisted namespace avoids a false timeout while preserving the
+        native health, payload, and identity checks in ``DesktopBridge``.
+        """
+
+        return self._owner.confirm_frontend_ready()
+
+
 def _loading_html() -> str:
     """Return a tiny local screen shown before the loopback API is ready."""
 
@@ -656,10 +762,11 @@ def _error_html(message: str) -> str:
     safe = html.escape(_STARTUP_ERROR_MESSAGES[code])
     code_label = html.escape(code)
     payload_label = html.escape(_current_payload_short_sha())
+    title = "Không thể kết nối Local AI Hub API" if code.startswith("API_") else "Không thể khởi động giao diện Local AI Hub"
     rollback_button = '<button class="secondary" onclick="choose(\'rollback_previous_payload\')">Khôi phục phiên bản trước</button>' if _verified_previous_pointer_available() else ''
     return f"""<!doctype html><html lang=\"vi\"><meta charset=\"utf-8\"><title>Local AI Hub</title>
     <style>html,body{{margin:0;height:100%;background:#0b1020;color:#edf2ff;font-family:Segoe UI,system-ui,sans-serif}}main{{max-width:680px;height:100%;margin:auto;display:grid;align-content:center;gap:14px;padding:32px;box-sizing:border-box}}h1{{font-size:24px;margin:0}}p{{max-width:620px;color:#b7c3df;line-height:1.5}}.code{{color:#efb2bd;font-family:ui-monospace,Consolas,monospace}}.actions{{display:flex;flex-wrap:wrap;gap:10px}}button{{border:1px solid #45639d;border-radius:9px;background:#182340;color:#edf2ff;padding:10px 14px;font:inherit;cursor:pointer}}button.primary{{background:#4d7dff;border-color:#80aaff}}button.secondary{{background:#2b2742;border-color:#9c86ff}}button:disabled{{opacity:.65;cursor:wait}}</style>
-    <main><h1>Không thể kết nối Local AI Hub API</h1><p data-error-code=\"{code_label}\">{safe}</p><p>Payload hiện tại: <span class=\"code\">{payload_label}</span></p><p id=\"status\">Hub chưa sẵn sàng; dữ liệu người dùng vẫn được giữ nguyên.</p><div class=\"actions\"><button class=\"primary\" onclick=\"choose('retry_startup')\">Thử lại</button>{rollback_button}</div></main>
+    <main><h1>{title}</h1><p data-error-code=\"{code_label}\">{safe}</p><p>Payload hiện tại: <span class=\"code\">{payload_label}</span></p><p id=\"status\">Hub chưa sẵn sàng; dữ liệu người dùng vẫn được giữ nguyên.</p><div class=\"actions\"><button class=\"primary\" onclick=\"choose('retry_startup')\">Thử lại</button>{rollback_button}</div></main>
     <script>async function choose(name){{const buttons=[...document.querySelectorAll('button')];const status=document.getElementById('status');const api=window.pywebview&&window.pywebview.api;if(!api||!api[name]){{status.textContent='Desktop bridge chưa sẵn sàng; Hub vẫn được giữ mở an toàn.';return}}buttons.forEach(button=>button.disabled=true);try{{const result=await api[name]();status.textContent=(result&&result.message)||'Đã nhận yêu cầu.';if(result&&result.status==='retrying')setTimeout(()=>window.location.reload(),500);}}catch(_error){{status.textContent='Không thể xử lý yêu cầu phục hồi; hãy thử lại.';buttons.forEach(button=>button.disabled=false)}}}}</script></html>"""
 
 
@@ -714,8 +821,8 @@ def _close_prompt_html(detail: dict[str, object]) -> str:
     <script>async function choose(name){{const buttons=[...document.querySelectorAll('button')];const status=document.getElementById('status');const api=window.pywebview&&window.pywebview.api;if(!api||!api[name]){{status.textContent='Desktop bridge chưa sẵn sàng; Hub vẫn được giữ mở an toàn.';return}}buttons.forEach(button=>button.disabled=true);try{{const result=await api[name]();status.textContent=(result&&result.message)||'Đã nhận lựa chọn.';if(!result||result.status!=='pending')buttons.forEach(button=>button.disabled=false)}}catch(error){{status.textContent='Không thể xử lý lựa chọn: '+error;buttons.forEach(button=>button.disabled=false)}}}}</script></html>"""
 
 
-def _load_ui_when_ready(window: object) -> None:
-    """Wait in a worker thread, leaving the native loading window responsive."""
+def _load_ui_when_ready(window: object, bridge: DesktopBridge | None = None) -> None:
+    """Load the WebView and wait for the explicit frontend-ready handshake."""
 
     try:
         _remember_owned_api(ensure_api())
@@ -725,26 +832,45 @@ def _load_ui_when_ready(window: object) -> None:
         except Exception:
             return
         return
-    try:
-        # A newly activated payload proves its identity only after its own API
-        # is healthy.  The marker is local installer state and contains no
-        # user data; a mismatch fail-closes to the previous verified pointer.
-        from src.services.app_update import mark_startup_health
-
-        with urllib.request.urlopen(f"{_api_base_url()}/health", timeout=2.0) as response:
-            health = json.loads(response.read(128 * 1024 + 1).decode("utf-8"))
-        install_root = Path(os.environ.get("LOCALAIHUB_INSTALL_ROOT") or ROOT)
-        mark_startup_health(install_root, health=health if isinstance(health, dict) else None)
-    except Exception:
-        # A missing marker is normal.  If the marker is malformed or the
-        # health proof fails, mark_startup_health already attempted a bounded
-        # rollback; the stable shell remains usable for the next launch.
-        pass
+    api_state, _payload = _probe_api()
+    _record_startup_event("api_ready", selected_port=_configured_port(), probe_state=api_state, runtime_class="installed_bundled")
+    _record_startup_event("webview_navigation_started", selected_port=_configured_port(), probe_state=api_state, runtime_class="installed_bundled")
+    _record_desktop_readiness("api_ready", status="running")
+    _record_desktop_readiness("webview_navigation_started", status="running")
     try:
         window.load_url(_ui_url())  # type: ignore[attr-defined]
     except Exception:
-        # The user can still close the loading window normally if WebView2 fails.
+        _record_startup_event(WEBVIEW_NAVIGATION_FAILED, selected_port=_configured_port(), probe_state=api_state, runtime_class="installed_bundled")
+        try:
+            window.load_html(_error_html(WEBVIEW_NAVIGATION_FAILED))  # type: ignore[attr-defined]
+        except Exception:
+            pass
         return
+    if bridge is None:
+        return
+    install_root = Path(os.environ.get("LOCALAIHUB_INSTALL_ROOT") or ROOT)
+    deadline = time.monotonic() + FRONTEND_READY_TIMEOUT_SECONDS
+    while not bridge._frontend_ready_event.is_set() and time.monotonic() < deadline:
+        state = load_state(install_root)
+        bootstrap_rendered = (
+            event_seen(state, "frontend_bootstrap_completed")
+            and event_seen(state, "frontend_rendered", route="dashboard")
+            and event_seen(state, "frontend_dom_visible", route="dashboard")
+        )
+        if state.get("pid") == os.getpid() and (event_seen(state, "frontend_ready") or bootstrap_rendered):
+            result = bridge.confirm_frontend_ready()
+            if result.get("status") == "ready":
+                bridge._frontend_ready_event.set()
+                break
+            _record_startup_event("frontend_ready_rejected", selected_port=_configured_port(), probe_state=api_state, runtime_class="installed_bundled")
+            break
+        time.sleep(0.2)
+    if not bridge._frontend_ready_event.is_set():
+        _record_startup_event("frontend_timeout", selected_port=_configured_port(), probe_state=api_state, runtime_class="installed_bundled")
+        try:
+            window.load_html(_error_html(FRONTEND_BOOTSTRAP_TIMEOUT))  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
 
 def _load_window_settings() -> tuple[int, int, bool]:
@@ -778,7 +904,11 @@ def main() -> int:
             print("Local AI Hub is already running in another instance.", file=sys.stderr)
             return 0
 
+        gui_exit_reason = "unexpected_exit"
+        readiness_finalized = False
         try:
+            _record_startup_event("desktop_started", selected_port=_configured_port(), probe_state="unknown", runtime_class="installed_bundled")
+            _record_desktop_readiness("desktop_started", status="starting")
             bridge = DesktopBridge()
             window_kwargs = {
                 "html": _loading_html(),
@@ -806,19 +936,31 @@ def main() -> int:
                         pass
                 threading.Thread(
                     target=_load_ui_when_ready,
-                    args=(window,),
+                    args=(window, bridge),
                     name="LocalAIHub-API-startup",
                     daemon=True,
                 ).start()
 
             try:
                 webview.start(initialize_window, gui="edgechromium", debug=False)
+                # pywebview returns after the window has been closed through
+                # its normal close path (including the explicit close prompt).
+                # Treat that as a user/normal exit, not a crash or a still-live
+                # readiness session.
+                gui_exit_reason = "normal_exit"
             finally:
+                _record_startup_event("desktop_exit", selected_port=_configured_port(), probe_state="unknown", runtime_class="installed_bundled")
+                readiness_event = "desktop_closed_by_user" if gui_exit_reason == "normal_exit" else "desktop_unexpected_exit"
+                _record_desktop_readiness(readiness_event, status=gui_exit_reason)
+                readiness_finalized = True
                 if bridge._controller and bridge._controller.cleanup_allowed:
                     close_owned_idle_backends()
                     close_owned_api()
             return 0
         except Exception as exc:  # pragma: no cover - native GUI errors are host-specific
+            if not readiness_finalized:
+                _record_startup_event("desktop_unexpected_exit", selected_port=_configured_port(), probe_state="unknown", runtime_class="installed_bundled")
+                _record_desktop_readiness("desktop_unexpected_exit", status="unexpected_exit")
             print(f"Local AI Hub desktop shell failed: {exc}", file=sys.stderr)
             return 1
 
