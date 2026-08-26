@@ -888,6 +888,32 @@ class ProductionCatalog:
     def snapshot(self, *, query: str = "", category: str = "", installed: bool | None = None) -> dict[str, Any]:
         models = [self.inspect_model(model_id) for model_id in sorted(self.models)]
         runtimes = [self.inspect_runtime(runtime_id) for runtime_id in sorted(self.runtimes)]
+        # Inventory health describes whether the registry and fixed-leaf
+        # metadata could be read.  It is deliberately separate from component
+        # readiness: an inventory can be healthy while individual models still
+        # need import, license review or a bounded runtime smoke.
+        inventory_models = list(models)
+        inventory_runtimes = list(runtimes)
+        inventory = {
+            "status": "healthy",
+            "registry_records": len(inventory_models),
+            "observed_count": sum(1 for item in inventory_models if item.get("observed_local") is True or item.get("status") in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"}),
+            "verified_installed": sum(1 for item in inventory_models if item.get("status") == "INSTALLED"),
+            "partial_count": sum(1 for item in inventory_models if item.get("status") in {"PARTIAL", "INSTALLED_UNVERIFIED"}),
+            "unknown_count": sum(1 for item in inventory_models if item.get("status") in {"UNKNOWN", "NOT_PUBLISHED"}),
+            "unavailable_count": sum(1 for item in inventory_models if item.get("status") in {"NOT_INSTALLED", "UNAVAILABLE"}),
+            "readiness_note": "Healthy chỉ xác nhận registry đọc được; readiness model/runtime được đánh giá riêng theo từng component.",
+            "runtimes": {
+                "status": "healthy",
+                "registry_records": len(inventory_runtimes),
+                "observed_count": sum(1 for item in inventory_runtimes if item.get("status") in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"} or any(leaf.get("present") is True for leaf in item.get("leaves", []) if isinstance(leaf, dict))),
+                "verified_installed": sum(1 for item in inventory_runtimes if item.get("status") == "INSTALLED"),
+                "partial_count": sum(1 for item in inventory_runtimes if item.get("status") in {"PARTIAL", "INSTALLED_UNVERIFIED"}),
+                "unknown_count": sum(1 for item in inventory_runtimes if item.get("status") in {"UNKNOWN", "NOT_PUBLISHED"}),
+                "unavailable_count": sum(1 for item in inventory_runtimes if item.get("status") in {"NOT_INSTALLED", "UNAVAILABLE"}),
+                "readiness_note": "Runtime inventory chỉ xác nhận registry và fixed leaves; import, worker và bounded smoke được đánh giá riêng.",
+            },
+        }
         needle = query.strip().casefold()
         if needle:
             models = [item for item in models if needle in str(item.get("model_id", "")).casefold() or needle in str(item.get("display_name", "")).casefold()]
@@ -896,7 +922,7 @@ class ProductionCatalog:
             models = [item for item in models if str(item.get("category", "")).casefold() == category.casefold()]
         if installed is not None:
             models = [item for item in models if (item["status"] in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"}) is installed]
-        return {"schema_version": "v7-production-catalog-snapshot.v1", "catalog_schema_version": self.catalog_schema_version, "catalog_version": self.catalog_version, "status": "completed", "execution": "not_run", "dry_run": True, "catalog_fingerprint": self.fingerprint, "models": models, "runtimes": runtimes, "counts": {"models": len(models), "runtimes": len(runtimes), "installed_models": sum(item["status"] in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"} for item in models), "install_ready": sum(item["disposition"] == "AUTO_INSTALL_READY" for item in models)}, "reason": "Catalog and fixed-leaf discovery only; no model/runtime process or network action ran.", "next_action": "Select a server-owned component plan before any installation."}
+        return {"schema_version": "v7-production-catalog-snapshot.v1", "catalog_schema_version": self.catalog_schema_version, "catalog_version": self.catalog_version, "status": "completed", "execution": "not_run", "dry_run": True, "catalog_fingerprint": self.fingerprint, "models": models, "runtimes": runtimes, "inventory": inventory, "counts": {"models": len(models), "runtimes": len(runtimes), "installed_models": sum(item["status"] in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"} for item in models), "install_ready": sum(item["disposition"] == "AUTO_INSTALL_READY" for item in models)}, "reason": "Catalog and fixed-leaf discovery only; no model/runtime process or network action ran.", "next_action": "Select a server-owned component plan before any installation."}
 
     def refresh_model_size(self, model_id: str, *, max_files: int = 10000) -> dict[str, Any]:
         """Explicit user-requested bounded size refresh; never runs on every UI refresh."""

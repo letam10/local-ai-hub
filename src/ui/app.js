@@ -131,7 +131,7 @@ const state = {
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
   workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trong V5-D trước khi đồng bộ." },
   storageScan: { status: "idle", progress: 0, exact: false },
-  productionCatalog: { status: "partial", models: [], runtimes: [] }, updateCenter: { settings: { policy: "manual" }, records: [] }, modelFilters: { query: "", category: "", installed: "all" }, modelActionStatus: "", settingsActionStatus: "",
+  productionCatalog: { status: "partial", models: [], runtimes: [] }, updateCenter: { settings: { policy: "manual" }, records: [] }, modelFilters: { query: "", category: "", installed: "all" }, modelActionStatus: "", settingsActionStatus: "", settingsDirty: false,
   featureRegistry: FEATURE_REGISTRY,
 };
 const view = document.querySelector("#module-view");
@@ -754,6 +754,12 @@ const applyBootstrap = (payload) => {
   state.productionCatalog = payload.production_catalog || state.productionCatalog;
   state.tools = payload.tools || [];
   state.settings = payload.settings || {};
+  state.settingsDirty = false;
+  // Settings are persisted by the server-owned SettingsPersistence service;
+  // hydrate the current shell from that snapshot before the first render so a
+  // restart does not silently fall back to stale localStorage preferences.
+  if (["vi", "en", "zh", "ja", "ko"].includes(state.settings.language)) setLanguage(state.settings.language);
+  if (["system", "dark", "light"].includes(state.settings.theme)) applyTheme(state.settings.theme);
   state.lifecycle = payload.lifecycle || {};
   if (payload.workflow_library && typeof payload.workflow_library === "object") state.workflowLibrary = payload.workflow_library;
 };
@@ -1020,6 +1026,7 @@ const loadRouteData = async ({ scan = false } = {}) => {
         state.settings = setRes.value.settings;
         state.settings_revision = setRes.value.settings_revision;
         state.settingsRecovery = setRes.value.recovery;
+        state.settingsDirty = false;
       }
       if (backRes.status === "fulfilled" && backRes.value?.backups) {
         state.backups = backRes.value.backups;
@@ -1319,7 +1326,26 @@ const handleImageMaskForm = async (form) => {
   return result?.preset?.title ? `Đã lưu preset ${result.preset.title}.` : result?.layer?.name ? `Đã cập nhật layer ${result.layer.name}.` : "Đã autosave Image & Mask Studio cục bộ.";
 };
 
+const updateSettingsDirtyUi = () => {
+  const dirty = state.settingsDirty === true;
+  const banner = document.querySelector("[data-settings-dirty]");
+  if (banner) {
+    banner.dataset.settingsDirty = String(dirty);
+    banner.classList.toggle("is-dirty", dirty);
+    const title = banner.querySelector("strong");
+    const detail = banner.querySelector("span");
+    if (title) title.textContent = dirty ? "Có thay đổi chưa áp dụng" : "Cài đặt đã đồng bộ";
+    if (detail) detail.textContent = dirty ? "Các giá trị chỉ có hiệu lực sau khi bạn bấm Áp dụng & lưu." : "Không có thay đổi cục bộ đang chờ.";
+  }
+  const save = document.querySelector("[data-save-settings]");
+  if (save) save.disabled = !dirty;
+  const discard = document.querySelector("[data-discard-settings]");
+  if (discard) discard.disabled = !dirty;
+};
+
 document.addEventListener("change", (event) => {
+  const setting = event.target.closest("[data-setting-key]");
+  if (setting) { state.settingsDirty = true; updateSettingsDirtyUi(); return; }
   const modelCategory = event.target.closest("[data-model-category]");
   if (modelCategory) { state.modelFilters.category = String(modelCategory.value || "").slice(0, 48); render(); return; }
   const modelInstalled = event.target.closest("[data-model-installed]");
@@ -1362,6 +1388,8 @@ document.addEventListener("error", (event) => {
 }, true);
 
 document.addEventListener("input", (event) => {
+  const setting = event.target.closest("[data-setting-key]");
+  if (setting) { state.settingsDirty = true; updateSettingsDirtyUi(); return; }
   const jobSearch = event.target.closest("[data-job-search]");
   if (jobSearch) { state.jobQuery = String(jobSearch.value || "").slice(0, 120); state.jobPage = 1; render(); return; }
   const modelSearch = event.target.closest("[data-model-search]");
@@ -1948,6 +1976,12 @@ document.addEventListener("click", async (event) => {
     }
     return;
   }
+  if (event.target.closest("[data-discard-settings]")) {
+    state.settingsDirty = false;
+    state.settingsActionStatus = "Đã hủy các thay đổi chưa áp dụng.";
+    render();
+    return;
+  }
   if (event.target.closest("[data-save-settings]")) {
     const saveButton = event.target.closest("[data-save-settings]");
     const expectedRevision = Number(saveButton.dataset.expectedRevision ?? state.settings_revision ?? 0);
@@ -1970,6 +2004,13 @@ document.addEventListener("click", async (event) => {
       if (result.accepted) {
         state.settings = result.settings;
         state.settings_revision = result.settings_revision;
+        state.settingsDirty = false;
+        state.settingsActionStatus = `Đã áp dụng & lưu cài đặt · revision ${result.settings_revision}.`;
+        // The server has persisted the values atomically.  Reflect the same
+        // contract in the current shell immediately; otherwise language and
+        // theme appear to save successfully but stay stale until restart.
+        setLanguage(lang);
+        applyTheme(theme);
         showToast("Đã lưu cài đặt thành công.", "success");
         render();
       } else if (result.status === "conflict") {
@@ -1992,6 +2033,8 @@ document.addEventListener("click", async (event) => {
       if (result.accepted) {
         state.settings = result.settings;
         state.settings_revision = result.settings_revision;
+        state.settingsDirty = false;
+        state.settingsActionStatus = `Đã đặt lại cấu hình phần ${section} · revision ${result.settings_revision}.`;
         showToast(`Đã đặt lại cấu hình phần ${section}.`, "success");
         render();
       }

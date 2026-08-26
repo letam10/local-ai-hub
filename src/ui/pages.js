@@ -99,7 +99,7 @@ const renderDashboardFeature = createDashboardRenderer({
 });
 const renderJobsFeature = createJobsRenderer({ jobRecoverySnapshot, escapeHtml, uiTextHtml, statusPill, statusExplanation, statusImpact, readinessStatusLabel, artifactList, provenanceList, heading });
 const renderComponentsFeature = createComponentsRenderer({ heading, escapeHtml, statusPill, statusExplanation, statusImpact, readinessStatusLabel, uiTextHtml, uiText });
-const renderDiagnosticsFeature = createDiagnosticsRenderer({ heading, escapeHtml, statusPill, statusExplanation, statusImpact, uiTextHtml });
+const renderDiagnosticsFeature = createDiagnosticsRenderer({ heading, escapeHtml, statusPill, statusExplanation, statusImpact, uiText, uiTextHtml });
 const renderSettingsFeature = createSettingsRenderer({ heading, card, escapeHtml, uiTextHtml, statusPill, readinessStatusLabel, readinessSnapshot, readinessModuleDetails, readinessResourceDetails, readinessStorageDetails, mediaEvidencePanel });
 const renderAiri = createAiriRenderer({ app, heading, card, escapeHtml, statusPill, statusExplanation, statusImpact });
 const renderVision = createVisionRenderer({ component, tool, heading, visionWorkflowRail, capability, card, file, field, button, formResult });

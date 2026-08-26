@@ -24,6 +24,18 @@ const FINITE_ACCEPTANCE_STATES = new Set([
   "SOURCE_UNVERIFIED",
   "UNSUPPORTED_SOURCE",
 ]);
+const ACCEPTANCE_STATE_LABELS = Object.freeze({
+  AUTO_INSTALL_READY: "Sẵn sàng lập kế hoạch",
+  AUTH_REQUIRED: "Cần cấp quyền",
+  INTEGRITY_INCOMPLETE: "Thiếu kiểm tra toàn vẹn",
+  LICENSE_REVIEW_REQUIRED: "Cần xem giấy phép",
+  MANUAL_REVIEW_REQUIRED: "Cần xem thủ công",
+  REFERENCE_EXISTING: "Dùng bản có sẵn",
+  SIZE_UNKNOWN: "Chưa rõ dung lượng",
+  SOURCE_UNAVAILABLE: "Nguồn chưa khả dụng",
+  SOURCE_UNVERIFIED: "Nguồn chưa xác minh",
+  UNSUPPORTED_SOURCE: "Nguồn không hỗ trợ",
+});
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({
   "&": "&amp;",
@@ -122,7 +134,12 @@ const safeAcceptance = (value) => {
   };
 };
 
-const pill = (state) => `<span class="status-pill status-pill--${escapeHtml(String(state).toLowerCase().replace(/[^a-z0-9_-]+/g, "-"))}">${escapeHtml(state)}</span>`;
+const pill = (state) => {
+  const code = String(state || "unknown");
+  const label = ACCEPTANCE_STATE_LABELS[code] || code;
+  const semantic = ["AUTO_INSTALL_READY"].includes(code) ? "available" : ["UNSUPPORTED_SOURCE"].includes(code) ? "unavailable" : "partial";
+  return `<span class="status-pill" data-status="${escapeHtml(semantic)}" data-technical-status="${escapeHtml(code)}" title="${escapeHtml(code)}">${escapeHtml(label)} <code>${escapeHtml(code)}</code></span>`;
+};
 
 const renderOperations = (target, operations) => {
   const safe = operations.map(safeOperation).filter(Boolean);
@@ -130,7 +147,7 @@ const renderOperations = (target, operations) => {
     target.innerHTML = `<div class="empty-state"><strong>Chưa có V8 operation</strong><span>Kế hoạch mới sẽ xuất hiện ở đây bằng opaque operation ID.</span></div>`;
     return;
   }
-  target.innerHTML = `<div class="component-manager-list">${safe.map((item) => {
+    target.innerHTML = `<div class="component-manager-list">${safe.map((item) => {
     const actions = item.state === "planned" ? `<div class="form-actions"><button class="button button--compact button--accent" type="button" data-v8-operation-confirm="${escapeHtml(item.operation_id)}">Xác nhận operation</button><button class="button button--compact" type="button" data-v8-operation-cancel="${escapeHtml(item.operation_id)}">Hủy operation</button></div>` : "";
     const result = item.result_code ? `<p class="small">${uiText("Result:")} <strong>${escapeHtml(item.result_code)}</strong></p>` : "";
     return `<article class="component-plan-preview"><div class="split"><div><strong>${escapeHtml(item.component_id)}</strong><p class="small">${escapeHtml(item.component_type)} · ${escapeHtml(item.action)} · <code>${escapeHtml(item.operation_id)}</code></p></div>${pill(item.state)}</div>${result}${actions}</article>`;
@@ -149,7 +166,7 @@ const renderSourceAcceptance = (records) => {
       continue;
     }
     const req = item.requirements;
-    slot.innerHTML = `<div class="split"><strong>${uiText("V8 source acceptance")}</strong>${pill(item.acceptance_state)}</div><p class="small">${uiText("Disposition:")} ${escapeHtml(item.disposition)} · ${uiText("Auto-install:")} <strong>${item.auto_install_eligible ? uiText("eligible") : uiText("disabled")}</strong></p><p class="small">${uiText("Source")} ${requirementLabel(req.source_verified)} · ${uiText("Auth")} ${requirementLabel(req.authentication_ready)} · ${uiText("License")} ${requirementLabel(req.license_ready)} · ${uiText("Integrity")} ${requirementLabel(req.integrity_ready)} · ${uiText("Size")} ${requirementLabel(req.size_ready)}</p><div class="workspace-state__action"><strong>${uiText("Bước tiếp theo")}</strong><span>${escapeHtml(fixedCopy(item.next_action) || "Giữ component ở trạng thái non-automatic cho tới khi đủ evidence.")}</span></div>`;
+    slot.innerHTML = `<div class="split"><strong>${uiText("V8 source acceptance")}</strong>${pill(item.acceptance_state)}</div><p class="small">${uiText("Disposition:")} ${escapeHtml(item.disposition)} · ${uiText("Auto-install:")} <strong>${item.auto_install_eligible ? uiText("eligible") : uiText("disabled")}</strong></p><p class="small">${uiText("Source")} ${requirementLabel(req.source_verified)} · ${uiText("Auth")} ${requirementLabel(req.authentication_ready)} · ${uiText("License")} ${requirementLabel(req.license_ready)} · ${uiText("Integrity")} ${requirementLabel(req.integrity_ready)} · ${uiText("Size")} ${requirementLabel(req.size_ready)}</p><div class="workspace-state__action"><strong>${uiText("Bước tiếp theo")}</strong><span>${escapeHtml(fixedCopy(item.next_action) || "Giữ component ở trạng thái chưa tự động cho tới khi đủ bằng chứng.")}</span></div>`;
   }
 };
 

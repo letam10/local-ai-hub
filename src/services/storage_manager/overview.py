@@ -46,6 +46,8 @@ _model_cache: tuple[float, list[dict[str, Any]]] | None = None
 _scan_lock = threading.RLock()
 _scan_thread: threading.Thread | None = None
 _scan_cancel_events: dict[str, threading.Event] = {}
+_scan_cache_loaded = False
+_SCAN_CACHE_SCHEMA = "storage-scan-cache.v1"
 _scan_state: dict[str, Any] = {
     "schema_version": "storage-scan.v1",
     "scan_id": None,
@@ -66,6 +68,84 @@ _scan_state: dict[str, Any] = {
     "cancel_requested": False,
 }
 _SCAN_AREA_NAMES = ("Models", "Environments", "Runtime", "Cache", "Output", "Temp", "Logs")
+
+
+def _scan_cache_path(data_root: Path | None = None) -> Path:
+    """Return the machine-local exact-scan cache location.
+
+    The cache contains only the path-free storage projection and is kept under
+    the configured DATA_ROOT.  It is never committed to source control.
+    """
+
+    root = data_root if data_root is not None else _managed_roots()[0]
+    return Path(root) / "Config" / "storage_scan_cache.json"
+
+
+def _persist_exact_scan(result: dict[str, Any], data_root: Path) -> None:
+    if result.get("status") != "completed" or not result.get("scan", {}).get("exact"):
+        return
+    target = _scan_cache_path(data_root)
+    config_root = target.parent
+    try:
+        # Do not write through a reparse-pointed local-state directory.
+        if config_root.exists() and (config_root.is_symlink() or getattr(config_root.stat(follow_symlinks=False), "st_file_attributes", 0) & 0x400):
+            return
+        config_root.mkdir(parents=True, exist_ok=True)
+        payload = {"schema_version": _SCAN_CACHE_SCHEMA, "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "summary": result}
+        temporary = config_root / ".storage_scan_cache.tmp"
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    except (OSError, TypeError, ValueError):
+        try:
+            temporary.unlink(missing_ok=True)
+        except (UnboundLocalError, OSError):
+            pass
+
+
+def _restore_exact_scan_cache() -> None:
+    """Restore a previously completed exact result without scanning again."""
+
+    global _scan_cache_loaded, _scan_state, _size_cache
+    if _scan_cache_loaded or _scan_state.get("status") != "idle":
+        return
+    _scan_cache_loaded = True
+    try:
+        data_root = _managed_roots()[0]
+        payload = json.loads(_scan_cache_path(data_root).read_text(encoding="utf-8"))
+        result = payload.get("summary") if isinstance(payload, dict) else None
+        scan = result.get("scan") if isinstance(result, dict) else None
+        if not isinstance(result, dict) or not isinstance(scan, dict) or scan.get("exact") is not True or result.get("status") != "completed":
+            return
+        areas = result.get("areas") if isinstance(result.get("areas"), dict) else {}
+        _scan_state = {
+            "schema_version": "storage-scan.v1", "scan_id": scan.get("scan_id"), "status": "completed", "execution": "background",
+            "progress": 100, "current_area": None, "areas": {str(k): dict(v) for k, v in areas.items() if isinstance(v, dict)},
+            "exact": True, "mode": "deep_exact", "entries_scanned": int(scan.get("entries_scanned", 0)),
+            "files_scanned": int(scan.get("files_scanned", 0)), "total_bytes_counted": int(scan.get("total_bytes_counted", 0)),
+            "started_at": scan.get("started_at"), "completed_at": scan.get("completed_at"), "reason": result.get("reason", "Đã khôi phục tổng storage chính xác đã lưu."),
+            "next_action": result.get("next_action", "Bấm Quét lại sau khi có thay đổi bên ngoài."), "cancel_requested": False,
+            "disk": dict(result.get("disk") or {}), "volumes": [dict(item) for item in result.get("volumes") or [] if isinstance(item, dict)],
+            "volume_projection": dict(result.get("volume_projection") or {}), "legacy": [dict(item) for item in result.get("legacy") or [] if isinstance(item, dict)],
+            "legacy_counts": dict(result.get("legacy_counts") or {}),
+        }
+        _size_cache = (time.monotonic(), result)
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError, KeyError):
+        return
+
+
+def invalidate_storage_scan_cache() -> None:
+    """Forget the exact snapshot; the next explicit scan starts fresh."""
+
+    global _scan_cache_loaded, _size_cache, _scan_state
+    with _scan_lock:
+        _scan_cache_loaded = True
+        _size_cache = None
+        if _scan_thread is None or not _scan_thread.is_alive():
+            _scan_state = {**_scan_state, "status": "idle", "exact": False, "scan_id": None, "progress": 0, "areas": {}}
 
 
 def _managed_roots() -> tuple[Path, Path, Path, Path, Path, Path, Path, Path]:
@@ -439,7 +519,10 @@ def _storage_summary_from_reports(
         }
         for name, report in reports.items()
     }
-    exact = bool(reports) and all(report.get("complete") is True for report in reports.values())
+    # A result is exact only when every allowlisted storage area has a
+    # terminal complete report.  ``all([])`` and a cancelled worker with only
+    # its first area completed must never be promoted to exact.
+    exact = len(reports) == len(_SCAN_AREA_NAMES) and all(report.get("complete") is True for report in reports.values())
     status = scan_status or ("completed" if exact else "partial")
     if status == "running":
         reason = "Storage đang được quét nền theo từng vùng; số liệu hiện tại chưa phải tổng chính xác."
@@ -451,7 +534,21 @@ def _storage_summary_from_reports(
         reason = "Tất cả vùng storage được đọc hết; tổng bytes là chính xác."
         next_action = "Không cần thao tác; bấm Quét lại sau khi có thay đổi bên ngoài."
     else:
-        reason = "Một hoặc nhiều vùng không thể đọc hết; tổng hiển thị chỉ là số liệu đã đếm."
+        incomplete = [
+            name for name in _SCAN_AREA_NAMES
+            if name not in reports or reports[name].get("complete") is not True
+        ]
+        reparse = sum(int(report.get("reparse_entries", 0) or 0) for report in reports.values())
+        unreadable = sum(int(report.get("unreadable_entries", 0) or 0) for report in reports.values())
+        details: list[str] = []
+        if incomplete:
+            details.append("vùng chưa hoàn tất: " + ", ".join(incomplete[:7]))
+        if reparse:
+            details.append(f"{reparse} symlink/reparse point bị bỏ qua")
+        if unreadable:
+            details.append(f"{unreadable} mục không đọc được")
+        suffix = "; ".join(details) if details else "chưa có đủ bằng chứng hoàn tất"
+        reason = "Không thể xác nhận tổng storage chính xác: " + suffix + ". Tổng hiển thị chỉ là số liệu đã đếm."
         next_action = "Kiểm tra quyền/reparse point hoặc bấm Quét lại để xác nhận lại."
     volumes = _volume_projection()
     legacy = _legacy_records()
@@ -506,6 +603,8 @@ def _copy_scan_state() -> dict[str, Any]:
 def storage_scan_snapshot() -> dict[str, Any]:
     """Return a path-free, incremental scan projection for UI polling."""
 
+    with _scan_lock:
+        _restore_exact_scan_cache()
     state = _copy_scan_state()
     scan = {
         key: state.get(key)
@@ -626,7 +725,7 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
             with _scan_lock:
                 _scan_state["progress"] = round(index * 100 / len(roots))
         cancelled_scan = cancel_event.is_set()
-        exact = bool(reports) and not cancelled_scan and all(item.get("complete") is True for item in reports.values())
+        exact = len(reports) == len(roots) and not cancelled_scan and all(item.get("complete") is True for item in reports.values())
         completed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         if cancelled_scan:
             final_status = "cancelled"
@@ -672,6 +771,8 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
                 "legacy_counts": dict(result.get("legacy_counts") or {}),
             }
             _size_cache = (time.monotonic(), result)
+        if exact:
+            _persist_exact_scan(result, data_root)
     except Exception:
         with _scan_lock:
             _scan_state.update({
@@ -692,9 +793,10 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
 def start_storage_scan(*, force: bool = False, mode: str = "fast") -> dict[str, Any]:
     """Start a FAST snapshot or explicit DEEP_EXACT background scan."""
 
-    global _scan_thread, _scan_state, _size_cache
+    global _scan_thread, _scan_state, _size_cache, _scan_cache_loaded
     selected_mode = "deep_exact" if mode in {"deep", "deep_exact"} else "fast"
     with _scan_lock:
+        _restore_exact_scan_cache()
         if _scan_thread is not None and _scan_thread.is_alive():
             return storage_scan_snapshot()
         if not force and _scan_state.get("scan_id") and _scan_state.get("status") in {"completed", "partial", "cancelled", "unavailable"}:
@@ -720,6 +822,7 @@ def start_storage_scan(*, force: bool = False, mode: str = "fast") -> dict[str, 
             "files_scanned": 0,
             "cancel_requested": False,
         }
+        _scan_cache_loaded = True
         _scan_cancel_events[scan_id] = cancel_event
         _size_cache = None
         _scan_thread = threading.Thread(target=_scan_worker, args=(scan_id, selected_mode, cancel_event), name="LocalAIHub-storage-scan", daemon=True)
@@ -939,6 +1042,8 @@ def _legacy_records() -> list[dict[str, Any]]:
 
 def storage_summary(*, force: bool = False) -> dict[str, Any]:
     global _size_cache
+    with _scan_lock:
+        _restore_exact_scan_cache()
     now = time.monotonic()
     with _cache_lock:
         if not force and _size_cache and now - _size_cache[0] < _CACHE_SECONDS:
