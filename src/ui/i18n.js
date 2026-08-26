@@ -271,6 +271,48 @@ const V8_VI_UI_COPY = Object.freeze({
   "All tracked config files readable.": "Đã đọc được toàn bộ tệp cấu hình được theo dõi.", "Jobs store readable.": "Đã đọc được kho tác vụ.", "Artifact store accessible.": "Kho artifact có thể truy cập.", "Workflow library absent (no workflows saved yet).": "Chưa có thư viện workflow (chưa lưu workflow nào).", "Low disk space detected.": "Phát hiện dung lượng đĩa thấp.", "Free disk space on affected drives.": "Giải phóng dung lượng trên ổ đĩa bị ảnh hưởng.", "Disk space adequate.": "Dung lượng đĩa đủ.", "No error lines found in logs.": "Không tìm thấy dòng lỗi trong nhật ký.", "Logs/ directory absent — no errors logged yet.": "Chưa có thư mục nhật ký — chưa ghi nhận lỗi.", "No recovery or draft files found.": "Không tìm thấy tệp phục hồi hoặc bản nháp.", "Review the managed diagnostic source manually.": "Kiểm tra thủ công nguồn chẩn đoán do máy chủ quản lý.", "No action required.": "Không cần hành động thêm.", "Readiness is derived from server-owned static capability evidence.": "Mức sẵn sàng được suy ra từ bằng chứng năng lực tĩnh do máy chủ sở hữu.",
 });
 
+// Feature pages still share a few legacy English labels.  Keep these stable
+// template strings in one bounded table so selecting Vietnamese (or another
+// supported language) never leaves form labels and card titles untranslated.
+// Technical product names such as Qwen3-TTS, Seed-VC and Whisper remain
+// unchanged; only explanatory UI copy is translated.
+const PRODUCT_COPY_DICTIONARIES = Object.freeze({
+  vi: Object.freeze({
+    "Voice Studio": "Studio giọng nói", "Whisper / Subtitles": "Whisper / Phụ đề", "Media workspace": "Không gian media",
+    "Text to Speech": "Chuyển văn bản thành giọng nói", "Voice Design / Clone": "Thiết kế / nhân bản giọng nói", "Voice Conversion": "Chuyển đổi giọng nói",
+    "Voice Design": "Thiết kế giọng nói", "Voice Clone": "Nhân bản giọng nói", "Batch": "Theo lô", "Reference audio (chỉ Voice Clone)": "Âm thanh tham chiếu (chỉ nhân bản giọng nói)",
+    "Reference text": "Văn bản tham chiếu", "Source audio": "Âm thanh nguồn", "Target voice": "Giọng đích", "Diffusion steps": "Số bước khuếch tán", "Speaker": "Người nói",
+    "Transcript queue": "Hàng đợi bản chép lời", "Transcript + SRT": "Bản chép lời + SRT", "Transcript + burn subtitle": "Bản chép lời + ghi phụ đề",
+    "CPU safe": "CPU an toàn", "CUDA nếu environment hỗ trợ": "CUDA nếu môi trường hỗ trợ", "Output không ghi đè source media.": "Đầu ra không ghi đè media nguồn.",
+    "Cancel/resume dùng Jobs và chỉ dừng process do Hub sở hữu.": "Hủy/tiếp tục dùng Tác vụ và chỉ dừng tiến trình do Hub sở hữu.",
+    "Folder batch được lên kế hoạch qua nhiều job upload; không cần mở Whisper GUI.": "Thư mục theo lô được lập kế hoạch qua nhiều tác vụ tải lên; không cần mở giao diện Whisper.",
+    "Transcript, SRT và video subtitle xuất hiện ở Jobs": "Bản chép lời, SRT và phụ đề video xuất hiện trong Tác vụ",
+    "Media safety boundary": "Ranh giới an toàn media", "Generic video and image actions": "Thao tác video và hình ảnh chung",
+    "Pipeline video typed": "Pipeline video có kiểu", "Video Nodes": "Node video", "Sáng tạo video": "Sáng tạo video",
+  }),
+  en: Object.freeze({
+    "Voice Studio": "Voice Studio", "Whisper / Subtitles": "Whisper / Subtitles", "Media workspace": "Media workspace",
+    "Text to Speech": "Text to Speech", "Voice Design / Clone": "Voice Design / Clone", "Voice Conversion": "Voice Conversion",
+    "Voice Design": "Voice Design", "Voice Clone": "Voice Clone", "Batch": "Batch", "Reference audio (chỉ Voice Clone)": "Reference audio (Voice Clone only)",
+    "Reference text": "Reference text", "Source audio": "Source audio", "Target voice": "Target voice", "Diffusion steps": "Diffusion steps", "Speaker": "Speaker",
+    "Transcript queue": "Transcript queue", "Transcript + SRT": "Transcript + SRT", "Transcript + burn subtitle": "Transcript + burn subtitle",
+    "CPU safe": "CPU safe", "CUDA nếu environment hỗ trợ": "CUDA when the environment supports it", "Output không ghi đè source media.": "Output does not overwrite source media.",
+    "Cancel/resume dùng Jobs và chỉ dừng process do Hub sở hữu.": "Cancel/resume uses Jobs and stops only Hub-owned processes.",
+    "Folder batch được lên kế hoạch qua nhiều job upload; không cần mở Whisper GUI.": "Folder batches are planned through multiple upload jobs; no Whisper GUI is required.",
+    "Transcript, SRT và video subtitle xuất hiện ở Jobs": "Transcript, SRT and video subtitles appear in Jobs",
+    "Media safety boundary": "Media safety boundary", "Generic video and image actions": "Generic video and image actions", "Pipeline video typed": "Typed video pipeline", "Video Nodes": "VIDEO NODES",
+  }),
+  zh: Object.freeze({
+    "Voice Studio": "语音工作室", "Whisper / Subtitles": "Whisper / 字幕", "Media workspace": "媒体工作区", "Text to Speech": "文本转语音", "Voice Design / Clone": "语音设计 / 克隆", "Voice Conversion": "声音转换", "Voice Design": "语音设计", "Voice Clone": "语音克隆", "Batch": "批处理", "Reference audio (chỉ Voice Clone)": "参考音频（仅语音克隆）", "Reference text": "参考文本", "Source audio": "源音频", "Target voice": "目标声音", "Diffusion steps": "扩散步数", "Speaker": "说话人", "Transcript queue": "转录队列", "Transcript + SRT": "转录 + SRT", "Transcript + burn subtitle": "转录 + 烧录字幕", "CPU safe": "安全 CPU", "CUDA nếu environment hỗ trợ": "环境支持时使用 CUDA", "Output không ghi đè source media.": "输出不会覆盖源媒体。", "Cancel/resume dùng Jobs và chỉ dừng process do Hub sở hữu.": "取消/继续使用任务，并且只停止 Hub 拥有的进程。", "Folder batch được lên kế hoạch qua nhiều job upload; không cần mở Whisper GUI.": "批处理文件夹通过多个上传任务规划；无需打开 Whisper GUI。", "Transcript, SRT và video subtitle xuất hiện ở Jobs": "转录、SRT 和视频字幕会显示在任务中", "Media safety boundary": "媒体安全边界", "Generic video and image actions": "通用视频和图像操作", "Pipeline video typed": "类型化视频管线", "Video Nodes": "视频节点",
+  }),
+  ja: Object.freeze({
+    "Voice Studio": "ボイススタジオ", "Whisper / Subtitles": "Whisper / 字幕", "Media workspace": "メディアワークスペース", "Text to Speech": "テキスト読み上げ", "Voice Design / Clone": "ボイスデザイン / クローン", "Voice Conversion": "ボイス変換", "Voice Design": "ボイスデザイン", "Voice Clone": "ボイスクローン", "Batch": "一括処理", "Reference audio (chỉ Voice Clone)": "参照音声（ボイスクローンのみ）", "Reference text": "参照テキスト", "Source audio": "ソース音声", "Target voice": "対象ボイス", "Diffusion steps": "拡散ステップ", "Speaker": "話者", "Transcript queue": "文字起こしキュー", "Transcript + SRT": "文字起こし + SRT", "Transcript + burn subtitle": "文字起こし + 字幕焼き付け", "CPU safe": "安全な CPU", "CUDA nếu environment hỗ trợ": "環境が対応する場合は CUDA", "Output không ghi đè source media.": "出力はソースメディアを上書きしません。", "Cancel/resume dùng Jobs và chỉ dừng process do Hub sở hữu.": "キャンセル/再開はジョブを使用し、Hub 所有プロセスのみ停止します。", "Folder batch được lên kế hoạch qua nhiều job upload; không cần mở Whisper GUI.": "フォルダ一括処理は複数のアップロードジョブで計画します。Whisper GUI は不要です。", "Transcript, SRT và video subtitle xuất hiện ở Jobs": "文字起こし、SRT、動画字幕はジョブに表示されます", "Media safety boundary": "メディア安全境界", "Generic video and image actions": "一般的な動画・画像操作", "Pipeline video typed": "型付き動画パイプライン", "Video Nodes": "動画ノード",
+  }),
+  ko: Object.freeze({
+    "Voice Studio": "음성 스튜디오", "Whisper / Subtitles": "Whisper / 자막", "Media workspace": "미디어 작업 공간", "Text to Speech": "텍스트 음성 변환", "Voice Design / Clone": "음성 디자인 / 복제", "Voice Conversion": "음성 변환", "Voice Design": "음성 디자인", "Voice Clone": "음성 복제", "Batch": "일괄 처리", "Reference audio (chỉ Voice Clone)": "참조 오디오(음성 복제 전용)", "Reference text": "참조 텍스트", "Source audio": "원본 오디오", "Target voice": "대상 음성", "Diffusion steps": "확산 단계", "Speaker": "화자", "Transcript queue": "전사 대기열", "Transcript + SRT": "전사 + SRT", "Transcript + burn subtitle": "전사 + 자막 삽입", "CPU safe": "안전한 CPU", "CUDA nếu environment hỗ trợ": "환경이 지원하면 CUDA", "Output không ghi đè source media.": "출력은 원본 미디어를 덮어쓰지 않습니다.", "Cancel/resume dùng Jobs và chỉ dừng process do Hub sở hữu.": "취소/재개는 작업을 사용하며 Hub 소유 프로세스만 중지합니다.", "Folder batch được lên kế hoạch qua nhiều job upload; không cần mở Whisper GUI.": "폴더 일괄 처리는 여러 업로드 작업으로 계획하며 Whisper GUI가 필요하지 않습니다.", "Transcript, SRT và video subtitle xuất hiện ở Jobs": "전사, SRT 및 동영상 자막은 작업에 표시됩니다", "Media safety boundary": "미디어 안전 경계", "Generic video and image actions": "일반 동영상 및 이미지 작업", "Pipeline video typed": "타입이 지정된 동영상 파이프라인", "Video Nodes": "동영상 노드",
+  }),
+});
+
 // Explicit labels used by the page renderer.  These keys are template-owned
 // copy only; server-projected reasons, names, IDs and artifact text never pass
 // through this table.
@@ -370,7 +412,7 @@ export const setLanguage = (value) => {
 
 export const translateText = (value, language = currentLanguage()) => {
   let result = String(value ?? "");
-  const dictionary = { ...(DICTIONARIES[language] || DICTIONARIES.vi), ...(EXTRA_DICTIONARIES[language] || {}), ...(language === "vi" ? V8_VI_UI_COPY : {}), ...(PAGE_LABEL_DICTIONARIES[language] || {}), ...(COMPONENT_LABEL_DICTIONARIES[language] || {}) };
+  const dictionary = { ...(DICTIONARIES[language] || DICTIONARIES.vi), ...(EXTRA_DICTIONARIES[language] || {}), ...(language === "vi" ? V8_VI_UI_COPY : {}), ...(PRODUCT_COPY_DICTIONARIES[language] || {}), ...(PAGE_LABEL_DICTIONARIES[language] || {}), ...(COMPONENT_LABEL_DICTIONARIES[language] || {}) };
   for (const [source, target] of Object.entries(dictionary).sort((a, b) => b[0].length - a[0].length)) {
     if (source.length < 8 && /^[A-Za-z ]+$/.test(source)) {
       const escaped = source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

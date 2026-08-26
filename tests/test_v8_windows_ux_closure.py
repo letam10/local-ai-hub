@@ -124,6 +124,22 @@ class V8WindowsUxClosureTests(unittest.TestCase):
         self.assertIn("This means not installed, not that the source is unavailable.", models)
         self.assertIn("Needs verification", models)
 
+    def test_product_pages_have_vietnamese_feature_copy_dictionary(self) -> None:
+        i18n = (ROOT / "src" / "ui" / "i18n.js").read_text(encoding="utf-8")
+        pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
+        self.assertIn("const PRODUCT_COPY_DICTIONARIES", i18n)
+        self.assertIn("...(PRODUCT_COPY_DICTIONARIES[language] || {})", i18n)
+        for source, target in (
+            ("Voice Studio", "Studio giọng nói"),
+            ("Whisper / Subtitles", "Whisper / Phụ đề"),
+            ("Text to Speech", "Chuyển văn bản thành giọng nói"),
+            ("Voice Conversion", "Chuyển đổi giọng nói"),
+            ("Reference audio (chỉ Voice Clone)", "Âm thanh tham chiếu (chỉ nhân bản giọng nói)"),
+            ("Media safety boundary", "Ranh giới an toàn media"),
+        ):
+            self.assertIn(f'"{source}": "{target}"', i18n)
+            self.assertIn(f'"{source}"', pages)
+
     def test_deep_exact_requires_every_allowlisted_area(self) -> None:
         reports = {
             name: {"bytes": 1, "gb": 0.0, "status": "available", "complete": True, "entries_scanned": 1, "files_scanned": 1}
