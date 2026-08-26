@@ -628,6 +628,16 @@ def project_job_recovery(jobs: object) -> dict[str, Any]:
                 "Review the job state and create a new task when recovery is unavailable.",
             ),
         }
+        # V8 durable recovery intentionally reconstructs a new record only.  The
+        # projection must make that contract explicit so clients cannot present
+        # a queued dry-run as an executing retry.  Legacy hot jobs keep their
+        # existing same-session runner semantics and do not receive this label.
+        if durable:
+            record.update({
+                "execution": "not_run",
+                "dry_run": True,
+                "retry_mode": "reconstruct_only",
+            })
         if recovery is not None:
             record["recovery"] = recovery
             record["lifecycle"] = _project_lifecycle(item.get("lifecycle"), status)
@@ -837,7 +847,16 @@ def resume_durable_job(
                 "recovery": {**decision, "status": "unavailable", "action": "CREATE_NEW_JOB", "action_available": False, "reason": RECOVERY_REASON_INVALID, "next_action": RECOVERY_NEXT_CREATE},
                 "next_action": RECOVERY_NEXT_CREATE,
             }
-        return {"status": "queued", "execution": "not_run", "dry_run": True, "job": resumed, "recovery": decision}
+        return {
+            "status": "queued",
+            "execution": "not_run",
+            "dry_run": True,
+            "retry_mode": "reconstruct_only",
+            "actual_retry_execution": False,
+            "next_action": "A new durable task was created from the retained request, but it was not executed in V8.",
+            "job": resumed,
+            "recovery": decision,
+        }
     finally:
         engine.close()
 
@@ -852,7 +871,13 @@ def retry_durable_job(
 
     result = resume_durable_job(job_id, path, registry=registry)
     if result.get("status") == "queued":
-        result = {**result, "retry_contract": "new_job", "historical_record_preserved": True}
+        result = {
+            **result,
+            "retry_contract": "new_job",
+            "retry_mode": "reconstruct_only",
+            "actual_retry_execution": False,
+            "historical_record_preserved": True,
+        }
     else:
         result = {**result, "retry_contract": "unavailable", "historical_record_preserved": True}
     return result

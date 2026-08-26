@@ -111,7 +111,11 @@ import {
   confirmComponentUpdate,
   rollbackComponentUpdate,
 } from "./api.js";
+// The compatibility resumeDurableJob endpoint remains available for older
+// clients; this UI deliberately uses retryDurableJob so V8 says "new record,
+// not executed" truthfully.
 import { disposeNodeStudios, mountNodeStudios } from "./features/node_studio/studio.js";
+import { createStorageScanPoller, STORAGE_SCAN_ACTIVE_STATES } from "./storage_scan_polling.js";
 import { mountImageMaskCanvases } from "./image_mask_studio.js";
 import { createWorkflowLibraryAdapter } from "./workflow_library.js";
 import { NAVIGATION, jobRecoverySnapshot, renderPage } from "./pages.js";
@@ -199,7 +203,6 @@ const workflowLibraryAdapter = createWorkflowLibraryAdapter(null, {
   confirm_migration: ({ entries, expected_revision }) => confirmWorkflowLibraryMigration(entries, expected_revision),
 });
 let routeLoad = null;
-let storagePollGeneration = 0;
 let desktopCloseLayer = null;
 let artifactPreviewOpener = null;
 let disposeImageMaskCanvases = () => {};
@@ -859,7 +862,9 @@ const updateStorageScanDom = (result) => {
   const title = banner.querySelector(".card-title-row strong");
   if (title) {
     const area = scan.current_area ? ` · ${scan.current_area}` : "";
-    title.textContent = status === "running"
+    title.textContent = scan.polling_limited === true
+      ? "Quét vẫn đang chạy nền"
+      : status === "running"
       ? `${mode === "deep_exact" ? "Đang tính chính xác" : "Đang quét nhanh"} · ${progress}%${area}`
       : status === "cancelling" ? "Đang hủy quét …"
         : status === "completed" && scan.exact === true ? "Đã quét xong · tổng chính xác"
@@ -884,6 +889,13 @@ const updateStorageScanDom = (result) => {
   if (liveArea) liveArea.textContent = scan.current_area || "";
   const reason = banner.querySelector("[data-storage-scan-reason]");
   if (reason) reason.textContent = scan.reason || result?.reason || "";
+  const pollingNotice = banner.querySelector("[data-storage-polling-notice]");
+  if (pollingNotice) {
+    pollingNotice.textContent = scan.polling_limited === true
+      ? (scan.polling_message || "Quét vẫn đang chạy nền; bấm Theo dõi tiếp để cập nhật.")
+      : "";
+    pollingNotice.hidden = scan.polling_limited !== true;
+  }
 
   const areas = result?.areas && typeof result.areas === "object" ? result.areas : {};
   const list = view.querySelector("[data-storage-area-list]");
@@ -910,34 +922,45 @@ const updateStorageScanDom = (result) => {
   const action = view.querySelector("[data-storage-scan-action]");
   if (action) {
     const canCancel = (status === "running" || status === "cancelling") && mode === "deep_exact";
-    action.innerHTML = canCancel
-      ? `<button class="button button--danger" type="button" data-cancel-storage-scan="${escapeHtml(scan.scan_id || "")}"${status === "cancelling" ? " disabled" : ""}>Hủy quét</button>`
-      : `<button class="button" type="button" data-refresh-storage${status === "cancelling" ? " disabled" : ""}>Quét lại</button>`;
+    const buttons = [];
+    if (scan.polling_limited === true && STORAGE_SCAN_ACTIVE_STATES.includes(status)) {
+      buttons.push(`<button class="button" type="button" data-resume-storage-polling="${escapeHtml(scan.scan_id || "")}">Theo dõi tiếp</button>`);
+    }
+    if (canCancel) {
+      buttons.push(`<button class="button button--danger" type="button" data-cancel-storage-scan="${escapeHtml(scan.scan_id || "")}"${status === "cancelling" ? " disabled" : ""}>Hủy quét</button>`);
+    }
+    if (!buttons.length) buttons.push(`<button class="button" type="button" data-refresh-storage${status === "cancelling" ? " disabled" : ""}>Quét lại</button>`);
+    action.innerHTML = buttons.join("");
   }
 };
 
-const pollStorageScan = (scanId = "") => {
-  const generation = ++storagePollGeneration;
-  let attempts = 0;
-  const poll = async () => {
-    if (generation !== storagePollGeneration || routeId() !== "models" || attempts >= 120) return;
-    attempts += 1;
-    try {
-      const result = await getStorageScan();
-      const scan = result?.scan || {};
-      if (scanId && scan.scan_id && scan.scan_id !== scanId) return;
-      state.storage = result || state.storage;
-      state.storageScan = scan;
-      updateStorageScanDom(result || {});
-      if (scan.status === "running") {
-        window.setTimeout(poll, 500);
-      }
-    } catch {
-      // Keep the last bounded snapshot visible; a later manual refresh can retry.
-    }
-  };
-  window.setTimeout(poll, 250);
-};
+const storageScanPoller = createStorageScanPoller({
+  getSnapshot: getStorageScan,
+  isRouteActive: () => routeId() === "models",
+  onSnapshot: (result) => {
+    state.storage = result || state.storage;
+    state.storageScan = result?.scan || state.storageScan;
+    updateStorageScanDom(result || {});
+  },
+  onCeiling: (result) => {
+    const currentScan = state.storageScan && typeof state.storageScan === "object" ? state.storageScan : {};
+    if (!STORAGE_SCAN_ACTIVE_STATES.includes(String(currentScan.status || result?.scan?.status || "running"))) return;
+    const limitedScan = {
+      ...currentScan,
+      ...(result?.scan || {}),
+      polling_limited: true,
+      polling_message: "Quét vẫn đang chạy nền; bấm Theo dõi tiếp để cập nhật.",
+    };
+    state.storageScan = limitedScan;
+    state.storage = { ...(state.storage || {}), scan: limitedScan };
+    updateStorageScanDom(state.storage);
+  },
+  onError: () => {
+    // A transient loopback error is retried by the coordinator while the
+    // server-owned worker remains in running/cancelling state.
+  },
+});
+const pollStorageScan = (scanId = "") => storageScanPoller.start(scanId);
 
 const loadRouteData = async ({ scan = false } = {}) => {
   const route = routeId();
@@ -952,7 +975,7 @@ const loadRouteData = async ({ scan = false } = {}) => {
       if (results[2].status === "fulfilled") state.productionCatalog = results[2].value || state.productionCatalog;
       if (results[3].status === "fulfilled") state.updateCenter = { ...state.updateCenter, settings: results[3].value || state.updateCenter.settings };
       render();
-      if (state.storageScan?.status === "running") pollStorageScan(state.storageScan.scan_id || "");
+      if (STORAGE_SCAN_ACTIVE_STATES.includes(String(state.storageScan?.status || ""))) pollStorageScan(state.storageScan.scan_id || "");
     }).catch(() => {}).finally(() => { routeLoad = null; });
     return routeLoad;
   }
@@ -2093,11 +2116,21 @@ document.addEventListener("click", async (event) => {
       state.storageScan = result?.scan || state.storageScan;
       updateStorageScanDom(result || {});
       showToast("Đã gửi yêu cầu hủy quét storage; worker sẽ dừng ở checkpoint gần nhất.", "warning");
-      if (state.storageScan?.status === "cancelling" || state.storageScan?.status === "running") pollStorageScan(state.storageScan.scan_id || "");
+      if (STORAGE_SCAN_ACTIVE_STATES.includes(String(state.storageScan?.status || ""))) pollStorageScan(state.storageScan.scan_id || "");
     } catch (error) {
       showToast(error.message || "Không thể hủy quét storage.", "error");
       cancelStorageButton.disabled = false;
     }
+    return;
+  }
+  const resumeStoragePollingButton = event.target.closest("[data-resume-storage-polling]");
+  if (resumeStoragePollingButton) {
+    const scanId = resumeStoragePollingButton.dataset.resumeStoragePolling || "";
+    state.storageScan = { ...(state.storageScan || {}), polling_limited: false };
+    state.storage = { ...(state.storage || {}), scan: state.storageScan };
+    updateStorageScanDom(state.storage);
+    pollStorageScan(scanId);
+    showToast("Đã tiếp tục theo dõi scan storage nền.", "success");
     return;
   }
   const checkAllUpdatesButton = event.target.closest("[data-check-all-updates]");
@@ -2214,9 +2247,9 @@ document.addEventListener("click", async (event) => {
       const result = await retryDurableJob(durableResume.dataset.resumeDurableJob);
       const refreshed = await refreshFast({ quiet: true });
       if (refreshed === false) render();
-      const message = safeDisplayMessage(result?.next_action, result?.retry_contract === "new_job"
-        ? "Đã tạo job mới từ request đã xác thực; bản ghi lỗi cũ được giữ nguyên."
-        : "Không thể tạo job retry mới từ snapshot hiện tại.");
+      const message = result?.retry_contract === "new_job"
+        ? "Đã tạo tác vụ mới nhưng chưa thực thi; bản ghi lỗi cũ được giữ nguyên."
+        : safeDisplayMessage(result?.next_action, "Không thể tạo lại tác vụ từ snapshot hiện tại.");
       setJobActionStatus(message, result?.status === "unavailable" ? "warning" : "success"); showToast(message, "warning");
     } catch (error) {
       setJobActionStatus(error.message, "error"); showToast(error.message, "error");
@@ -2308,7 +2341,7 @@ document.addEventListener("keydown", async (event) => {
 });
 
 window.addEventListener("resize", syncSidebarState);
-window.addEventListener("hashchange", async () => { storagePollGeneration += 1; render({ focus: "main" }); await loadRouteData(); });
+window.addEventListener("hashchange", async () => { storageScanPoller.stop(); render({ focus: "main" }); await loadRouteData(); });
 syncSidebarState();
 applyTheme(currentTheme());
 setLanguage(currentLanguage());
