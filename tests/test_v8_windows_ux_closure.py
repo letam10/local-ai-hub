@@ -123,6 +123,9 @@ class V8WindowsUxClosureTests(unittest.TestCase):
         self.assertIn('data-model-readiness=', models)
         self.assertIn("This means not installed, not that the source is unavailable.", models)
         self.assertIn("Needs verification", models)
+        self.assertIn("const modelSizeLabel", models)
+        self.assertIn("formatGb(bytes)", models)
+        self.assertIn("${modelSizeLabel(item", models)
 
     def test_product_pages_have_vietnamese_feature_copy_dictionary(self) -> None:
         i18n = (ROOT / "src" / "ui" / "i18n.js").read_text(encoding="utf-8")

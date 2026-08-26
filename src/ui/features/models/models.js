@@ -37,6 +37,20 @@ const MODEL_READINESS_COPY = Object.freeze({
 
 const inventoryCount = (value, fallback = 0) => Number.isInteger(value) && value >= 0 ? value : fallback;
 
+const modelSizeLabel = (item, { escapeHtml, formatGb, uiTextHtml }) => {
+  const raw = typeof item?.size_label === "string" ? item.size_label.trim() : "";
+  const rawBytes = raw.match(/^(?:download:\s*)?(\d+)\s+bytes$/i);
+  const expectedBytes = Number.isSafeInteger(item?.expected_download_size_bytes) && item.expected_download_size_bytes >= 0
+    ? item.expected_download_size_bytes
+    : null;
+  const bytes = rawBytes ? Number(rawBytes[1]) : expectedBytes;
+  if (Number.isSafeInteger(bytes) && bytes >= 0) {
+    const prefix = rawBytes && /^download:/i.test(raw) ? `${uiTextHtml("Download")}: ` : "";
+    return `${escapeHtml(prefix)}${escapeHtml(formatGb(bytes))}<small class="row-meta">${escapeHtml(String(bytes))} bytes</small>`;
+  }
+  return escapeHtml(raw || "Size unavailable");
+};
+
 const modelReadinessCopy = (item) => {
   const status = String(item?.status || "UNKNOWN").toUpperCase();
   return MODEL_READINESS_COPY[status] || {
@@ -89,7 +103,7 @@ export function renderProductionModels({ productionCatalog, legacyModels, storag
     const sourceStatus = String(item.source_availability?.status || "UNKNOWN").toUpperCase();
     const readiness = modelReadinessCopy(item);
     const sourceLabel = sourceStatus === "UNKNOWN" ? "Source not verified" : sourceStatus === "AVAILABLE" ? "Source available" : "Source requires review";
-    return `<tr data-model-readiness="${escapeHtml(rawStatus.toLowerCase())}"><td><strong>${escapeHtml(item.display_name || item.model_id)}</strong><br><small>${escapeHtml(item.model_id || "")}</small></td><td>${escapeHtml(item.category || "Other")}</td><td>${escapeHtml(item.size_label || (item.expected_download_size_bytes ? `Download: ${item.expected_download_size_bytes} bytes` : "Size unavailable"))}</td><td>${statusPill(status)}<br><small>${uiTextHtml(readiness.label)}</small><br><small>${uiTextHtml("Source")}: ${uiTextHtml(sourceLabel)}</small><br><small>${escapeHtml(readiness.reason)}</small><br><small><strong>${uiTextHtml("Next action")}:</strong> ${escapeHtml(readiness.action)}</small><br><small>${uiTextHtml(action)}</small></td><td><button class="button button--compact" type="button" data-product-plan="${escapeHtml(item.model_id || "")}">${uiTextHtml(action)}</button><button class="button button--compact" type="button" data-check-update="${escapeHtml(item.model_id || "")}">${uiTextHtml("Check Update")}</button></td></tr>`;
+    return `<tr data-model-readiness="${escapeHtml(rawStatus.toLowerCase())}"><td><strong>${escapeHtml(item.display_name || item.model_id)}</strong><br><small>${escapeHtml(item.model_id || "")}</small></td><td>${escapeHtml(item.category || "Other")}</td><td>${modelSizeLabel(item, { escapeHtml, formatGb, uiTextHtml })}</td><td>${statusPill(status)}<br><small>${uiTextHtml(readiness.label)}</small><br><small>${uiTextHtml("Source")}: ${uiTextHtml(sourceLabel)}</small><br><small>${escapeHtml(readiness.reason)}</small><br><small><strong>${uiTextHtml("Next action")}:</strong> ${escapeHtml(readiness.action)}</small><br><small>${uiTextHtml(action)}</small></td><td><button class="button button--compact" type="button" data-product-plan="${escapeHtml(item.model_id || "")}">${uiTextHtml(action)}</button><button class="button button--compact" type="button" data-check-update="${escapeHtml(item.model_id || "")}">${uiTextHtml("Check Update")}</button></td></tr>`;
   }).join("");
   const legacyRows = legacy.map((item) => `<tr><td>${escapeHtml(item.model_name)}</td><td>${escapeHtml(item.engine)}</td><td>${formatGb(item.size?.bytes)}</td><td>${statusPill(item.installed ? "installed" : "not_installed")}</td></tr>`).join("");
   const table = catalogRows ? `<div class="table-wrap"><table><thead><tr><th>${uiTextHtml("Model")}</th><th>${uiTextHtml("Category")}</th><th>${uiTextHtml("Size")}</th><th>${uiTextHtml("Status / action")}</th><th></th></tr></thead><tbody>${catalogRows}</tbody></table></div>` : legacyRows ? `<div class="table-wrap"><table><thead><tr><th>${uiTextHtml("Model")}</th><th>${uiTextHtml("Engine")}</th><th>${uiTextHtml("Size")}</th><th>${uiTextHtml("Status")}</th></tr></thead><tbody>${legacyRows}</tbody></table></div>` : `<div class="empty-state compact">Chưa có model catalog.</div>`;
