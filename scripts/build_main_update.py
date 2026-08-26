@@ -126,7 +126,12 @@ def build(output: Path, *, update_kind: str = "APP_ONLY", runtime_root: Path | N
         "archive_sha256": digest,
         "file_count": len(paths) + len(runtime),
     }
-    (output / "update-manifest.json").write_text(json.dumps(manifest, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n", encoding="utf-8")
+    # Write the bytes that are hashed/packaged explicitly.  ``Path.write_text``
+    # uses the Windows text-mode newline translation, which turns the LF used
+    # for the digest calculation into CRLF on disk and makes the updater reject
+    # an otherwise valid artifact with UPDATE_CONTRACT_HASH_MISMATCH.
+    manifest_raw = (json.dumps(manifest, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+    (output / "update-manifest.json").write_bytes(manifest_raw)
     contract = {
         "schema_version": UPDATE_CONTRACT_SCHEMA,
         "update_kind": update_kind,
@@ -137,10 +142,11 @@ def build(output: Path, *, update_kind: str = "APP_ONLY", runtime_root: Path | N
         "minimum_launcher_version": "v8.0.1",
         "source_commit": source_commit,
     }
-    contract_raw = json.dumps(contract, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
-    (output / UPDATE_CONTRACT_NAME).write_text(contract_raw, encoding="utf-8")
-    contract_digest = hashlib.sha256(contract_raw.encode("utf-8")).hexdigest()
-    (output / "SHA256SUMS.txt").write_text(f"{digest}  {ARCHIVE_NAME}\n{contract_digest}  {UPDATE_CONTRACT_NAME}\n", encoding="utf-8")
+    contract_raw = (json.dumps(contract, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+    (output / UPDATE_CONTRACT_NAME).write_bytes(contract_raw)
+    contract_digest = hashlib.sha256(contract_raw).hexdigest()
+    sums_raw = f"{digest}  {ARCHIVE_NAME}\n{contract_digest}  {UPDATE_CONTRACT_NAME}\n".encode("ascii")
+    (output / "SHA256SUMS.txt").write_bytes(sums_raw)
     return manifest
 
 
