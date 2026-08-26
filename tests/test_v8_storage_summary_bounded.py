@@ -52,6 +52,29 @@ class StorageSummaryBoundedTests(unittest.TestCase):
             self.assertEqual(report["bytes"], 2)
             self.assertEqual(report["entries_scanned"], 1)
 
+    def test_background_scan_reports_progress_and_exact_completion(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            roots = self._roots(root)
+
+            def report(path: Path) -> dict[str, object]:
+                return {"bytes": 10, "gb": 0.0, "status": "available", "complete": True, "entries_scanned": 1, "reason": "bounded fixture", "next_action": "none"}
+
+            with patch.object(overview, "_managed_roots", return_value=roots), patch.object(overview, "_directory_size_report", side_effect=report), patch.object(overview, "_volume_projection", return_value=[]), patch.object(overview, "_legacy_records", return_value=[]), patch.object(overview, "_disk_snapshot", return_value={"status": "available"}):
+                overview._scan_thread = None
+                started = overview.start_storage_scan(force=True)
+                self.assertEqual(started["status"], "running")
+                thread = overview._scan_thread
+                self.assertIsNotNone(thread)
+                thread.join(timeout=2)
+                self.assertFalse(thread.is_alive())
+                snapshot = overview.storage_scan_snapshot()
+
+            self.assertEqual(snapshot["status"], "completed")
+            self.assertEqual(snapshot["scan"]["progress"], 100)
+            self.assertTrue(snapshot["scan"]["exact"])
+            self.assertEqual(len(snapshot["areas"]), 7)
+
 
 if __name__ == "__main__":
     unittest.main()

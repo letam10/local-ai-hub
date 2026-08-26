@@ -7,6 +7,7 @@ import os
 import shutil
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
@@ -39,6 +40,24 @@ _cache_lock = threading.Lock()
 _size_cache: tuple[float, dict[str, Any]] | None = None
 _volume_snapshot_cache: tuple[float, dict[str, Any]] | None = None
 _model_cache: tuple[float, list[dict[str, Any]]] | None = None
+_scan_lock = threading.RLock()
+_scan_thread: threading.Thread | None = None
+_scan_state: dict[str, Any] = {
+    "schema_version": "storage-scan.v1",
+    "scan_id": None,
+    "status": "idle",
+    "execution": "not_run",
+    "progress": 0,
+    "current_area": None,
+    "areas": {},
+    "exact": False,
+    "entries_scanned": 0,
+    "started_at": None,
+    "completed_at": None,
+    "reason": "Chưa có lần quét storage nào được yêu cầu.",
+    "next_action": "Bấm Quét lại để bắt đầu quét nền có giới hạn.",
+}
+_SCAN_AREA_NAMES = ("Models", "Environments", "Runtime", "Cache", "Output", "Temp", "Logs")
 
 
 def _managed_roots() -> tuple[Path, Path, Path, Path, Path, Path, Path, Path]:
@@ -180,6 +199,228 @@ def _directory_size(path: Path) -> int:
     """Compatibility helper for model summaries; never performs an unbounded walk."""
 
     return int(_directory_size_report(path)["bytes"])
+
+
+def _disk_snapshot(data_root: Path) -> dict[str, Any]:
+    """Return bounded disk metadata without echoing the machine path."""
+
+    try:
+        usage = shutil.disk_usage(data_root)
+        total, used, free = usage
+        if any(type(value) is not int or value < 0 for value in usage) or used > total or free > total:
+            raise OSError("invalid_disk_usage")
+    except (OSError, ValueError, TypeError):
+        return {"total_bytes": None, "free_bytes": None, "used_bytes": None, "free_gb": None, "low_space": None, "status": "unavailable"}
+    return {
+        "total_bytes": total,
+        "free_bytes": free,
+        "used_bytes": used,
+        "free_gb": round(free / (1024**3), 3),
+        "low_space": free < _LOW_SPACE_BYTES,
+        "status": "available",
+    }
+
+
+def _storage_summary_from_reports(
+    data_root: Path,
+    reports: dict[str, dict[str, Any]],
+    *,
+    scan_status: str | None = None,
+    scan_execution: str = "not_run",
+    progress: int = 100,
+    current_area: str | None = None,
+    scan_id: str | None = None,
+    started_at: str | None = None,
+    completed_at: str | None = None,
+) -> dict[str, Any]:
+    areas = {
+        name: {
+            **report,
+            "bytes": int(report.get("bytes", 0)),
+            "gb": float(report.get("gb", 0.0)),
+        }
+        for name, report in reports.items()
+    }
+    exact = bool(reports) and all(report.get("complete") is True for report in reports.values())
+    status = scan_status or ("completed" if exact else "partial")
+    if status == "running":
+        reason = "Storage đang được quét nền theo từng vùng; số liệu hiện tại chưa phải tổng chính xác."
+        next_action = "Giữ trang mở hoặc bấm làm mới để theo dõi tiến độ; không chạy lại khi scan đang hoạt động."
+    elif exact:
+        reason = "Tất cả vùng storage được quét xong trong ngân sách giới hạn."
+        next_action = "Không cần thao tác; bấm Quét lại sau khi có thay đổi bên ngoài."
+    else:
+        reason = "Một hoặc nhiều vùng vượt ngân sách quét; tổng hiển thị chỉ là số liệu tối thiểu."
+        next_action = "Bấm Quét lại sau khi giảm dữ liệu hoặc kiểm tra vùng chưa hoàn tất."
+    volumes = _volume_projection()
+    legacy = _legacy_records()
+    return {
+        "status": status,
+        "execution": scan_execution,
+        "scan": {
+            "schema_version": "storage-scan.v1",
+            "status": status,
+            "execution": scan_execution,
+            "progress": max(0, min(100, int(progress))),
+            "current_area": current_area,
+            "scan_id": scan_id,
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "exact": exact,
+            "max_entries": _DIRECTORY_SCAN_MAX_ENTRIES,
+            "max_depth": _DIRECTORY_SCAN_MAX_DEPTH,
+            "entries_scanned": sum(int(report.get("entries_scanned", 0)) for report in reports.values()),
+            "reason": reason,
+            "next_action": next_action,
+        },
+        "disk": _disk_snapshot(data_root),
+        "volumes": volumes,
+        "volume_projection": _volume_projection_payload(volumes),
+        "areas": areas,
+        "legacy": legacy,
+        "legacy_counts": {
+            "total": len(legacy),
+            "cleanup_candidates": sum(1 for item in legacy if item["cleanup_allowed"]),
+            "unverified": sum(1 for item in legacy if not item["managed"]),
+        },
+        "canonical_root": "LocalAIHub",
+        "data_location_class": "persistent_configured" if data_root != get_paths().app_root else "app_root",
+        "reason": reason,
+        "next_action": next_action,
+    }
+
+
+def _copy_scan_state() -> dict[str, Any]:
+    with _scan_lock:
+        state = dict(_scan_state)
+        state["areas"] = {name: dict(value) for name, value in (_scan_state.get("areas") or {}).items()}
+        return state
+
+
+def storage_scan_snapshot() -> dict[str, Any]:
+    """Return a path-free, incremental scan projection for UI polling."""
+
+    state = _copy_scan_state()
+    scan = {
+        key: state.get(key)
+        for key in ("schema_version", "scan_id", "status", "execution", "progress", "current_area", "exact", "entries_scanned", "started_at", "completed_at", "reason", "next_action")
+    }
+    return {
+        "status": state.get("status", "idle"),
+        "execution": state.get("execution", "not_run"),
+        "scan": scan,
+        "areas": state.get("areas", {}),
+        "disk": state.get("disk", {}),
+        "volumes": state.get("volumes", []),
+        "volume_projection": state.get("volume_projection", {"status": "partial", "execution": "not_run", "allowlist": ["c", "d"], "volumes": []}),
+        "legacy": state.get("legacy", []),
+        "legacy_counts": state.get("legacy_counts", {"total": 0, "cleanup_candidates": 0, "unverified": 0}),
+        "canonical_root": "LocalAIHub",
+        "reason": state.get("reason", ""),
+        "next_action": state.get("next_action", ""),
+    }
+
+
+def _scan_worker(scan_id: str) -> None:
+    global _scan_state, _size_cache, _scan_thread
+    data_root, model_root, environments_root, runtime_root, cache_root, output_root, temp_root, log_root = _managed_roots()
+    roots = dict(zip(_SCAN_AREA_NAMES, (model_root, environments_root, runtime_root, cache_root, output_root, temp_root, log_root)))
+    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    reports: dict[str, dict[str, Any]] = {}
+    try:
+        for index, (name, path) in enumerate(roots.items(), start=1):
+            with _scan_lock:
+                _scan_state.update({
+                    "status": "running",
+                    "execution": "background",
+                    "progress": round((index - 1) * 100 / len(roots)),
+                    "current_area": name,
+                    "started_at": started_at,
+                    "completed_at": None,
+                    "reason": "Storage đang được quét nền theo từng vùng; số liệu hiện tại chưa phải tổng chính xác.",
+                    "next_action": "Giữ trang mở hoặc bấm làm mới để theo dõi tiến độ; không chạy lại khi scan đang hoạt động.",
+                })
+            reports[name] = _directory_size_report(path)
+            with _scan_lock:
+                _scan_state["areas"] = {key: dict(value) for key, value in reports.items()}
+                _scan_state["entries_scanned"] = sum(int(item.get("entries_scanned", 0)) for item in reports.values())
+                _scan_state["progress"] = round(index * 100 / len(roots))
+        exact = all(item.get("complete") is True for item in reports.values())
+        completed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        result = _storage_summary_from_reports(
+            data_root,
+            reports,
+            scan_status="completed" if exact else "partial",
+            scan_execution="background",
+            progress=100,
+            current_area=None,
+            scan_id=scan_id,
+            started_at=started_at,
+            completed_at=completed_at,
+        )
+        with _scan_lock:
+            _scan_state = {
+                "schema_version": "storage-scan.v1",
+                "scan_id": scan_id,
+                "status": result["status"],
+                "execution": "background",
+                "progress": 100,
+                "current_area": None,
+                "areas": {name: dict(value) for name, value in reports.items()},
+                "exact": exact,
+                "entries_scanned": result["scan"]["entries_scanned"],
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "reason": result["reason"],
+                "next_action": result["next_action"],
+                "disk": dict(result.get("disk") or {}),
+                "volumes": [dict(item) for item in result.get("volumes") or []],
+                "volume_projection": dict(result.get("volume_projection") or {}),
+                "legacy": [dict(item) for item in result.get("legacy") or []],
+                "legacy_counts": dict(result.get("legacy_counts") or {}),
+            }
+            _size_cache = (time.monotonic(), result)
+    except Exception:
+        with _scan_lock:
+            _scan_state.update({
+                "status": "unavailable",
+                "execution": "background",
+                "progress": min(99, int(_scan_state.get("progress", 0))),
+                "current_area": None,
+                "reason": "Storage scan không hoàn tất; một vùng không thể đọc an toàn.",
+                "next_action": "Kiểm tra quyền vùng storage rồi thử lại.",
+            })
+    finally:
+        with _scan_lock:
+            _scan_thread = None
+
+
+def start_storage_scan(*, force: bool = False) -> dict[str, Any]:
+    """Start one bounded background scan, or return its current projection."""
+
+    global _scan_thread, _scan_state
+    with _scan_lock:
+        if _scan_thread is not None and _scan_thread.is_alive():
+            return _copy_scan_state()
+        scan_id = f"scan-{int(time.time() * 1000):x}"
+        _scan_state = {
+            "schema_version": "storage-scan.v1",
+            "scan_id": scan_id,
+            "status": "running",
+            "execution": "background",
+            "progress": 0,
+            "current_area": None,
+            "areas": {},
+            "exact": False,
+            "entries_scanned": 0,
+            "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "completed_at": None,
+            "reason": "Storage đang được quét nền theo từng vùng; số liệu hiện tại chưa phải tổng chính xác.",
+            "next_action": "Giữ trang mở hoặc bấm làm mới để theo dõi tiến độ; không chạy lại khi scan đang hoạt động.",
+        }
+        _scan_thread = threading.Thread(target=_scan_worker, args=(scan_id,), name="LocalAIHub-storage-scan", daemon=True)
+        _scan_thread.start()
+        return _copy_scan_state()
 
 
 def _bytes_record(value: int) -> dict[str, Any]:
