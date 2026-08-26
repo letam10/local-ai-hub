@@ -754,11 +754,10 @@ class DiagnosticsCenter:
         unavailable = counts.get("unavailable_count", 0)
         prefix = "Registry đọc được" if healthy else "Chưa đọc đủ registry"
         return (
-            f"{prefix}: {records} bản ghi {label}; quan sát cục bộ {observed}; "
-            f"đã xác minh cài đặt {verified}; đã có bằng chứng operational {operational}; "
-            f"đã cài nhưng chưa xác minh {unverified}; một phần {partial}; chưa rõ {unknown}; "
-            f"chưa cài {not_installed}; không khả dụng {unavailable}. "
-            "Healthy chỉ mô tả khả năng đọc inventory, không xác nhận mọi mục có thể chạy."
+            f"{prefix}: {records} bản ghi {label}; cục bộ {observed}; đã xác minh {verified}; "
+            f"operational {operational}; chưa xác minh {unverified}; một phần {partial}; "
+            f"chưa rõ {unknown}; chưa cài {not_installed}; không khả dụng {unavailable}. "
+            "Healthy chỉ nói registry đọc được, không bảo đảm mọi mục chạy được."
         )
 
     def models_inventory(self) -> dict[str, Any]:
