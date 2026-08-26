@@ -520,10 +520,16 @@ const jobRecoverySnapshot = (state) => {
     const detail = jobSource === "hot" ? hotDetails.get(actionId) || hotDetails.get(id) : null;
     const durableArtifacts = jobSource === "durable" ? safeJobArtifacts(item.artifacts) : [];
     const durableProvenance = jobSource === "durable" ? safeJobProvenance(item.provenance) : [];
+    const status = safeJobStatus(item.status);
+    const reconstructOnlyPending = jobSource === "durable" && status === "queued" && (
+      item.reconstruct_only_pending === true
+      || item.retry_mode === "reconstruct_only"
+      || item.execution === "not_run"
+    );
+    const active = ["queued", "starting", "running", "cancelling"].includes(status) && !reconstructOnlyPending;
     const durableLifecycle = jobSource === "durable" && item.lifecycle && typeof item.lifecycle === "object" && !Array.isArray(item.lifecycle)
       ? safeUiText(item.lifecycle.state || item.lifecycle_status, "")
       : safeUiText(item.lifecycle_status, "");
-    const status = safeJobStatus(item.status);
     const progress = Number.isInteger(item.progress) && item.progress >= 0 && item.progress <= 100 ? item.progress : 0;
     return [{
       id,
@@ -534,11 +540,14 @@ const jobRecoverySnapshot = (state) => {
       source: jobSource,
       sourceLabel: jobSource === "durable" ? "Durable" : "Hot",
       status,
+      active,
+      reconstructOnlyPending,
       progress,
       resumable: item.resumable === true,
       retryMode: jobSource === "durable" ? "reconstruct_only" : "same_session",
       execution: jobSource === "durable" ? "not_run" : "",
       dryRun: jobSource === "durable" && item.dry_run === true,
+      actualRetryExecution: jobSource === "durable" ? false : null,
       errorCode: safeUiIdentifier(item.error_code || (item.result && item.result.failure_code), ""),
       reason: safeUiText(item.reason || item.error || detail?.error || detail?.reason || detail?.message, "Chưa có nguyên nhân an toàn trong snapshot này."),
       nextAction: safeUiText(item.next_action, "Kiểm tra backend liên quan rồi tạo lại tác vụ nếu cần."),
@@ -575,14 +584,14 @@ const jobRecoverySnapshot = (state) => {
     return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
   });
   const derivedCounts = {
-    active: records.filter((item) => ["queued", "starting", "running", "cancelling"].includes(item.status)).length,
+    active: records.filter((item) => item.active === true).length,
     attention: records.filter((item) => ["failed", "unavailable", "cancelled", "interrupted"].includes(item.status)).length,
     interrupted: records.filter((item) => item.status === "interrupted").length,
     recoverable: records.filter((item) => item.resumable === true).length,
     total: records.length,
   };
   const publishedCounts = productJobs.counts && typeof productJobs.counts === "object" && !Array.isArray(productJobs.counts) ? productJobs.counts : {};
-  const counts = Object.fromEntries(Object.keys(derivedCounts).map((key) => [key, safeJobCount(publishedCounts[key], derivedCounts[key])]));
+  const counts = Object.fromEntries(Object.keys(derivedCounts).map((key) => [key, key === "active" ? derivedCounts.active : safeJobCount(publishedCounts[key], derivedCounts[key])]));
   const fallbackStatus = counts.attention > 0 ? "partial" : "ready";
   return {
     source: hasCanonical ? "productization.jobs" : "legacy job snapshot fallback",

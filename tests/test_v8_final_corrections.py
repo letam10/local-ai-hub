@@ -10,7 +10,7 @@ import unittest
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from src.services.api.v5_productization import retry_durable_job
+from src.services.api.v5_productization import project_job_recovery, retry_durable_job
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,6 +119,112 @@ assert.match(ceiling.ceilings[0], /Quét vẫn đang chạy nền/);
         self.assertEqual(result["execution"], "not_run")
         self.assertTrue(result["dry_run"])
         self.assertTrue(result["historical_record_preserved"])
+
+    def test_public_projection_excludes_reconstruct_only_pending_from_active_counts(self) -> None:
+        old_id = "jobv5_" + "a" * 32
+        new_id = "jobv5_" + "b" * 32
+        projected = project_job_recovery([
+            {
+                "id": old_id,
+                "source": "durable",
+                "status": "failed",
+                "retry_mode": "reconstruct_only",
+                "execution": "not_run",
+                "dry_run": True,
+            },
+            {
+                "id": new_id,
+                "source": "durable",
+                "status": "queued",
+                "retry_of": old_id,
+                "execution": "not_run",
+            },
+        ])
+        new_record = next(item for item in projected["records"] if item["id"] == new_id)
+        self.assertEqual(projected["counts"]["active"], 0)
+        self.assertFalse(new_record["active"])
+        self.assertTrue(new_record["reconstruct_only_pending"])
+        self.assertEqual(new_record["status"], "queued")
+        self.assertEqual(new_record["execution"], "not_run")
+        self.assertTrue(new_record["dry_run"])
+        self.assertFalse(new_record["actual_retry_execution"])
+
+    def test_live_hot_queued_job_remains_active(self) -> None:
+        job_id = "job_hot_queued"
+        projected = project_job_recovery([{"id": job_id, "source": "hot", "status": "queued"}])
+        record = projected["records"][0]
+        self.assertEqual(projected["counts"]["active"], 1)
+        self.assertTrue(record["active"])
+        self.assertFalse(record["reconstruct_only_pending"])
+
+    def test_jobs_ui_excludes_reconstruct_only_pending_but_keeps_hot_queue_active(self) -> None:
+        durable_id = "jobv5_" + "c" * 32
+        hot_id = "job_hot_queued"
+        state = {
+            "productization": {
+                "jobs": {
+                    "status": "partial",
+                    "execution": "not_run",
+                    "dry_run": True,
+                    "records": [{
+                        "id": durable_id,
+                        "tool": "unit_retryable",
+                        "source": "durable",
+                        "status": "queued",
+                        "progress": 0,
+                        "retry_mode": "reconstruct_only",
+                        "execution": "not_run",
+                        "dry_run": True,
+                        "artifacts": [],
+                    }],
+                    # Deliberately stale to prove the frontend derives active
+                    # from the public record semantics instead of this count.
+                    "counts": {"active": 1, "attention": 0, "interrupted": 0, "recoverable": 0, "total": 1},
+                },
+            },
+        }
+        hot_state = {
+            "productization": {
+                "jobs": {
+                    "status": "partial",
+                    "execution": "not_run",
+                    "dry_run": True,
+                    "records": [{
+                        "id": hot_id,
+                        "tool": "unit_live",
+                        "source": "hot",
+                        "status": "queued",
+                        "progress": 0,
+                        "artifacts": [],
+                    }],
+                    "counts": {"active": 0, "attention": 0, "interrupted": 0, "recoverable": 0, "total": 1},
+                },
+            },
+        }
+        script = f'''
+import assert from "node:assert/strict";
+import {{ jobRecoverySnapshot }} from "./src/ui/pages.js";
+import {{ renderPage }} from "./src/ui/pages.js";
+const state = {json.dumps(state, ensure_ascii=True)};
+const recovery = jobRecoverySnapshot(state);
+assert.equal(recovery.counts.active, 0);
+assert.equal(recovery.records[0].active, false);
+assert.equal(recovery.records[0].reconstructOnlyPending, true);
+assert.equal(recovery.records[0].actualRetryExecution, false);
+const allHtml = renderPage("jobs", state);
+assert.match(allHtml, /Đã tạo · chưa thực thi/);
+assert.doesNotMatch(allHtml, /Đang xử lý/);
+const activeHtml = renderPage("jobs", {{ ...state, jobFilter: "active" }});
+assert.doesNotMatch(activeHtml, /{durable_id}/);
+const hotState = {json.dumps(hot_state, ensure_ascii=True)};
+const hotRecovery = jobRecoverySnapshot(hotState);
+assert.equal(hotRecovery.counts.active, 1);
+assert.equal(hotRecovery.records[0].active, true);
+const hotActiveHtml = renderPage("jobs", {{ ...hotState, jobFilter: "active" }});
+assert.match(hotActiveHtml, /{hot_id}/);
+'''
+        result = _run_node(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_frontend_exposes_long_polling_and_truthful_durable_retry_labels(self) -> None:
         app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")

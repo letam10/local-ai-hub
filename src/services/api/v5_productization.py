@@ -74,6 +74,14 @@ _LIFECYCLE_JOB_ID = re.compile(r"jobv5_[a-f0-9]{32}")
 _LIFECYCLE_FINGERPRINT = re.compile(r"[a-f0-9]{64}")
 
 
+def _is_reconstruct_only_pending(item: Mapping[str, Any], *, durable: bool, status: str) -> bool:
+    """Identify a durable queued record that has no dispatching worker."""
+
+    if not durable or status != "queued":
+        return False
+    return item.get("retry_mode") == "reconstruct_only" or item.get("execution") == "not_run"
+
+
 def _status(value: object, fallback: str = "partial") -> str:
     candidate = str(value or fallback)
     return candidate if candidate in _STATUS_ALLOWLIST else fallback
@@ -616,11 +624,15 @@ def project_job_recovery(jobs: object) -> dict[str, Any]:
         progress = max(0, min(100, int(raw_progress))) if type(raw_progress) in {int, float} and math.isfinite(raw_progress) else 0
         job_id = item.get("id")
         safe_job_id = job_id if isinstance(job_id, str) and _LIFECYCLE_JOB_ID.fullmatch(job_id) else _safe_id(job_id, "job")
+        reconstruct_only_pending = _is_reconstruct_only_pending(item, durable=durable, status=status)
+        active = status in _ACTIVE_JOB_STATES and not reconstruct_only_pending
         record: dict[str, Any] = {
             "id": safe_job_id,
             "tool": _safe_id(item.get("tool"), "job"),
             "source": "durable" if durable else _safe_id(item.get("source"), "legacy"),
             "status": status,
+            "active": active,
+            "reconstruct_only_pending": reconstruct_only_pending,
             "progress": progress,
             "resumable": bool(resumable) and status in _ATTENTION_JOB_STATES,
             "next_action": recovery["next_action"] if recovery is not None else _text(
@@ -637,6 +649,7 @@ def project_job_recovery(jobs: object) -> dict[str, Any]:
                 "execution": "not_run",
                 "dry_run": True,
                 "retry_mode": "reconstruct_only",
+                "actual_retry_execution": False,
             })
         if recovery is not None:
             record["recovery"] = recovery
@@ -644,7 +657,7 @@ def project_job_recovery(jobs: object) -> dict[str, Any]:
             record["artifacts"] = _project_artifacts(item.get("artifacts"))
         records.append(record)
         counts["total"] += 1
-        if status in _ACTIVE_JOB_STATES:
+        if active:
             counts["active"] += 1
         if status in _ATTENTION_JOB_STATES:
             counts["attention"] += 1
