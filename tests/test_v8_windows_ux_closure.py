@@ -131,6 +131,8 @@ class V8WindowsUxClosureTests(unittest.TestCase):
         self.assertIn("...(PRODUCT_COPY_DICTIONARIES[language] || {})", i18n)
         for source, target in (
             ("Voice Studio", "Studio giọng nói"),
+            ("Voice", "Giọng nói"),
+            ("Diagnostics", "Chẩn đoán"),
             ("Whisper / Subtitles", "Whisper / Phụ đề"),
             ("Text to Speech", "Chuyển văn bản thành giọng nói"),
             ("Voice Conversion", "Chuyển đổi giọng nói"),
@@ -139,6 +141,8 @@ class V8WindowsUxClosureTests(unittest.TestCase):
         ):
             self.assertIn(f'"{source}": "{target}"', i18n)
             self.assertIn(f'"{source}"', pages)
+        rendering = (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
+        self.assertIn("<p>${uiTextHtml(note)}</p>", rendering)
 
     def test_deep_exact_requires_every_allowlisted_area(self) -> None:
         reports = {

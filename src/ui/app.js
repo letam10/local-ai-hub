@@ -688,7 +688,7 @@ const updateTopbar = () => {
   gpuMetric.textContent = gpu.name ? `GPU ${gpu.name}` : "GPU chưa phát hiện";
   if (apiEndpoint) apiEndpoint.textContent = `API ${window.location.host || "127.0.0.1"}`;
   const recovery = jobRecoverySnapshot(state);
-  jobSummary.textContent = `Jobs: ${recovery.counts.active} active · ${recovery.counts.total} records`;
+  jobSummary.textContent = `${translateText("Jobs")}: ${recovery.counts.active} ${translateText("active")} · ${recovery.counts.total} ${translateText("records")}`;
 };
 
 const render = ({ background = false, focus = "" } = {}) => {
