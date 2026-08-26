@@ -27,7 +27,7 @@ export function createDiagnosticsRenderer(deps) {
     const checkedAt = info?.checked_at || "Chưa có thời điểm kiểm tra";
     const count = (value) => Number.isInteger(value) && value >= 0 ? String(value) : "—";
     const inventorySummary = ["models_inventory", "environments_inventory", "runtime_inventory"].includes(id) && Number.isInteger(info?.registry_records)
-      ? `<p class="diagnostics-inventory-summary"><span>${uiText("Registry records")}</span> ${count(info.registry_records)} · <span>${uiText("Observed locally")}</span> ${count(info.observed_count)} · <span>${uiText("Verified installed")}</span> ${count(info.verified_installed)} · <span>${uiText("Operational evidence")}</span> ${count(info.operational_count)} · <span>${uiText("Not installed")}</span> ${count(info.not_installed_count)} · <span>${uiText("Unavailable")}</span> ${count(info.unavailable_count)}</p>`
+      ? `<p class="diagnostics-inventory-summary"><span>${uiText("Registry records")}</span> ${count(info.registry_records)} · <span>${uiText("Managed roots observed")}</span> ${count(Number.isInteger(info.root_present_count) ? info.root_present_count : info.observed_count)} · <span>${uiText("Verified installed")}</span> ${count(info.verified_installed)} · <span>${uiText("Operational evidence")}</span> ${count(info.operational_count)} · <span>${uiText("Not installed")}</span> ${count(info.not_installed_count)} · <span>${uiText("Unavailable")}</span> ${count(info.unavailable_count)}</p>`
       : "";
     const purpose = {
       git_integrity: "Xác nhận source/repository không bị thay đổi ngoài contract.",

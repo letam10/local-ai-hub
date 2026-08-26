@@ -313,6 +313,8 @@ def _public_inventory_summary(result: dict[str, Any], raw: object) -> dict[str, 
     for key in (
         "registry_records",
         "observed_count",
+        "root_present_count",
+        "reparse_count",
         "verified_installed",
         "installed_unverified_count",
         "operational_count",
@@ -452,7 +454,7 @@ def _public_subsystem(name: str, raw: object) -> dict[str, Any]:
             "total_count", "drives", "drive_count", "low_space", "gpus", "gpu_count", "lines", "error_count",
             "has_errors", "digest", "files", "recovery_count", "has_recovery_files", "category_flags",
             "root_verified", "inside_work_tree", "inspected", "evidence_summary", "impact", "checked_at",
-            "registry_records", "observed_count", "verified_installed", "installed_unverified_count",
+            "registry_records", "observed_count", "root_present_count", "reparse_count", "verified_installed", "installed_unverified_count",
             "operational_count", "partial_count", "unknown_count", "not_installed_count", "unavailable_count",
             "inventory_healthy", "readiness_note", "scan_status", "scan_mode", "scan_exact",
             "scan_progress", "scan_files", "scan_bytes", "scan_reason", "scan_next_action",
@@ -745,6 +747,7 @@ class DiagnosticsCenter:
 
         records = counts.get("registry_records", 0)
         observed = counts.get("observed_count", 0)
+        root_present = counts.get("root_present_count", observed)
         verified = counts.get("verified_installed", 0)
         unverified = counts.get("installed_unverified_count", 0)
         operational = counts.get("operational_count", 0)
@@ -754,7 +757,7 @@ class DiagnosticsCenter:
         unavailable = counts.get("unavailable_count", 0)
         prefix = "Registry đọc được" if healthy else "Chưa đọc đủ registry"
         return (
-            f"{prefix}: {records} bản ghi {label}; cục bộ {observed}; đã xác minh {verified}; "
+            f"{prefix}: {records} bản ghi {label}; catalog cục bộ {observed}; root managed {root_present}; đã xác minh {verified}; "
             f"operational {operational}; chưa xác minh {unverified}; một phần {partial}; "
             f"chưa rõ {unknown}; chưa cài {not_installed}; không khả dụng {unavailable}. "
             "Healthy chỉ nói registry đọc được, không bảo đảm mọi mục chạy được."
@@ -773,6 +776,8 @@ class DiagnosticsCenter:
             fallback_counts = catalog_counts or {
                 "registry_records": len(MODEL_PATHS),
                 "observed_count": 0,
+                "root_present_count": 0,
+                "reparse_count": 0,
                 "verified_installed": 0,
                 "installed_unverified_count": 0,
                 "operational_count": 0,
@@ -801,6 +806,8 @@ class DiagnosticsCenter:
         counts = catalog_counts or {
             "registry_records": len(entries),
             "observed_count": present,
+            "root_present_count": present,
+            "reparse_count": reparse_partial,
             "verified_installed": 0,
             "installed_unverified_count": 0,
             "operational_count": 0,
@@ -809,8 +816,9 @@ class DiagnosticsCenter:
             "not_installed_count": len(missing_keys),
             "unavailable_count": 0,
         }
+        counts = {**counts, "root_present_count": present, "reparse_count": reparse_partial}
         if reparse_partial:
-            counts = {**counts, "partial_count": counts.get("partial_count", 0) + reparse_partial}
+            counts["partial_count"] = counts.get("partial_count", 0) + reparse_partial
         missing_count = counts.get("not_installed_count", len(missing_keys))
         needs_review = counts.get("installed_unverified_count", 0) + counts.get("partial_count", 0) + counts.get("unknown_count", 0)
         next_action = (
@@ -849,6 +857,8 @@ class DiagnosticsCenter:
         counts = {
             "registry_records": len(envs),
             "observed_count": len(envs),
+            "root_present_count": len(envs),
+            "reparse_count": 0,
             "verified_installed": 0,
             "installed_unverified_count": 0,
             "operational_count": 0,
@@ -873,6 +883,8 @@ class DiagnosticsCenter:
         counts = catalog_counts or {
             "registry_records": len(entries),
             "observed_count": present,
+            "root_present_count": present,
+            "reparse_count": 0,
             "verified_installed": 0,
             "installed_unverified_count": 0,
             "operational_count": 0,
@@ -881,6 +893,7 @@ class DiagnosticsCenter:
             "not_installed_count": len(entries) - present,
             "unavailable_count": 0,
         }
+        counts = {**counts, "root_present_count": present, "reparse_count": 0}
         healthy = catalog_counts is not None or bool(present)
         return {
             **_status(HEALTHY if healthy else UNAVAILABLE, self._inventory_reason("runtime", counts, healthy=healthy), "Mở Components để kiểm tra import/runtime smoke và trạng thái cài đặt." if counts.get("not_installed_count", 0) else "Inventory đã đọc được; runtime vẫn cần bằng chứng bounded smoke."),

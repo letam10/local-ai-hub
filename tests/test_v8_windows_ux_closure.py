@@ -96,6 +96,8 @@ class V8WindowsUxClosureTests(unittest.TestCase):
                 "models": {"model-a": {"present": False}},
                 "registry_records": 2,
                 "observed_count": 1,
+                "root_present_count": 1,
+                "reparse_count": 0,
                 "verified_installed": 0,
                 "installed_unverified_count": 1,
                 "operational_count": 0,
@@ -108,7 +110,7 @@ class V8WindowsUxClosureTests(unittest.TestCase):
             }
         }
         projected = public_snapshot_projection(raw)["models_inventory"]
-        for key in ("registry_records", "observed_count", "verified_installed", "installed_unverified_count", "operational_count", "partial_count", "unknown_count", "not_installed_count", "unavailable_count"):
+        for key in ("registry_records", "observed_count", "root_present_count", "reparse_count", "verified_installed", "installed_unverified_count", "operational_count", "partial_count", "unknown_count", "not_installed_count", "unavailable_count"):
             self.assertIn(key, projected)
         self.assertNotIn("models", projected)
         self.assertEqual(projected["not_installed_count"], 1)
