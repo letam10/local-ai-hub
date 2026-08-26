@@ -2397,6 +2397,25 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "jobs.durable_retry",
+      "method": "POST",
+      "path": "/api/durable-jobs/{job_id}/retry",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/jobs.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "image_mask.create",
       "method": "POST",
       "path": "/api/image-mask-studio/sessions",
@@ -3008,6 +3027,25 @@
       "route_id": "compat.storage_scan",
       "method": "POST",
       "path": "/api/storage/scan",
+      "domain": "storage",
+      "owner": "src/services/api/routes/compatibility.py",
+      "service": "storage",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "compat.storage_scan_cancel",
+      "method": "POST",
+      "path": "/api/storage/scan/cancel",
       "domain": "storage",
       "owner": "src/services/api/routes/compatibility.py",
       "service": "storage",

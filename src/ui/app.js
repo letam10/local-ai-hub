@@ -36,7 +36,7 @@ import {
   deleteJobHistory,
   clearTerminalJobHistory,
   getDurableJobs,
-  resumeDurableJob,
+  retryDurableJob,
   getWorkflowLibrary,
   saveWorkflowLibrary,
   deleteWorkflowLibrary,
@@ -87,6 +87,7 @@ import {
   saveImageMaskSession,
   saveComfyBridgeWorkflow,
   scanStorage,
+  cancelStorageScan,
   startComfyAdvanced,
   submitJob,
   updateAsset,
@@ -841,6 +842,80 @@ const refreshImageMaskStudio = async ({ renderView = true, before = "", after = 
   }
 };
 
+const updateStorageScanDom = (result) => {
+  // Polling a storage scan must not tear down the module DOM (and must not
+  // remount canvases, reset focus, or reload the whole WebView).  Update only
+  // the bounded status/area projection that the Models page owns.
+  if (routeId() !== "models") return;
+  const scan = result?.scan && typeof result.scan === "object" ? result.scan : {};
+  const status = String(scan.status || result?.status || "idle");
+  const mode = String(scan.mode || result?.scan_mode || "fast");
+  const progress = Math.max(0, Math.min(100, Number.isFinite(Number(scan.progress)) ? Number(scan.progress) : 0));
+  const banner = view.querySelector("[data-storage-scan-status]");
+  if (!banner) { render(); return; }
+  banner.dataset.storageScanStatus = status;
+  banner.dataset.storageScanMode = mode;
+  banner.dataset.storageScanProgress = String(progress);
+  const title = banner.querySelector(".card-title-row strong");
+  if (title) {
+    const area = scan.current_area ? ` · ${scan.current_area}` : "";
+    title.textContent = status === "running"
+      ? `${mode === "deep_exact" ? "Đang tính chính xác" : "Đang quét nhanh"} · ${progress}%${area}`
+      : status === "cancelling" ? "Đang hủy quét …"
+        : status === "completed" && scan.exact === true ? "Đã quét xong · tổng chính xác"
+          : status === "partial" ? "Đã quét một phần · tổng chưa đủ"
+            : status === "cancelled" ? "Đã hủy quét · tổng chưa đủ"
+              : status === "unavailable" ? "Quét storage chưa khả dụng" : "Chưa có lần quét storage";
+  }
+  const badge = banner.querySelector(".card-title-row span");
+  if (badge) badge.textContent = scan.exact === true ? "chính xác" : status === "running" ? "đang đếm" : "có giới hạn";
+  const bar = banner.querySelector(".progress-bar");
+  const track = banner.querySelector("[role=progressbar]");
+  if (bar) bar.style.width = `${progress}%`;
+  if (track) track.setAttribute("aria-valuenow", String(progress));
+  const liveBytes = banner.querySelector("[data-storage-total-bytes]");
+  const countedBytes = Number(scan.total_bytes_counted ?? 0);
+  if (liveBytes) liveBytes.textContent = formatGb(countedBytes);
+  const liveBytesRaw = banner.querySelector("[data-storage-total-bytes-raw]");
+  if (liveBytesRaw) liveBytesRaw.textContent = `${Number.isFinite(countedBytes) ? countedBytes.toLocaleString() : "0"} bytes`;
+  const liveFiles = banner.querySelector("[data-storage-files-scanned]");
+  if (liveFiles) liveFiles.textContent = `${Number(scan.files_scanned || 0)} tệp đã đếm`;
+  const liveArea = banner.querySelector("[data-storage-current-area]");
+  if (liveArea) liveArea.textContent = scan.current_area || "";
+  const reason = banner.querySelector("[data-storage-scan-reason]");
+  if (reason) reason.textContent = scan.reason || result?.reason || "";
+
+  const areas = result?.areas && typeof result.areas === "object" ? result.areas : {};
+  const list = view.querySelector("[data-storage-area-list]");
+  if (list) {
+    Object.entries(areas).forEach(([name, value]) => {
+      let row = list.querySelector(`[data-storage-area="${CSS.escape(name)}"]`);
+      if (!row) {
+        row = document.createElement("div");
+        row.className = "row-item";
+        row.dataset.storageArea = name;
+        row.innerHTML = "<span></span><strong data-storage-area-value></strong><small data-storage-area-count></small>";
+        list.append(row);
+      }
+      const label = row.querySelector("span");
+      const valueNode = row.querySelector("[data-storage-area-value]");
+      const countNode = row.querySelector("[data-storage-area-count]");
+      const bytes = Number(value?.bytes || 0);
+      const partial = value?.complete === false || value?.status === "partial" || value?.status === "running";
+      if (label) label.textContent = name;
+      if (valueNode) valueNode.textContent = partial ? `Ít nhất ${formatGb(bytes)}` : formatGb(bytes);
+      if (countNode) countNode.textContent = `${Number(value?.files_scanned ?? value?.entries_scanned ?? 0)} tệp`;
+    });
+  }
+  const action = view.querySelector("[data-storage-scan-action]");
+  if (action) {
+    const canCancel = (status === "running" || status === "cancelling") && mode === "deep_exact";
+    action.innerHTML = canCancel
+      ? `<button class="button button--danger" type="button" data-cancel-storage-scan="${escapeHtml(scan.scan_id || "")}"${status === "cancelling" ? " disabled" : ""}>Hủy quét</button>`
+      : `<button class="button" type="button" data-refresh-storage${status === "cancelling" ? " disabled" : ""}>Quét lại</button>`;
+  }
+};
+
 const pollStorageScan = (scanId = "") => {
   const generation = ++storagePollGeneration;
   let attempts = 0;
@@ -853,7 +928,7 @@ const pollStorageScan = (scanId = "") => {
       if (scanId && scan.scan_id && scan.scan_id !== scanId) return;
       state.storage = result || state.storage;
       state.storageScan = scan;
-      render();
+      updateStorageScanDom(result || {});
       if (scan.status === "running") {
         window.setTimeout(poll, 500);
       }
@@ -2009,6 +2084,22 @@ document.addEventListener("click", async (event) => {
     }
     return;
   }
+  const cancelStorageButton = event.target.closest("[data-cancel-storage-scan]");
+  if (cancelStorageButton) {
+    cancelStorageButton.disabled = true;
+    try {
+      const result = await cancelStorageScan(cancelStorageButton.dataset.cancelStorageScan || "");
+      state.storage = result || state.storage;
+      state.storageScan = result?.scan || state.storageScan;
+      updateStorageScanDom(result || {});
+      showToast("Đã gửi yêu cầu hủy quét storage; worker sẽ dừng ở checkpoint gần nhất.", "warning");
+      if (state.storageScan?.status === "cancelling" || state.storageScan?.status === "running") pollStorageScan(state.storageScan.scan_id || "");
+    } catch (error) {
+      showToast(error.message || "Không thể hủy quét storage.", "error");
+      cancelStorageButton.disabled = false;
+    }
+    return;
+  }
   const checkAllUpdatesButton = event.target.closest("[data-check-all-updates]");
   if (checkAllUpdatesButton) {
     checkAllUpdatesButton.disabled = true;
@@ -2120,10 +2211,12 @@ document.addEventListener("click", async (event) => {
   if (durableResume) {
     durableResume.disabled = true;
     try {
-      const result = await resumeDurableJob(durableResume.dataset.resumeDurableJob);
+      const result = await retryDurableJob(durableResume.dataset.resumeDurableJob);
       const refreshed = await refreshFast({ quiet: true });
       if (refreshed === false) render();
-      const message = safeDisplayMessage(result?.next_action, "Durable recovery response received; the server snapshot remains authoritative.");
+      const message = safeDisplayMessage(result?.next_action, result?.retry_contract === "new_job"
+        ? "Đã tạo job mới từ request đã xác thực; bản ghi lỗi cũ được giữ nguyên."
+        : "Không thể tạo job retry mới từ snapshot hiện tại.");
       setJobActionStatus(message, result?.status === "unavailable" ? "warning" : "success"); showToast(message, "warning");
     } catch (error) {
       setJobActionStatus(error.message, "error"); showToast(error.message, "error");

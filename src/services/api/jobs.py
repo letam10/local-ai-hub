@@ -313,6 +313,8 @@ def _durable_record(record: dict[str, Any]) -> dict[str, Any]:
         "message",
         "next_action",
         "result",
+        "retry_of",
+        "attempt",
     }
     durable: dict[str, Any] = {}
     for key in allowed:
@@ -414,6 +416,12 @@ def _load() -> None:
             value.pop("input", None)
             value.pop("resume_data", None)
             value.pop("resume_available", None)
+            retry_of = value.get("retry_of")
+            if retry_of is not None and (not isinstance(retry_of, str) or _JOB_OUTPUT_SCOPE_ID.fullmatch(retry_of) is None):
+                value.pop("retry_of", None)
+            attempt = value.get("attempt")
+            if attempt is not None and (isinstance(attempt, bool) or not isinstance(attempt, int) or not 1 <= attempt <= 10_000):
+                value.pop("attempt", None)
             if str(value.get("status")) in ACTIVE_STATUSES:
                 value.update({
                     "status": "interrupted",
@@ -443,7 +451,11 @@ def create_job(
     output: str | None = None,
     device: str | None = None,
     resume_data: dict[str, Any] | None = None,
+    retry_of: str | None = None,
+    attempt: int = 1,
 ) -> dict[str, Any]:
+    safe_retry_of = retry_of if isinstance(retry_of, str) and _JOB_OUTPUT_SCOPE_ID.fullmatch(retry_of) else None
+    safe_attempt = attempt if isinstance(attempt, int) and not isinstance(attempt, bool) and 1 <= attempt <= 10_000 else 1
     with _lock:
         job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         record = {
@@ -461,6 +473,8 @@ def create_job(
             "error": None,
             "resume_data": resume_data if resume_data is not None else (dict(input_data) if isinstance(input_data, dict) else None),
             "resume_available": False,
+            "retry_of": safe_retry_of,
+            "attempt": safe_attempt,
             "result": None,
             "next_action": None,
         }
@@ -507,8 +521,16 @@ def public_job(record: dict[str, Any]) -> dict[str, Any]:
         "next_action",
         "result",
         "resumable",
+        "retry_of",
+        "attempt",
     }
     result = {key: value for key, value in record.items() if key in allowed and value is not None}
+    retry_of = result.get("retry_of")
+    if not isinstance(retry_of, str) or _JOB_OUTPUT_SCOPE_ID.fullmatch(retry_of) is None:
+        result.pop("retry_of", None)
+    attempt = result.get("attempt")
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or not 1 <= attempt <= 10_000:
+        result.pop("attempt", None)
     if "result" in result:
         result["result"] = publicize(result["result"])
     if result.get("error"):

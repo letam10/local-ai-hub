@@ -516,6 +516,11 @@ td { color: var(--text); }
 .storage-scan-status[data-storage-scan-status="partial"], .storage-scan-status[data-storage-scan-status="unavailable"] { border-left-color: var(--danger); }
 .storage-scan-status .card-title-row { margin: 0; }
 .storage-scan-status small { color: var(--muted); line-height: 1.4; }
+.storage-scan-live { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: baseline; color: var(--muted); font-size: 11px; }
+.storage-scan-live strong { color: var(--text); font-size: 15px; }
+.storage-scan-live span:empty { display: none; }
+.row-item small[data-storage-area-count] { color: var(--muted); font-size: 10px; }
+.storage-scan-status[data-storage-scan-status="cancelling"] { border-left-color: var(--warning); }
 .status-explanation--compact summary { padding: 10px 12px; }
 .status-explanation--compact .status-explanation__body { gap: 10px; padding: 11px 12px 13px 34px; }
 .dashboard-primary > details { margin-top: 4px; padding: 2px 0 4px; }

@@ -173,6 +173,29 @@ process.stdout.write(renderPage({json.dumps(route)}, {payload}));
         self.assertIn("jobs.history_delete", route_ids)
         self.assertIn("jobs.history_clear", route_ids)
 
+    def test_storage_deep_scan_contract_is_visible_and_incremental(self) -> None:
+        storage = (ROOT / "src/services/storage_manager/overview.py").read_text(encoding="utf-8")
+        models = (ROOT / "src/ui/features/models/models.js").read_text(encoding="utf-8")
+        app = (ROOT / "src/ui/app.js").read_text(encoding="utf-8")
+        routes = (ROOT / "src/services/api/routes/compatibility.py").read_text(encoding="utf-8")
+        for marker in ("_deep_directory_size_report", "_DEEP_SCAN_YIELD_ENTRIES", "cancel_storage_scan", "deep_exact", "reparse_entries", "total_bytes_counted"):
+            self.assertIn(marker, storage)
+        for marker in ("data-cancel-storage-scan", "data-storage-total-bytes", "data-storage-total-bytes-raw", "data-storage-files-scanned", "data-storage-area-list"):
+            self.assertIn(marker, models)
+        self.assertIn("updateStorageScanDom(result || {})", app)
+        self.assertIn("cancelStorageScan", app)
+        self.assertNotIn("render();\n      if (scan.status === \"running\")", app)
+        self.assertIn("/api/storage/scan/cancel", routes)
+
+    def test_explicit_retry_route_is_new_job_contract(self) -> None:
+        routes = (ROOT / "src/services/api/routes/jobs.py").read_text(encoding="utf-8")
+        productization = (ROOT / "src/services/api/v5_productization.py").read_text(encoding="utf-8")
+        durable = (ROOT / "src/services/job_manager/durable.py").read_text(encoding="utf-8")
+        self.assertIn("jobs.durable_retry", routes)
+        self.assertIn("retry_durable_job", productization)
+        self.assertIn("historical_record_preserved", productization)
+        self.assertIn("without mutating the terminal historical record", durable.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

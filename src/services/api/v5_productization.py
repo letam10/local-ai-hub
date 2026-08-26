@@ -779,7 +779,12 @@ def resume_durable_job(
     *,
     registry: ServerOwnedAdapterRegistry | None = None,
 ) -> dict[str, Any]:
-    """Attempt V5-A resume only through the server-owned adapter registry."""
+    """Compatibility resume entry point; eligible recovery creates a NEW job.
+
+    The old durable record is never reopened or rewritten.  ``retry_durable_job``
+    is the explicit name used by the current UI, while this function remains for
+    clients that already called the original ``/resume`` route.
+    """
 
     if not isinstance(job_id, str) or not _LIFECYCLE_JOB_ID.fullmatch(job_id):
         return {"status": "invalid", "execution": "not_run", "dry_run": True, "next_action": "Use the opaque durable job ID returned by Hub."}
@@ -835,6 +840,22 @@ def resume_durable_job(
         return {"status": "queued", "execution": "not_run", "dry_run": True, "job": resumed, "recovery": decision}
     finally:
         engine.close()
+
+
+def retry_durable_job(
+    job_id: str,
+    path: Path = DURABLE_JOBS_PATH,
+    *,
+    registry: ServerOwnedAdapterRegistry | None = None,
+) -> dict[str, Any]:
+    """Queue a safe NEW durable job from retained server-owned request data."""
+
+    result = resume_durable_job(job_id, path, registry=registry)
+    if result.get("status") == "queued":
+        result = {**result, "retry_contract": "new_job", "historical_record_preserved": True}
+    else:
+        result = {**result, "retry_contract": "unavailable", "historical_record_preserved": True}
+    return result
 
 
 def project_workflow_library(value: object) -> dict[str, Any]:
@@ -954,4 +975,5 @@ __all__ = [
     "project_storage_projection",
     "project_workflow_library",
     "resume_durable_job",
+    "retry_durable_job",
 ]

@@ -30,6 +30,9 @@ _CACHE_SECONDS = 120.0
 _LOW_SPACE_BYTES = 20 * 1024**3
 _DIRECTORY_SCAN_MAX_ENTRIES = 12_000
 _DIRECTORY_SCAN_MAX_DEPTH = 24
+_DEEP_SCAN_YIELD_ENTRIES = 512
+_DEEP_SCAN_YIELD_SECONDS = 0.25
+_DEEP_SCAN_PROGRESS_WINDOW = 1_000
 _OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
 _OLLAMA_TIMEOUT_SECONDS = 0.5
 _VOLUME_ALLOWLIST = (
@@ -42,6 +45,7 @@ _volume_snapshot_cache: tuple[float, dict[str, Any]] | None = None
 _model_cache: tuple[float, list[dict[str, Any]]] | None = None
 _scan_lock = threading.RLock()
 _scan_thread: threading.Thread | None = None
+_scan_cancel_events: dict[str, threading.Event] = {}
 _scan_state: dict[str, Any] = {
     "schema_version": "storage-scan.v1",
     "scan_id": None,
@@ -56,6 +60,10 @@ _scan_state: dict[str, Any] = {
     "completed_at": None,
     "reason": "Chưa có lần quét storage nào được yêu cầu.",
     "next_action": "Bấm Quét lại để bắt đầu quét nền có giới hạn.",
+    "mode": "fast",
+    "total_bytes_counted": 0,
+    "files_scanned": 0,
+    "cancel_requested": False,
 }
 _SCAN_AREA_NAMES = ("Models", "Environments", "Runtime", "Cache", "Output", "Temp", "Logs")
 
@@ -114,6 +122,10 @@ def _directory_size_report(path: Path) -> dict[str, Any]:
             "status": "unavailable",
             "complete": False,
             "entries_scanned": 0,
+            "files_scanned": 0,
+            "directories_scanned": 0,
+            "reparse_entries": 0,
+            "unreadable_entries": 0,
             "reason": reason,
             "next_action": "Review the managed storage root before retrying.",
         }
@@ -130,6 +142,10 @@ def _directory_size_report(path: Path) -> dict[str, Any]:
                 "status": "available",
                 "complete": True,
                 "entries_scanned": 1,
+                "files_scanned": 1,
+                "directories_scanned": 0,
+                "reparse_entries": 0,
+                "unreadable_entries": 0,
                 "reason": "Managed storage size was read from a regular file.",
                 "next_action": "No action is required; refresh after external storage changes.",
             }
@@ -140,6 +156,10 @@ def _directory_size_report(path: Path) -> dict[str, Any]:
 
     total = 0
     entries_scanned = 0
+    files_scanned = 0
+    directories_scanned = 0
+    reparse_entries = 0
+    unreadable_entries = 0
     truncated = False
     stack: list[tuple[Path, int]] = [(path, 0)]
     while stack:
@@ -160,19 +180,23 @@ def _directory_size_report(path: Path) -> dict[str, Any]:
                 entries_scanned += 1
                 try:
                     if _is_reparse_point(entry):
+                        reparse_entries += 1
                         continue
                     if entry.is_dir(follow_symlinks=False):
+                        directories_scanned += 1
                         if depth < _DIRECTORY_SCAN_MAX_DEPTH:
                             stack.append((Path(entry.path), depth + 1))
                         else:
                             truncated = True
                         continue
                     if entry.is_file(follow_symlinks=False):
+                        files_scanned += 1
                         total += entry.stat(follow_symlinks=False).st_size
                     else:
                         truncated = True
                 except OSError:
                     truncated = True
+                    unreadable_entries += 1
         if entries_scanned >= _DIRECTORY_SCAN_MAX_ENTRIES:
             break
 
@@ -190,9 +214,182 @@ def _directory_size_report(path: Path) -> dict[str, Any]:
         "status": status,
         "complete": not truncated,
         "entries_scanned": entries_scanned,
+        "files_scanned": files_scanned,
+        "directories_scanned": directories_scanned,
+        "reparse_entries": reparse_entries,
+        "unreadable_entries": unreadable_entries,
         "reason": reason,
         "next_action": next_action,
     }
+
+
+def _deep_directory_size_report(
+    path: Path,
+    *,
+    cancel_event: threading.Event | None = None,
+    on_progress: Any = None,
+) -> dict[str, Any]:
+    """Stream an exact candidate tree without the FAST entry budget.
+
+    Only regular files below the managed root are counted.  Directory entries
+    are consumed in small batches and no file list is retained, so the worker
+    can traverse large model/environment trees without blocking an API thread
+    or growing memory with every file.  Symlinks and Windows reparse points are
+    deliberately skipped; their target bytes are outside this root's safe,
+    server-owned accounting scope and therefore make the result partial.
+    """
+
+    event = cancel_event or threading.Event()
+    total = 0
+    entries_scanned = 0
+    files_scanned = 0
+    directories_scanned = 0
+    reparse_entries = 0
+    unreadable_entries = 0
+    last_publish = time.monotonic()
+    last_publish_entries = 0
+    stack: list[Path] = []
+
+    def report(*, status: str, complete: bool, reason: str, next_action: str) -> dict[str, Any]:
+        value = {
+            "bytes": total,
+            "gb": round(total / (1024**3), 3),
+            "total_bytes_counted": total,
+            "status": status,
+            "complete": complete,
+            "entries_scanned": entries_scanned,
+            "files_scanned": files_scanned,
+            "directories_scanned": directories_scanned,
+            "reparse_entries": reparse_entries,
+            "unreadable_entries": unreadable_entries,
+            "reason": reason,
+            "next_action": next_action,
+        }
+        callback = on_progress
+        if callable(callback):
+            try:
+                callback(dict(value))
+            except Exception:
+                # Progress publication must never turn a readable scan into a
+                # false failure because a UI observer disappeared.
+                pass
+        return value
+
+    def cancelled() -> dict[str, Any]:
+        return report(
+            status="cancelled",
+            complete=False,
+            reason="Đã hủy quét trước khi toàn bộ cây storage được đọc; tổng hiện tại là số đã đếm.",
+            next_action="Bấm Quét lại để bắt đầu một deep scan mới.",
+        )
+
+    try:
+        root_stat = path.stat(follow_symlinks=False)
+        if getattr(root_stat, "st_file_attributes", 0) & 0x400 or path.is_symlink():
+            return report(
+                status="partial",
+                complete=False,
+                reason="Gốc storage là symlink/reparse point nên không thể xác nhận tổng chính xác.",
+                next_action="Kiểm tra gốc managed storage rồi quét lại.",
+            )
+        if path.is_file():
+            try:
+                size = path.stat(follow_symlinks=False).st_size
+            except OSError:
+                return report(
+                    status="partial",
+                    complete=False,
+                    reason="Không thể đọc kích thước tệp managed storage.",
+                    next_action="Kiểm tra quyền đọc rồi quét lại.",
+                )
+            total += size
+            entries_scanned = files_scanned = 1
+            return report(
+                status="available",
+                complete=True,
+                reason="Đã đọc chính xác tệp managed storage.",
+                next_action="Không cần thao tác; quét lại sau khi có thay đổi bên ngoài.",
+            )
+        if not path.is_dir():
+            return report(
+                status="partial",
+                complete=False,
+                reason="Gốc managed storage không phải thư mục đọc được.",
+                next_action="Kiểm tra gốc managed storage rồi quét lại.",
+            )
+        stack.append(path)
+    except OSError:
+        return report(
+            status="partial",
+            complete=False,
+            reason="Không thể mở gốc managed storage để xác nhận tổng chính xác.",
+            next_action="Kiểm tra quyền đọc rồi quét lại.",
+        )
+
+    while stack:
+        if event.is_set():
+            return cancelled()
+        current = stack.pop()
+        try:
+            entries = os.scandir(current)
+        except OSError:
+            unreadable_entries += 1
+            if event.is_set():
+                return cancelled()
+            continue
+        with entries:
+            for entry in entries:
+                if event.is_set():
+                    return cancelled()
+                entries_scanned += 1
+                try:
+                    if _is_reparse_point(entry):
+                        reparse_entries += 1
+                    elif entry.is_dir(follow_symlinks=False):
+                        directories_scanned += 1
+                        stack.append(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False):
+                        files_scanned += 1
+                        total += entry.stat(follow_symlinks=False).st_size
+                    else:
+                        unreadable_entries += 1
+                except OSError:
+                    unreadable_entries += 1
+
+                now = time.monotonic()
+                if (
+                    entries_scanned - last_publish_entries >= _DEEP_SCAN_YIELD_ENTRIES
+                    or now - last_publish >= _DEEP_SCAN_YIELD_SECONDS
+                ):
+                    report(
+                        status="running",
+                        complete=False,
+                        reason="Đang đọc toàn bộ cây storage; tổng bytes và số tệp sẽ tăng dần.",
+                        next_action="Giữ trang mở hoặc bấm Hủy quét.",
+                    )
+                    last_publish_entries = entries_scanned
+                    last_publish = now
+
+    if event.is_set():
+        return cancelled()
+    if unreadable_entries or reparse_entries:
+        reasons: list[str] = []
+        if unreadable_entries:
+            reasons.append(f"{unreadable_entries} mục không đọc được")
+        if reparse_entries:
+            reasons.append(f"{reparse_entries} symlink/reparse point bị bỏ qua")
+        return report(
+            status="partial",
+            complete=False,
+            reason="Không thể xác nhận tổng chính xác: " + "; ".join(reasons) + ".",
+            next_action="Sửa quyền hoặc loại trừ reparse point rồi quét lại.",
+        )
+    return report(
+        status="available",
+        complete=True,
+        reason="Đã đọc hết các thư mục managed bình thường; tổng bytes là chính xác.",
+        next_action="Không cần thao tác; bấm Quét lại sau khi có thay đổi bên ngoài.",
+    )
 
 
 def _directory_size(path: Path) -> int:
@@ -232,6 +429,7 @@ def _storage_summary_from_reports(
     scan_id: str | None = None,
     started_at: str | None = None,
     completed_at: str | None = None,
+    scan_mode: str = "fast",
 ) -> dict[str, Any]:
     areas = {
         name: {
@@ -246,12 +444,15 @@ def _storage_summary_from_reports(
     if status == "running":
         reason = "Storage đang được quét nền theo từng vùng; số liệu hiện tại chưa phải tổng chính xác."
         next_action = "Giữ trang mở hoặc bấm làm mới để theo dõi tiến độ; không chạy lại khi scan đang hoạt động."
+    elif status == "cancelled":
+        reason = "Deep scan đã bị hủy; tổng bytes hiện tại chỉ gồm phần đã đếm trước khi hủy."
+        next_action = "Bấm Quét lại để đọc tiếp toàn bộ cây storage."
     elif exact:
-        reason = "Tất cả vùng storage được quét xong trong ngân sách giới hạn."
+        reason = "Tất cả vùng storage được đọc hết; tổng bytes là chính xác."
         next_action = "Không cần thao tác; bấm Quét lại sau khi có thay đổi bên ngoài."
     else:
-        reason = "Một hoặc nhiều vùng vượt ngân sách quét; tổng hiển thị chỉ là số liệu tối thiểu."
-        next_action = "Bấm Quét lại sau khi giảm dữ liệu hoặc kiểm tra vùng chưa hoàn tất."
+        reason = "Một hoặc nhiều vùng không thể đọc hết; tổng hiển thị chỉ là số liệu đã đếm."
+        next_action = "Kiểm tra quyền/reparse point hoặc bấm Quét lại để xác nhận lại."
     volumes = _volume_projection()
     legacy = _legacy_records()
     return {
@@ -264,12 +465,16 @@ def _storage_summary_from_reports(
             "progress": max(0, min(100, int(progress))),
             "current_area": current_area,
             "scan_id": scan_id,
+            "mode": scan_mode,
             "started_at": started_at,
             "completed_at": completed_at,
             "exact": exact,
-            "max_entries": _DIRECTORY_SCAN_MAX_ENTRIES,
+            "max_entries": _DIRECTORY_SCAN_MAX_ENTRIES if scan_mode == "fast" else None,
             "max_depth": _DIRECTORY_SCAN_MAX_DEPTH,
             "entries_scanned": sum(int(report.get("entries_scanned", 0)) for report in reports.values()),
+            "files_scanned": sum(int(report.get("files_scanned", 0)) for report in reports.values()),
+            "total_bytes_counted": sum(int(report.get("bytes", 0)) for report in reports.values()),
+            "cancel_requested": False,
             "reason": reason,
             "next_action": next_action,
         },
@@ -287,6 +492,7 @@ def _storage_summary_from_reports(
         "data_location_class": "persistent_configured" if data_root != get_paths().app_root else "app_root",
         "reason": reason,
         "next_action": next_action,
+        "scan_mode": scan_mode,
     }
 
 
@@ -303,7 +509,11 @@ def storage_scan_snapshot() -> dict[str, Any]:
     state = _copy_scan_state()
     scan = {
         key: state.get(key)
-        for key in ("schema_version", "scan_id", "status", "execution", "progress", "current_area", "exact", "entries_scanned", "started_at", "completed_at", "reason", "next_action")
+        for key in (
+            "schema_version", "scan_id", "status", "execution", "progress", "current_area", "exact",
+            "entries_scanned", "files_scanned", "total_bytes_counted", "started_at", "completed_at",
+            "reason", "next_action", "mode", "cancel_requested",
+        )
     }
     return {
         "status": state.get("status", "idle"),
@@ -318,45 +528,123 @@ def storage_scan_snapshot() -> dict[str, Any]:
         "canonical_root": "LocalAIHub",
         "reason": state.get("reason", ""),
         "next_action": state.get("next_action", ""),
+        "scan_mode": state.get("mode", "fast"),
     }
 
 
-def _scan_worker(scan_id: str) -> None:
+def _empty_scan_area(*, mode: str) -> dict[str, Any]:
+    return {
+        "bytes": 0,
+        "gb": 0.0,
+        "total_bytes_counted": 0,
+        "status": "running",
+        "complete": False,
+        "entries_scanned": 0,
+        "files_scanned": 0,
+        "directories_scanned": 0,
+        "reparse_entries": 0,
+        "unreadable_entries": 0,
+        "progress": 0,
+        "mode": mode,
+        "reason": "Đang chờ vùng storage này được quét.",
+        "next_action": "Giữ trang mở hoặc bấm Hủy quét.",
+    }
+
+
+def _scan_progress(index: int, total_areas: int, report: dict[str, Any], estimate: int | None) -> int:
+    """Return a monotonic, explicitly-estimated area-weighted progress value."""
+
+    entries = max(0, int(report.get("entries_scanned", 0)))
+    if estimate and estimate > 0:
+        fraction = min(0.99, entries / estimate)
+    else:
+        # There is no safe total-entry oracle without a second full walk.  A
+        # bounded window still gives useful movement while truthfully avoiding
+        # a fabricated completion percentage.
+        fraction = min(0.99, entries / (entries + _DEEP_SCAN_PROGRESS_WINDOW)) if entries else 0.0
+    return max(0, min(99, int(((index - 1) + fraction) * 100 / total_areas)))
+
+
+def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None:
     global _scan_state, _size_cache, _scan_thread
     data_root, model_root, environments_root, runtime_root, cache_root, output_root, temp_root, log_root = _managed_roots()
     roots = dict(zip(_SCAN_AREA_NAMES, (model_root, environments_root, runtime_root, cache_root, output_root, temp_root, log_root)))
     started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     reports: dict[str, dict[str, Any]] = {}
+    deep = mode == "deep_exact"
+    previous_areas: dict[str, Any] = {}
+    with _scan_lock:
+        previous_areas = {name: dict(value) for name, value in (_scan_state.get("areas") or {}).items()}
+
+    def publish_area(name: str, index: int, report: dict[str, Any]) -> None:
+        estimate_value = previous_areas.get(name, {}).get("entries_scanned")
+        estimate = estimate_value if isinstance(estimate_value, int) and estimate_value > 0 else None
+        area = dict(report)
+        if deep:
+            area["progress"] = _scan_progress(index, len(roots), report, estimate)
+            area["mode"] = "deep_exact"
+        with _scan_lock:
+            reports[name] = area
+            _scan_state["areas"] = {key: dict(value) for key, value in reports.items()}
+            _scan_state["entries_scanned"] = sum(int(item.get("entries_scanned", 0)) for item in reports.values())
+            _scan_state["files_scanned"] = sum(int(item.get("files_scanned", 0)) for item in reports.values())
+            _scan_state["total_bytes_counted"] = sum(int(item.get("bytes", 0)) for item in reports.values())
+            _scan_state["progress"] = _scan_progress(index, len(roots), report, estimate) if deep else _scan_state.get("progress", 0)
+            _scan_state["current_area"] = name
+
     try:
         for index, (name, path) in enumerate(roots.items(), start=1):
+            if cancel_event.is_set():
+                break
             with _scan_lock:
                 _scan_state.update({
                     "status": "running",
                     "execution": "background",
+                    "mode": mode,
                     "progress": round((index - 1) * 100 / len(roots)),
                     "current_area": name,
                     "started_at": started_at,
                     "completed_at": None,
-                    "reason": "Storage đang được quét nền theo từng vùng; số liệu hiện tại chưa phải tổng chính xác.",
-                    "next_action": "Giữ trang mở hoặc bấm làm mới để theo dõi tiến độ; không chạy lại khi scan đang hoạt động.",
+                    "total_bytes_counted": sum(int(item.get("bytes", 0)) for item in reports.values()),
+                    "files_scanned": sum(int(item.get("files_scanned", 0)) for item in reports.values()),
+                    "cancel_requested": cancel_event.is_set(),
+                    "reason": "Đang đọc toàn bộ cây storage; tổng bytes và số tệp sẽ tăng dần." if deep else "Storage đang được quét nền theo từng vùng; số liệu hiện tại chưa phải tổng chính xác.",
+                    "next_action": "Giữ trang mở hoặc bấm Hủy quét." if deep else "Giữ trang mở hoặc bấm làm mới để theo dõi tiến độ; không chạy lại khi scan đang hoạt động.",
                 })
-            reports[name] = _directory_size_report(path)
+            if deep:
+                publish_area(name, index, _empty_scan_area(mode=mode))
+                report = _deep_directory_size_report(
+                    path,
+                    cancel_event=cancel_event,
+                    on_progress=lambda value, n=name, i=index: publish_area(n, i, value),
+                )
+            else:
+                report = _directory_size_report(path)
+            publish_area(name, index, report)
+            if cancel_event.is_set():
+                break
             with _scan_lock:
-                _scan_state["areas"] = {key: dict(value) for key, value in reports.items()}
-                _scan_state["entries_scanned"] = sum(int(item.get("entries_scanned", 0)) for item in reports.values())
                 _scan_state["progress"] = round(index * 100 / len(roots))
-        exact = all(item.get("complete") is True for item in reports.values())
+        cancelled_scan = cancel_event.is_set()
+        exact = bool(reports) and not cancelled_scan and all(item.get("complete") is True for item in reports.values())
         completed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if cancelled_scan:
+            final_status = "cancelled"
+        elif deep:
+            final_status = "completed" if exact else "partial"
+        else:
+            final_status = "completed" if all(item.get("complete") is True for item in reports.values()) else "partial"
         result = _storage_summary_from_reports(
             data_root,
             reports,
-            scan_status="completed" if exact else "partial",
+            scan_status=final_status,
             scan_execution="background",
             progress=100,
             current_area=None,
             scan_id=scan_id,
             started_at=started_at,
             completed_at=completed_at,
+            scan_mode=mode,
         )
         with _scan_lock:
             _scan_state = {
@@ -364,15 +652,19 @@ def _scan_worker(scan_id: str) -> None:
                 "scan_id": scan_id,
                 "status": result["status"],
                 "execution": "background",
-                "progress": 100,
+                "progress": 100 if final_status in {"completed", "partial"} and not cancelled_scan else min(99, int(_scan_state.get("progress", 0))),
                 "current_area": None,
                 "areas": {name: dict(value) for name, value in reports.items()},
                 "exact": exact,
+                "mode": mode,
                 "entries_scanned": result["scan"]["entries_scanned"],
+                "files_scanned": result["scan"]["files_scanned"],
+                "total_bytes_counted": result["scan"]["total_bytes_counted"],
                 "started_at": started_at,
                 "completed_at": completed_at,
                 "reason": result["reason"],
                 "next_action": result["next_action"],
+                "cancel_requested": cancelled_scan,
                 "disk": dict(result.get("disk") or {}),
                 "volumes": [dict(item) for item in result.get("volumes") or []],
                 "volume_projection": dict(result.get("volume_projection") or {}),
@@ -389,20 +681,26 @@ def _scan_worker(scan_id: str) -> None:
                 "current_area": None,
                 "reason": "Storage scan không hoàn tất; một vùng không thể đọc an toàn.",
                 "next_action": "Kiểm tra quyền vùng storage rồi thử lại.",
+                "cancel_requested": cancel_event.is_set(),
             })
     finally:
         with _scan_lock:
+            _scan_cancel_events.pop(scan_id, None)
             _scan_thread = None
 
 
-def start_storage_scan(*, force: bool = False) -> dict[str, Any]:
-    """Start one bounded background scan, or return its current projection."""
+def start_storage_scan(*, force: bool = False, mode: str = "fast") -> dict[str, Any]:
+    """Start a FAST snapshot or explicit DEEP_EXACT background scan."""
 
-    global _scan_thread, _scan_state
+    global _scan_thread, _scan_state, _size_cache
+    selected_mode = "deep_exact" if mode in {"deep", "deep_exact"} else "fast"
     with _scan_lock:
         if _scan_thread is not None and _scan_thread.is_alive():
-            return _copy_scan_state()
+            return storage_scan_snapshot()
+        if not force and _scan_state.get("scan_id") and _scan_state.get("status") in {"completed", "partial", "cancelled", "unavailable"}:
+            return storage_scan_snapshot()
         scan_id = f"scan-{int(time.time() * 1000):x}"
+        cancel_event = threading.Event()
         _scan_state = {
             "schema_version": "storage-scan.v1",
             "scan_id": scan_id,
@@ -415,12 +713,37 @@ def start_storage_scan(*, force: bool = False) -> dict[str, Any]:
             "entries_scanned": 0,
             "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "completed_at": None,
-            "reason": "Storage đang được quét nền theo từng vùng; số liệu hiện tại chưa phải tổng chính xác.",
-            "next_action": "Giữ trang mở hoặc bấm làm mới để theo dõi tiến độ; không chạy lại khi scan đang hoạt động.",
+            "reason": "Đang đọc toàn bộ cây storage; tổng bytes và số tệp sẽ tăng dần." if selected_mode == "deep_exact" else "Storage đang được quét nền theo từng vùng; số liệu hiện tại chưa phải tổng chính xác.",
+            "next_action": "Giữ trang mở hoặc bấm Hủy quét." if selected_mode == "deep_exact" else "Giữ trang mở hoặc bấm làm mới để theo dõi tiến độ; không chạy lại khi scan đang hoạt động.",
+            "mode": selected_mode,
+            "total_bytes_counted": 0,
+            "files_scanned": 0,
+            "cancel_requested": False,
         }
-        _scan_thread = threading.Thread(target=_scan_worker, args=(scan_id,), name="LocalAIHub-storage-scan", daemon=True)
+        _scan_cancel_events[scan_id] = cancel_event
+        _size_cache = None
+        _scan_thread = threading.Thread(target=_scan_worker, args=(scan_id, selected_mode, cancel_event), name="LocalAIHub-storage-scan", daemon=True)
         _scan_thread.start()
-        return _copy_scan_state()
+        return storage_scan_snapshot()
+
+
+def cancel_storage_scan(scan_id: str | None = None) -> dict[str, Any]:
+    """Request cooperative cancellation of the current background scan."""
+
+    with _scan_lock:
+        active_id = _scan_state.get("scan_id")
+        if scan_id is not None and scan_id != active_id:
+            return storage_scan_snapshot()
+        if _scan_thread is None or not _scan_thread.is_alive() or _scan_state.get("status") != "running":
+            return storage_scan_snapshot()
+        event = _scan_cancel_events.get(str(active_id))
+        if event is not None:
+            event.set()
+        _scan_state["cancel_requested"] = True
+        _scan_state["status"] = "cancelling"
+        _scan_state["reason"] = "Đang hủy deep scan ở checkpoint gần nhất; tổng hiện tại chỉ là số đã đếm."
+        _scan_state["next_action"] = "Chờ worker dừng an toàn hoặc bấm Quét lại sau khi trạng thái đã hủy."
+        return storage_scan_snapshot()
 
 
 def _bytes_record(value: int) -> dict[str, Any]:
@@ -652,8 +975,13 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
         "status": "completed" if all(report["complete"] for report in area_reports.values()) else "partial",
         "scan": {
             "status": "completed" if all(report["complete"] for report in area_reports.values()) else "partial",
+            "mode": "fast",
+            "exact": all(report["complete"] for report in area_reports.values()),
             "max_entries": _DIRECTORY_SCAN_MAX_ENTRIES,
             "max_depth": _DIRECTORY_SCAN_MAX_DEPTH,
+            "entries_scanned": sum(int(report.get("entries_scanned", 0)) for report in area_reports.values()),
+            "files_scanned": sum(int(report.get("files_scanned", 0)) for report in area_reports.values()),
+            "total_bytes_counted": sum(int(report.get("bytes", 0)) for report in area_reports.values()),
             "reason": "All managed roots were scanned within the bounded budget." if all(report["complete"] for report in area_reports.values()) else "One or more managed roots exceeded the bounded scan budget; partial totals are shown.",
         },
         "disk": {

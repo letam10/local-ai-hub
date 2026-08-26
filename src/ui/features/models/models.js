@@ -52,8 +52,13 @@ export function renderProductionModels({ productionCatalog, legacyModels, storag
   const scan = storage?.scan && typeof storage.scan === "object" ? storage.scan : {};
   const scanStatus = String(scan.status || storage?.status || "idle");
   const scanProgress = Math.max(0, Math.min(100, Number.isFinite(Number(scan.progress)) ? Number(scan.progress) : scanStatus === "completed" ? 100 : 0));
+  const scanMode = String(scan.mode || storage?.scan_mode || "fast");
+  const scanRunning = scanStatus === "running" || scanStatus === "cancelling";
+  const scanCanCancel = scanRunning && scanMode === "deep_exact";
   const scanLabel = scanStatus === "running"
-    ? `Đang quét nền · ${scanProgress}%${scan.current_area ? ` · ${escapeHtml(scan.current_area)}` : ""}`
+    ? `${scanMode === "deep_exact" ? "Đang tính chính xác" : "Đang quét nhanh"} · ${scanProgress}%${scan.current_area ? ` · ${escapeHtml(scan.current_area)}` : ""}`
+    : scanStatus === "cancelling"
+      ? "Đang hủy quét …"
     : scanStatus === "completed" && scan.exact === true
       ? "Đã quét xong · tổng chính xác"
       : scanStatus === "partial"
@@ -61,10 +66,15 @@ export function renderProductionModels({ productionCatalog, legacyModels, storag
         : scanStatus === "unavailable"
           ? "Quét storage chưa khả dụng"
           : "Chưa có lần quét storage";
-  const scanBanner = `<div class="storage-scan-status" data-storage-scan-status="${escapeHtml(scanStatus)}" data-storage-scan-progress="${escapeHtml(String(scanProgress))}" role="status"><div class="card-title-row"><strong>${scanLabel}</strong><span>${scan.exact === true ? "chính xác" : "có giới hạn"}</span></div><div class="progress-track" role="progressbar" aria-label="Tiến độ quét storage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${scanProgress}"><div class="progress-bar" style="width:${scanProgress}%"></div></div><small>${escapeHtml(scan.reason || storage?.reason || "Số liệu được đọc theo ngân sách giới hạn; không quét vô hạn.")}</small></div>`;
-  return heading("STORAGE", "Models & Storage", "Model store canonical không nhân bản. Legacy cleanup chỉ xử lý mục đã phân loại và xác minh, không tự xoá UNKNOWN hoặc user media.", `<button class="button" type="button" data-refresh-storage>Quét lại</button>`) + `
+  const countedBytes = Number(scan.total_bytes_counted ?? scan.bytes_counted ?? 0);
+  const countedFiles = Number(scan.files_scanned ?? 0);
+  const scanAction = scanCanCancel
+    ? `<button class="button button--danger" type="button" data-cancel-storage-scan="${escapeHtml(scan.scan_id || "")}">Hủy quét</button>`
+    : `<button class="button" type="button" data-refresh-storage ${scanStatus === "cancelling" ? "disabled" : ""}>Quét lại</button>`;
+  const scanBanner = `<div class="storage-scan-status" data-storage-scan-status="${escapeHtml(scanStatus)}" data-storage-scan-mode="${escapeHtml(scanMode)}" data-storage-scan-progress="${escapeHtml(String(scanProgress))}" role="status"><div class="card-title-row"><strong>${scanLabel}</strong><span>${scan.exact === true ? "chính xác" : "đang đếm"}</span></div><div class="storage-scan-live"><strong data-storage-total-bytes>${escapeHtml(formatGb(countedBytes))}</strong><span data-storage-total-bytes-raw>${escapeHtml(String(countedBytes))} bytes</span><span data-storage-files-scanned>${escapeHtml(String(countedFiles))} tệp đã đếm</span><span data-storage-current-area>${escapeHtml(scan.current_area || "")}</span></div><div class="progress-track" role="progressbar" aria-label="Tiến độ quét storage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${scanProgress}"><div class="progress-bar" style="width:${scanProgress}%"></div></div><small data-storage-scan-reason>${escapeHtml(scan.reason || storage?.reason || "Số liệu được đọc theo ngân sách giới hạn; không quét vô hạn.")}</small></div>`;
+  return heading("STORAGE", "Models & Storage", "Model store canonical không nhân bản. Legacy cleanup chỉ xử lý mục đã phân loại và xác minh, không tự xoá UNKNOWN hoặc user media.", `<span data-storage-scan-action>${scanAction}</span>`) + `
     <div class="workspace-grid workspace-grid--two">
-      ${card("Dung lượng", scanBanner + `<div class="row-list">${areas.map(([name, value]) => `<div class="row-item"><span>${escapeHtml(name)}</span><strong>${storageAreaValue(value)}</strong></div>`).join("") || `<div class="empty-state compact">Đang chờ snapshot storage.</div>`}</div>`)}
+      ${card("Dung lượng", scanBanner + `<div class="row-list" data-storage-area-list>${areas.map(([name, value]) => `<div class="row-item" data-storage-area="${escapeHtml(name)}"><span>${escapeHtml(name)}</span><strong data-storage-area-value>${storageAreaValue(value)}</strong><small data-storage-area-count>${escapeHtml(String(value?.files_scanned ?? value?.entries_scanned ?? 0))} tệp</small></div>`).join("") || `<div class="empty-state compact">Đang chờ snapshot storage.</div>`}</div>`)}
       ${card("Legacy cleanup", `<div class="metric-inline"><strong>${escapeHtml(storage?.legacy_counts?.total || 0)}</strong><span>${uiTextHtml("legacy paths inventoried")}</span></div><div class="callout callout--warning">${uiTextHtml("Cleanup V3 separates REAL_DIRECTORY/JUNCTION, checks references and user data first. Active or unknown items are retained with reason/rollback.")}</div>`, "", "card--flat")}
     </div>
     ${card("AI Models & Components", controls + table, "", "card--wide")}${updateCard}`;
