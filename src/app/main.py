@@ -904,6 +904,8 @@ def main() -> int:
             print("Local AI Hub is already running in another instance.", file=sys.stderr)
             return 0
 
+        gui_exit_reason = "unexpected_exit"
+        readiness_finalized = False
         try:
             _record_startup_event("desktop_started", selected_port=_configured_port(), probe_state="unknown", runtime_class="installed_bundled")
             _record_desktop_readiness("desktop_started", status="starting")
@@ -941,14 +943,24 @@ def main() -> int:
 
             try:
                 webview.start(initialize_window, gui="edgechromium", debug=False)
+                # pywebview returns after the window has been closed through
+                # its normal close path (including the explicit close prompt).
+                # Treat that as a user/normal exit, not a crash or a still-live
+                # readiness session.
+                gui_exit_reason = "normal_exit"
             finally:
                 _record_startup_event("desktop_exit", selected_port=_configured_port(), probe_state="unknown", runtime_class="installed_bundled")
-                _record_desktop_readiness("desktop_exit", status="stopped")
+                readiness_event = "desktop_closed_by_user" if gui_exit_reason == "normal_exit" else "desktop_unexpected_exit"
+                _record_desktop_readiness(readiness_event, status=gui_exit_reason)
+                readiness_finalized = True
                 if bridge._controller and bridge._controller.cleanup_allowed:
                     close_owned_idle_backends()
                     close_owned_api()
             return 0
         except Exception as exc:  # pragma: no cover - native GUI errors are host-specific
+            if not readiness_finalized:
+                _record_startup_event("desktop_unexpected_exit", selected_port=_configured_port(), probe_state="unknown", runtime_class="installed_bundled")
+                _record_desktop_readiness("desktop_unexpected_exit", status="unexpected_exit")
             print(f"Local AI Hub desktop shell failed: {exc}", file=sys.stderr)
             return 1
 

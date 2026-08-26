@@ -39,6 +39,9 @@ _EVENTS = frozenset({
     "frontend_timeout",
     "webview_navigation_failed",
     "desktop_exit",
+    "desktop_closed_by_user",
+    "desktop_normal_exit",
+    "desktop_unexpected_exit",
 })
 _ROUTES = frozenset({"dashboard", "models", "diagnostics", "settings"})
 _MAX_EVENTS = 64
@@ -54,6 +57,18 @@ _FRONTEND_SIGNAL_EVENTS = frozenset({
     "frontend_ready",
     "route_rendered",
 })
+
+# The persisted status is deliberately more precise than a boolean "running".
+# ``stale_session`` is a verifier/UI classification for an old active record;
+# it is never a claim that the desktop is currently alive.
+_TERMINAL_STATUSES = frozenset({"normal_exit", "unexpected_exit", "stale_session"})
+_EVENT_STATUS = {
+    "desktop_started": "starting",
+    "desktop_closed_by_user": "normal_exit",
+    "desktop_normal_exit": "normal_exit",
+    "desktop_exit": "normal_exit",
+    "desktop_unexpected_exit": "unexpected_exit",
+}
 
 
 def _read_json(path: Path, *, max_bytes: int) -> dict[str, Any]:
@@ -135,9 +150,10 @@ def record_event(
         item["route"] = route
     events = [entry for entry in events if isinstance(entry, dict)][-_MAX_EVENTS + 1 :]
     events.append(item)
+    event_status = _EVENT_STATUS.get(event)
     value = {
         "schema_version": READINESS_SCHEMA,
-        "status": status or ("stopped" if event == "desktop_exit" else "running"),
+        "status": status or event_status or ("running" if event not in _TERMINAL_STATUSES else "stale_session"),
         "pid": current_pid,
         "payload_id": payload_id,
         "source_commit": source_commit,
@@ -153,6 +169,68 @@ def record_event(
 
 def load_state(install_root: Path) -> dict[str, Any]:
     return _read_json(readiness_path(Path(install_root).absolute()), max_bytes=64 * 1024)
+
+
+def classify_state(
+    state: Mapping[str, Any],
+    *,
+    desktop_process_alive: bool,
+    current_pid: int | None = None,
+) -> dict[str, Any]:
+    """Classify persisted readiness without turning a stale file into ``running``.
+
+    The desktop process is the authority for a live session.  A persisted
+    active state whose PID is gone is reported as ``stale_session`` and keeps
+    its last evidence for diagnostics; it is not silently promoted to ready.
+    ``normal_exit`` and ``unexpected_exit`` are terminal lifecycle outcomes
+    recorded by the native shell when it knows why the window ended.
+    """
+
+    value = dict(state) if isinstance(state, Mapping) else {}
+    status = str(value.get("status") or "unknown")
+    stored_pid = value.get("pid")
+    pid_matches = (
+        current_pid is None
+        or (isinstance(stored_pid, int) and not isinstance(stored_pid, bool) and stored_pid == current_pid)
+    )
+    active = status in {"starting", "running", "ready"}
+    if active and (not desktop_process_alive or not pid_matches):
+        value["status"] = "stale_session"
+        value["stale"] = True
+        value["active_session"] = False
+        value["exit_reason"] = "unknown"
+        value["stale_reason"] = "Persisted readiness belongs to a desktop session that is no longer alive."
+        return value
+    value["stale"] = False
+    value["active_session"] = bool(desktop_process_alive and pid_matches and status in {"starting", "running", "ready"})
+    if status in _TERMINAL_STATUSES:
+        value["active_session"] = False
+    return value
+
+
+def reconcile_state(
+    install_root: Path,
+    *,
+    desktop_process_alive: bool,
+    current_pid: int | None = None,
+) -> dict[str, Any]:
+    """Return a safe stale-session projection and persist only that classification.
+
+    This helper is used by read-only verifiers and diagnostics.  It never
+    changes pointers, payloads, jobs, or user data; the only write is the
+    bounded readiness evidence file when an active record is demonstrably
+    stale.
+    """
+
+    root = Path(install_root).absolute()
+    state = load_state(root)
+    classified = classify_state(state, desktop_process_alive=desktop_process_alive, current_pid=current_pid)
+    if classified.get("stale") is True and state.get("status") != "stale_session":
+        try:
+            _atomic_write(readiness_path(root), classified)
+        except OSError:
+            classified = {**classified, "persistence": "unavailable"}
+    return classified
 
 
 def record_frontend_signal(
@@ -235,7 +313,9 @@ __all__ = [
     "READINESS_SCHEMA",
     "evaluate_readiness",
     "event_seen",
+    "classify_state",
     "load_state",
+    "reconcile_state",
     "record_frontend_signal",
     "readiness_path",
     "record_event",

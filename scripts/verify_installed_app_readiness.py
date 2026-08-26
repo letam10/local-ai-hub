@@ -30,7 +30,7 @@ try:
 except ImportError:  # pragma: no cover - optional on headless hosts
     pygetwindow = None  # type: ignore[assignment]
 
-from src.app.readiness import event_seen, evaluate_readiness, load_state
+from src.app.readiness import classify_state, event_seen, evaluate_readiness, load_state
 
 
 ROUTES = ("dashboard", "models", "diagnostics", "settings")
@@ -105,12 +105,13 @@ def verify(install_root: Path) -> dict[str, Any]:
     bootstrap_status, bootstrap, bootstrap_seconds = _get_json("http://127.0.0.1:8765/api/bootstrap", 20.0)
     desktop_pid, desktop_alive, desktop_age = _desktop_process(payload_root)
     window_visible, window_responding, window_title = _window_state()
-    state = load_state(root)
+    raw_state = load_state(root)
+    state = classify_state(raw_state, desktop_process_alive=desktop_alive, current_pid=desktop_pid)
     api_identity_match = isinstance(health, dict) and health.get("build_source_commit") == source_commit and health.get("build_payload_id") == payload_id
     payload_identity_match = bool(payload_id.startswith("main-") and source_commit and payload_id == f"main-{source_commit[:12]}")
     bootstrap_valid = isinstance(bootstrap, dict) and bootstrap.get("status") == "completed" and all(key in bootstrap for key in ("health", "components", "settings", "capabilities", "applications", "tools"))
     frontend_pid_match = desktop_pid is not None and state.get("pid") == desktop_pid
-    frontend_ready = frontend_pid_match and state.get("status") in {"running", "ready"} and event_seen(state, "frontend_ready")
+    frontend_ready = frontend_pid_match and state.get("active_session") is True and state.get("status") in {"running", "ready"} and event_seen(state, "frontend_ready")
     dashboard_rendered = frontend_pid_match and (
         event_seen(state, "route_rendered", route="dashboard")
         or event_seen(state, "frontend_rendered", route="dashboard")
@@ -145,6 +146,12 @@ def verify(install_root: Path) -> dict[str, Any]:
         "bootstrap_seconds": round(bootstrap_seconds, 3),
         "evidence": evidence,
         "readiness_state": state,
+        "readiness_session": {
+            "status": state.get("status", "unknown"),
+            "stale": state.get("stale") is True,
+            "active": state.get("active_session") is True,
+            "exit_reason": state.get("exit_reason"),
+        },
     }
 
 

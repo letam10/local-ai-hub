@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from src.app.readiness import evaluate_readiness, event_seen, load_state, record_event, record_frontend_signal
+from src.app.readiness import classify_state, evaluate_readiness, event_seen, load_state, record_event, record_frontend_signal
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +65,58 @@ class V8AppReadinessContractTests(unittest.TestCase):
             self.assertTrue(event_seen(state, "route_rendered", route="dashboard"))
             serialized = json.dumps(state)
             self.assertNotIn("\\", serialized)
+
+    def test_normal_close_records_terminal_user_exit_instead_of_running(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="v8-readiness-close-") as folder:
+            root = Path(folder)
+            payload_id = "main-aaaaaaaaaaaa"
+            payload = root / "versions" / payload_id
+            payload.mkdir(parents=True)
+            (root / "current.json").write_text(json.dumps({"version": payload_id}), encoding="utf-8")
+            (payload / "build.json").write_text(json.dumps({"source_commit": "a" * 40}), encoding="utf-8")
+            record_event(root, "desktop_started", status="starting", pid=4321)
+            result = record_event(root, "desktop_closed_by_user", pid=4321)
+            self.assertEqual(result["status"], "recorded")
+            state = load_state(root)
+            self.assertEqual(state["status"], "normal_exit")
+            self.assertTrue(event_seen(state, "desktop_closed_by_user"))
+            self.assertFalse(classify_state(state, desktop_process_alive=False, current_pid=4321)["active_session"])
+
+    def test_unexpected_exit_is_distinct_from_normal_close(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="v8-readiness-crash-") as folder:
+            root = Path(folder)
+            payload_id = "main-aaaaaaaaaaaa"
+            payload = root / "versions" / payload_id
+            payload.mkdir(parents=True)
+            (root / "current.json").write_text(json.dumps({"version": payload_id}), encoding="utf-8")
+            (payload / "build.json").write_text(json.dumps({"source_commit": "a" * 40}), encoding="utf-8")
+            record_event(root, "desktop_started", status="starting", pid=4321)
+            record_event(root, "desktop_unexpected_exit", pid=4321)
+            state = load_state(root)
+            self.assertEqual(state["status"], "unexpected_exit")
+            self.assertTrue(event_seen(state, "desktop_unexpected_exit"))
+            self.assertFalse(classify_state(state, desktop_process_alive=False, current_pid=4321)["active_session"])
+
+    def test_stale_active_session_is_not_reported_as_running(self) -> None:
+        state = {
+            "schema_version": "v8-desktop-readiness.v1",
+            "status": "running",
+            "pid": 9876,
+            "payload_id": "main-aaaaaaaaaaaa",
+            "events": [{"event": "frontend_ready", "route": "dashboard"}],
+        }
+        stale = classify_state(state, desktop_process_alive=False, current_pid=None)
+        self.assertEqual(stale["status"], "stale_session")
+        self.assertTrue(stale["stale"])
+        self.assertFalse(stale["active_session"])
+        self.assertEqual(stale["exit_reason"], "unknown")
+
+    def test_live_session_requires_the_recorded_pid(self) -> None:
+        state = {"status": "running", "pid": 9876}
+        self.assertTrue(classify_state(state, desktop_process_alive=True, current_pid=9876)["active_session"])
+        mismatch = classify_state(state, desktop_process_alive=True, current_pid=1234)
+        self.assertEqual(mismatch["status"], "stale_session")
+        self.assertFalse(mismatch["active_session"])
 
     def test_loopback_frontend_signal_requires_identity_and_render_before_ready(self) -> None:
         with tempfile.TemporaryDirectory(prefix="v8-readiness-signal-") as folder:
