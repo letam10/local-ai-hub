@@ -13,6 +13,9 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
+from src.services.api.context import ApiContext
+from src.services.api.router import ApiRequest
+from src.services.api.routes import lifecycle
 from src.services.diagnostics.center import DIAGNOSTIC_SUBSYSTEMS, DiagnosticsCenter, public_snapshot_projection
 from src.services.productization.catalog import ProductionCatalog
 from src.services.storage_manager.overview import _storage_summary_from_reports
@@ -22,6 +25,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class V8WindowsUxClosureTests(unittest.TestCase):
+    def test_prepare_close_route_normalizes_service_tuple_to_object(self) -> None:
+        context = ApiContext({
+            "prepare_owned_shutdown": lambda: (200, {"status": "ready_to_close", "active_jobs": 0}),
+        })
+        request = ApiRequest(method="POST", path="/api/lifecycle/prepare-close", query={}, headers={})
+        response = lifecycle.prepare_close(request, context, {})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.payload, {"status": "ready_to_close", "active_jobs": 0})
+
     def test_diagnostics_publish_all_twelve_bounded_evidence_fields(self) -> None:
         center = DiagnosticsCenter()
         methods = {
