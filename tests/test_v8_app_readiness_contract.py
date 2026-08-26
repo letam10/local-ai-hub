@@ -137,6 +137,27 @@ class V8AppReadinessContractTests(unittest.TestCase):
             mismatch = record_frontend_signal(root, "frontend_ready", source_commit="b" * 40, payload_id=payload_id)
             self.assertEqual(mismatch["code"], "READINESS_SOURCE_MISMATCH")
 
+    def test_legacy_frontend_signal_is_allowed_without_pending_update(self) -> None:
+        """The original 8.0.1 payload must not be stranded by V8 identity gates."""
+
+        with tempfile.TemporaryDirectory(prefix="v8-readiness-legacy-signal-") as folder:
+            root = Path(folder)
+            payload = root / "versions" / "8.0.1"
+            payload.mkdir(parents=True)
+            (root / "current.json").write_text(json.dumps({"version": "8.0.1"}), encoding="utf-8")
+            record_event(root, "desktop_started", status="starting", pid=4321)
+            self.assertEqual(record_frontend_signal(root, "frontend_bootstrap_completed")["status"], "recorded")
+            self.assertEqual(record_frontend_signal(root, "frontend_dom_visible", route="dashboard")["status"], "recorded")
+            self.assertEqual(record_frontend_signal(root, "frontend_rendered", route="dashboard")["status"], "recorded")
+            ready = record_frontend_signal(root, "frontend_ready", route="dashboard")
+            self.assertEqual(ready["status"], "recorded")
+
+            pending = root / "update-state" / "pending-health.json"
+            pending.parent.mkdir(parents=True, exist_ok=True)
+            pending.write_text("{}", encoding="utf-8")
+            blocked = record_frontend_signal(root, "frontend_ready", route="dashboard")
+            self.assertEqual(blocked["code"], "READINESS_IDENTITY_UNAVAILABLE")
+
     def test_frontend_has_failure_guard_and_ready_contract(self) -> None:
         app_js = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
         index_html = (ROOT / "src" / "ui" / "index.html").read_text(encoding="utf-8")

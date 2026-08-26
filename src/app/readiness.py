@@ -116,6 +116,29 @@ def _identity(root: Path) -> tuple[str, str]:
         return "", ""
 
 
+def _legacy_payload_is_safe(root: Path) -> bool:
+    """Recognise the original product payload that predates build metadata.
+
+    V8 update payloads are identity-bound through ``build.json``.  The first
+    8.0.1 installer, however, deliberately has no build record.  It still
+    needs a truthful frontend-ready handshake so that the strict post-update
+    gate does not strand a fresh install on the recovery screen.  This helper
+    accepts only a bounded, non-``main-*`` pointer and is never used while a
+    pending update marker exists.
+    """
+
+    try:
+        pointer = _read_json(root / "current.json", max_bytes=16 * 1024)
+        version = pointer.get("version")
+        if not isinstance(version, str) or not version or len(version) > 32:
+            return False
+        if _PAYLOAD_RE.fullmatch(version):
+            return False
+        return re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}", version) is not None
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return False
+
+
 def readiness_path(install_root: Path) -> Path:
     return Path(install_root).absolute() / "update-state" / READINESS_FILE
 
@@ -247,13 +270,22 @@ def record_frontend_signal(
         return {"status": "rejected", "code": "READINESS_EVENT_INVALID"}
     root = Path(install_root).absolute()
     expected_commit, expected_payload = _identity(root)
-    if not expected_commit or not expected_payload:
-        return {"status": "rejected", "code": "READINESS_IDENTITY_UNAVAILABLE"}
+    identity_available = bool(expected_commit and expected_payload)
+    if not identity_available:
+        # Never accept an identity-free signal for a staged update.  Only a
+        # legacy install with no pending marker may use the compatibility
+        # handshake; its readiness remains separate from exact V8 payload
+        # evidence and does not clear any update marker.
+        pending = root / "update-state" / "pending-health.json"
+        if not _legacy_payload_is_safe(root) or pending.exists() or pending.is_symlink():
+            return {"status": "rejected", "code": "READINESS_IDENTITY_UNAVAILABLE"}
+        if source_commit not in {None, ""} or payload_id not in {None, ""}:
+            return {"status": "rejected", "code": "READINESS_IDENTITY_UNAVAILABLE"}
     if source_commit is not None and source_commit != expected_commit:
         return {"status": "rejected", "code": "READINESS_SOURCE_MISMATCH"}
     if payload_id is not None and payload_id != expected_payload:
         return {"status": "rejected", "code": "READINESS_PAYLOAD_MISMATCH"}
-    if event == "frontend_ready" and (source_commit != expected_commit or payload_id != expected_payload):
+    if event == "frontend_ready" and identity_available and (source_commit != expected_commit or payload_id != expected_payload):
         return {"status": "rejected", "code": "READINESS_IDENTITY_REQUIRED"}
     state = load_state(root)
     pid = state.get("pid")
