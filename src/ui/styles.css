@@ -123,12 +123,19 @@ p { margin: 0; color: var(--muted); line-height: 1.55; }
 .metric-card strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; letter-spacing: -.02em; }
 .card { min-width: 0; padding: var(--space-section); border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--panel); box-shadow: var(--shadow); }
 .card--flat { box-shadow: none; background: var(--panel-raised); }
+.inventory-health { display: grid; gap: 12px; }
+.inventory-health__summary { padding: 10px 12px; border-left: 3px solid var(--accent); border-radius: var(--radius-control); color: var(--text); background: var(--panel-soft); font-size: 12px; line-height: 1.45; }
+.inventory-health__metrics { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; }
+.inventory-health__metrics > div { display: grid; gap: 4px; min-width: 0; padding: 9px 10px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--panel); }
+.inventory-health__metrics span { color: var(--muted); font-size: 10px; line-height: 1.25; }
+.inventory-health__metrics strong { color: var(--text); font-size: 16px; }
+.model-readiness-note { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.4; }
 .card-title-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
 .card-description { color: var(--muted); font-size: 12px; line-height: 1.5; }
 .stat-value { margin-top: 6px; font-size: 24px; font-weight: 700; letter-spacing: -.03em; }
 .stat-label { color: var(--muted); font-size: 11px; }
 .status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; color: var(--muted); background: var(--panel-soft); font-size: 10px; white-space: nowrap; }
-.status-pill[data-status="operational"], .status-pill[data-status="running"], .status-pill[data-status="installed"], .status-pill[data-status="available"], .status-pill[data-status="ready"] { color: var(--success); background: rgba(69, 209, 154, .12); }
+.status-pill[data-status="operational"], .status-pill[data-status="healthy"], .status-pill[data-status="running"], .status-pill[data-status="installed"], .status-pill[data-status="available"], .status-pill[data-status="ready"] { color: var(--success); background: rgba(69, 209, 154, .12); }
 .status-pill[data-status="partial"], .status-pill[data-status="starting"], .status-pill[data-status="external_managed"] { color: var(--warning); background: rgba(242, 189, 101, .13); }
 .status-pill[data-status="unavailable"], .status-pill[data-status="interrupted"], .status-pill[data-status="missing"], .status-pill[data-status="not_installed"] { color: var(--danger); background: rgba(239, 120, 133, .12); }
 .status-pill[data-status="planned"] { color: var(--muted); }
@@ -551,6 +558,8 @@ td { color: var(--text); }
 .diagnostics-card__evidence span, .diagnostics-card__evidence small { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
 .diagnostics-card__evidence p { overflow-wrap: anywhere; font-size: 11px; line-height: 1.45; }
 .diagnostics-card__evidence small { font-weight: 400; letter-spacing: 0; text-transform: none; }
+.diagnostics-inventory-summary { padding: 8px 10px; border-radius: var(--radius-control); color: var(--text) !important; background: var(--panel); font-size: 11px !important; line-height: 1.4; }
+.diagnostics-inventory-summary span { color: var(--muted) !important; font-size: 10px !important; font-weight: 600 !important; letter-spacing: 0 !important; text-transform: none !important; }
 @media (max-width: 760px) { .diagnostics-grid { grid-template-columns: minmax(0, 1fr); } }
 .dashboard-primary > details { margin-top: 4px; padding: 2px 0 4px; }
 .dashboard-primary > details > summary { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); cursor: pointer; }
@@ -620,7 +629,8 @@ td { color: var(--text); }
 
 @media (max-width: 1450px) and (min-width: 981px) { .graph-editor { --node-inspector-width: 280px; } }
 @media (max-width: 980px) { .graph-editor__layout { grid-template-columns: minmax(0, 1fr); }.graph-inspector { min-width: 0; }.job-filter-grid { grid-template-columns: 1fr; }.job-card__summary, .job-timestamps { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 560px) { .job-card__summary, .job-timestamps { grid-template-columns: 1fr; }.job-pagination { align-items: flex-start; flex-direction: column; }.status-explanation summary { align-items: flex-start; }.status-explanation summary .status-pill { flex: 0 0 auto; } }
+@media (max-width: 980px) { .inventory-health__metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .job-card__summary, .job-timestamps { grid-template-columns: 1fr; }.job-pagination { align-items: flex-start; flex-direction: column; }.status-explanation summary { align-items: flex-start; }.status-explanation summary .status-pill { flex: 0 0 auto; }.inventory-health__metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
 /* Milestone 4A: local-only creative project workspace. */
 .creative-tabs { margin: -7px 0 16px; overflow-x: auto; }

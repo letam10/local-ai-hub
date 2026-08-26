@@ -310,7 +310,17 @@ def _public_inventory_summary(result: dict[str, Any], raw: object) -> dict[str, 
     """Copy bounded inventory/readiness counters without exposing registry IDs."""
 
     source = raw if isinstance(raw, dict) else {}
-    for key in ("registry_records", "observed_count", "verified_installed", "partial_count", "unknown_count", "unavailable_count"):
+    for key in (
+        "registry_records",
+        "observed_count",
+        "verified_installed",
+        "installed_unverified_count",
+        "operational_count",
+        "partial_count",
+        "unknown_count",
+        "not_installed_count",
+        "unavailable_count",
+    ):
         value = _public_int(source.get(key))
         if value is not None:
             result[key] = value
@@ -442,8 +452,9 @@ def _public_subsystem(name: str, raw: object) -> dict[str, Any]:
             "total_count", "drives", "drive_count", "low_space", "gpus", "gpu_count", "lines", "error_count",
             "has_errors", "digest", "files", "recovery_count", "has_recovery_files", "category_flags",
             "root_verified", "inside_work_tree", "inspected", "evidence_summary", "impact", "checked_at",
-            "registry_records", "observed_count", "verified_installed", "partial_count", "unknown_count",
-            "unavailable_count", "inventory_healthy", "readiness_note", "scan_status", "scan_mode", "scan_exact",
+            "registry_records", "observed_count", "verified_installed", "installed_unverified_count",
+            "operational_count", "partial_count", "unknown_count", "not_installed_count", "unavailable_count",
+            "inventory_healthy", "readiness_note", "scan_status", "scan_mode", "scan_exact",
             "scan_progress", "scan_files", "scan_bytes", "scan_reason", "scan_next_action",
         }
         if not any(key in raw for key in detail_keys):
@@ -678,6 +689,78 @@ class DiagnosticsCenter:
     # Inventory subsystems (read-only filesystem scan)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _catalog_inventory_counts(section: str) -> dict[str, int] | None:
+        """Read the bounded production-catalog counters without starting a scan.
+
+        The catalog owns fixed-leaf model/runtime readiness.  Diagnostics may
+        reuse that metadata, but it must not recursively walk Models or
+        Environments a second time just to render a health card.
+        """
+
+        try:
+            from src.platform.paths import get_paths
+            from src.services.productization.catalog import ProductionCatalog
+
+            # Build the catalog directly instead of calling the compatibility
+            # ``catalog_snapshot`` façade.  The façade may consult legacy
+            # model summaries (and an Ollama loopback tags endpoint); a
+            # diagnostics refresh must stay metadata-only and never probe a
+            # provider just to render inventory counters.
+            snapshot = ProductionCatalog(paths=get_paths()).snapshot()
+            source: object = snapshot.get("inventory") if isinstance(snapshot, dict) else None
+            if section == "runtimes" and isinstance(source, dict):
+                source = source.get("runtimes")
+            if not isinstance(source, dict) or source.get("status") != "healthy":
+                return None
+            result: dict[str, int] = {}
+            for key in (
+                "registry_records",
+                "observed_count",
+                "verified_installed",
+                "installed_unverified_count",
+                "operational_count",
+                "partial_count",
+                "unknown_count",
+                "not_installed_count",
+                "unavailable_count",
+            ):
+                value = source.get(key)
+                if type(value) is int and value >= 0 and value <= _MAX_PUBLIC_COUNT:
+                    result[key] = value
+            return result if result.get("registry_records", 0) > 0 else None
+        except Exception:
+            # Diagnostics must remain available even when an optional catalog
+            # snapshot cannot be read; the caller falls back to fixed roots.
+            return None
+
+    @staticmethod
+    def _inventory_reason(
+        label: str,
+        counts: dict[str, int],
+        *,
+        healthy: bool,
+    ) -> str:
+        """Build a path-free explanation of inventory versus readiness."""
+
+        records = counts.get("registry_records", 0)
+        observed = counts.get("observed_count", 0)
+        verified = counts.get("verified_installed", 0)
+        unverified = counts.get("installed_unverified_count", 0)
+        operational = counts.get("operational_count", 0)
+        partial = counts.get("partial_count", 0)
+        unknown = counts.get("unknown_count", 0)
+        not_installed = counts.get("not_installed_count", 0)
+        unavailable = counts.get("unavailable_count", 0)
+        prefix = "Registry đọc được" if healthy else "Chưa đọc đủ registry"
+        return (
+            f"{prefix}: {records} bản ghi {label}; quan sát cục bộ {observed}; "
+            f"đã xác minh cài đặt {verified}; đã có bằng chứng operational {operational}; "
+            f"đã cài nhưng chưa xác minh {unverified}; một phần {partial}; chưa rõ {unknown}; "
+            f"chưa cài {not_installed}; không khả dụng {unavailable}. "
+            "Healthy chỉ mô tả khả năng đọc inventory, không xác nhận mọi mục có thể chạy."
+        )
+
     def models_inventory(self) -> dict[str, Any]:
         """Read the model registry/root presence without recursively walking it.
 
@@ -686,16 +769,24 @@ class DiagnosticsCenter:
         second multi-hundred-thousand-entry scan.  Presence here is therefore
         inventory evidence only, never model-readiness or operational proof.
         """
+        catalog_counts = self._catalog_inventory_counts("models")
         if not MODEL_ROOT.exists():
-            return {
-                **_status(UNAVAILABLE, "Models/ directory not found.", "Review the managed model root before requesting component setup."),
+            fallback_counts = catalog_counts or {
                 "registry_records": len(MODEL_PATHS),
                 "observed_count": 0,
                 "verified_installed": 0,
+                "installed_unverified_count": 0,
+                "operational_count": 0,
                 "partial_count": 0,
                 "unknown_count": len(MODEL_PATHS),
+                "not_installed_count": 0,
                 "unavailable_count": len(MODEL_PATHS),
+            }
+            return {
+                **_status(UNAVAILABLE, "Models/ directory not found. " + self._inventory_reason("model", fallback_counts, healthy=False), "Review the managed model root before requesting component setup."),
+                **fallback_counts,
                 "inventory_healthy": False,
+                "readiness_note": "Inventory không xác nhận model readiness; cần kiểm tra root managed và component evidence riêng.",
             }
         entries: dict[str, Any] = {}
         for key, path in MODEL_PATHS.items():
@@ -707,24 +798,36 @@ class DiagnosticsCenter:
                 entries[key] = {"present": False, "reparse": False, "size_bytes": None}
         present = sum(1 for v in entries.values() if v["present"])
         missing_keys = [k for k, v in entries.items() if not v["present"]]
-        partial = sum(1 for value in entries.values() if value["present"] and value.get("reparse"))
-        unavailable = len(missing_keys)
-        next_action = (
-            f"Inventory đọc được nhưng {unavailable} model root chưa hiện diện; xem Components để kiểm tra import/license/runtime."
-            if missing_keys else
-            "Inventory đã đọc được; mở Components để xem model nào đã được xác minh runtime."
-        )
-        return {
-            **_status(HEALTHY, f"Model registry đọc được: {present}/{len(entries)} root đã quan sát; đây không phải bằng chứng operational.", next_action),
-            "models": entries,
+        reparse_partial = sum(1 for value in entries.values() if value["present"] and value.get("reparse"))
+        counts = catalog_counts or {
             "registry_records": len(entries),
             "observed_count": present,
             "verified_installed": 0,
-            "partial_count": partial,
+            "installed_unverified_count": 0,
+            "operational_count": 0,
+            "partial_count": reparse_partial,
             "unknown_count": 0,
-            "unavailable_count": unavailable,
-            "inventory_healthy": True,
-            "readiness_note": "Healthy chỉ mô tả registry/root inventory; trạng thái cài đặt, license và runtime được đánh giá riêng ở Components.",
+            "not_installed_count": len(missing_keys),
+            "unavailable_count": 0,
+        }
+        if reparse_partial:
+            counts = {**counts, "partial_count": counts.get("partial_count", 0) + reparse_partial}
+        missing_count = counts.get("not_installed_count", len(missing_keys))
+        needs_review = counts.get("installed_unverified_count", 0) + counts.get("partial_count", 0) + counts.get("unknown_count", 0)
+        next_action = (
+            f"Có {missing_count} model chưa cài; mở Components để xem import/license/runtime và không tải lại resource đã quan sát."
+            if missing_count else
+            "Inventory đã đọc được; mở Components để xem model nào đã được xác minh runtime."
+        )
+        if needs_review:
+            next_action += " Các mục một phần/chưa xác minh vẫn chưa nên coi là operational."
+        return {
+            **_status(HEALTHY if catalog_counts is not None or present or not missing_keys else NEEDS_ATTENTION, self._inventory_reason("model", counts, healthy=catalog_counts is not None or bool(present or not missing_keys)), next_action),
+            "models": entries,
+            "registry_records": len(entries),
+            **counts,
+            "inventory_healthy": catalog_counts is not None or bool(present or not missing_keys),
+            "readiness_note": "Healthy chỉ mô tả registry/root inventory; model chỉ được coi là operational khi có bằng chứng runtime riêng.",
         }
 
     def environments_inventory(self) -> dict[str, Any]:
@@ -744,32 +847,48 @@ class DiagnosticsCenter:
         except OSError:
             unreadable = 1
         status = HEALTHY if unreadable == 0 else NEEDS_ATTENTION
-        return {
-            **_status(status, f"Environment inventory đọc được {len(envs)} root cấp một; không chạy environment.", "Mở Components để kiểm tra runtime/environment readiness; cài đặt cần thao tác rõ ràng." if not envs else "Inventory đã đọc được; readiness runtime cần bằng chứng riêng."),
-            "environments": envs,
+        counts = {
             "registry_records": len(envs),
             "observed_count": len(envs),
             "verified_installed": 0,
+            "installed_unverified_count": 0,
+            "operational_count": 0,
             "partial_count": unreadable,
             "unknown_count": 0,
-            "unavailable_count": 0 if envs else 1,
+            "not_installed_count": 0 if envs else 1,
+            "unavailable_count": 0,
+        }
+        return {
+            **_status(status, self._inventory_reason("environment", counts, healthy=unreadable == 0), "Mở Components để kiểm tra runtime/environment readiness; cài đặt cần thao tác rõ ràng." if not envs else "Inventory đã đọc được; readiness runtime cần bằng chứng riêng."),
+            "environments": envs,
+            **counts,
             "inventory_healthy": unreadable == 0,
+            "readiness_note": "Environment inventory chỉ xác nhận root cấp một; runtime/import/worker smoke được đánh giá riêng.",
         }
 
     def runtime_inventory(self) -> dict[str, Any]:
         """Check presence of registered runtime paths."""
         entries: dict[str, bool] = {key: path.exists() for key, path in RUNTIME_PATHS.items()}
         present = sum(entries.values())
-        return {
-            **_status(HEALTHY if entries else UNAVAILABLE, f"Runtime inventory đọc được {present}/{len(entries)} root; chưa xác nhận worker đang chạy.", "Mở Components để kiểm tra import/runtime smoke và trạng thái cài đặt." if present < len(entries) else "Inventory đã đọc được; runtime vẫn cần bằng chứng bounded smoke."),
-            "runtimes": entries,
+        catalog_counts = self._catalog_inventory_counts("runtimes")
+        counts = catalog_counts or {
             "registry_records": len(entries),
             "observed_count": present,
             "verified_installed": 0,
+            "installed_unverified_count": 0,
+            "operational_count": 0,
             "partial_count": 0,
             "unknown_count": 0,
-            "unavailable_count": max(0, len(entries) - present),
-            "inventory_healthy": bool(entries),
+            "not_installed_count": len(entries) - present,
+            "unavailable_count": 0,
+        }
+        healthy = catalog_counts is not None or bool(present)
+        return {
+            **_status(HEALTHY if healthy else UNAVAILABLE, self._inventory_reason("runtime", counts, healthy=healthy), "Mở Components để kiểm tra import/runtime smoke và trạng thái cài đặt." if counts.get("not_installed_count", 0) else "Inventory đã đọc được; runtime vẫn cần bằng chứng bounded smoke."),
+            "runtimes": entries,
+            **counts,
+            "inventory_healthy": healthy,
+            "readiness_note": "Runtime inventory chỉ xác nhận registry/fixed leaves; import, worker và bounded smoke được đánh giá riêng.",
         }
 
     # ------------------------------------------------------------------

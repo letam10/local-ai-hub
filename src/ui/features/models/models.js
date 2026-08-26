@@ -2,6 +2,50 @@
  * pages.js keeps only the compatibility wrapper for older routes. */
 const MODEL_STATUS_INSTALLED = new Set(["INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"]);
 
+const MODEL_READINESS_COPY = Object.freeze({
+  INSTALLED: {
+    label: "Installed · runtime not verified",
+    reason: "Required catalog leaves match, but this inventory view has not produced bounded runtime evidence.",
+    action: "Review the linked runtime and run a bounded verification before use.",
+  },
+  INSTALLED_UNVERIFIED: {
+    label: "Observed locally · not verified",
+    reason: "A local model record was observed, but catalog leaves or runtime smoke are not fully verified.",
+    action: "Use the existing resource; review the catalog binding and verify it before running.",
+  },
+  PARTIAL: {
+    label: "Partial installation",
+    reason: "Only some required catalog leaves were observed, so the model is incomplete.",
+    action: "Review the missing leaves and create an explicit import or installation plan.",
+  },
+  NOT_INSTALLED: {
+    label: "Not installed",
+    reason: "No required catalog leaf was observed. This means not installed, not that the source is unavailable.",
+    action: "Import an existing model or review the server-owned plan, license and source before installing.",
+  },
+  UNAVAILABLE: {
+    label: "Unavailable",
+    reason: "The catalog cannot currently provide a usable model source or prerequisite.",
+    action: "Keep installation disabled until the missing source or prerequisite is explicitly resolved.",
+  },
+  OPERATIONAL: {
+    label: "Operational evidence",
+    reason: "Only a matching bounded runtime evidence record permits the operational label.",
+    action: "Use only within the scope of the published runtime evidence.",
+  },
+});
+
+const inventoryCount = (value, fallback = 0) => Number.isInteger(value) && value >= 0 ? value : fallback;
+
+const modelReadinessCopy = (item) => {
+  const status = String(item?.status || "UNKNOWN").toUpperCase();
+  return MODEL_READINESS_COPY[status] || {
+    label: "Unknown readiness",
+    reason: "The server snapshot does not contain enough evidence to classify this model.",
+    action: "Review the bounded server-owned evidence before requesting runtime work.",
+  };
+};
+
 function filterCatalogModels(models, filters = {}) {
   const query = String(filters.query || "").trim().toLocaleLowerCase().slice(0, 80);
   const category = String(filters.category || "").trim();
@@ -22,19 +66,30 @@ export function renderProductionModels({ productionCatalog, legacyModels, storag
   const legacy = Array.isArray(legacyModels) ? legacyModels : [];
   const areas = Object.entries(storage?.areas || {});
   const inventory = productionCatalog?.inventory && typeof productionCatalog.inventory === "object" ? productionCatalog.inventory : {};
-  const inventoryRecords = Number.isInteger(inventory.registry_records) ? inventory.registry_records : production.length;
-  const inventoryObserved = Number.isInteger(inventory.observed_count) ? inventory.observed_count : production.filter((item) => item.observed_local === true).length;
-  const inventoryVerified = Number.isInteger(inventory.verified_installed) ? inventory.verified_installed : production.filter((item) => String(item.status || "").toUpperCase() === "INSTALLED").length;
-  const inventoryPartial = Number.isInteger(inventory.partial_count) ? inventory.partial_count : production.filter((item) => ["PARTIAL", "INSTALLED_UNVERIFIED"].includes(String(item.status || "").toUpperCase())).length;
-  const inventoryUnknown = Number.isInteger(inventory.unknown_count) ? inventory.unknown_count : production.filter((item) => String(item.status || "").toUpperCase() === "UNKNOWN").length;
-  const inventoryUnavailable = Number.isInteger(inventory.unavailable_count) ? inventory.unavailable_count : production.filter((item) => ["NOT_INSTALLED", "UNAVAILABLE"].includes(String(item.status || "").toUpperCase())).length;
-  const inventoryCard = `<section class="inventory-health card card--flat" data-inventory-status="${escapeHtml(String(inventory.status || "healthy"))}"><div class="card-title-row"><div><span class="eyebrow">INVENTORY</span><h2>${uiTextHtml("Model inventory")}</h2><p class="small">${uiTextHtml("Healthy chỉ xác nhận registry đọc được; không đồng nghĩa mọi model đã cài hoặc operational.")}</p></div>${statusPill(String(inventory.status || "healthy"), uiTextHtml("Registry readable"))}</div><div class="inventory-health__metrics"><div><span>${uiTextHtml("Registry records")}</span><strong>${escapeHtml(String(inventoryRecords))}</strong></div><div><span>${uiTextHtml("Observed locally")}</span><strong>${escapeHtml(String(inventoryObserved))}</strong></div><div><span>${uiTextHtml("Verified installed")}</span><strong>${escapeHtml(String(inventoryVerified))}</strong></div><div><span>${uiTextHtml("Partial / unknown")}</span><strong>${escapeHtml(String(inventoryPartial + inventoryUnknown))}</strong></div><div><span>${uiTextHtml("Unavailable")}</span><strong>${escapeHtml(String(inventoryUnavailable))}</strong></div></div><p class="small">${uiTextHtml("Component readiness, license, source and runtime smoke are shown per row below; no model was loaded by this inventory view.")}</p></section>`;
+  const inventoryStatus = typeof inventory.status === "string" && inventory.status ? inventory.status : "unknown";
+  const inventoryRecords = inventoryCount(inventory.registry_records, production.length);
+  const inventoryObserved = inventoryCount(inventory.observed_count, production.filter((item) => item.observed_local === true).length);
+  const inventoryVerified = inventoryCount(inventory.verified_installed, production.filter((item) => String(item.status || "").toUpperCase() === "INSTALLED").length);
+  const inventoryUnverified = inventoryCount(inventory.installed_unverified_count, production.filter((item) => String(item.status || "").toUpperCase() === "INSTALLED_UNVERIFIED").length);
+  const inventoryOperational = inventoryCount(inventory.operational_count, production.filter((item) => String(item.status || "").toUpperCase() === "OPERATIONAL" && item.operational === true).length);
+  const inventoryPartial = inventoryCount(inventory.partial_count, production.filter((item) => String(item.status || "").toUpperCase() === "PARTIAL").length);
+  const inventoryUnknown = inventoryCount(inventory.unknown_count, production.filter((item) => ["UNKNOWN", "NOT_PUBLISHED"].includes(String(item.status || "").toUpperCase())).length);
+  const inventoryNotInstalled = inventoryCount(inventory.not_installed_count, production.filter((item) => String(item.status || "").toUpperCase() === "NOT_INSTALLED").length);
+  const inventoryUnavailable = Number.isInteger(inventory.unavailable_count) && Number.isInteger(inventory.not_installed_count)
+    ? inventoryCount(inventory.unavailable_count)
+    : production.filter((item) => String(item.status || "").toUpperCase() === "UNAVAILABLE").length;
+  const inventoryNeedsVerification = inventoryUnverified + inventoryPartial + inventoryUnknown;
+  const inventorySummary = `${uiTextHtml("Registry readable")} · ${escapeHtml(String(inventoryRecords))} ${uiTextHtml("model records")} · ${escapeHtml(String(inventoryVerified))} ${uiTextHtml("verified installed")} · ${escapeHtml(String(inventoryOperational))} ${uiTextHtml("operational evidence")} · ${escapeHtml(String(inventoryNeedsVerification))} ${uiTextHtml("needs verification")} · ${escapeHtml(String(inventoryNotInstalled))} ${uiTextHtml("not installed")} · ${escapeHtml(String(inventoryUnavailable))} ${uiTextHtml("unavailable")}`;
+  const inventoryCard = `<section class="inventory-health card card--flat" data-inventory-status="${escapeHtml(inventoryStatus)}"><div class="card-title-row"><div><span class="eyebrow">INVENTORY</span><h2>${uiTextHtml("Model inventory")}</h2><p class="small">${uiTextHtml("Healthy chỉ xác nhận registry đọc được; không đồng nghĩa mọi model đã cài hoặc operational.")}</p></div>${statusPill(inventoryStatus, inventoryStatus === "healthy" ? uiTextHtml("Registry readable") : "")}</div><p class="inventory-health__summary">${inventorySummary}</p><div class="inventory-health__metrics"><div><span>${uiTextHtml("Registry records")}</span><strong>${escapeHtml(String(inventoryRecords))}</strong></div><div><span>${uiTextHtml("Observed locally")}</span><strong>${escapeHtml(String(inventoryObserved))}</strong></div><div><span>${uiTextHtml("Verified installed")}</span><strong>${escapeHtml(String(inventoryVerified))}</strong></div><div><span>${uiTextHtml("Operational evidence")}</span><strong>${escapeHtml(String(inventoryOperational))}</strong></div><div><span>${uiTextHtml("Needs verification")}</span><strong>${escapeHtml(String(inventoryNeedsVerification))}</strong></div><div><span>${uiTextHtml("Not installed")}</span><strong>${escapeHtml(String(inventoryNotInstalled))}</strong></div><div><span>${uiTextHtml("Unavailable")}</span><strong>${escapeHtml(String(inventoryUnavailable))}</strong></div></div><p class="small">${uiTextHtml("Component readiness, license, source and runtime smoke are shown per row below; no model was loaded by this inventory view.")}</p></section>`;
   const catalogRows = visibleProduction.map((item) => {
-    const status = String(item.status || "UNAVAILABLE").toLowerCase();
+    const rawStatus = String(item.status || "UNAVAILABLE").toUpperCase();
+    const status = rawStatus.toLowerCase();
     const disposition = String(item.disposition || "MANUAL_IMPORT_ONLY");
     const action = disposition === "AUTO_INSTALL_READY" ? "Download & Install" : disposition === "AUTH_REQUIRED" ? "Authorize & Install" : disposition === "LICENSE_REQUIRED" ? "Review License" : disposition === "MANUAL_IMPORT_ONLY" ? "Import Model" : "Manual Review";
-    const sourceStatus = String(item.source_availability?.status || "UNKNOWN");
-    return `<tr><td><strong>${escapeHtml(item.display_name || item.model_id)}</strong><br><small>${escapeHtml(item.model_id || "")}</small></td><td>${escapeHtml(item.category || "Other")}</td><td>${escapeHtml(item.size_label || (item.expected_download_size_bytes ? `Download: ${item.expected_download_size_bytes} bytes` : "Size unavailable"))}</td><td>${statusPill(status)}<br><small>Nguồn: ${escapeHtml(sourceStatus)}</small><br><small>${uiTextHtml(action)}</small></td><td><button class="button button--compact" type="button" data-product-plan="${escapeHtml(item.model_id || "")}">${uiTextHtml(action)}</button><button class="button button--compact" type="button" data-check-update="${escapeHtml(item.model_id || "")}">${uiTextHtml("Check Update")}</button></td></tr>`;
+    const sourceStatus = String(item.source_availability?.status || "UNKNOWN").toUpperCase();
+    const readiness = modelReadinessCopy(item);
+    const sourceLabel = sourceStatus === "UNKNOWN" ? "Source not verified" : sourceStatus === "AVAILABLE" ? "Source available" : "Source requires review";
+    return `<tr data-model-readiness="${escapeHtml(rawStatus.toLowerCase())}"><td><strong>${escapeHtml(item.display_name || item.model_id)}</strong><br><small>${escapeHtml(item.model_id || "")}</small></td><td>${escapeHtml(item.category || "Other")}</td><td>${escapeHtml(item.size_label || (item.expected_download_size_bytes ? `Download: ${item.expected_download_size_bytes} bytes` : "Size unavailable"))}</td><td>${statusPill(status)}<br><small>${uiTextHtml(readiness.label)}</small><br><small>${uiTextHtml("Source")}: ${uiTextHtml(sourceLabel)}</small><br><small>${escapeHtml(readiness.reason)}</small><br><small><strong>${uiTextHtml("Next action")}:</strong> ${escapeHtml(readiness.action)}</small><br><small>${uiTextHtml(action)}</small></td><td><button class="button button--compact" type="button" data-product-plan="${escapeHtml(item.model_id || "")}">${uiTextHtml(action)}</button><button class="button button--compact" type="button" data-check-update="${escapeHtml(item.model_id || "")}">${uiTextHtml("Check Update")}</button></td></tr>`;
   }).join("");
   const legacyRows = legacy.map((item) => `<tr><td>${escapeHtml(item.model_name)}</td><td>${escapeHtml(item.engine)}</td><td>${formatGb(item.size?.bytes)}</td><td>${statusPill(item.installed ? "installed" : "not_installed")}</td></tr>`).join("");
   const table = catalogRows ? `<div class="table-wrap"><table><thead><tr><th>${uiTextHtml("Model")}</th><th>${uiTextHtml("Category")}</th><th>${uiTextHtml("Size")}</th><th>${uiTextHtml("Status / action")}</th><th></th></tr></thead><tbody>${catalogRows}</tbody></table></div>` : legacyRows ? `<div class="table-wrap"><table><thead><tr><th>${uiTextHtml("Model")}</th><th>${uiTextHtml("Engine")}</th><th>${uiTextHtml("Size")}</th><th>${uiTextHtml("Status")}</th></tr></thead><tbody>${legacyRows}</tbody></table></div>` : `<div class="empty-state compact">Chưa có model catalog.</div>`;

@@ -25,6 +25,10 @@ export function createDiagnosticsRenderer(deps) {
     const inspected = info?.inspected || "Đang xác định phạm vi kiểm tra...";
     const evidence = info?.evidence_summary || reason;
     const checkedAt = info?.checked_at || "Chưa có thời điểm kiểm tra";
+    const count = (value) => Number.isInteger(value) && value >= 0 ? String(value) : "—";
+    const inventorySummary = ["models_inventory", "environments_inventory", "runtime_inventory"].includes(id) && Number.isInteger(info?.registry_records)
+      ? `<p class="diagnostics-inventory-summary"><span>${uiText("Registry records")}</span> ${count(info.registry_records)} · <span>${uiText("Observed locally")}</span> ${count(info.observed_count)} · <span>${uiText("Verified installed")}</span> ${count(info.verified_installed)} · <span>${uiText("Operational evidence")}</span> ${count(info.operational_count)} · <span>${uiText("Not installed")}</span> ${count(info.not_installed_count)} · <span>${uiText("Unavailable")}</span> ${count(info.unavailable_count)}</p>`
+      : "";
     const purpose = {
       git_integrity: "Xác nhận source/repository không bị thay đổi ngoài contract.",
       config_registry: "Đọc cấu hình server-owned và các registry đã allowlist.",
@@ -40,7 +44,7 @@ export function createDiagnosticsRenderer(deps) {
       recovery_forensic: "Kiểm tra dấu vết phục hồi và bản nháp cần xử lý.",
     }[id] || "Kiểm tra một subsystem server-owned.";
     const translatedLabel = typeof uiText === "function" ? uiText(label) : label;
-    return `<article class="diagnostics-card" data-subsystem="${escapeHtml(id)}" data-status="${escapeHtml(status)}"><div class="diagnostics-card__disclosure">${statusExplanation({ name: translatedLabel, technicalId: id, purpose, status: displayStatus, reason, impact: info?.impact || statusImpact(displayStatus, label), nextAction, compact: true })}</div><div class="diagnostics-card__evidence"><div><span>Đã kiểm tra</span><p>${escapeHtml(inspected)}</p></div><div><span>Bằng chứng</span><p>${escapeHtml(evidence)}</p></div><small>Kiểm tra lần cuối: ${escapeHtml(checkedAt)}</small></div></article>`;
+    return `<article class="diagnostics-card" data-subsystem="${escapeHtml(id)}" data-status="${escapeHtml(status)}"><div class="diagnostics-card__disclosure">${statusExplanation({ name: translatedLabel, technicalId: id, purpose, status: displayStatus, reason, impact: info?.impact || statusImpact(displayStatus, label), nextAction, compact: true })}</div><div class="diagnostics-card__evidence"><div><span>Đã kiểm tra</span><p>${escapeHtml(inspected)}</p></div><div><span>Bằng chứng</span><p>${escapeHtml(evidence)}</p></div>${inventorySummary}<small>Kiểm tra lần cuối: ${escapeHtml(checkedAt)}</small></div></article>`;
   };
   // Use two independent vertical stacks.  A CSS grid with each card as a
   // direct child couples row heights, so expanding one card would create a

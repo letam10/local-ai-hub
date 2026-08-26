@@ -13,7 +13,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from src.services.diagnostics.center import DIAGNOSTIC_SUBSYSTEMS, DiagnosticsCenter
+from src.services.diagnostics.center import DIAGNOSTIC_SUBSYSTEMS, DiagnosticsCenter, public_snapshot_projection
 from src.services.productization.catalog import ProductionCatalog
 from src.services.storage_manager.overview import _storage_summary_from_reports
 
@@ -61,9 +61,66 @@ class V8WindowsUxClosureTests(unittest.TestCase):
         inventory = snapshot["inventory"]
         self.assertEqual(inventory["status"], "healthy")
         self.assertIn("registry_records", inventory)
+        self.assertEqual(inventory["not_installed_count"], sum(item["status"] == "NOT_INSTALLED" for item in snapshot["models"]))
+        self.assertEqual(inventory["unavailable_count"], sum(item["status"] == "UNAVAILABLE" for item in snapshot["models"]))
+        self.assertEqual(inventory["operational_count"], 0)
         self.assertIn("runtimes", inventory)
         self.assertIn("readiness_note", inventory["runtimes"])
         self.assertIn("runtime", inventory["runtimes"]["readiness_note"].casefold())
+
+    def test_inventory_health_does_not_conflate_not_installed_with_unavailable(self) -> None:
+        records = [
+            {"status": "NOT_INSTALLED"},
+            {"status": "UNAVAILABLE"},
+            {"status": "INSTALLED_UNVERIFIED", "observed_local": True},
+            {"status": "INSTALLED", "operational": False},
+            {"status": "OPERATIONAL", "operational": True},
+            {"status": "PARTIAL", "leaves": [{"present": True}]},
+            {"status": "UNKNOWN"},
+        ]
+        counts = ProductionCatalog._inventory_counts(records)
+        self.assertEqual(counts["registry_records"], 7)
+        self.assertEqual(counts["not_installed_count"], 1)
+        self.assertEqual(counts["unavailable_count"], 1)
+        self.assertEqual(counts["installed_unverified_count"], 1)
+        self.assertEqual(counts["verified_installed"], 1)
+        self.assertEqual(counts["operational_count"], 1)
+        self.assertEqual(counts["partial_count"], 1)
+        self.assertEqual(counts["unknown_count"], 1)
+        self.assertEqual(counts["observed_count"], 4)
+
+    def test_public_inventory_projection_keeps_readiness_counters_path_free(self) -> None:
+        raw = {
+            "models_inventory": {
+                "status": "HEALTHY",
+                "models": {"model-a": {"present": False}},
+                "registry_records": 2,
+                "observed_count": 1,
+                "verified_installed": 0,
+                "installed_unverified_count": 1,
+                "operational_count": 0,
+                "partial_count": 0,
+                "unknown_count": 0,
+                "not_installed_count": 1,
+                "unavailable_count": 0,
+                "inventory_healthy": True,
+                "readiness_note": "Healthy only describes registry readability; execution evidence is separate.",
+            }
+        }
+        projected = public_snapshot_projection(raw)["models_inventory"]
+        for key in ("registry_records", "observed_count", "verified_installed", "installed_unverified_count", "operational_count", "partial_count", "unknown_count", "not_installed_count", "unavailable_count"):
+            self.assertIn(key, projected)
+        self.assertNotIn("models", projected)
+        self.assertEqual(projected["not_installed_count"], 1)
+        self.assertEqual(projected["unavailable_count"], 0)
+
+    def test_models_ui_explains_inventory_health_and_per_model_readiness(self) -> None:
+        models = (ROOT / "src" / "ui" / "features" / "models" / "models.js").read_text(encoding="utf-8")
+        self.assertIn("not_installed_count", models)
+        self.assertIn("operational_count", models)
+        self.assertIn('data-model-readiness=', models)
+        self.assertIn("This means not installed, not that the source is unavailable.", models)
+        self.assertIn("Needs verification", models)
 
     def test_deep_exact_requires_every_allowlisted_area(self) -> None:
         reports = {
@@ -85,6 +142,7 @@ class V8WindowsUxClosureTests(unittest.TestCase):
         resource = (ROOT / "src/ui/shared/rendering.js").read_text(encoding="utf-8")
         components = (ROOT / "src/ui/features/components/render.js").read_text(encoding="utf-8")
         self.assertIn("diagnostics-column", diagnostics)
+        self.assertIn("diagnostics-inventory-summary", diagnostics)
         self.assertIn("align-content: start", css)
         self.assertIn("status-explanation__body", css)
         self.assertIn("settingsDirty", app)
