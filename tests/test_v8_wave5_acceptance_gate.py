@@ -158,7 +158,7 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
         by_id = {item["gate_id"]: set(item["required_checks"]) for item in contract["gates"]}
         self.assertTrue({"route_render", "real_navigation", "dark", "light", "dpi_100", "dpi_125", "dpi_150", "degraded_error_recovery", "frontend_ready", "normal_close", "trusted_native_interaction"}.issubset(by_id["webview2_product_ux"]))
         self.assertTrue({"api_start_failure_or_frontend_timeout", "watchdog_rollback_previous_relaunch"}.issubset(by_id["crash_recovery"]))
-        self.assertIn("helper_execution_or_truthful_limitation", by_id["real_component_lifecycle"])
+        self.assertIn("real_lightweight_helper_execution", by_id["real_component_lifecycle"])
         self.assertEqual(contract["release_policy"]["main_merge"], "user_approved_only")
         self.assertEqual(contract["release_policy"]["version_change"], "user_approved_only")
         self.assertEqual(contract["release_policy"]["tag_change"], "user_approved_only")

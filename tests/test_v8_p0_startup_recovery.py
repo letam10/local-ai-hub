@@ -12,7 +12,7 @@ from unittest.mock import patch
 from src.app.main import DesktopBridge, FRONTEND_BOOTSTRAP_TIMEOUT, WEBVIEW_NAVIGATION_FAILED, _error_html, _load_ui_when_ready, _verified_previous_pointer_available
 from src.app.stable_shell import POINTER_SCHEMA, PRODUCT_SCHEMA, VERSION_MANIFEST_SCHEMA, StableShellError, atomic_activate_pointer, load_current_pointer, resolve_launch_plan, resolve_verified_running_plan
 from src.app.update_bridge import _restart_after_update
-from src.app.update_watchdog import _rollback_previous
+from src.app.update_watchdog import _rollback_previous, _session_snapshot, run as run_watchdog
 from src.app.readiness import record_event
 from src.services.app_update import (
     AppUpdateError,
@@ -196,6 +196,42 @@ class V8P0StartupRecoveryTests(unittest.TestCase):
             self.assertTrue(_rollback_previous(root, reason="fixture-again"))
             self.assertEqual(load_current_pointer(root)["version"], "8.0.1")
 
+    def test_watchdog_parent_timeout_rolls_back_without_killing_parent(self):
+        with self._temp() as temporary:
+            root = Path(temporary) / "install"
+            self._install(root, current="main-aaaaaaaaaaaa", current_commit="a" * 40, previous="8.0.1")
+            previous = json.loads((root / "update-state" / "previous-current.json").read_text())
+            (root / "update-state" / "pending-health.json").write_text(json.dumps({
+                "schema_version": "local-ai-hub-pending-health.v1", "payload_id": "main-aaaaaaaaaaaa",
+                "source_commit": "a" * 40, "previous": previous,
+            }), encoding="utf-8")
+            before = load_current_pointer(root)
+            with patch("src.app.update_watchdog._wait_for_pid_exit", return_value=False), patch("src.app.update_watchdog._launch_stable") as launch:
+                result = run_watchdog(app_root=root, wait_pid=99999, timeout_seconds=5)
+            self.assertEqual(result["status"], "rolled_back")
+            self.assertEqual(result["code"], "WATCHDOG_PARENT_TIMEOUT_ROLLBACK")
+            self.assertEqual(load_current_pointer(root)["version"], "8.0.1")
+            self.assertFalse((root / "update-state" / "pending-health.json").exists())
+            launch.assert_not_called()
+            self.assertEqual(before["version"], "main-aaaaaaaaaaaa")
+
+    def test_watchdog_session_accepts_only_matching_nonce_identity_and_port(self):
+        with self._temp() as temporary:
+            root = Path(temporary) / "install"
+            state = root / "update-state"
+            state.mkdir(parents=True)
+            session = state / "restart-session.json"
+            nonce = "a" * 32
+            session.write_text(json.dumps({
+                "schema_version": "local-ai-hub-restart-session.v1", "payload_id": "main-bbbbbbbbbbbb",
+                "source_commit": "b" * 40, "nonce": nonce, "parent_pid": 1,
+                "api_port": 52943, "api_pid": 1234, "status": "frontend_ready",
+            }), encoding="utf-8")
+            with patch.dict(os.environ, {"LOCALAIHUB_WATCHDOG_SESSION_PATH": str(session), "LOCALAIHUB_WATCHDOG_SESSION_NONCE": nonce}, clear=False):
+                self.assertEqual(_session_snapshot()["api_port"], 52943)
+            with patch.dict(os.environ, {"LOCALAIHUB_WATCHDOG_SESSION_PATH": str(session), "LOCALAIHUB_WATCHDOG_SESSION_NONCE": "b" * 32}, clear=False):
+                self.assertIsNone(_session_snapshot())
+
     def test_recovery_screen_is_bounded_vietnamese_and_no_paths(self):
         html = _error_html("API_STARTUP_TIMEOUT")
         self.assertIn("Không thể kết nối Local AI Hub API", html)
@@ -319,7 +355,7 @@ class V8P0StartupRecoveryTests(unittest.TestCase):
             self.assertFalse(window.loaded_html)
             confirm.assert_called_once_with()
 
-    def test_watchdog_bridge_uses_old_verified_runtime_when_new_runtime_is_missing(self):
+    def test_watchdog_bridge_requires_a_persisted_staged_candidate_before_restart(self):
         with self._temp() as temporary:
             root = Path(temporary) / "install"
             old_app = root / "versions" / "old" / "app"
@@ -341,12 +377,10 @@ class V8P0StartupRecoveryTests(unittest.TestCase):
                     captured["destroyed"] = True
             with patch.dict(os.environ, {"LOCALAIHUB_INSTALL_ROOT": str(root), "LOCALAIHUB_APP_ROOT": str(old_app)}, clear=False), patch("src.app.update_bridge.resolve_launch_plan", return_value=new_plan), patch("src.app.update_bridge.resolve_verified_running_plan", return_value=old_plan), patch("src.app.update_bridge.subprocess.Popen", return_value=SimpleNamespace()) as popen, patch("src.app.update_bridge.importlib.import_module", return_value=SimpleNamespace(_prepare_owned_api_close=lambda: {"verification": "verified", "active_jobs": 0})):
                 result = _restart_after_update(Bridge())
-            self.assertEqual(result["status"], "completed")
-            command = popen.call_args.args[0]
-            self.assertEqual(command[:2], [str(old_runtime), "-m"])
-            self.assertEqual(popen.call_args.kwargs["cwd"], str(old_app))
-            self.assertEqual(popen.call_args.kwargs["env"]["LOCALAIHUB_APP_ROOT"], str(old_app))
-            self.assertTrue(captured["destroyed"])
+            self.assertEqual(result["status"], "blocked")
+            self.assertIn(result["code"], {"STAGED_UPDATE_INVALID", "INSTALL_ROOT_NOT_PRODUCTION"})
+            popen.assert_not_called()
+            self.assertNotIn("destroyed", captured)
 
     def test_watchdog_bridge_blocks_old_payload_ownership_mismatch(self):
         with self._temp() as temporary:

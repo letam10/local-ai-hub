@@ -60,9 +60,13 @@ ghi rõ đường mouse/keyboard native thay thế hoặc để check đó `BLOC
 được che khuất giới hạn host.
 
 `crash_recovery` phải có bằng chứng lỗi khởi động API/frontend hoặc process
-failure cùng watchdog rollback và relaunch payload trước.  `real_component_lifecycle`
-phải ghi lightweight helper đã thực sự chạy, hoặc khai báo rõ giới hạn nếu chỉ
-thực hiện verify/cancel bounded mà không thể chạy helper an toàn.
+failure cùng watchdog rollback và relaunch payload trước. `real_component_lifecycle`
+dùng check `real_lightweight_helper_execution`: gate PASS chỉ khi một helper
+nhẹ đã thực sự được start/verify/stop an toàn; không được dùng một boolean
+"truthful limitation" chung để làm PASS cho gate có chữ REAL.
+
+Luồng self-update hai pha, owner external, fallback port và restart-session
+watchdog được mô tả ở `docs/operations/V8_SELF_UPDATE_TRANSACTION.md`.
 
 PASS report dùng schema `v8-local-gate-report.v1` và phải bind:
 

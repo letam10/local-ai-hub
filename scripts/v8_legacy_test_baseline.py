@@ -83,18 +83,26 @@ def compare_observed(baseline: Mapping[str, Any], observed: Mapping[str, Any]) -
     expected_errors = set(_ids(baseline.get("errors"), "errors"))
     actual_failures = set(_ids(observed.get("failures"), "observed_failures"))
     actual_errors = set(_ids(observed.get("errors"), "observed_errors"))
+    expected_skips = set(_ids(baseline.get("skipped"), "skipped"))
+    actual_skips = set(_ids(observed.get("skipped", []), "observed_skipped"))
     new_failures = sorted(actual_failures - expected_failures)
     new_errors = sorted(actual_errors - expected_errors)
     historical_failures = sorted(actual_failures & expected_failures)
     historical_errors = sorted(actual_errors & expected_errors)
+    unexpected_skips = sorted(actual_skips - expected_skips)
+    observed_tests_run = observed.get("testsRun") if isinstance(observed.get("testsRun"), int) and not isinstance(observed.get("testsRun"), bool) else None
+    discovery_regression = observed_tests_run is None or observed_tests_run < int(baseline.get("tests_run", 0) or 0)
     observed_fingerprint = baseline_fingerprint(failures=actual_failures, errors=actual_errors)
     return {
-        "status": "PASS" if not new_failures and not new_errors else "FAIL",
-        "tests_run": observed.get("testsRun") if isinstance(observed.get("testsRun"), int) else None,
+        "status": "PASS" if not new_failures and not new_errors and not unexpected_skips and not discovery_regression else "FAIL",
+        "tests_run": observed_tests_run,
+        "baseline_tests_run": baseline.get("tests_run"),
+        "test_discovery_regression": discovery_regression,
         "historical_failures": historical_failures,
         "historical_errors": historical_errors,
         "new_failures": new_failures,
         "new_errors": new_errors,
+        "unexpected_skips": unexpected_skips,
         "observed_fingerprint": observed_fingerprint,
         "baseline_fingerprint": baseline.get("fingerprint"),
         "historical_failure_count": len(historical_failures),

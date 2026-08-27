@@ -27,11 +27,13 @@ from src.app.stable_shell import (
     resolve_launch_plan,
 )
 from src.services.process_manager.managed import terminate_owned_process
+from src.services.app_update import _update_serialization_lock
 from src.shared.runtime_identity import API_PROTOCOL_VERSION, api_identity
 from src.shared.version import PRODUCT_VERSION
 
 
 WATCHDOG_TIMEOUT_SECONDS = 30.0
+RESTART_SESSION_SCHEMA = "local-ai-hub-restart-session.v1"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PAYLOAD_RE = re.compile(r"^main-[0-9a-f]{12}$")
 
@@ -100,6 +102,39 @@ def _port() -> int:
     return value if 1024 <= value <= 65535 else 8765
 
 
+def _session_path() -> Path | None:
+    value = os.environ.get("LOCALAIHUB_WATCHDOG_SESSION_PATH")
+    if not value:
+        return None
+    path = Path(value).expanduser().absolute()
+    return path if path.name == "restart-session.json" else None
+
+
+def _session_snapshot() -> dict[str, object] | None:
+    path = _session_path()
+    nonce = os.environ.get("LOCALAIHUB_WATCHDOG_SESSION_NONCE")
+    if path is None or not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{32}", nonce):
+        return None
+    try:
+        value = _json(path, limit=64 * 1024)
+    except (OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    if value.get("schema_version") != RESTART_SESSION_SCHEMA or value.get("nonce") != nonce:
+        return None
+    port = value.get("api_port")
+    api_pid = value.get("api_pid")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port <= 65535:
+        return None
+    if isinstance(api_pid, bool) or not isinstance(api_pid, int) or api_pid <= 0:
+        return None
+    return value
+
+
+def _session_port() -> int | None:
+    value = _session_snapshot()
+    return int(value["api_port"]) if value is not None else None
+
+
 def _target_identity(app_root: Path, *, require_build: bool = False) -> tuple[str, str | None, dict[str, str]]:
     pointer = load_current_pointer(app_root)
     version = str(pointer["version"])
@@ -126,9 +161,12 @@ def _target_identity(app_root: Path, *, require_build: bool = False) -> tuple[st
     return version, source_commit, expected
 
 
-def _health_matches(app_root: Path, *, version: str, source_commit: str | None, expected: dict[str, str]) -> bool:
+def _health_matches(app_root: Path, *, version: str, source_commit: str | None, expected: dict[str, str], port: int | None = None) -> bool:
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{_port()}/health", timeout=0.5) as response:
+        selected_port = _session_port() if port is None else port
+        if selected_port is None:
+            selected_port = _port()
+        with urllib.request.urlopen(f"http://127.0.0.1:{selected_port}/health", timeout=0.5) as response:
             value = json.loads(response.read(128 * 1024 + 1).decode("utf-8"))
         return (
             isinstance(value, dict)
@@ -146,7 +184,20 @@ def _wait_for_target_health(app_root: Path, *, version: str, source_commit: str 
     while time.monotonic() < deadline:
         if process is not None and process.poll() is not None and marker.exists():
             return False
-        if _health_matches(app_root, version=version, source_commit=source_commit, expected=expected) and not marker.exists():
+        session = _session_snapshot()
+        if _session_path() is not None and session is None:
+            # A restart-session contract was requested; never fall back to
+            # probing the old/default port while the candidate has not yet
+            # authenticated and published its selected loopback port.
+            time.sleep(0.2)
+            continue
+        if session is not None and session.get("payload_id") != version:
+            time.sleep(0.2)
+            continue
+        if session is not None and source_commit and session.get("source_commit") != source_commit:
+            time.sleep(0.2)
+            continue
+        if _health_matches(app_root, version=version, source_commit=source_commit, expected=expected, port=_session_port()) and not marker.exists():
             return True
         time.sleep(0.2)
     return False
@@ -156,21 +207,28 @@ def _rollback_previous(app_root: Path, *, reason: str) -> bool:
     marker = app_root / "update-state" / "pending-health.json"
     history = app_root / "update-state" / "previous-current.json"
     try:
-        previous = _json(history)
-        if set(previous) != {"schema_version", "version", "payload_relative", "manifest_sha256"} or previous.get("schema_version") != POINTER_SCHEMA:
-            return False
-        pointer = atomic_activate_pointer(app_root, version=str(previous["version"]), manifest_sha256=str(previous["manifest_sha256"]))
-        _atomic_json(app_root / "update-state" / "last-rollback.json", {
-            "schema_version": "local-ai-hub-pending-health.v1",
-            "status": "rollback",
-            "reason": reason,
-            "payload_id": pointer["version"],
-        })
-        try:
-            marker.unlink()
-        except FileNotFoundError:
-            pass
-        return True
+        with _update_serialization_lock(app_root):
+            previous = _json(history)
+            if set(previous) != {"schema_version", "version", "payload_relative", "manifest_sha256"} or previous.get("schema_version") != POINTER_SCHEMA:
+                return False
+            pointer = atomic_activate_pointer(app_root, version=str(previous["version"]), manifest_sha256=str(previous["manifest_sha256"]))
+            _atomic_json(app_root / "update-state" / "last-rollback.json", {
+                "schema_version": "local-ai-hub-pending-health.v1",
+                "status": "rollback",
+                "reason": reason,
+                "payload_id": pointer["version"],
+            })
+            try:
+                marker.unlink()
+            except FileNotFoundError:
+                pass
+            session = _session_path()
+            if session is not None:
+                try:
+                    session.unlink()
+                except FileNotFoundError:
+                    pass
+            return True
     except (OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError, StableShellError):
         return False
 
@@ -180,6 +238,11 @@ def _launch_stable(app_root: Path) -> subprocess.Popen[object]:
     if not launcher.is_file() or launcher.is_symlink():
         raise OSError("stable_launcher_unavailable")
     environment = dict(os.environ)
+    # The launcher waits for the exact old desktop PID, while the watchdog
+    # itself remains alive to own rollback/health decisions.
+    wait_pid = environment.get("LOCALAIHUB_WATCHDOG_WAIT_PID")
+    if wait_pid:
+        environment["LOCALAIHUB_RESTART_WAIT_PID"] = wait_pid
     environment.pop("LOCALAIHUB_WATCHDOG_WAIT_PID", None)
     # Old stable launcher binaries may not yet know the build-health fields.
     # Inject the already-validated current payload identity into the inherited
@@ -214,13 +277,21 @@ def _launch_stable(app_root: Path) -> subprocess.Popen[object]:
 def run(*, app_root: Path, wait_pid: int, timeout_seconds: float = WATCHDOG_TIMEOUT_SECONDS) -> dict[str, object]:
     deadline = time.monotonic() + max(5.0, min(120.0, float(timeout_seconds)))
     if wait_pid and not _wait_for_pid_exit(wait_pid, deadline):
-        return {"status": "failed", "code": "WATCHDOG_PARENT_TIMEOUT"}
+        rolled_back = _rollback_previous(app_root, reason="WATCHDOG_PARENT_TIMEOUT_ROLLBACK")
+        return {"status": "rolled_back" if rolled_back else "failed", "code": "WATCHDOG_PARENT_TIMEOUT_ROLLBACK" if rolled_back else "WATCHDOG_PARENT_TIMEOUT"}
     try:
         target_version, target_commit, target_identity = _target_identity(app_root, require_build=True)
         child = _launch_stable(app_root)
     except (OSError, StableShellError, ValueError, TypeError, json.JSONDecodeError) as exc:
-        return {"status": "failed", "code": "WATCHDOG_LAUNCH_FAILED", "detail": type(exc).__name__}
+        rolled_back = _rollback_previous(app_root, reason="WATCHDOG_LAUNCH_FAILED_ROLLBACK")
+        return {"status": "rolled_back" if rolled_back else "failed", "code": "WATCHDOG_LAUNCH_FAILED_ROLLBACK" if rolled_back else "WATCHDOG_LAUNCH_FAILED", "detail": type(exc).__name__}
     if _wait_for_target_health(app_root, version=target_version, source_commit=target_commit, expected=target_identity, deadline=deadline, process=child):
+        session = _session_path()
+        if session is not None:
+            try:
+                session.unlink()
+            except FileNotFoundError:
+                pass
         return {"status": "healthy", "payload_id": target_version, "source_commit": target_commit}
     try:
         terminate_owned_process(child)
@@ -229,6 +300,10 @@ def run(*, app_root: Path, wait_pid: int, timeout_seconds: float = WATCHDOG_TIME
     if not _rollback_previous(app_root, reason="WATCHDOG_POST_RESTART_HEALTH_FAILED"):
         return {"status": "failed", "code": "WATCHDOG_ROLLBACK_FAILED"}
     try:
+        # The rollback relaunch targets the previous payload, so the candidate
+        # session nonce/port contract must not constrain that fallback probe.
+        os.environ.pop("LOCALAIHUB_WATCHDOG_SESSION_PATH", None)
+        os.environ.pop("LOCALAIHUB_WATCHDOG_SESSION_NONCE", None)
         fallback = _launch_stable(app_root)
         version, commit, identity = _target_identity(app_root, require_build=False)
         fallback_deadline = time.monotonic() + max(5.0, min(60.0, float(timeout_seconds)))

@@ -25,6 +25,14 @@ class V8LegacyTestBaselineTests(unittest.TestCase):
         result = compare_observed(baseline, {"testsRun": 1, "failures": ["new.test"], "errors": []})
         self.assertEqual(result["status"], "FAIL")
         self.assertEqual(result["new_failures"], ["new.test"])
+        self.assertTrue(result["test_discovery_regression"])
+
+    def test_discovery_regression_and_unexpected_skip_are_explicit_failures(self) -> None:
+        baseline = load_baseline(BASELINE_PATH)
+        result = compare_observed(baseline, {"testsRun": baseline["tests_run"], "failures": [], "errors": [], "skipped": ["new.skip"]})
+        self.assertEqual(result["status"], "FAIL")
+        self.assertFalse(result["test_discovery_regression"])
+        self.assertEqual(result["unexpected_skips"], ["new.skip"])
 
 
 if __name__ == "__main__":

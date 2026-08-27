@@ -10,6 +10,8 @@ stable shell pointer.  Models, Environments and DATA_ROOT are out of scope.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -48,6 +50,8 @@ UPDATE_CONTRACT_SCHEMA = "local-ai-hub-update-contract.v1"
 UPDATE_CONTRACT_NAME = "update-contract.json"
 BUILD_INFO_SCHEMA = "local-ai-hub-build-info.v1"
 PENDING_HEALTH_SCHEMA = "local-ai-hub-pending-health.v1"
+STAGED_UPDATE_SCHEMA = "local-ai-hub-staged-update.v1"
+RESTART_SESSION_SCHEMA = "local-ai-hub-restart-session.v1"
 RUNTIME_STRATEGY = "reuse-current"
 RUNTIME_STRATEGY_BUNDLED = "bundled"
 UPDATE_KIND_APP_ONLY = "APP_ONLY"
@@ -70,6 +74,60 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PAYLOAD_RE = re.compile(r"^main-[0-9a-f]{12}$")
 _RUNTIME_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _staged_update_path(root: Path) -> Path:
+    return root / "update-state" / "staged-update.json"
+
+
+def _restart_session_path(root: Path) -> Path:
+    return root / "update-state" / "restart-session.json"
+
+
+def _unlink_state(path: Path) -> None:
+    try:
+        if path.is_file() and not path.is_symlink():
+            path.unlink()
+    except OSError:
+        pass
+
+
+@contextmanager
+def _update_serialization_lock(root: Path):
+    """Serialize stage/commit/rollback across the API and desktop processes.
+
+    ``threading.RLock`` is insufficient because the prepare route and native
+    restart bridge run in different processes.  An exclusive, tiny marker in
+    the installer-owned update-state directory provides a fail-closed
+    cross-process lock without a daemon or a service dependency.  Stale locks
+    are never silently removed; the next operation reports a bounded busy
+    state instead of risking a concurrent pointer transaction.
+    """
+
+    lock_path = root / "update-state" / "update-transaction.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd: int | None = None
+    try:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError as exc:
+            raise AppUpdateError("UPDATE_TRANSACTION_BUSY") from exc
+        os.write(fd, f"pid={os.getpid()}\n".encode("ascii"))
+        yield
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
 
 
 def _classify_channel_relation(compare_status: object) -> str:
@@ -180,6 +238,46 @@ def _record_pending_health(root: Path, *, previous: dict[str, Any], payload_id: 
     })
 
 
+def _write_restart_session(root: Path, value: dict[str, Any]) -> None:
+    """Publish bounded candidate-session identity for the watchdog.
+
+    The state is internal installer metadata.  It intentionally carries no
+    filesystem paths, tokens, or user data; only the nonce, exact payload
+    identity, loopback port and process IDs needed to bind the watchdog probe.
+    """
+
+    _write_json_atomic(_restart_session_path(root), value)
+
+
+def _read_staged_update(root: Path) -> dict[str, Any] | None:
+    path = _staged_update_path(root)
+    if not path.is_file() or path.is_symlink():
+        return None
+    value = _safe_json_file(path, max_bytes=64 * 1024)
+    expected = {
+        "schema_version", "payload_id", "source_commit", "payload_relative",
+        "manifest_sha256", "previous", "staged_at", "update_kind",
+    }
+    if set(value) != expected or value.get("schema_version") != STAGED_UPDATE_SCHEMA:
+        raise AppUpdateError("STAGED_UPDATE_INVALID")
+    payload_id = value.get("payload_id")
+    source_commit = value.get("source_commit")
+    relative = value.get("payload_relative")
+    digest = value.get("manifest_sha256")
+    if (
+        not isinstance(payload_id, str) or _PAYLOAD_RE.fullmatch(payload_id) is None
+        or not isinstance(source_commit, str) or _SHA_RE.fullmatch(source_commit) is None
+        or payload_id != f"main-{source_commit[:12]}"
+        or relative != f"versions/{payload_id}"
+        or not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None
+        or not isinstance(value.get("previous"), dict)
+        or not isinstance(value.get("staged_at"), str)
+        or value.get("update_kind") not in {UPDATE_KIND_APP_ONLY, UPDATE_KIND_FULL}
+    ):
+        raise AppUpdateError("STAGED_UPDATE_INVALID")
+    return dict(value)
+
+
 def mark_startup_health(
     app_root: Path,
     *,
@@ -242,6 +340,7 @@ def mark_startup_health(
             pending_path.unlink()
         except OSError as exc:
             raise AppUpdateError("UPDATE_STATE_CLEAR_FAILED") from exc
+        _unlink_state(_staged_update_path(root))
         return {"status": "healthy", "payload_id": current["version"], "source_commit": build["source_commit"]}
     previous = pending["previous"]
     pointer = atomic_activate_pointer(root, version=str(previous["version"]), manifest_sha256=str(previous["manifest_sha256"]))
@@ -255,6 +354,8 @@ def mark_startup_health(
         pending_path.unlink()
     except OSError:
         pass
+    _unlink_state(_staged_update_path(root))
+    _unlink_state(_restart_session_path(root))
     return {"status": "rollback", "payload_id": pointer["version"], "code": "POST_RESTART_HEALTH_FAILED"}
 
 
@@ -371,13 +472,17 @@ class AppUpdateService:
         self._transport_selector: TransportSelector | None = None
         self._lock = threading.RLock()
         self._cached: tuple[float, dict[str, Any]] | None = None
+        self._retry_attempt: int | None = None
+
+    def _on_transport_retry(self, attempt: int, total: int) -> None:
+        self._retry_attempt = max(1, min(int(total), int(attempt)))
 
     def _selected_transport(self) -> tuple[Any, AuthState]:
         if self._transport_override is not None:
             state = self._transport_override.auth_state()
             return self._transport_override, state
         if self._transport_selector is None:
-            self._transport_selector = build_transport(runner=self._runner, gh_path=self._gh_path)
+            self._transport_selector = build_transport(runner=self._runner, gh_path=self._gh_path, retry_callback=self._on_transport_retry)
         return self._transport_selector.select()
 
     def _transport(self) -> Any:
@@ -486,6 +591,7 @@ class AppUpdateService:
     def status(self, *, refresh: bool = False) -> dict[str, Any]:
         with self._lock:
             now = time.monotonic()
+            self._retry_attempt = None
             if not refresh and self._cached and now - self._cached[0] < CACHE_SECONDS:
                 return dict(self._cached[1])
             try:
@@ -507,6 +613,21 @@ class AppUpdateService:
                             "latest_build": None, "transport": "github_cli", "action": "Chờ main CI tạo update artifact thành công.",
                         }
                     else:
+                        try:
+                            staged = _read_staged_update(root)
+                        except (OSError, UnicodeError, json.JSONDecodeError, AppUpdateError):
+                            staged = None
+                        if staged is not None and staged.get("source_commit") == candidate.source_commit:
+                            result = {
+                                "status": "staged", "available": False, "product_version": PRODUCT_VERSION,
+                                "current_build": current["commit"], "current_payload": current["payload_id"],
+                                "latest_build": candidate.source_commit, "latest_payload": staged.get("payload_id"),
+                                "staged_payload": staged.get("payload_id"), "restart_required": True,
+                                "run_id": candidate.run_id, "artifact_id": candidate.artifact_id, "transport": auth.transport,
+                                "action": "Candidate đã stage; khởi động lại để commit pointer an toàn.",
+                            }
+                            self._cached = (now, dict(result))
+                            return result
                         relation = self._channel_relation(current["commit"], candidate.source_commit)
                         if relation == "blocked_current_ahead_of_main":
                             result = {
@@ -549,6 +670,10 @@ class AppUpdateService:
                     "action": "Cài/đăng nhập GitHub CLI hoặc mở Diagnostics để kiểm tra updater.",
                 }
             self._cached = (now, dict(result))
+            if self._retry_attempt is not None:
+                result["retry_attempt"] = self._retry_attempt
+                result["retry_attempts"] = self._retry_attempt
+                self._cached = (now, dict(result))
             return result
 
     def changes(self) -> dict[str, Any]:
@@ -793,6 +918,155 @@ class AppUpdateService:
                 except Exception:
                     pass
 
+    def staged_update(self) -> dict[str, Any] | None:
+        """Return the validated staged candidate, without changing pointers."""
+
+        with self._lock:
+            root = self._install_root()
+            try:
+                value = _read_staged_update(root)
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                raise AppUpdateError("STAGED_UPDATE_INVALID") from None
+            if value is None:
+                return None
+            self._verify_staged_payload(root, value)
+            return value
+
+    @staticmethod
+    def _verify_staged_payload(root: Path, staged: dict[str, Any]) -> None:
+        """Revalidate a candidate immediately before pointer activation."""
+
+        relative = str(staged.get("payload_relative") or "")
+        payload_id = str(staged.get("payload_id") or "")
+        source_commit = str(staged.get("source_commit") or "")
+        if relative != f"versions/{payload_id}" or _PAYLOAD_RE.fullmatch(payload_id) is None or not _SHA_RE.fullmatch(source_commit) or payload_id != f"main-{source_commit[:12]}":
+            raise AppUpdateError("STAGED_UPDATE_INVALID")
+        payload = root / Path(relative)
+        if payload.is_symlink() or not payload.is_dir():
+            raise AppUpdateError("STAGED_PAYLOAD_UNAVAILABLE")
+        manifest = payload / "manifest.json"
+        build = payload / "build.json"
+        if manifest.is_symlink() or not manifest.is_file() or _sha256(manifest) != str(staged.get("manifest_sha256")):
+            raise AppUpdateError("STAGED_MANIFEST_HASH_MISMATCH")
+        try:
+            manifest_value = _safe_json_file(manifest, max_bytes=128 * 1024)
+            build_value = _safe_json_file(build, max_bytes=32 * 1024)
+        except (OSError, UnicodeError, json.JSONDecodeError, AppUpdateError) as exc:
+            raise AppUpdateError("STAGED_PAYLOAD_INVALID") from exc
+        if manifest_value.get("version") != payload_id or build_value.get("source_commit") != source_commit or build_value.get("schema_version") != BUILD_INFO_SCHEMA:
+            raise AppUpdateError("STAGED_BUILD_IDENTITY_MISMATCH")
+        runtime = payload / "runtime" / "Python312" / "pythonw.exe"
+        app = payload / "app"
+        if app.is_symlink() or not app.is_dir() or runtime.is_symlink() or not runtime.is_file():
+            raise AppUpdateError("STAGED_RUNTIME_UNAVAILABLE")
+
+    def create_restart_session(self, *, payload_id: str, source_commit: str, nonce: str, parent_pid: int) -> dict[str, Any]:
+        """Atomically publish the session contract consumed by the watchdog."""
+
+        if _PAYLOAD_RE.fullmatch(payload_id) is None or not _SHA_RE.fullmatch(source_commit) or payload_id != f"main-{source_commit[:12]}":
+            raise AppUpdateError("RESTART_SESSION_IDENTITY_INVALID")
+        if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{32}", nonce) or isinstance(parent_pid, bool) or not isinstance(parent_pid, int) or parent_pid <= 0:
+            raise AppUpdateError("RESTART_SESSION_INVALID")
+        root = self._install_root()
+        value = {
+            "schema_version": RESTART_SESSION_SCHEMA,
+            "payload_id": payload_id,
+            "source_commit": source_commit,
+            "nonce": nonce,
+            "parent_pid": parent_pid,
+            "api_port": None,
+            "api_pid": None,
+            "status": "awaiting_candidate",
+            "created_at": _utc_now(),
+        }
+        _write_restart_session(root, value)
+        return {key: value[key] for key in ("schema_version", "payload_id", "source_commit", "nonce", "parent_pid", "status")}
+
+    def commit_staged_restart(self) -> dict[str, Any]:
+        """Commit a staged candidate after the native close gate is ready.
+
+        This is the only method that switches ``current.json``.  It is called
+        by the native bridge after API/job ownership preflight and before the
+        single authorized desktop destroy.  The method itself is atomic and
+        fail-closed: any error after activation restores the exact previous
+        pointer and removes pending state.
+        """
+
+        with self._lock:
+            root = self._install_root()
+            with _update_serialization_lock(root):
+                staged = _read_staged_update(root)
+                if staged is None:
+                    raise AppUpdateError("STAGED_UPDATE_UNAVAILABLE")
+                self._verify_staged_payload(root, staged)
+                current = load_current_pointer(root)
+                previous = staged.get("previous")
+                if not isinstance(previous, dict) or current != previous:
+                    raise AppUpdateError("STAGED_CURRENT_POINTER_CHANGED")
+                payload_id = str(staged["payload_id"])
+                source_commit = str(staged["source_commit"])
+                manifest_hash = str(staged["manifest_sha256"])
+                activated = False
+                try:
+                    history = root / "update-state"
+                    history.mkdir(parents=True, exist_ok=True)
+                    _write_json_atomic(history / "previous-current.json", previous)
+                    _record_pending_health(root, previous=previous, payload_id=payload_id, source_commit=source_commit)
+                    atomic_activate_pointer(root, version=payload_id, manifest_sha256=manifest_hash)
+                    activated = True
+                except (OSError, UnicodeError, json.JSONDecodeError, StableShellError, AppUpdateError) as exc:
+                    switched = activated
+                    if not switched:
+                        try:
+                            switched = load_current_pointer(root).get("version") == payload_id
+                        except Exception:
+                            switched = False
+                    if switched:
+                        try:
+                            atomic_activate_pointer(root, version=str(previous["version"]), manifest_sha256=str(previous["manifest_sha256"]))
+                        except Exception:
+                            pass
+                    _unlink_state(_pending_health_path(root))
+                    raise exc if isinstance(exc, AppUpdateError) else AppUpdateError("UPDATE_COMMIT_FAILED") from exc
+                self._cached = None
+                return {
+                    "status": "activated",
+                    "source_commit": source_commit,
+                    "payload_id": payload_id,
+                    "previous_payload": previous.get("version"),
+                    "restart_required": True,
+                    "launcher_changed": False,
+                    "data_root_changed": False,
+                    "update_kind": staged.get("update_kind"),
+                    "commit_phase": "restart_pending",
+                }
+
+    def rollback_pending_restart(self, *, reason: str = "RESTART_TRANSACTION_FAILED") -> dict[str, Any]:
+        """Restore the exact pre-commit pointer after a restart transaction veto."""
+
+        with self._lock:
+            root = self._install_root()
+            with _update_serialization_lock(root):
+                pending_path = _pending_health_path(root)
+                if not pending_path.is_file() or pending_path.is_symlink():
+                    return {"status": "not_pending"}
+                pending = _safe_json_file(pending_path, max_bytes=64 * 1024)
+                previous = pending.get("previous") if isinstance(pending, dict) else None
+                if not isinstance(previous, dict):
+                    raise AppUpdateError("UPDATE_PENDING_HEALTH_INVALID")
+                pointer = atomic_activate_pointer(root, version=str(previous["version"]), manifest_sha256=str(previous["manifest_sha256"]))
+                _write_json_atomic(root / "update-state" / "last-rollback.json", {
+                    "schema_version": PENDING_HEALTH_SCHEMA,
+                    "status": "rollback",
+                    "payload_id": pointer["version"],
+                    "reason": str(reason)[:96],
+                })
+                _unlink_state(pending_path)
+                _unlink_state(_staged_update_path(root))
+                _unlink_state(_restart_session_path(root))
+                self._cached = None
+                return {"status": "rolled_back", "payload_id": pointer["version"], "reason": str(reason)[:96]}
+
     @staticmethod
     def _preserve_failed_staging(root: Path, work: Path, source_commit: str) -> None:
         """Keep failed candidate payload/logs available for forensic review."""
@@ -809,132 +1083,163 @@ class AppUpdateService:
             return
 
     def prepare(self) -> dict[str, Any]:
-        """Download, validate, stage and atomically activate the latest main payload."""
+        """Download, validate and stage the latest main payload.
+
+        ``prepare`` is deliberately a phase-1 operation.  It never writes
+        ``current.json`` or ``pending-health.json``; the native restart bridge
+        performs the phase-2 commit only after the close/ownership gate is
+        ready.  This prevents a new pointer from being visible while the old
+        desktop is still running.
+        """
         with self._lock:
             root = self._install_root()
-            _transport, auth = self._selected_transport()
-            if auth.status != "ready":
-                raise AppUpdateError(auth.code or "GITHUB_AUTH_REQUIRED")
-            candidate = self._latest_candidate()
-            if candidate is None:
-                raise AppUpdateError("UPDATE_ARTIFACT_NOT_FOUND")
-            current = self._current_build(root)
-            if current["commit"] == candidate.source_commit:
-                return {"status": "up_to_date", "restart_required": False, "source_commit": candidate.source_commit}
-            relation = self._channel_relation(current["commit"], candidate.source_commit)
-            if relation == "blocked_current_ahead_of_main":
-                raise AppUpdateError("UPDATE_CURRENT_AHEAD_OF_MAIN")
-            if relation == "blocked_channel_diverged":
-                raise AppUpdateError("UPDATE_CHANNEL_DIVERGED")
-            if relation == "channel_relation_unavailable" and current["commit"] not in {"legacy", "unknown"}:
-                raise AppUpdateError("UPDATE_CHANNEL_RELATION_UNAVAILABLE")
-            plan = resolve_launch_plan(root, allow_test_root=self._allow_test_root)
-            staging_root = root / "staging"
-            staging_root.mkdir(parents=True, exist_ok=True)
-            work = staging_root / f"main-update-{candidate.source_commit[:12]}-{os.getpid()}"
-            download = work / "download"
-            stage_payload = work / "payload"
-            target = root / "versions" / f"main-{candidate.source_commit[:12]}"
-            try:
-                work.mkdir(parents=False, exist_ok=False)
-                self._download_candidate(candidate, download)
-                manifest, contract, archive = self._validate_download(download, candidate)
-                update_kind = str(contract["update_kind"])
-                stage_payload.mkdir(parents=False, exist_ok=False)
-                _safe_extract_app_archive(archive, stage_payload, expected_files=int(manifest["file_count"]), update_kind=update_kind)
-                runtime_source = plan.payload_root / "runtime"
-                if update_kind == UPDATE_KIND_APP_ONLY:
-                    if not runtime_source.is_dir() or runtime_source.is_symlink():
-                        raise AppUpdateError("CURRENT_RUNTIME_UNAVAILABLE")
-                    shutil.copytree(runtime_source, stage_payload / "runtime", symlinks=False)
-                elif not (stage_payload / "runtime" / "Python312" / "pythonw.exe").is_file():
-                    raise AppUpdateError("FULL_RUNTIME_PAYLOAD_MISSING")
-                if update_kind == UPDATE_KIND_FULL and _runtime_inventory_hash(stage_payload / "runtime") != contract["runtime_hash"]:
-                    raise AppUpdateError("UPDATE_RUNTIME_HASH_MISMATCH")
-                version = str(manifest["payload_id"])
-                version_manifest = {
-                    "schema_version": VERSION_MANIFEST_SCHEMA,
-                    "product_id": PRODUCT_ID,
-                    "version": version,
-                    "app_relative": "app",
-                    "runtime_relative": "runtime/Python312/pythonw.exe",
-                    "entrypoint": "src.app.launcher",
-                }
-                manifest_bytes = _canonical_json(version_manifest)
-                (stage_payload / "manifest.json").write_bytes(manifest_bytes)
-                build_info = {
-                    "schema_version": BUILD_INFO_SCHEMA,
-                    "source_commit": candidate.source_commit,
-                    "workflow_run_id": candidate.run_id,
-                    "channel": "main",
-                    "product_version": PRODUCT_VERSION,
-                }
-                (stage_payload / "build.json").write_bytes(_canonical_json(build_info))
-                runtime_pythonw = stage_payload / "runtime" / "Python312" / "pythonw.exe"
-                if not runtime_pythonw.is_file():
-                    raise AppUpdateError("STAGED_RUNTIME_UNAVAILABLE")
-                self._validate_staged_imports(stage_payload / "app", runtime_pythonw)
-                self._preflight_candidate_api(
-                    install_root=root,
-                    app_root=stage_payload / "app",
-                    runtime_pythonw=runtime_pythonw,
-                    payload_id=version,
-                    source_commit=candidate.source_commit,
-                    work_root=work,
-                )
-                manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
-                if target.exists():
-                    existing = target / "build.json"
-                    if not existing.is_file() or _safe_json_file(existing, max_bytes=32 * 1024).get("source_commit") != candidate.source_commit:
-                        raise AppUpdateError("UPDATE_TARGET_CONFLICT")
-                    shutil.rmtree(stage_payload)
-                else:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(stage_payload, target)
-                previous = load_current_pointer(root)
-                history = root / "update-state"
-                history.mkdir(parents=True, exist_ok=True)
-                _write_json_atomic(history / "previous-current.json", previous)
-                _record_pending_health(root, previous=previous, payload_id=version, source_commit=candidate.source_commit)
-                atomic_activate_pointer(root, version=version, manifest_sha256=manifest_hash)
-                self._cached = None
+            with _update_serialization_lock(root):
+                return self._prepare_locked(root)
+
+    def _prepare_locked(self, root: Path) -> dict[str, Any]:
+        """Implementation of :meth:`prepare` under the cross-process lock."""
+
+        _transport, auth = self._selected_transport()
+        if auth.status != "ready":
+            raise AppUpdateError(auth.code or "GITHUB_AUTH_REQUIRED")
+        candidate = self._latest_candidate()
+        if candidate is None:
+            raise AppUpdateError("UPDATE_ARTIFACT_NOT_FOUND")
+        current = self._current_build(root)
+        if current["commit"] == candidate.source_commit:
+            return {"status": "up_to_date", "restart_required": False, "source_commit": candidate.source_commit}
+        relation = self._channel_relation(current["commit"], candidate.source_commit)
+        if relation == "blocked_current_ahead_of_main":
+            raise AppUpdateError("UPDATE_CURRENT_AHEAD_OF_MAIN")
+        if relation == "blocked_channel_diverged":
+            raise AppUpdateError("UPDATE_CHANNEL_DIVERGED")
+        if relation == "channel_relation_unavailable" and current["commit"] not in {"legacy", "unknown"}:
+            raise AppUpdateError("UPDATE_CHANNEL_RELATION_UNAVAILABLE")
+        existing_staged = _read_staged_update(root)
+        if existing_staged is not None:
+            if existing_staged.get("source_commit") == candidate.source_commit:
                 return {
-                    "status": "activated", "source_commit": candidate.source_commit,
-                    "payload_id": version, "previous_payload": previous.get("version"),
-                    "restart_required": True, "launcher_changed": False, "data_root_changed": False,
-                    "update_kind": update_kind, "runtime_contract": contract["runtime_contract"],
+                    "status": "staged",
+                    "source_commit": candidate.source_commit,
+                    "payload_id": existing_staged.get("payload_id"),
+                    "restart_required": True,
+                    "staged": True,
+                    "commit_phase": "awaiting_restart",
                 }
-            except AppUpdateError:
-                self._preserve_failed_staging(root, work, candidate.source_commit)
-                raise
-            except (OSError, UnicodeError, json.JSONDecodeError, zipfile.BadZipFile, StableShellError) as exc:
-                self._preserve_failed_staging(root, work, candidate.source_commit)
-                if isinstance(exc, AppUpdateError):
-                    raise
-                raise AppUpdateError("UPDATE_PREPARE_FAILED", type(exc).__name__) from exc
-            finally:
-                try:
-                    if work.exists():
-                        shutil.rmtree(work)
-                except OSError:
-                    pass
+            raise AppUpdateError("UPDATE_STAGED_UPDATE_PENDING")
+        plan = resolve_launch_plan(root, allow_test_root=self._allow_test_root)
+        staging_root = root / "staging"
+        staging_root.mkdir(parents=True, exist_ok=True)
+        work = staging_root / f"main-update-{candidate.source_commit[:12]}-{os.getpid()}"
+        download = work / "download"
+        stage_payload = work / "payload"
+        target = root / "versions" / f"main-{candidate.source_commit[:12]}"
+        try:
+            work.mkdir(parents=False, exist_ok=False)
+            self._download_candidate(candidate, download)
+            manifest, contract, archive = self._validate_download(download, candidate)
+            update_kind = str(contract["update_kind"])
+            stage_payload.mkdir(parents=False, exist_ok=False)
+            _safe_extract_app_archive(archive, stage_payload, expected_files=int(manifest["file_count"]), update_kind=update_kind)
+            runtime_source = plan.payload_root / "runtime"
+            if update_kind == UPDATE_KIND_APP_ONLY:
+                if not runtime_source.is_dir() or runtime_source.is_symlink():
+                    raise AppUpdateError("CURRENT_RUNTIME_UNAVAILABLE")
+                shutil.copytree(runtime_source, stage_payload / "runtime", symlinks=False)
+            elif not (stage_payload / "runtime" / "Python312" / "pythonw.exe").is_file():
+                raise AppUpdateError("FULL_RUNTIME_PAYLOAD_MISSING")
+            if update_kind == UPDATE_KIND_FULL and _runtime_inventory_hash(stage_payload / "runtime") != contract["runtime_hash"]:
+                raise AppUpdateError("UPDATE_RUNTIME_HASH_MISMATCH")
+            version = str(manifest["payload_id"])
+            version_manifest = {
+                "schema_version": VERSION_MANIFEST_SCHEMA,
+                "product_id": PRODUCT_ID,
+                "version": version,
+                "app_relative": "app",
+                "runtime_relative": "runtime/Python312/pythonw.exe",
+                "entrypoint": "src.app.launcher",
+            }
+            manifest_bytes = _canonical_json(version_manifest)
+            (stage_payload / "manifest.json").write_bytes(manifest_bytes)
+            build_info = {
+                "schema_version": BUILD_INFO_SCHEMA,
+                "source_commit": candidate.source_commit,
+                "workflow_run_id": candidate.run_id,
+                "channel": "main",
+                "product_version": PRODUCT_VERSION,
+            }
+            (stage_payload / "build.json").write_bytes(_canonical_json(build_info))
+            runtime_pythonw = stage_payload / "runtime" / "Python312" / "pythonw.exe"
+            if not runtime_pythonw.is_file():
+                raise AppUpdateError("STAGED_RUNTIME_UNAVAILABLE")
+            self._validate_staged_imports(stage_payload / "app", runtime_pythonw)
+            self._preflight_candidate_api(
+                install_root=root,
+                app_root=stage_payload / "app",
+                runtime_pythonw=runtime_pythonw,
+                payload_id=version,
+                source_commit=candidate.source_commit,
+                work_root=work,
+            )
+            manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
+            if target.exists():
+                existing = target / "build.json"
+                if not existing.is_file() or _safe_json_file(existing, max_bytes=32 * 1024).get("source_commit") != candidate.source_commit:
+                    raise AppUpdateError("UPDATE_TARGET_CONFLICT")
+                shutil.rmtree(stage_payload)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(stage_payload, target)
+            previous = load_current_pointer(root)
+            history = root / "update-state"
+            history.mkdir(parents=True, exist_ok=True)
+            _write_json_atomic(history / "staged-update.json", {
+                "schema_version": STAGED_UPDATE_SCHEMA,
+                "payload_id": version,
+                "source_commit": candidate.source_commit,
+                "payload_relative": f"versions/{version}",
+                "manifest_sha256": manifest_hash,
+                "previous": previous,
+                "staged_at": _utc_now(),
+                "update_kind": update_kind,
+            })
+            self._cached = None
+            return {
+                "status": "staged", "source_commit": candidate.source_commit,
+                "payload_id": version, "previous_payload": previous.get("version"),
+                "restart_required": True, "staged": True, "launcher_changed": False, "data_root_changed": False,
+                "update_kind": update_kind, "runtime_contract": contract["runtime_contract"],
+                "commit_phase": "awaiting_restart",
+            }
+        except AppUpdateError:
+            self._preserve_failed_staging(root, work, candidate.source_commit)
+            raise
+        except (OSError, UnicodeError, json.JSONDecodeError, zipfile.BadZipFile, StableShellError) as exc:
+            self._preserve_failed_staging(root, work, candidate.source_commit)
+            raise AppUpdateError("UPDATE_PREPARE_FAILED", type(exc).__name__) from exc
+        finally:
+            try:
+                if work.exists():
+                    shutil.rmtree(work)
+            except OSError:
+                pass
 
     def rollback(self) -> dict[str, Any]:
         with self._lock:
             root = self._install_root()
-            path = root / "update-state" / "previous-current.json"
-            if not path.is_file() or path.is_symlink():
-                raise AppUpdateError("ROLLBACK_POINTER_UNAVAILABLE")
-            previous = _safe_json_file(path, max_bytes=32 * 1024)
-            if set(previous) != {"schema_version", "version", "payload_relative", "manifest_sha256"} or previous.get("schema_version") != POINTER_SCHEMA:
-                raise AppUpdateError("ROLLBACK_POINTER_INVALID")
-            pointer = atomic_activate_pointer(root, version=str(previous["version"]), manifest_sha256=str(previous["manifest_sha256"]))
-            try:
-                _pending_health_path(root).unlink()
-            except OSError:
-                pass
-            self._cached = None
-            return {"status": "rolled_back", "payload_id": pointer["version"], "restart_required": True}
+            with _update_serialization_lock(root):
+                path = root / "update-state" / "previous-current.json"
+                if not path.is_file() or path.is_symlink():
+                    raise AppUpdateError("ROLLBACK_POINTER_UNAVAILABLE")
+                previous = _safe_json_file(path, max_bytes=32 * 1024)
+                if set(previous) != {"schema_version", "version", "payload_relative", "manifest_sha256"} or previous.get("schema_version") != POINTER_SCHEMA:
+                    raise AppUpdateError("ROLLBACK_POINTER_INVALID")
+                pointer = atomic_activate_pointer(root, version=str(previous["version"]), manifest_sha256=str(previous["manifest_sha256"]))
+                _unlink_state(_pending_health_path(root))
+                _unlink_state(_staged_update_path(root))
+                _unlink_state(_restart_session_path(root))
+                self._cached = None
+                return {"status": "rolled_back", "payload_id": pointer["version"], "restart_required": True}
 
 
 _SERVICE: AppUpdateService | None = None
@@ -952,5 +1257,5 @@ def app_update_service() -> AppUpdateService:
 __all__ = [
     "AppUpdateError", "AppUpdateService", "BUILD_INFO_SCHEMA", "REPOSITORY", "UPDATE_ARTIFACT_NAME",
     "UPDATE_CONTRACT_NAME", "UPDATE_CONTRACT_SCHEMA", "UPDATE_KIND_APP_ONLY", "UPDATE_KIND_FULL",
-    "PENDING_HEALTH_SCHEMA", "CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS", "CANDIDATE_BOOTSTRAP_PREFLIGHT_TIMEOUT_SECONDS", "UPDATE_SCHEMA", "app_update_service", "mark_startup_health", "_runtime_inventory_hash", "_safe_extract_app_archive", "_safe_update_contract", "_safe_update_manifest",
+    "PENDING_HEALTH_SCHEMA", "STAGED_UPDATE_SCHEMA", "RESTART_SESSION_SCHEMA", "CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS", "CANDIDATE_BOOTSTRAP_PREFLIGHT_TIMEOUT_SECONDS", "UPDATE_SCHEMA", "app_update_service", "mark_startup_health", "_runtime_inventory_hash", "_safe_extract_app_archive", "_safe_update_contract", "_safe_update_manifest", "_read_staged_update", "_write_restart_session",
 ]

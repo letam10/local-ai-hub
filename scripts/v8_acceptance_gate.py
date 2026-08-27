@@ -58,6 +58,17 @@ REQUIRED_SOURCE_FILES = (
     "tests/test_v8_wave5_acceptance_gate.py",
     "tests/test_v8_wave6_release_provenance.py",
     "docs/operations/V8_LEGACY_TEST_BASELINE.json",
+    "docs/operations/V8_SELF_UPDATE_TRANSACTION.md",
+    "src/app/desktop_lifecycle.py",
+    "src/app/main.py",
+    "src/app/update_bridge.py",
+    "src/app/update_watchdog.py",
+    "src/services/app_update.py",
+    "src/services/update_transport.py",
+    "tests/test_v8_p0_startup_recovery.py",
+    "tests/test_v8_p0_update_bridge.py",
+    "tests/test_v8_update_transaction.py",
+    "tests/test_v8_update_transport.py",
 )
 
 

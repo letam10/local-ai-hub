@@ -511,7 +511,10 @@ def health(*, probe_gpu: bool = False) -> dict[str, Any]:
         disk: dict[str, int] | None = {"free_bytes": free, "total_bytes": total, "used_bytes": used}
     except OSError:
         disk = None
-    active = [item for item in list_jobs() if item.get("status") in {"queued", "starting", "running", "cancelling"}]
+    # ``active_jobs`` excludes durable reconstruct-only queue records: those
+    # are persisted retry intents with no worker and must not block update or
+    # shutdown UX as if they were executing jobs.
+    active = active_jobs()
     identity = api_identity(product_version=PRODUCT_VERSION)
     bind_host = str(os.environ.get("LOCALAIHUB_BIND_HOST") or config.get("bind_host", "127.0.0.1"))
     try:

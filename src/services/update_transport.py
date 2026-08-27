@@ -37,6 +37,8 @@ GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code"
 GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token"
 CREDENTIAL_TARGET = "LocalAIHub/github/oauth"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_TRANSIENT_ATTEMPTS = 3
+TRANSIENT_BACKOFF_SECONDS = (0.4, 1.0, 2.0)
 MAX_DEVICE_WAIT_SECONDS = 15 * 60
 DEFAULT_DEVICE_INTERVAL_SECONDS = 5
 
@@ -47,6 +49,31 @@ class TransportError(RuntimeError):
     def __init__(self, code: str, message: str = "") -> None:
         super().__init__(message or code)
         self.code = code
+
+
+def _cli_failure_is_transient(result: subprocess.CompletedProcess[str]) -> bool:
+    """Classify only bounded network/service failures as retryable."""
+
+    text = f"{result.stdout or ''}\n{result.stderr or ''}".casefold()
+    permanent_markers = (
+        "401", "403", "404", "unauthorized", "forbidden", "permission",
+        "authentication", "auth required", "not found", "invalid json",
+        "invalid response", "bad credentials",
+    )
+    if any(marker in text for marker in permanent_markers):
+        return False
+    transient_markers = (
+        "timeout", "timed out", "temporar", "connection", "network",
+        "rate limit", "429", "500", "502", "503", "504", "service unavailable",
+        "tls", "eof", "reset by peer",
+    )
+    if any(marker in text for marker in transient_markers):
+        return True
+    # ``gh`` can return a terse non-zero status for a transient API/process
+    # failure without a useful stderr line.  Once permanent auth/permission/
+    # identity markers have been excluded, one bounded retry cycle is safer
+    # than forcing the user to click the check button repeatedly.
+    return True
 
 
 class CredentialStore(Protocol):
@@ -176,9 +203,12 @@ Runner = Callable[..., subprocess.CompletedProcess[str]]
 class GhCliTransport:
     name = "github_cli"
 
-    def __init__(self, *, runner: Runner | None = None, gh_path: str | None = None) -> None:
+    def __init__(self, *, runner: Runner | None = None, gh_path: str | None = None, retry_callback: Callable[[int, int], None] | None = None, sleeper: Callable[[float], None] = time.sleep) -> None:
         self._runner = runner or subprocess.run
         self._gh_path = gh_path
+        self._retry_callback = retry_callback
+        self._sleeper = sleeper
+        self.last_retry_attempts = 0
 
     def _gh(self) -> str:
         candidate = self._gh_path or os.environ.get("LOCALAIHUB_GH_CLI") or shutil.which("gh")
@@ -213,18 +243,31 @@ class GhCliTransport:
         args = ["api", "--method", "GET", endpoint]
         for key, value in (fields or {}).items():
             args.extend(["-f", f"{key}={value}"])
-        result = self._run(args)
-        if result.returncode != 0:
+        self.last_retry_attempts = 0
+        for attempt in range(1, MAX_TRANSIENT_ATTEMPTS + 1):
+            result = self._run(args)
+            if result.returncode == 0:
+                if len(result.stdout.encode("utf-8", "replace")) > MAX_RESPONSE_BYTES:
+                    raise TransportError("GITHUB_RESPONSE_TOO_LARGE")
+                try:
+                    value = json.loads(result.stdout)
+                except json.JSONDecodeError as exc:
+                    # Invalid JSON is a permanent contract failure; retrying
+                    # it could accidentally accept a later unrelated payload.
+                    raise TransportError("GITHUB_RESPONSE_INVALID") from exc
+                if not isinstance(value, dict):
+                    raise TransportError("GITHUB_RESPONSE_INVALID")
+                return value
+            if attempt < MAX_TRANSIENT_ATTEMPTS and _cli_failure_is_transient(result):
+                self.last_retry_attempts = attempt
+                if callable(self._retry_callback):
+                    try:
+                        self._retry_callback(attempt + 1, MAX_TRANSIENT_ATTEMPTS)
+                    except Exception:
+                        pass
+                self._sleeper(TRANSIENT_BACKOFF_SECONDS[attempt - 1])
+                continue
             raise TransportError("GITHUB_API_FAILED")
-        if len(result.stdout.encode("utf-8", "replace")) > MAX_RESPONSE_BYTES:
-            raise TransportError("GITHUB_RESPONSE_TOO_LARGE")
-        try:
-            value = json.loads(result.stdout)
-        except json.JSONDecodeError as exc:
-            raise TransportError("GITHUB_RESPONSE_INVALID") from exc
-        if not isinstance(value, dict):
-            raise TransportError("GITHUB_RESPONSE_INVALID")
-        return value
 
     def download_artifact(self, run_id: int, destination: Path, artifact_name: str) -> None:
         destination.mkdir(parents=True, exist_ok=False)
@@ -242,11 +285,12 @@ class GhCliTransport:
 class GitHubDeviceFlowTransport:
     name = "github_oauth_device"
 
-    def __init__(self, *, client_id: str | None = None, store: CredentialStore | None = None, opener: Callable[..., Any] = urlopen, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, *, client_id: str | None = None, store: CredentialStore | None = None, opener: Callable[..., Any] = urlopen, clock: Callable[[], float] = time.monotonic, sleeper: Callable[[float], None] = time.sleep) -> None:
         self.client_id = client_id or os.environ.get("LOCALAIHUB_GITHUB_OAUTH_CLIENT_ID")
         self.store = store if store is not None else _credential_store()
         self._opener = opener
         self._clock = clock
+        self._sleeper = sleeper
         self._device_sessions: dict[str, dict[str, Any]] = {}
 
     def configured(self) -> bool:
@@ -260,11 +304,22 @@ class GitHubDeviceFlowTransport:
         if token:
             headers["Authorization"] = f"Bearer {token}"
         request = Request(url, data=body, headers=headers, method="POST" if body is not None else "GET")
-        try:
-            with self._opener(request, timeout=15.0) as response:
-                raw = response.read(MAX_RESPONSE_BYTES + 1)
-        except (OSError, HTTPError, URLError) as exc:
-            raise TransportError("OAUTH_NETWORK_FAILED", type(exc).__name__) from exc
+        raw: bytes | None = None
+        for attempt in range(1, MAX_TRANSIENT_ATTEMPTS + 1):
+            try:
+                with self._opener(request, timeout=15.0) as response:
+                    raw = response.read(MAX_RESPONSE_BYTES + 1)
+                break
+            except HTTPError as exc:
+                transient = int(getattr(exc, "code", 0) or 0) == 429 or int(getattr(exc, "code", 0) or 0) >= 500
+                if not transient or attempt >= MAX_TRANSIENT_ATTEMPTS:
+                    raise TransportError("OAUTH_NETWORK_FAILED", type(exc).__name__) from exc
+            except (OSError, URLError) as exc:
+                if attempt >= MAX_TRANSIENT_ATTEMPTS:
+                    raise TransportError("OAUTH_NETWORK_FAILED", type(exc).__name__) from exc
+            self._sleeper(TRANSIENT_BACKOFF_SECONDS[attempt - 1])
+        if raw is None:
+            raise TransportError("OAUTH_NETWORK_FAILED")
         if len(raw) > MAX_RESPONSE_BYTES:
             raise TransportError("OAUTH_RESPONSE_TOO_LARGE")
         try:
@@ -427,9 +482,9 @@ class GitHubDeviceFlowTransport:
 class TransportSelector:
     """Select native authenticated transport, then gh fallback, fail closed."""
 
-    def __init__(self, *, runner: Runner | None = None, gh_path: str | None = None, native: GitHubDeviceFlowTransport | None = None) -> None:
+    def __init__(self, *, runner: Runner | None = None, gh_path: str | None = None, native: GitHubDeviceFlowTransport | None = None, retry_callback: Callable[[int, int], None] | None = None) -> None:
         self.native = native or GitHubDeviceFlowTransport()
-        self.gh = GhCliTransport(runner=runner, gh_path=gh_path)
+        self.gh = GhCliTransport(runner=runner, gh_path=gh_path, retry_callback=retry_callback)
 
     def select(self) -> tuple[GitHubTransport, AuthState]:
         native_state = self.native.auth_state()
@@ -445,8 +500,8 @@ class TransportSelector:
         return self.gh, gh_state
 
 
-def build_transport(*, runner: Runner | None = None, gh_path: str | None = None) -> TransportSelector:
-    return TransportSelector(runner=runner, gh_path=gh_path)
+def build_transport(*, runner: Runner | None = None, gh_path: str | None = None, retry_callback: Callable[[int, int], None] | None = None) -> TransportSelector:
+    return TransportSelector(runner=runner, gh_path=gh_path, retry_callback=retry_callback)
 
 
 __all__ = [

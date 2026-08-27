@@ -389,7 +389,9 @@ const showDesktopClosePrompt = (detail = {}) => {
   const copy = document.createElement("p");
   const count = verified ? detail.active_jobs : 0;
   copy.textContent = verified && count > 0
-    ? `${count} job đang chờ, chuẩn bị, chạy hoặc hủy. Hub không tự dừng worker đang hoạt động.`
+    ? detail.owner === "external"
+      ? `API do dịch vụ khác quản lý đang có ${count} job; desktop không có quyền hủy và sẽ không dừng listener external.`
+      : `${count} job đang chờ, chuẩn bị, chạy hoặc hủy. Hub không tự dừng worker đang hoạt động.`
     : "Hub chưa đóng vì chưa xác minh được trạng thái tác vụ.";
   const status = document.createElement("p"); status.className = `desktop-close-prompt__status ${detail.kind === "error" ? "is-error" : ""}`; status.setAttribute("role", "status"); status.textContent = detail.message || "Chọn một trong ba cách tiếp tục.";
   const actions = document.createElement("div"); actions.className = "desktop-close-prompt__actions";
