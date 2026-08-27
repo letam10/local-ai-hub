@@ -57,6 +57,10 @@ domains:
     owner: [src/services/api/components.py]
     depends_on: [component_installer, shared]
     forbidden: [raw-path-input, raw-url-input, direct-filesystem-ui]
+  capability_graph:
+    owner: [src/services/capability_graph/]
+    depends_on: [shared]
+    forbidden: [ui, raw-public-paths, provider-execution, startup-download, model-load]
   sam2:
     owner: [src/modules/sam2/]
     depends_on: [artifact_store, job_manager]

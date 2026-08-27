@@ -42,3 +42,5 @@ rules:
     text: Existing install reuse may write only a catalog-bound receipt after exact leaf/reparse validation; it never copies, redownloads or overwrites bytes.
   - id: update-delta-preservation
     text: Update activation preserves unchanged component files and a rollback slot; only the reviewed candidate leaf is replaced.
+  - id: capability-graph-read-only
+    text: Capability Graph V2 composes only server-owned snapshots and evidence; it cannot launch, download, import, or promote an unverified capability to operational.

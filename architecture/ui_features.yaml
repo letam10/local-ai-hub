@@ -61,12 +61,12 @@ features:
     related_services: [src/services/diagnostics]
   - id: components
     owner: src/ui/features/components/
-    api_dependencies: [productization, component_manager]
+    api_dependencies: [productization, component_manager, capability_graph]
     state_owner: app.components
     styles: src/ui/styles.css
     i18n_namespace: components
-    tests: [tests/test_v7_final_productization.py, tests/test_component_installer_manager.py]
-    related_services: [src/services/component_installer, src/services/productization]
+    tests: [tests/test_v7_final_productization.py, tests/test_component_installer_manager.py, tests/test_post_v8_capability_graph_v2.py]
+    related_services: [src/services/component_installer, src/services/productization, src/services/capability_graph]
   - id: models
     owner: src/ui/features/models/
     api_dependencies: [productization, models]

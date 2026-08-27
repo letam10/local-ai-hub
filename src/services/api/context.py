@@ -84,6 +84,20 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
             return service.catalog.inspect_runtime(component_id)
         return None
 
+    def capability_graph() -> Any:
+        """Compose V2 from existing server-owned, bounded snapshots only."""
+
+        from src.services.capability_graph import build_component_capability_graph
+
+        component_items = get("component_statuses")()
+        tool_items = get("tool_catalog")(component_items)
+        catalog_snapshot = productization().catalog.snapshot()
+        return build_component_capability_graph(
+            component_statuses=component_items,
+            tool_records=tool_items,
+            catalog_snapshot=catalog_snapshot,
+        )
+
     def prepare_shutdown() -> dict[str, Any]:
         status, payload = get("prepare_owned_shutdown")()
         return {**payload, "http_status": status}
@@ -109,6 +123,12 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
     return ApiContext({
         "health": get("health"), "bootstrap_payload": get("bootstrap_payload"),
         "capability_control_plane": get("capability_control_plane"), "lifecycle_payload": get("lifecycle_payload"),
+        "capability_graph_snapshot": lambda: capability_graph().snapshot(),
+        "capability_graph_capability": lambda capability_id: capability_graph().capability(capability_id),
+        "capability_graph_dependency_tree": lambda capability_id: capability_graph().dependency_tree(capability_id),
+        "capability_graph_blockers": lambda capability_id: capability_graph().blockers(capability_id),
+        "capability_graph_safe_actions": lambda capability_id: capability_graph().safe_actions(capability_id),
+        "capability_graph_verification_evidence": lambda capability_id: capability_graph().verification_evidence(capability_id),
         "tools_payload": lambda: {"status": "completed", "tools": get("tool_catalog")(get("component_statuses")())},
         "component_statuses": get("component_statuses"), "component_snapshot": component_api.snapshot,
         "component_detail": component_api.detail, "component_plan_lookup": component_api.lookup_plan,
