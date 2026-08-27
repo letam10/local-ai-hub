@@ -378,7 +378,11 @@ class V8P0StartupRecoveryTests(unittest.TestCase):
             with patch.dict(os.environ, {"LOCALAIHUB_INSTALL_ROOT": str(root), "LOCALAIHUB_APP_ROOT": str(old_app)}, clear=False), patch("src.app.update_bridge.resolve_launch_plan", return_value=new_plan), patch("src.app.update_bridge.resolve_verified_running_plan", return_value=old_plan), patch("src.app.update_bridge.subprocess.Popen", return_value=SimpleNamespace()) as popen, patch("src.app.update_bridge.importlib.import_module", return_value=SimpleNamespace(_prepare_owned_api_close=lambda: {"verification": "verified", "active_jobs": 0})):
                 result = _restart_after_update(Bridge())
             self.assertEqual(result["status"], "blocked")
-            self.assertIn(result["code"], {"STAGED_UPDATE_INVALID", "INSTALL_ROOT_NOT_PRODUCTION"})
+            # The stable-shell root guard is platform-specific for a synthetic
+            # tempfile: Windows rejects the Temp path before reading it,
+            # whereas POSIX reaches the deliberately absent manifest. Both
+            # outcomes are the same fail-closed staged-candidate refusal.
+            self.assertIn(result["code"], {"STAGED_UPDATE_INVALID", "INSTALL_ROOT_NOT_PRODUCTION", "MANIFEST_UNREADABLE"})
             popen.assert_not_called()
             self.assertNotIn("destroyed", captured)
 
