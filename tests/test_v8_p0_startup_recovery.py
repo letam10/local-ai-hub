@@ -9,10 +9,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from src.app import main as desktop
 from src.app.main import DesktopBridge, FRONTEND_BOOTSTRAP_TIMEOUT, WEBVIEW_NAVIGATION_FAILED, _error_html, _load_ui_when_ready, _verified_previous_pointer_available
 from src.app.stable_shell import POINTER_SCHEMA, PRODUCT_SCHEMA, VERSION_MANIFEST_SCHEMA, StableShellError, atomic_activate_pointer, load_current_pointer, resolve_launch_plan, resolve_verified_running_plan
 from src.app.update_bridge import _restart_after_update
-from src.app.update_watchdog import _rollback_previous, _session_snapshot, run as run_watchdog
+from src.app.update_watchdog import _launch_stable, _rollback_previous, _session_snapshot, run as run_watchdog
 from src.app.readiness import record_event
 from src.services.app_update import (
     AppUpdateError,
@@ -231,6 +232,32 @@ class V8P0StartupRecoveryTests(unittest.TestCase):
                 self.assertEqual(_session_snapshot()["api_port"], 52943)
             with patch.dict(os.environ, {"LOCALAIHUB_WATCHDOG_SESSION_PATH": str(session), "LOCALAIHUB_WATCHDOG_SESSION_NONCE": "b" * 32}, clear=False):
                 self.assertIsNone(_session_snapshot())
+
+    def test_watchdog_bridges_authenticated_session_to_new_payload_environment(self):
+        with self._temp() as temporary:
+            root = Path(temporary) / "install"
+            self._install(root, current="main-aaaaaaaaaaaa", current_commit="a" * 40)
+            session_path = root / "update-state" / "restart-session.json"
+            nonce = "a" * 32
+            captured = {}
+            with patch.dict(os.environ, {
+                "LOCALAIHUB_WATCHDOG_SESSION_PATH": str(session_path),
+                "LOCALAIHUB_WATCHDOG_SESSION_NONCE": nonce,
+                "LOCALAIHUB_WATCHDOG_WAIT_PID": "1234",
+            }, clear=False), patch("src.app.update_watchdog.subprocess.Popen", side_effect=lambda *args, **kwargs: captured.update(kwargs) or SimpleNamespace()):
+                _launch_stable(root)
+            environment = captured["env"]
+            self.assertEqual(environment["LOCALAIHUB_RESTART_SESSION_PATH"], str(session_path))
+            self.assertEqual(environment["LOCALAIHUB_RESTART_SESSION_NONCE"], nonce)
+            self.assertEqual(environment["LOCALAIHUB_RESTART_WAIT_PID"], "1234")
+
+    def test_owned_api_pid_reports_child_pid_only_when_live(self):
+        process = SimpleNamespace(pid=4321, poll=lambda: None)
+        with patch.object(desktop, "_api_process", process):
+            self.assertEqual(desktop._owned_api_pid(), 4321)
+        exited = SimpleNamespace(pid=4321, poll=lambda: 0)
+        with patch.object(desktop, "_api_process", exited):
+            self.assertIsNone(desktop._owned_api_pid())
 
     def test_recovery_screen_is_bounded_vietnamese_and_no_paths(self):
         html = _error_html("API_STARTUP_TIMEOUT")

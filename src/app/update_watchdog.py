@@ -244,6 +244,24 @@ def _launch_stable(app_root: Path) -> subprocess.Popen[object]:
     if wait_pid:
         environment["LOCALAIHUB_RESTART_WAIT_PID"] = wait_pid
     environment.pop("LOCALAIHUB_WATCHDOG_WAIT_PID", None)
+    # The watchdog owns the restart-session authentication values while the
+    # new payload owns publishing its selected API port.  Bridge the private
+    # watchdog names into the payload names explicitly; without this mapping
+    # the new desktop never updates api_port/api_pid and the watchdog cannot
+    # authenticate a fallback-port candidate.
+    watchdog_session_path = environment.get("LOCALAIHUB_WATCHDOG_SESSION_PATH")
+    watchdog_session_nonce = environment.get("LOCALAIHUB_WATCHDOG_SESSION_NONCE")
+    if (
+        isinstance(watchdog_session_path, str)
+        and Path(watchdog_session_path).name == "restart-session.json"
+        and isinstance(watchdog_session_nonce, str)
+        and re.fullmatch(r"[0-9a-f]{32}", watchdog_session_nonce)
+    ):
+        environment["LOCALAIHUB_RESTART_SESSION_PATH"] = watchdog_session_path
+        environment["LOCALAIHUB_RESTART_SESSION_NONCE"] = watchdog_session_nonce
+    else:
+        environment.pop("LOCALAIHUB_RESTART_SESSION_PATH", None)
+        environment.pop("LOCALAIHUB_RESTART_SESSION_NONCE", None)
     # Old stable launcher binaries may not yet know the build-health fields.
     # Inject the already-validated current payload identity into the inherited
     # child environment so the API handshake remains exact without rebuilding

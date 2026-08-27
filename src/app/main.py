@@ -440,6 +440,15 @@ def _owns_live_api() -> bool:
         return _api_process is not None and _api_process.poll() is None
 
 
+def _owned_api_pid() -> int | None:
+    """Return the PID of the API process owned by this desktop, if live."""
+
+    with _api_process_lock:
+        process = _api_process
+        pid = getattr(process, "pid", None) if process is not None and process.poll() is None else None
+    return int(pid) if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
+
+
 def close_owned_idle_backends() -> None:
     """Ask the API process to stop only idle backends that it owns."""
 
@@ -736,7 +745,7 @@ class DesktopBridge:
             if result.get("status") in {"healthy", "not_pending"}:
                 self._frontend_ready_result = {**result, "status": "ready"}
                 self._frontend_ready_event.set()
-                _record_restart_session(status="frontend_ready", api_port=_configured_port(), api_pid=os.getpid())
+                _record_restart_session(status="frontend_ready", api_port=_configured_port(), api_pid=_owned_api_pid())
                 _record_desktop_readiness(FRONTEND_READY, status="ready")
                 state, _payload = _probe_api()
                 _record_startup_event(FRONTEND_READY, probe_state=state, runtime_class="installed_bundled")
@@ -955,7 +964,7 @@ def _load_ui_when_ready(window: object, bridge: DesktopBridge | None = None) -> 
             return
         return
     api_state, _payload = _probe_api()
-    _record_restart_session(status="api_ready", api_port=_configured_port(), api_pid=os.getpid())
+    _record_restart_session(status="api_ready", api_port=_configured_port(), api_pid=_owned_api_pid())
     _record_startup_event("api_ready", selected_port=_configured_port(), probe_state=api_state, runtime_class="installed_bundled")
     _record_startup_event("webview_navigation_started", selected_port=_configured_port(), probe_state=api_state, runtime_class="installed_bundled")
     _record_desktop_readiness("api_ready", status="running")
