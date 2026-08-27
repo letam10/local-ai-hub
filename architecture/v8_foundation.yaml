@@ -52,6 +52,8 @@ waves:
       - actual_report_sha256_must_match_declared_digest
       - pass_report_binds_gate_platform_and_source_commit
       - report_checks_are_finite_and_true
+      - every_gate_declares_required_check_ids
+      - pass_report_check_set_matches_gate_contract_exactly
       - version_tag_and_main_merge_are_user_approved_only
       - source_preflight_is_read_only
     required_local_gates: 12

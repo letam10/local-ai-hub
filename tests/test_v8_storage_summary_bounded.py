@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
 import threading
 import time
 import unittest
@@ -79,6 +80,11 @@ class StorageSummaryBoundedTests(unittest.TestCase):
             self.assertEqual(snapshot["scan"]["progress"], 100)
             self.assertTrue(snapshot["scan"]["exact"])
             self.assertEqual(len(snapshot["areas"]), 7)
+            self.assertEqual(snapshot["scan"]["owned_storage_total_bytes"], 70)
+            self.assertTrue(snapshot["scan"]["owned_storage_exact"])
+            self.assertIsNotNone(snapshot["scan"]["saved_at"])
+            self.assertEqual(set(snapshot["managed_root_counts"]), set(overview._SCAN_AREA_NAMES))
+            self.assertTrue(all("reparse_entries" in value and "unreadable_entries" in value for value in snapshot["managed_root_counts"].values()))
 
     def test_deep_scan_crosses_fast_entry_budget_and_publishes_live_progress(self) -> None:
         with TemporaryDirectory(dir=ROOT.parent) as temporary:
@@ -148,6 +154,55 @@ class StorageSummaryBoundedTests(unittest.TestCase):
             self.assertEqual(report["reparse_entries"], 1)
             self.assertEqual(report["bytes"], 3)
             self.assertIn("reparse", str(report["reason"]).lower())
+
+    def test_nested_allowlisted_roots_are_counted_once(self) -> None:
+        with TemporaryDirectory(dir=ROOT.parent) as temporary:
+            root = Path(temporary)
+            parent = root / "Models"
+            child = parent / "Environments"
+            child.mkdir(parents=True)
+            (child / "shared.bin").write_bytes(b"abc")
+            roots = (root, parent, child, root / "Runtime", root / "Cache", root / "Output", root / "Temp", root / "Logs")
+            with patch.object(overview, "_managed_roots", return_value=roots), patch.object(overview, "_volume_projection", return_value=[]), patch.object(overview, "_legacy_records", return_value=[]), patch.object(overview, "_disk_snapshot", return_value={"status": "available"}):
+                overview._scan_thread = None
+                started = overview.start_storage_scan(force=True, mode="deep_exact")
+                thread = overview._scan_thread
+                self.assertIsNotNone(thread)
+                thread.join(timeout=2)
+                snapshot = overview.storage_scan_snapshot()
+            self.assertEqual(snapshot["scan"]["deduplicated_targets"], 1)
+            self.assertEqual(snapshot["scan"]["owned_storage_total_bytes"], 3)
+            self.assertTrue(snapshot["areas"]["Environments"]["deduplicated"])
+
+    def test_exact_cache_round_trip_exposes_saved_at(self) -> None:
+        with TemporaryDirectory(dir=ROOT.parent) as temporary:
+            root = Path(temporary)
+            cache = root / "Config" / "storage_scan_cache.json"
+            reports = {
+                name: {"bytes": 2, "gb": 0.0, "status": "available", "complete": True, "entries_scanned": 1, "files_scanned": 1}
+                for name in overview._SCAN_AREA_NAMES
+            }
+            with patch.object(overview, "_volume_projection", return_value=[]), patch.object(overview, "_legacy_records", return_value=[]), patch.object(overview, "_disk_snapshot", return_value={"status": "available"}), patch.object(overview, "_scan_cache_path", return_value=cache):
+                result = overview._storage_summary_from_reports(root, reports, scan_status="completed", scan_execution="background", scan_id="scan-cache", started_at="2026-08-27T00:00:00+00:00", completed_at="2026-08-27T00:00:01+00:00", saved_at="2026-08-27T00:00:01+00:00", scan_mode="deep_exact")
+                overview._persist_exact_scan(result, root)
+                self.assertTrue(cache.is_file())
+                payload = json.loads(cache.read_text(encoding="utf-8"))
+                self.assertEqual(payload["saved_at"], "2026-08-27T00:00:01+00:00")
+                original_state = overview._scan_state
+                original_loaded = overview._scan_cache_loaded
+                original_size = overview._size_cache
+                try:
+                    overview._scan_state = {"status": "idle"}
+                    overview._scan_cache_loaded = False
+                    overview._size_cache = None
+                    overview._restore_exact_scan_cache()
+                    snapshot = overview.storage_scan_snapshot()
+                finally:
+                    overview._scan_state = original_state
+                    overview._scan_cache_loaded = original_loaded
+                    overview._size_cache = original_size
+            self.assertTrue(snapshot["scan"]["exact"])
+            self.assertEqual(snapshot["scan"]["saved_at"], "2026-08-27T00:00:01+00:00")
 
     def test_deep_background_scan_updates_area_before_completion(self) -> None:
         with TemporaryDirectory(dir=ROOT.parent) as temporary:

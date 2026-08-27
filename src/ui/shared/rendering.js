@@ -634,9 +634,22 @@ const readinessResourceDetails = (resource) => {
     ...resource.physical.map((item) => ({ ...item, kind: "Physical fit", fit: item.fit })),
     ...resource.concurrent.map((item) => ({ ...item, kind: "Concurrent fit", fit: item.fit })),
   ];
-  const rows = fitRows.length
+  const fitGroups = new Map();
+  fitRows.forEach((item) => {
+    const key = `${item.kind}|${String(item.fit)}|${item.gpu}`;
+    const current = fitGroups.get(key) || { ...item, count: 0 };
+    current.count += 1;
+    fitGroups.set(key, current);
+  });
+  const fitSummary = fitRows.length
+    ? `<div class="readiness-resource-fit-summary" data-resource-fit-summary>${[...fitGroups.values()].map((item) => `<div class="readiness-resource-fit-summary__item"><strong>${uiTextHtml(item.kind)} · ${uiTextHtml(readinessFitLabel(item.fit))}</strong><span>${escapeHtml(String(item.count))} module · ${escapeHtml(readinessGpuLabel(item.gpu))}</span><small>${escapeHtml(readinessFitExplanation(item.kind, item.fit))}</small></div>`).join("")}</div>`
+    : "";
+  const detailRows = fitRows.length
     ? fitRows.map((item) => `<div class="readiness-resource-row"><span><strong>${uiTextHtml(item.kind)}</strong> · ${escapeHtml(item.id)}<small>${escapeHtml(readinessFitExplanation(item.kind, item.fit))}</small></span><span>${escapeHtml(readinessGpuLabel(item.gpu))} · ${uiTextHtml(readinessFitLabel(item.fit))}</span></div>`).join("")
     : `<div class="empty-state compact"><span>${uiTextHtml("No per-module resource fit was published.")}</span></div>`;
+  const rows = fitRows.length
+    ? `${fitSummary}<details class="readiness-resource-details" data-resource-fit-details><summary>${uiTextHtml("Xem chi tiết")} (${escapeHtml(String(fitRows.length))})</summary><div class="readiness-resource-list__details">${detailRows}</div></details>`
+    : detailRows;
   const errors = resource.errors.length
     ? `<div class="readiness-resource-errors"><strong>${uiTextHtml("Resource notes")}</strong>${resource.errors.map((item) => `<span>${escapeHtml(RESOURCE_ERROR_COPY[item.code] || "Không thể đánh giá một mục tài nguyên.")} <code>${escapeHtml(item.code)}</code>${item.module ? ` · ${escapeHtml(item.module)}` : ""}</span>`).join("")}</div>`
     : "";

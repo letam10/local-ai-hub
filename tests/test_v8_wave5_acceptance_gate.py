@@ -38,13 +38,14 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
             gate_id = item["gate_id"]
             digest: str | None = None
             if status == "PASS":
+                required_checks = list(item["required_checks"])
                 report = {
                     "schema_version": REPORT_SCHEMA_VERSION,
                     "gate_id": gate_id,
                     "status": "PASS",
                     "platform": contract["required_platform"],
                     "source_commit": source,
-                    "checks": {"synthetic_contract_check": True},
+                    "checks": {check_id: True for check_id in required_checks},
                 }
                 raw = json.dumps(report, sort_keys=True).encode("utf-8")
                 (reports / f"{gate_id}.json").write_bytes(raw)
@@ -152,6 +153,12 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
         self.assertEqual(contract["required_platform"], "windows-x64")
         self.assertEqual(contract["required_evidence_class"], "local_windows")
         self.assertTrue(all(item["required"] is True for item in contract["gates"]))
+        self.assertTrue(all(item["required_checks"] for item in contract["gates"]))
+        self.assertTrue(all(len(item["required_checks"]) == len(set(item["required_checks"])) for item in contract["gates"]))
+        by_id = {item["gate_id"]: set(item["required_checks"]) for item in contract["gates"]}
+        self.assertTrue({"route_render", "real_navigation", "dark", "light", "dpi_100", "dpi_125", "dpi_150", "degraded_error_recovery", "frontend_ready", "normal_close", "trusted_native_interaction"}.issubset(by_id["webview2_product_ux"]))
+        self.assertTrue({"api_start_failure_or_frontend_timeout", "watchdog_rollback_previous_relaunch"}.issubset(by_id["crash_recovery"]))
+        self.assertIn("helper_execution_or_truthful_limitation", by_id["real_component_lifecycle"])
         self.assertEqual(contract["release_policy"]["main_merge"], "user_approved_only")
         self.assertEqual(contract["release_policy"]["version_change"], "user_approved_only")
         self.assertEqual(contract["release_policy"]["tag_change"], "user_approved_only")
@@ -167,6 +174,54 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
             with self.assertRaises(AcceptanceGateError) as caught:
                 load_gate_contract(path)
         self.assertEqual(caught.exception.code, "GATE_CONTRACT_ROOT_INVALID")
+
+    def test_pass_report_missing_declared_check_is_rejected(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            evidence_path = self._write_bundle(repo, root)
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            gate_id = next(iter(evidence["gates"]))
+            report_path = root / "reports" / f"{gate_id}.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            removed = next(iter(report["checks"]))
+            report["checks"].pop(removed)
+            raw = json.dumps(report, sort_keys=True).encode("utf-8")
+            report_path.write_bytes(raw)
+            evidence["gates"][gate_id]["report_sha256"] = hashlib.sha256(raw).hexdigest()
+            evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+            result = evaluate(evidence_path=evidence_path, repo_root=repo)
+        self.assertFalse(result["local_evidence"]["valid"])
+        self.assertIn("EVIDENCE_REPORT_REQUIRED_CHECKS_MISSING", result["blockers"])
+
+    def test_pass_report_with_only_arbitrary_true_key_is_rejected(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            evidence_path = self._write_bundle(repo, root)
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            gate_id = next(iter(evidence["gates"]))
+            report_path = root / "reports" / f"{gate_id}.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["checks"] = {"synthetic_contract_check": True}
+            raw = json.dumps(report, sort_keys=True).encode("utf-8")
+            report_path.write_bytes(raw)
+            evidence["gates"][gate_id]["report_sha256"] = hashlib.sha256(raw).hexdigest()
+            evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+            result = evaluate(evidence_path=evidence_path, repo_root=repo)
+        self.assertFalse(result["local_evidence"]["valid"])
+        self.assertIn("EVIDENCE_REPORT_REQUIRED_CHECKS_MISSING", result["blockers"])
+
+    def test_gate_contract_rejects_missing_required_check_declaration(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        contract = json.loads((repo / "architecture" / "v8_acceptance_gates.json").read_text(encoding="utf-8"))
+        contract["gates"][0].pop("required_checks")
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "gates.json"
+            path.write_text(json.dumps(contract), encoding="utf-8")
+            with self.assertRaises(AcceptanceGateError) as caught:
+                load_gate_contract(path)
+        self.assertEqual(caught.exception.code, "GATE_CONTRACT_GATE_INVALID")
 
 
 if __name__ == "__main__":

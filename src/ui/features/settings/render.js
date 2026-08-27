@@ -41,7 +41,7 @@ export function createSettingsRenderer(deps) {
             </select>
           </div>
           <div class="row-item">
-            <span><span>Giao diện</span><small class="setting-effect">Áp dụng ngay; lựa chọn hệ thống theo Windows.</small></span>
+            <span><span>Giao diện</span><small class="setting-effect">Chỉ áp dụng sau khi bấm Áp dụng & lưu; thay đổi chưa lưu chưa đổi giao diện.</small></span>
             <select id="settings-theme" class="input input--select" data-setting-key="ui.theme">
               <option value="system" ${settings.theme === "system" ? "selected" : ""}>Theo hệ thống (system)</option>
               <option value="dark" ${settings.theme === "dark" ? "selected" : ""}>Tối (dark)</option>

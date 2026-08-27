@@ -1,9 +1,19 @@
 import json
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
 
-from src.app.readiness import classify_state, evaluate_readiness, event_seen, load_state, record_event, record_frontend_signal
+from src.app.readiness import (
+    LEGACY_PAYLOAD_ALLOWLIST,
+    _legacy_payload_is_safe,
+    classify_state,
+    evaluate_readiness,
+    event_seen,
+    load_state,
+    record_event,
+    record_frontend_signal,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -157,6 +167,80 @@ class V8AppReadinessContractTests(unittest.TestCase):
             pending.write_text("{}", encoding="utf-8")
             blocked = record_frontend_signal(root, "frontend_ready", route="dashboard")
             self.assertEqual(blocked["code"], "READINESS_IDENTITY_UNAVAILABLE")
+
+    def test_legacy_compatibility_is_an_explicit_allowlist(self) -> None:
+        self.assertEqual(LEGACY_PAYLOAD_ALLOWLIST, {"8.0.1"})
+        with tempfile.TemporaryDirectory(prefix="v8-readiness-legacy-allowlist-") as folder:
+            root = Path(folder)
+            for version in ("foo", "8.0.0-test", "8.0.1-hotfix-unknown", "main-aaaaaaaaaaaa"):
+                payload = root / "versions" / version
+                payload.mkdir(parents=True)
+                (root / "current.json").write_text(json.dumps({"version": version}), encoding="utf-8")
+                self.assertFalse(_legacy_payload_is_safe(root), version)
+                payload.rmdir()
+            payload = root / "versions" / "8.0.1"
+            payload.mkdir(parents=True)
+            (root / "current.json").write_text(json.dumps({"version": "8.0.1"}), encoding="utf-8")
+            self.assertTrue(_legacy_payload_is_safe(root))
+
+    def test_legacy_identity_metadata_is_verified_when_present(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="v8-readiness-legacy-identity-") as folder:
+            root = Path(folder)
+            payload = root / "versions" / "8.0.1"
+            payload.mkdir(parents=True)
+            manifest = {
+                "schema_version": "v8.0.1-version-manifest.v1",
+                "product_id": "LocalAIHub",
+                "version": "8.0.1",
+                "app_relative": "app",
+                "runtime_relative": "runtime/Python312/pythonw.exe",
+                "entrypoint": "src.app.launcher",
+            }
+            manifest_path = payload / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+            digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            (root / "current.json").write_text(json.dumps({
+                "schema_version": "v8.0.1-pointer.v1",
+                "version": "8.0.1",
+                "payload_relative": "versions/8.0.1",
+                "manifest_sha256": digest,
+            }, sort_keys=True), encoding="utf-8")
+            (root / "product.json").write_text(json.dumps({
+                "schema_version": "v8.0.1-product.v1",
+                "product_id": "LocalAIHub",
+                "version": "8.0.1",
+                "launcher": "LocalAIHub.exe",
+                "icon": "local-ai-hub.ico",
+                "current_pointer": "current.json",
+            }, sort_keys=True), encoding="utf-8")
+            (root / "installation.json").write_text(json.dumps({
+                "schema_version": "v8.0.1-installation.v1",
+                "product_id": "LocalAIHub",
+                "app_root": str(root),
+                "data_root": str(root / "data"),
+                "app_user_model_id": "LocalAIHub.Desktop",
+                "launcher": "LocalAIHub.exe",
+            }, sort_keys=True), encoding="utf-8")
+            self.assertTrue(_legacy_payload_is_safe(root))
+
+            malformed_pointer = json.loads((root / "current.json").read_text(encoding="utf-8"))
+            malformed_pointer["payload_relative"] = "../../outside"
+            (root / "current.json").write_text(json.dumps(malformed_pointer), encoding="utf-8")
+            self.assertFalse(_legacy_payload_is_safe(root))
+
+            (root / "current.json").write_text(json.dumps({"version": "8.0.1"}), encoding="utf-8")
+            (root / "product.json").write_text(json.dumps({"version": "8.0.1", "product_id": "not-local-ai-hub"}), encoding="utf-8")
+            self.assertFalse(_legacy_payload_is_safe(root))
+
+    def test_legacy_pending_health_remains_strict(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="v8-readiness-legacy-pending-") as folder:
+            root = Path(folder)
+            (root / "versions" / "8.0.1").mkdir(parents=True)
+            (root / "current.json").write_text(json.dumps({"version": "8.0.1"}), encoding="utf-8")
+            pending = root / "update-state" / "pending-health.json"
+            pending.parent.mkdir(parents=True)
+            pending.write_text("{}", encoding="utf-8")
+            self.assertFalse(_legacy_payload_is_safe(root))
 
     def test_frontend_has_failure_guard_and_ready_contract(self) -> None:
         app_js = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")

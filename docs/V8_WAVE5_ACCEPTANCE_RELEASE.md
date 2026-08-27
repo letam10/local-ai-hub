@@ -46,6 +46,24 @@ Cấu trúc local:
 
 Mỗi gate `PASS` phải có `report_sha256` và file deterministic `reports/<gate_id>.json`.
 
+Mỗi gate trong `architecture/v8_acceptance_gates.json` cũng khai báo
+`required_checks`.  Report `PASS` phải có đúng tập check đã khai báo và mọi
+giá trị phải là boolean `true`; một key `true` tùy ý hoặc report thiếu check
+không được coi là bằng chứng.  Preflight vẫn đối chiếu digest report, source
+commit và platform trước khi tính gate.
+
+Riêng `webview2_product_ux` phải báo cáo route render, điều hướng thật,
+dark/light, DPI 100/125/150 (hoặc bằng chứng không khả dụng cho từng mức),
+degraded/error recovery, frontend-ready, normal close và ít nhất một đường
+tương tác native/trusted.  Nếu UIA InvokePattern không dùng được, report phải
+ghi rõ đường mouse/keyboard native thay thế hoặc để check đó `BLOCKED`; không
+được che khuất giới hạn host.
+
+`crash_recovery` phải có bằng chứng lỗi khởi động API/frontend hoặc process
+failure cùng watchdog rollback và relaunch payload trước.  `real_component_lifecycle`
+phải ghi lightweight helper đã thực sự chạy, hoặc khai báo rõ giới hạn nếu chỉ
+thực hiện verify/cancel bounded mà không thể chạy helper an toàn.
+
 PASS report dùng schema `v8-local-gate-report.v1` và phải bind:
 
 - exact `gate_id`;

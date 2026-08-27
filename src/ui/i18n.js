@@ -43,7 +43,7 @@ const DICTIONARIES = Object.freeze({
     "Module navigation": "Điều hướng module", "Điều hướng module": "Điều hướng module", "Local AI center": "Trung tâm AI cục bộ", "Trung tâm AI cục bộ": "Trung tâm AI cục bộ",
     "Loopback only · no CDN": "Chỉ loopback · không CDN", "Chỉ loopback · không CDN": "Chỉ loopback · không CDN",
     "Diagnostics Center": "Trung tâm chẩn đoán", "Desktop Repair Center": "Trung tâm bảo trì",
-    "Backup & Restore": "Sao lưu & Khôi phục", "Save Settings": "Lưu cài đặt",
+    "Backup & Restore": "Sao lưu & Khôi phục", "Save Settings": "Lưu cài đặt", "Xem chi tiết": "Xem chi tiết",
   }),
   en: Object.freeze({
     "Bảng điều khiển": "Dashboard", "Cài đặt": "Settings", "Tác vụ": "Jobs", "Mô hình & Lưu trữ": "Models & Storage",
@@ -61,7 +61,7 @@ const DICTIONARIES = Object.freeze({
     "Thu gọn điều hướng": "Collapse navigation", "đang hoạt động": "active", "bản ghi": "records", "Làm mới snapshot": "Refresh snapshot",
     "Ngôn ngữ": "Language", "Đổi giao diện": "Change theme", "Điều hướng module": "Module navigation", "Trung tâm AI cục bộ": "Local AI center", "Chỉ loopback · không CDN": "Loopback only · no CDN",
     "Diagnostics Center": "Diagnostics Center", "Desktop Repair Center": "Desktop Repair Center",
-    "Backup & Restore": "Backup & Restore", "Lưu cài đặt": "Save Settings",
+    "Backup & Restore": "Backup & Restore", "Lưu cài đặt": "Save Settings", "Xem chi tiết": "View details",
   }),
   zh: Object.freeze({
     "Dashboard": "控制面板", "Bảng điều khiển": "控制面板", "Settings": "设置", "Cài đặt": "设置", "Jobs": "任务", "Tác vụ": "任务",
@@ -76,7 +76,7 @@ const DICTIONARIES = Object.freeze({
     "Refresh snapshot": "刷新快照", "Làm mới snapshot": "刷新快照", "active": "活动", "đang hoạt động": "活动", "records": "条记录", "bản ghi": "条记录",
     "Ngôn ngữ": "语言", "Đổi giao diện": "切换主题", "Điều hướng module": "模块导航", "Trung tâm AI cục bộ": "本地 AI 中心", "Chỉ loopback · không CDN": "仅本地回环 · 无 CDN",
     "Diagnostics Center": "诊断中心", "Desktop Repair Center": "桌面修复中心",
-    "Backup & Restore": "备份与恢复", "Lưu cài đặt": "保存设置",
+    "Backup & Restore": "备份与恢复", "Lưu cài đặt": "保存设置", "Xem chi tiết": "查看详情",
   }),
   ja: Object.freeze({
     "Dashboard": "ダッシュボード", "Bảng điều khiển": "ダッシュボード", "Settings": "設定", "Cài đặt": "設定", "Jobs": "ジョブ", "Tác vụ": "ジョブ",
@@ -91,7 +91,7 @@ const DICTIONARIES = Object.freeze({
     "Refresh snapshot": "スナップショットを更新", "Làm mới snapshot": "スナップショットを更新", "active": "アクティブ", "đang hoạt động": "アクティブ", "records": "件", "bản ghi": "件",
     "Ngôn ngữ": "言語", "Đổi giao diện": "テーマを切り替える", "Điều hướng module": "モジュールナビゲーション", "Trung tâm AI cục bộ": "ローカル AI センター", "Chỉ loopback · không CDN": "ループバックのみ・CDN なし",
     "Diagnostics Center": "診断センター", "Desktop Repair Center": "デスクトップ修復センター",
-    "Backup & Restore": "バックアップと復元", "Lưu cài đặt": "設定を保存",
+    "Backup & Restore": "バックアップと復元", "Lưu cài đặt": "設定を保存", "Xem chi tiết": "詳細を表示",
   }),
   ko: Object.freeze({
     "Dashboard": "대시보드", "Bảng điều khiển": "대시보드", "Settings": "설정", "Cài đặt": "설정", "Jobs": "작업", "Tác vụ": "작업",
@@ -106,7 +106,7 @@ const DICTIONARIES = Object.freeze({
     "Refresh snapshot": "스냅샷 새로 고침", "Làm mới snapshot": "스냅샷 새로 고침", "active": "활성", "đang hoạt động": "활성", "records": "개 기록", "bản ghi": "개 기록",
     "Ngôn ngữ": "언어", "Đổi giao diện": "테마 변경", "Điều hướng module": "모듈 탐색", "Trung tâm AI cục bộ": "로컬 AI 허브", "Chỉ loopback · không CDN": "루프백 전용 · CDN 없음",
     "Diagnostics Center": "진단 센터", "Desktop Repair Center": "데스크톱 복구 센터",
-    "Backup & Restore": "백업 및 복원", "Lưu cài đặt": "설정 저장",
+    "Backup & Restore": "백업 및 복원", "Lưu cài đặt": "설정 저장", "Xem chi tiết": "세부 정보 보기",
   }),
 });
 

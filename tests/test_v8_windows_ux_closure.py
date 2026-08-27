@@ -187,6 +187,9 @@ class V8WindowsUxClosureTests(unittest.TestCase):
         self.assertIn("Hủy thay đổi", settings)
         self.assertIn("Chưa cần gán tài nguyên riêng", resource)
         self.assertIn("Đây là đánh giá lập kế hoạch", resource)
+        self.assertIn("Xem chi tiết", resource)
+        self.assertIn("Chỉ áp dụng sau khi bấm Áp dụng & lưu", settings)
+        self.assertIn("Chính xác tại", (ROOT / "src/ui/features/models/models.js").read_text(encoding="utf-8"))
         self.assertIn("componentStatusCopy", components)
         self.assertIn("INSTALLED_UNVERIFIED", components)
 

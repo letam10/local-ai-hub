@@ -860,6 +860,7 @@ const updateStorageScanDom = (result) => {
   const status = String(scan.status || result?.status || "idle");
   const mode = String(scan.mode || result?.scan_mode || "fast");
   const progress = Math.max(0, Math.min(100, Number.isFinite(Number(scan.progress)) ? Number(scan.progress) : 0));
+  const savedAt = typeof scan.saved_at === "string" && scan.saved_at.trim() ? scan.saved_at.trim() : "";
   const banner = view.querySelector("[data-storage-scan-status]");
   if (!banner) { render(); return; }
   banner.dataset.storageScanStatus = status;
@@ -873,13 +874,13 @@ const updateStorageScanDom = (result) => {
       : status === "running"
       ? `${mode === "deep_exact" ? "Đang tính chính xác" : "Đang quét nhanh"} · ${progress}%${area}`
       : status === "cancelling" ? "Đang hủy quét …"
-        : status === "completed" && scan.exact === true ? "Đã quét xong · tổng chính xác"
+        : status === "completed" && scan.exact === true ? (savedAt ? `Chính xác tại ${savedAt}` : "Đã quét xong · tổng chính xác")
           : status === "partial" ? "Đã quét một phần · tổng chưa đủ"
             : status === "cancelled" ? "Đã hủy quét · tổng chưa đủ"
               : status === "unavailable" ? "Quét storage chưa khả dụng" : "Chưa có lần quét storage";
   }
   const badge = banner.querySelector(".card-title-row span");
-  if (badge) badge.textContent = scan.exact === true ? "chính xác" : status === "running" ? "đang đếm" : "có giới hạn";
+  if (badge) badge.textContent = scan.exact === true ? (savedAt ? `Chính xác tại ${savedAt}` : "chính xác") : status === "running" ? "đang đếm" : "có giới hạn";
   const bar = banner.querySelector(".progress-bar");
   const track = banner.querySelector("[role=progressbar]");
   if (bar) bar.style.width = `${progress}%`;
@@ -902,11 +903,18 @@ const updateStorageScanDom = (result) => {
       : "";
     pollingNotice.hidden = scan.polling_limited !== true;
   }
+  const savedAtNode = banner.querySelector("[data-storage-scan-saved-at]");
+  if (savedAtNode) {
+    savedAtNode.textContent = savedAt ? `Chính xác tại ${savedAt}; bấm Quét lại sau khi filesystem thay đổi.` : "";
+    savedAtNode.hidden = !savedAt;
+  }
 
   const areas = result?.areas && typeof result.areas === "object" ? result.areas : {};
+  const rootCounts = result?.managed_root_counts && typeof result.managed_root_counts === "object" ? result.managed_root_counts : {};
+  const areaProjection = { ...rootCounts, ...areas };
   const list = view.querySelector("[data-storage-area-list]");
   if (list) {
-    Object.entries(areas).forEach(([name, value]) => {
+    Object.entries(areaProjection).forEach(([name, value]) => {
       let row = list.querySelector(`[data-storage-area="${CSS.escape(name)}"]`);
       if (!row) {
         row = document.createElement("div");
@@ -922,7 +930,7 @@ const updateStorageScanDom = (result) => {
       const partial = value?.complete === false || value?.status === "partial" || value?.status === "running";
       if (label) label.textContent = name;
       if (valueNode) valueNode.textContent = partial ? `Ít nhất ${formatGb(bytes)}` : formatGb(bytes);
-      if (countNode) countNode.textContent = `${Number(value?.files_scanned ?? value?.entries_scanned ?? 0)} tệp`;
+      if (countNode) countNode.textContent = `${Number(value?.entries_scanned || 0)} mục · ${Number(value?.files_scanned || 0)} tệp · ${Number(value?.reparse_entries || 0)} reparse · ${Number(value?.unreadable_entries || 0)} không đọc được · ${value?.deduplicated === true ? "đã gộp trùng" : value?.complete === true ? "đã hoàn tất" : "chưa hoàn tất"}`;
     });
   }
   const action = view.querySelector("[data-storage-scan-action]");

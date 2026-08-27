@@ -947,7 +947,9 @@ class DiagnosticsCenter:
                     key: scan[key]
                     for key in (
                         "status", "mode", "exact", "progress", "files_scanned",
-                        "total_bytes_counted", "reason", "next_action",
+                        "total_bytes_counted", "owned_storage_total_bytes", "owned_storage_exact",
+                        "owned_storage_scope", "deduplicated_targets", "saved_at", "managed_root_counts",
+                        "reason", "next_action",
                     )
                     if key in scan
                 }

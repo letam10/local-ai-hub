@@ -48,6 +48,7 @@ REQUIRED_SOURCE_FILES = (
     "docs/V8_WAVE5_ACCEPTANCE_RELEASE.md",
     "docs/V8_WAVE6_RELEASE_PROVENANCE_PREPARATION.md",
     "scripts/v8_acceptance_gate.py",
+    "scripts/v8_legacy_test_baseline.py",
     "scripts/v8_release_provenance.py",
     "src/services/api/routes/component_v8.py",
     "src/services/component_enablement_v8.py",
@@ -56,6 +57,7 @@ REQUIRED_SOURCE_FILES = (
     "tests/test_v8_wave4_product_ux.py",
     "tests/test_v8_wave5_acceptance_gate.py",
     "tests/test_v8_wave6_release_provenance.py",
+    "docs/operations/V8_LEGACY_TEST_BASELINE.json",
 )
 
 
@@ -115,14 +117,22 @@ def load_gate_contract(path: Path = GATES_PATH) -> dict[str, Any]:
     seen: set[str] = set()
     normalized: list[dict[str, Any]] = []
     for item in gates:
-        if not isinstance(item, dict) or set(item) != {"gate_id", "required"}:
+        if not isinstance(item, dict) or set(item) != {"gate_id", "required", "required_checks"}:
             raise AcceptanceGateError("GATE_CONTRACT_GATE_INVALID")
         gate_id = item.get("gate_id")
         required = item.get("required")
+        required_checks = item.get("required_checks")
         if not isinstance(gate_id, str) or GATE_ID.fullmatch(gate_id) is None or gate_id in seen or type(required) is not bool:
             raise AcceptanceGateError("GATE_CONTRACT_GATE_INVALID")
+        if not isinstance(required_checks, list) or not 1 <= len(required_checks) <= 128:
+            raise AcceptanceGateError("GATE_CONTRACT_REQUIRED_CHECKS_INVALID")
+        check_ids: list[str] = []
+        for check_id in required_checks:
+            if not isinstance(check_id, str) or CHECK_ID.fullmatch(check_id) is None or check_id in check_ids:
+                raise AcceptanceGateError("GATE_CONTRACT_REQUIRED_CHECKS_INVALID")
+            check_ids.append(check_id)
         seen.add(gate_id)
-        normalized.append({"gate_id": gate_id, "required": required})
+        normalized.append({"gate_id": gate_id, "required": required, "required_checks": check_ids})
 
     policy = value.get("release_policy")
     expected_policy = {
@@ -241,7 +251,15 @@ def _validate_evidence(value: Any, contract: Mapping[str, Any]) -> dict[str, Any
     }
 
 
-def _validate_pass_report(path: Path, *, gate_id: str, source_commit: str, platform: str, expected_sha256: str) -> None:
+def _validate_pass_report(
+    path: Path,
+    *,
+    gate_id: str,
+    source_commit: str,
+    platform: str,
+    expected_sha256: str,
+    required_checks: list[str],
+) -> None:
     raw = _read_bytes(path, max_bytes=MAX_REPORT_BYTES, unreadable_code="EVIDENCE_REPORT_MISSING", too_large_code="EVIDENCE_REPORT_TOO_LARGE")
     if hashlib.sha256(raw).hexdigest() != expected_sha256:
         raise AcceptanceGateError("EVIDENCE_REPORT_DIGEST_MISMATCH")
@@ -255,13 +273,28 @@ def _validate_pass_report(path: Path, *, gate_id: str, source_commit: str, platf
     checks = value.get("checks")
     if not isinstance(checks, dict) or not 1 <= len(checks) <= 128:
         raise AcceptanceGateError("EVIDENCE_REPORT_CHECKS_INVALID")
+    check_keys = set(checks)
+    required_keys = set(required_checks)
+    if not required_keys.issubset(check_keys):
+        raise AcceptanceGateError("EVIDENCE_REPORT_REQUIRED_CHECKS_MISSING")
+    # A PASS report is a contract, not an arbitrary collection of true
+    # booleans.  Requiring the exact declared check set prevents a synthetic
+    # ``{"anything": true}`` report from satisfying a gate and keeps the
+    # report/evidence binding reviewable.
+    if check_keys != required_keys:
+        raise AcceptanceGateError("EVIDENCE_REPORT_CHECKS_UNEXPECTED")
     for check_id, passed in checks.items():
         if not isinstance(check_id, str) or CHECK_ID.fullmatch(check_id) is None or passed is not True:
             raise AcceptanceGateError("EVIDENCE_REPORT_CHECKS_INVALID")
 
 
-def _verify_pass_reports(evidence: Mapping[str, Any], evidence_path: Path) -> None:
+def _verify_pass_reports(evidence: Mapping[str, Any], evidence_path: Path, contract: Mapping[str, Any]) -> None:
     reports_dir = evidence_path.parent / REPORTS_DIR_NAME
+    required_by_gate = {
+        str(item["gate_id"]): [str(check) for check in item["required_checks"]]
+        for item in contract["gates"]
+        if item["required"] is True
+    }
     for gate_id, item in evidence["gates"].items():
         if item["status"] != "PASS":
             continue
@@ -271,6 +304,7 @@ def _verify_pass_reports(evidence: Mapping[str, Any], evidence_path: Path) -> No
             source_commit=str(evidence["source_commit"]),
             platform=str(evidence["platform"]),
             expected_sha256=str(item["report_sha256"]),
+            required_checks=required_by_gate[gate_id],
         )
 
 
@@ -313,7 +347,7 @@ def evaluate(
     else:
         try:
             evidence = _validate_evidence(_load_json(evidence_path), contract)
-            _verify_pass_reports(evidence, evidence_path)
+            _verify_pass_reports(evidence, evidence_path, contract)
             pending = [gate_id for gate_id, item in evidence["gates"].items() if item["status"] != "PASS"]
             source_matches = evidence["source_commit"] == head
             evidence_summary.update({
