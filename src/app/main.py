@@ -48,6 +48,7 @@ _shutdown_started = False
 API_PROBE_ABSENT = "absent"
 API_PROBE_COMPATIBLE = "compatible_owned_or_reusable"
 API_PROBE_LOCAL_INCOMPATIBLE = "localaihub_incompatible"
+API_PROBE_LOCAL_WRONG_BUILD = "compatible_installation_wrong_build"
 API_PROBE_FOREIGN = "foreign_unknown"
 API_STARTUP_EXITED = "API_STARTUP_EXITED"
 API_IDENTITY_MISMATCH = "API_IDENTITY_MISMATCH"
@@ -58,6 +59,7 @@ FRONTEND_BOOTSTRAP_TIMEOUT = "FRONTEND_BOOTSTRAP_TIMEOUT"
 WEBVIEW_NAVIGATION_FAILED = "WEBVIEW_NAVIGATION_FAILED"
 FRONTEND_READY = "frontend_ready"
 FRONTEND_READY_TIMEOUT_SECONDS = 20.0
+RESTART_SESSION_SCHEMA = "local-ai-hub-restart-session.v1"
 _STARTUP_ERROR_MESSAGES = {
     API_STARTUP_EXITED: "Dịch vụ API bundled đã thoát trong khi khởi động. Mở Diagnostics để xem chi tiết.",
     API_IDENTITY_MISMATCH: "Dịch vụ API không thuộc installation này. Mở Diagnostics để xem chi tiết.",
@@ -133,6 +135,31 @@ def _expected_api_identity() -> dict[str, str]:
     return {key: str(item) for key, item in value.items()}
 
 
+def _expected_build_identity() -> tuple[str, str] | None:
+    """Read the exact build identity selected by this desktop payload.
+
+    Installation-bound ``main-*`` payloads must not reuse a same-installation
+    API from an older build.  The check is intentionally path-free and
+    best-effort for legacy/source checkouts that have no build sidecar.
+    """
+
+    source_commit = str(os.environ.get("LOCALAIHUB_BUILD_SHA") or "")
+    payload_id = str(os.environ.get("LOCALAIHUB_BUILD_PAYLOAD") or "")
+    if re.fullmatch(r"[0-9a-f]{40}", source_commit) and payload_id == f"main-{source_commit[:12]}":
+        return source_commit, payload_id
+    try:
+        root = Path(os.environ.get("LOCALAIHUB_INSTALL_ROOT") or ROOT)
+        pointer = json.loads((root / "current.json").read_text(encoding="utf-8"))
+        version = str(pointer.get("version") or "") if isinstance(pointer, dict) else ""
+        build = json.loads((root / "versions" / version / "build.json").read_text(encoding="utf-8"))
+        commit = str(build.get("source_commit") or "") if isinstance(build, dict) else ""
+        if re.fullmatch(r"[0-9a-f]{40}", commit) and version == f"main-{commit[:12]}":
+            return commit, version
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return None
+
+
 def _classify_api_identity(payload: object) -> str:
     if not isinstance(payload, dict):
         return API_PROBE_FOREIGN
@@ -142,6 +169,11 @@ def _classify_api_identity(payload: object) -> str:
     required = ("product_id", "product_version", "api_protocol_version", "app_user_model_id", "process_owner", "installation_id")
     if any(payload.get(key) != expected[key] for key in required):
         return API_PROBE_LOCAL_INCOMPATIBLE
+    expected_build = _expected_build_identity()
+    if expected_build is not None:
+        source_commit, payload_id = expected_build
+        if payload.get("build_source_commit") != source_commit or payload.get("build_payload_id") != payload_id:
+            return API_PROBE_LOCAL_WRONG_BUILD
     return API_PROBE_COMPATIBLE
 
 
@@ -251,6 +283,44 @@ def _record_desktop_readiness(event: str, *, status: str | None = None, route: s
         return record_readiness_event(root, event, status=status, route=route)
     except (OSError, TypeError, ValueError):
         return {"status": "unavailable", "code": "READINESS_STATE_UNAVAILABLE"}
+
+
+def _record_restart_session(*, status: str, api_port: int | None = None, api_pid: int | None = None) -> None:
+    """Bind the candidate API port to the exact restart session contract."""
+
+    session_value = os.environ.get("LOCALAIHUB_RESTART_SESSION_PATH")
+    nonce = os.environ.get("LOCALAIHUB_RESTART_SESSION_NONCE")
+    if not session_value or not nonce or not re.fullmatch(r"[0-9a-f]{32}", nonce):
+        return
+    path = Path(session_value)
+    try:
+        raw = path.read_bytes()
+        if len(raw) > 64 * 1024:
+            return
+        value = json.loads(raw.decode("utf-8"))
+        if not isinstance(value, dict) or value.get("schema_version") != RESTART_SESSION_SCHEMA or value.get("nonce") != nonce:
+            return
+        expected = _expected_build_identity()
+        if expected is None or value.get("source_commit") != expected[0] or value.get("payload_id") != expected[1]:
+            return
+        value.update({
+            "api_port": int(api_port) if isinstance(api_port, int) and not isinstance(api_port, bool) and 1024 <= api_port <= 65535 else None,
+            "api_pid": int(api_pid) if isinstance(api_pid, int) and not isinstance(api_pid, bool) and api_pid > 0 else None,
+            "desktop_pid": os.getpid(),
+            "status": str(status)[:48],
+        })
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(value, handle, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except (OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        try:
+            temporary.unlink(missing_ok=True)
+        except (UnboundLocalError, OSError):
+            pass
 
 
 def ensure_api(timeout_seconds: float = 20.0) -> subprocess.Popen[object] | None:
@@ -370,6 +440,15 @@ def _owns_live_api() -> bool:
         return _api_process is not None and _api_process.poll() is None
 
 
+def _owned_api_pid() -> int | None:
+    """Return the PID of the API process owned by this desktop, if live."""
+
+    with _api_process_lock:
+        process = _api_process
+        pid = getattr(process, "pid", None) if process is not None and process.poll() is None else None
+    return int(pid) if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
+
+
 def close_owned_idle_backends() -> None:
     """Ask the API process to stop only idle backends that it owns."""
 
@@ -387,28 +466,64 @@ def close_owned_idle_backends() -> None:
 
 
 def _api_active_job_count() -> int:
-    """Return the truthful loopback count; callers veto close on any failure."""
+    """Return a validated loopback count; callers veto close on any failure."""
 
     with urllib.request.urlopen(f"{_api_base_url()}/health", timeout=1.0) as response:
         value = json.loads(response.read().decode("utf-8"))
     if not isinstance(value, dict):
         raise RuntimeError("Phản hồi health của Hub không hợp lệ.")
-    return max(0, int(value.get("active_jobs", 0)))
+    count = value.get("active_jobs")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise RuntimeError("Phản hồi health không công bố active_jobs hợp lệ.")
+    return count
 
 
-def _owned_api_active_job_count() -> int:
-    """Read active jobs only from the API process this desktop owns."""
+def _owned_api_active_job_count() -> dict[str, object]:
+    """Return a typed owned/external/unknown active-job observation.
 
-    if not _owns_live_api():
-        raise RuntimeError("External API owner")
-    return _api_active_job_count()
+    A compatible loopback API owned by another process is observable but not
+    cancellable by this desktop.  A wrong-build API is still treated as an
+    external owner for close safety, while the build mismatch remains visible
+    to the startup/update probes.  Probe failures are ``unknown`` and never
+    become an invented ``1``.
+    """
+
+    if _owns_live_api():
+        try:
+            count = _api_active_job_count()
+        except Exception:
+            return {"verification": "unknown", "owner": "owned", "active_jobs": None, "can_cancel": False, "message": "Không thể xác minh trạng thái tác vụ của API do desktop sở hữu; Hub chưa đóng để đảm bảo an toàn."}
+        return {"verification": "verified", "owner": "owned", "active_jobs": count, "can_cancel": count > 0, "message": ""}
+
+    state, payload = _probe_api()
+    if state == API_PROBE_ABSENT:
+        return {"verification": "verified", "owner": "none", "active_jobs": 0, "can_cancel": False, "message": ""}
+    if state not in {API_PROBE_COMPATIBLE, API_PROBE_LOCAL_WRONG_BUILD}:
+        return {"verification": "unknown", "owner": "external", "active_jobs": None, "can_cancel": False, "message": "Không thể xác minh API loopback do phiên hoặc dịch vụ khác quản lý; Hub chưa đóng để đảm bảo an toàn."}
+    count = payload.get("active_jobs") if isinstance(payload, dict) else None
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        return {"verification": "unknown", "owner": "external", "active_jobs": None, "can_cancel": False, "message": "API external không công bố active_jobs hợp lệ; desktop không thể tiếp tục an toàn."}
+    message = ""
+    if state == API_PROBE_LOCAL_WRONG_BUILD:
+        message = "API loopback do phiên cũ hoặc dịch vụ khác quản lý đang dùng build khác; desktop không tái sử dụng hoặc hủy API đó."
+    return {"verification": "verified", "owner": "external", "active_jobs": count, "can_cancel": False, "message": message}
 
 
 def _prepare_owned_api_close() -> dict[str, object]:
     """Close job admission and recheck under the owned API's server lock."""
 
     if not _owns_live_api():
-        return {"status": "ready_to_close", "verification": "verified", "active_jobs": 0, "can_cancel": False, "message": ""}
+        state, payload = _probe_api()
+        if state == API_PROBE_ABSENT:
+            return {"status": "ready_to_close", "verification": "verified", "owner": "none", "active_jobs": 0, "can_cancel": False, "message": ""}
+        if state not in {API_PROBE_COMPATIBLE, API_PROBE_LOCAL_WRONG_BUILD}:
+            return {"status": "unknown", "verification": "unknown", "owner": "external", "active_jobs": None, "can_cancel": False, "message": "Không thể xác minh API external; desktop chưa đóng để đảm bảo an toàn."}
+        raw_external = payload.get("active_jobs") if isinstance(payload, dict) else None
+        if isinstance(raw_external, bool) or not isinstance(raw_external, int) or raw_external < 0:
+            return {"status": "unknown", "verification": "unknown", "owner": "external", "active_jobs": None, "can_cancel": False, "message": "API external không công bố active_jobs hợp lệ; desktop chưa đóng để đảm bảo an toàn."}
+        if raw_external == 0:
+            return {"status": "ready_to_close", "verification": "verified", "owner": "external", "active_jobs": 0, "can_cancel": False, "message": "API external không có job hoạt động; desktop sẽ đóng GUI nhưng giữ nguyên listener do dịch vụ khác quản lý."}
+        return {"status": "external_active_jobs", "verification": "verified", "owner": "external", "active_jobs": raw_external, "can_cancel": False, "message": f"API external đang có {raw_external} job hoạt động; desktop không có quyền hủy và sẽ giữ cửa sổ mở."}
     request = urllib.request.Request(
         f"{_api_base_url()}/api/lifecycle/prepare-close",
         data=b"{}",
@@ -544,8 +659,17 @@ class DesktopBridge:
         self._window_call("show")
         self._window_call("restore")
 
-    def _destroy_window(self) -> None:
-        self._window_call("destroy")
+    def _destroy_window(self) -> bool:
+        return self._window_call("destroy")
+
+    def _authorize_update_restart(self) -> bool:
+        """Authorize the updater's one close transaction without public API exposure."""
+
+        return bool(self._controller and self._controller.authorize_update_restart())
+
+    def _abort_update_restart(self) -> None:
+        if self._controller:
+            self._controller.abort_update_restart()
 
     def _restore_from_tray(self) -> None:
         if self._tray:
@@ -621,6 +745,7 @@ class DesktopBridge:
             if result.get("status") in {"healthy", "not_pending"}:
                 self._frontend_ready_result = {**result, "status": "ready"}
                 self._frontend_ready_event.set()
+                _record_restart_session(status="frontend_ready", api_port=_configured_port(), api_pid=_owned_api_pid())
                 _record_desktop_readiness(FRONTEND_READY, status="ready")
                 state, _payload = _probe_api()
                 _record_startup_event(FRONTEND_READY, probe_state=state, runtime_class="installed_bundled")
@@ -814,7 +939,13 @@ def _close_prompt_html(detail: dict[str, object]) -> str:
     message = html.escape(str(detail.get("message") or ("Chọn một trong ba cách tiếp tục an toàn." if verified else "Không thể xác minh trạng thái tác vụ; Hub chưa đóng để đảm bảo an toàn.")))
     cancel_button = '<button class="danger" onclick="choose(\'cancel_jobs_and_exit\')">Hủy jobs và thoát</button>' if verified and bool(detail.get("can_cancel")) and count > 0 else ''
     eyebrow = "JOBS ĐANG HOẠT ĐỘNG" if verified and count > 0 else "KHÔNG THỂ XÁC MINH TÁC VỤ"
-    copy = f"{count} job đang chờ, chuẩn bị, chạy hoặc hủy. Hub không tự dừng worker đang hoạt động." if verified and count > 0 else "Hub chưa đóng vì chưa xác minh được trạng thái tác vụ."
+    copy = (
+        f"API do dịch vụ khác quản lý đang có {count} job; desktop không có quyền hủy và sẽ không dừng listener external."
+        if verified and count > 0 and detail.get("owner") == "external"
+        else f"{count} job đang chờ, chuẩn bị, chạy hoặc hủy. Hub không tự dừng worker đang hoạt động."
+        if verified and count > 0
+        else "Hub chưa đóng vì chưa xác minh được trạng thái tác vụ."
+    )
     return f"""<!doctype html><html lang="vi"><meta charset="utf-8"><title>Local AI Hub</title>
     <style>html,body{{margin:0;height:100%;background:#0b1020;color:#edf2ff;font-family:Segoe UI,system-ui,sans-serif}}main{{max-width:680px;margin:0 auto;height:100%;display:grid;align-content:center;gap:16px;padding:28px;box-sizing:border-box}}.eyebrow{{color:#80aaff;font-size:12px;letter-spacing:.12em}}p,small{{color:#b7c3df;line-height:1.55}}.actions{{display:flex;flex-wrap:wrap;gap:10px}}button{{border:1px solid #45639d;border-radius:9px;background:#182340;color:#edf2ff;padding:10px 14px;font:inherit;cursor:pointer}}button.primary{{background:#4d7dff;border-color:#80aaff}}button.danger{{background:#562737;border-color:#b95c71}}button:disabled{{opacity:.65;cursor:wait}}</style>
     <main><span class="eyebrow">{eyebrow}</span><h1>Bạn muốn xử lý Local AI Hub thế nào?</h1><p>{copy}</p><p id="status">{message}</p><div class="actions"><button onclick="choose('return_to_hub')">Quay lại Hub</button>{cancel_button}<button class="primary" onclick="choose('keep_running_in_background')">Giữ chạy nền vào khay</button></div><small>Chạy nền chỉ ẩn cửa sổ sau khi Windows đã tạo biểu tượng khay có lệnh Khôi phục và Thoát.</small></main>
@@ -833,6 +964,7 @@ def _load_ui_when_ready(window: object, bridge: DesktopBridge | None = None) -> 
             return
         return
     api_state, _payload = _probe_api()
+    _record_restart_session(status="api_ready", api_port=_configured_port(), api_pid=_owned_api_pid())
     _record_startup_event("api_ready", selected_port=_configured_port(), probe_state=api_state, runtime_class="installed_bundled")
     _record_startup_event("webview_navigation_started", selected_port=_configured_port(), probe_state=api_state, runtime_class="installed_bundled")
     _record_desktop_readiness("api_ready", status="running")

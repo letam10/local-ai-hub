@@ -1,9 +1,11 @@
-"""Narrow native restart bridge used after an atomic payload update.
+"""Native bridge for the two-phase, side-by-side application restart.
 
-The stable executable is launched again only after the installed current pointer
-already targets a different payload.  The new payload waits for the old desktop
-PID before entering the single-instance section, so the shortcut/launcher never
-needs to be rewritten during updates.
+The HTTP update route only stages a verified candidate.  This bridge owns the
+phase-2 transaction: it rechecks the close/ownership gate, commits the pointer,
+publishes a session-bound watchdog contract, authorizes exactly one native
+close, and then lets the watchdog relaunch the stable payload.  A failure after
+pointer activation rolls the pointer back before the old desktop is allowed to
+remain in an ambiguous state.
 """
 
 from __future__ import annotations
@@ -11,10 +13,13 @@ from __future__ import annotations
 import importlib
 import os
 from pathlib import Path
+import secrets
 import subprocess
 from typing import Any
 
 from src.app.stable_shell import StableShellError, resolve_launch_plan, resolve_verified_running_plan
+from src.services.app_update import AppUpdateError, app_update_service
+from src.services.process_manager.managed import terminate_owned_process
 
 
 def _creationflags() -> int:
@@ -30,69 +35,123 @@ def _restart_after_update(self: Any) -> dict[str, object]:
         return {"status": "unavailable", "code": "INSTALLED_PRODUCT_REQUIRED"}
     install_root = Path(install_value).expanduser().absolute()
     try:
-        plan = resolve_launch_plan(install_root)
-        running = Path(running_value).expanduser().absolute()
-        running_plan = resolve_verified_running_plan(install_root, running)
+        running_plan = resolve_verified_running_plan(install_root, Path(running_value).expanduser().absolute())
     except (OSError, ValueError, StableShellError):
-        return {"status": "blocked", "code": "UPDATE_POINTER_INVALID"}
-    try:
-        same_payload = plan.app_payload.resolve() == running.resolve()
-    except OSError:
-        same_payload = plan.app_payload.absolute() == running.absolute()
-    if same_payload:
-        return {"status": "not_required", "code": "NO_PENDING_PAYLOAD"}
+        return {"status": "blocked", "code": "RUNNING_PAYLOAD_INVALID"}
 
     desktop_main = importlib.import_module("src.app.main")
     prepare = getattr(desktop_main, "_prepare_owned_api_close", None)
     if not callable(prepare):
         return {"status": "blocked", "code": "CLOSE_PREFLIGHT_UNAVAILABLE"}
-    detail = prepare()
-    if not isinstance(detail, dict) or detail.get("verification") != "verified" or detail.get("active_jobs") != 0:
+    try:
+        detail = prepare()
+    except Exception:
+        detail = None
+    if (
+        not isinstance(detail, dict)
+        or detail.get("verification") != "verified"
+        or not isinstance(detail.get("active_jobs"), int)
+        or isinstance(detail.get("active_jobs"), bool)
+        or detail.get("active_jobs") != 0
+    ):
         return {
-            "status": "blocked", "code": "ACTIVE_OR_UNKNOWN_JOBS",
+            "status": "blocked",
+            "code": "ACTIVE_OR_UNKNOWN_JOBS",
             "active_jobs": detail.get("active_jobs") if isinstance(detail, dict) else None,
+            "owner": detail.get("owner") if isinstance(detail, dict) else "unknown",
+            "message": detail.get("message") if isinstance(detail, dict) else "Không thể xác minh trạng thái tác vụ.",
         }
 
-    launcher = install_root / "LocalAIHub.exe"
-    if not launcher.is_file() or launcher.is_symlink():
-        return {"status": "blocked", "code": "STABLE_LAUNCHER_UNAVAILABLE"}
-    watchdog = running_plan.app_payload / "src" / "app" / "update_watchdog.py"
-    if not watchdog.is_file() or watchdog.is_symlink():
-        return {"status": "blocked", "code": "UPDATE_WATCHDOG_UNAVAILABLE"}
-    environment = dict(os.environ)
-    environment.update({
-        "LOCALAIHUB_WATCHDOG_INSTALL_ROOT": str(install_root),
-        "LOCALAIHUB_WATCHDOG_APP_ROOT": str(running_plan.app_payload),
-        "LOCALAIHUB_WATCHDOG_WAIT_PID": str(os.getpid()),
-        "LOCALAIHUB_WATCHDOG_TIMEOUT": "30",
-        "LOCALAIHUB_INSTALL_ROOT": str(install_root),
-        "LOCALAIHUB_APP_ROOT": str(running_plan.app_payload),
-        "LOCALAIHUB_DATA_ROOT": str(running_plan.data_root),
-        "PYTHONPATH": str(running_plan.app_payload),
-        "PYTHONNOUSERSITE": "1",
-        "PYTHONUTF8": "1",
-    })
+    service = app_update_service()
     try:
-        subprocess.Popen(
+        staged = service.staged_update()
+    except (AppUpdateError, StableShellError, OSError, ValueError) as exc:
+        return {"status": "blocked", "code": getattr(exc, "code", "STAGED_UPDATE_INVALID")}
+    if staged is None:
+        return {"status": "not_required", "code": "NO_STAGED_PAYLOAD"}
+    previous = staged.get("previous") if isinstance(staged, dict) else None
+    if not isinstance(previous, dict) or previous.get("version") != running_plan.version:
+        return {"status": "blocked", "code": "STAGED_RUNNING_PAYLOAD_MISMATCH"}
+    payload_id = str(staged.get("payload_id") or "")
+    source_commit = str(staged.get("source_commit") or "")
+    authorize = getattr(self, "_authorize_update_restart", None)
+    abort = getattr(self, "_abort_update_restart", None)
+    destroy = getattr(self, "_destroy_window", None)
+    if not callable(authorize) or not callable(destroy):
+        return {"status": "blocked", "code": "DESKTOP_RESTART_TRANSACTION_UNAVAILABLE"}
+
+    committed = False
+    watchdog: subprocess.Popen[object] | None = None
+    nonce = secrets.token_hex(16)
+    try:
+        # The service revalidates the staged bytes and current pointer under a
+        # cross-process lock.  Nothing changes in current.json before this
+        # point, so a close veto leaves the running payload untouched.
+        commit = service.commit_staged_restart()
+        committed = commit.get("status") == "activated"
+        if not committed:
+            raise AppUpdateError("UPDATE_COMMIT_FAILED")
+        service.create_restart_session(payload_id=payload_id, source_commit=source_commit, nonce=nonce, parent_pid=os.getpid())
+
+        launcher = install_root / "LocalAIHub.exe"
+        watchdog_script = running_plan.app_payload / "src" / "app" / "update_watchdog.py"
+        if not launcher.is_file() or launcher.is_symlink():
+            raise AppUpdateError("STABLE_LAUNCHER_UNAVAILABLE")
+        if not watchdog_script.is_file() or watchdog_script.is_symlink():
+            raise AppUpdateError("UPDATE_WATCHDOG_UNAVAILABLE")
+        if not authorize():
+            raise AppUpdateError("DESKTOP_CLOSE_AUTHORIZATION_FAILED")
+        session_path = install_root / "update-state" / "restart-session.json"
+        environment = dict(os.environ)
+        environment.update({
+            "LOCALAIHUB_WATCHDOG_INSTALL_ROOT": str(install_root),
+            "LOCALAIHUB_WATCHDOG_APP_ROOT": str(running_plan.app_payload),
+            "LOCALAIHUB_WATCHDOG_WAIT_PID": str(os.getpid()),
+            "LOCALAIHUB_WATCHDOG_TIMEOUT": "30",
+            "LOCALAIHUB_WATCHDOG_SESSION_PATH": str(session_path),
+            "LOCALAIHUB_WATCHDOG_SESSION_NONCE": nonce,
+            "LOCALAIHUB_INSTALL_ROOT": str(install_root),
+            "LOCALAIHUB_APP_ROOT": str(running_plan.app_payload),
+            "LOCALAIHUB_DATA_ROOT": str(running_plan.data_root),
+            "PYTHONPATH": str(running_plan.app_payload),
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONUTF8": "1",
+        })
+        watchdog = subprocess.Popen(
             [str(running_plan.runtime_pythonw), "-m", "src.app.update_watchdog"],
             cwd=str(running_plan.app_payload), env=environment,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True, creationflags=_creationflags(),
         )
-    except OSError:
-        return {"status": "error", "code": "RESTART_LAUNCH_FAILED"}
-    destroy = getattr(self, "_destroy_window", None)
-    if not callable(destroy):
-        return {"status": "error", "code": "DESKTOP_DESTROY_UNAVAILABLE"}
-    destroy()
-    return {"status": "completed", "payload_id": plan.version, "restart": "scheduled"}
+        if not destroy():
+            raise AppUpdateError("DESKTOP_DESTROY_FAILED")
+        return {"status": "completed", "payload_id": payload_id, "source_commit": source_commit, "restart": "scheduled", "close_transaction": "update_restart_committed"}
+    except (AppUpdateError, OSError, ValueError) as exc:
+        if watchdog is not None:
+            try:
+                terminate_owned_process(watchdog)
+            except Exception:
+                pass
+        if committed:
+            try:
+                service.rollback_pending_restart(reason=getattr(exc, "code", "RESTART_TRANSACTION_FAILED"))
+            except Exception:
+                # Keep the original failure visible; the watchdog still has
+                # the pending marker if rollback itself needs manual review.
+                pass
+        if callable(abort):
+            try:
+                abort()
+            except Exception:
+                pass
+        return {"status": "error", "code": getattr(exc, "code", "RESTART_TRANSACTION_FAILED")}
 
 
 def install_update_bridge(bridge_class: type[Any]) -> None:
-    """Expose one bounded restart operation without changing existing close APIs."""
+    """Expose one bounded restart operation without changing close APIs."""
 
     if getattr(bridge_class, "restart_after_update", None) is None:
         setattr(bridge_class, "restart_after_update", _restart_after_update)
 
 
-__all__ = ["install_update_bridge"]
+__all__ = ["_restart_after_update", "install_update_bridge"]

@@ -16,6 +16,7 @@ from src.services.app_update import (
     _safe_update_contract,
 )
 from src.services.update_transport import (
+    GhCliTransport,
     GitHubDeviceFlowTransport,
     MemoryCredentialStore,
     TransportSelector,
@@ -104,6 +105,39 @@ class V8UpdateTransportTests(unittest.TestCase):
             with self.assertRaisesRegex(AppUpdateError, "UPDATE_ARCHIVE_PATH_INVALID"):
                 _safe_extract_app_archive(archive, root / "app-only", expected_files=2)
             self.assertEqual(_safe_extract_app_archive(archive, root / "full", expected_files=2, update_kind=UPDATE_KIND_FULL), 2)
+
+    def test_github_cli_retries_transient_failures_then_succeeds_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            gh = Path(temporary) / "gh.exe"
+            gh.write_bytes(b"fixture")
+            attempts = []
+            progress = []
+
+            def runner(command, **kwargs):
+                attempts.append(command)
+                if len(attempts) < 3:
+                    return subprocess.CompletedProcess(command, 1, "", "network timeout")
+                return subprocess.CompletedProcess(command, 0, '{"ok":true}', "")
+
+            transport = GhCliTransport(runner=runner, gh_path=str(gh), retry_callback=lambda attempt, total: progress.append((attempt, total)), sleeper=lambda _delay: None)
+            self.assertEqual(transport.api_json("repos/letam10/local-ai-hub"), {"ok": True})
+            self.assertEqual(len(attempts), 3)
+            self.assertEqual(progress, [(2, 3), (3, 3)])
+
+    def test_github_cli_permanent_auth_failure_is_not_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            gh = Path(temporary) / "gh.exe"
+            gh.write_bytes(b"fixture")
+            attempts = []
+
+            def runner(command, **kwargs):
+                attempts.append(command)
+                return subprocess.CompletedProcess(command, 1, "", "HTTP 403 forbidden")
+
+            transport = GhCliTransport(runner=runner, gh_path=str(gh), sleeper=lambda _delay: None)
+            with self.assertRaisesRegex(Exception, "GITHUB_API_FAILED"):
+                transport.api_json("repos/letam10/local-ai-hub")
+            self.assertEqual(len(attempts), 1)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -38,6 +39,14 @@ class V8MainUpdateBuilderTests(unittest.TestCase):
             self.assertFalse(any("/Models/" in name or "/Environments/" in name or "/Output/" in name for name in names))
             parsed = json.loads((output / "update-manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(parsed, manifest)
+            sums = {
+                parts[1]: parts[0]
+                for parts in (line.split() for line in (output / "SHA256SUMS.txt").read_text(encoding="utf-8").splitlines())
+                if len(parts) == 2
+            }
+            self.assertEqual(sums[ARCHIVE_NAME], hashlib.sha256((output / ARCHIVE_NAME).read_bytes()).hexdigest())
+            self.assertEqual(sums["update-contract.json"], hashlib.sha256((output / "update-contract.json").read_bytes()).hexdigest())
+            self.assertNotIn(b"\r\n", (output / "update-contract.json").read_bytes())
 
     def test_full_builder_requires_and_binds_a_bounded_runtime_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

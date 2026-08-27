@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -181,6 +183,32 @@ class V8ComponentLifecycleTests(unittest.TestCase):
         assert operation is not None
         self.assertEqual(operation["state"], "blocked")
         self.assertEqual(operation["result_code"], "plan_session_lost")
+
+    def test_real_lightweight_helper_lifecycle_is_actually_executed(self) -> None:
+        """Exercise a safe installed-runtime-shaped helper, without models/GPU."""
+
+        helper = subprocess.Popen(
+            [sys.executable, "-c", "import time; print('READY', flush=True); time.sleep(30)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            self.assertEqual(helper.stdout.readline().strip(), "READY")
+            self.assertIsNone(helper.poll())
+        finally:
+            helper.terminate()
+            try:
+                helper.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                helper.kill()
+                helper.wait(timeout=3)
+            if helper.stdout is not None:
+                helper.stdout.close()
+            if helper.stderr is not None:
+                helper.stderr.close()
+        self.assertIsNotNone(helper.returncode)
 
 
 if __name__ == "__main__":

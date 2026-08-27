@@ -131,7 +131,7 @@ const state = {
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
   workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trong V5-D trước khi đồng bộ." },
   storageScan: { status: "idle", progress: 0, exact: false },
-  productionCatalog: { status: "partial", models: [], runtimes: [] }, updateCenter: { settings: { policy: "manual" }, records: [] }, modelFilters: { query: "", category: "", installed: "all" }, modelActionStatus: "", settingsActionStatus: "",
+  productionCatalog: { status: "partial", models: [], runtimes: [] }, updateCenter: { settings: { policy: "manual" }, records: [] }, modelFilters: { query: "", category: "", installed: "all" }, modelActionStatus: "", settingsActionStatus: "", settingsDirty: false,
   featureRegistry: FEATURE_REGISTRY,
 };
 const view = document.querySelector("#module-view");
@@ -389,7 +389,9 @@ const showDesktopClosePrompt = (detail = {}) => {
   const copy = document.createElement("p");
   const count = verified ? detail.active_jobs : 0;
   copy.textContent = verified && count > 0
-    ? `${count} job đang chờ, chuẩn bị, chạy hoặc hủy. Hub không tự dừng worker đang hoạt động.`
+    ? detail.owner === "external"
+      ? `API do dịch vụ khác quản lý đang có ${count} job; desktop không có quyền hủy và sẽ không dừng listener external.`
+      : `${count} job đang chờ, chuẩn bị, chạy hoặc hủy. Hub không tự dừng worker đang hoạt động.`
     : "Hub chưa đóng vì chưa xác minh được trạng thái tác vụ.";
   const status = document.createElement("p"); status.className = `desktop-close-prompt__status ${detail.kind === "error" ? "is-error" : ""}`; status.setAttribute("role", "status"); status.textContent = detail.message || "Chọn một trong ba cách tiếp tục.";
   const actions = document.createElement("div"); actions.className = "desktop-close-prompt__actions";
@@ -688,7 +690,7 @@ const updateTopbar = () => {
   gpuMetric.textContent = gpu.name ? `GPU ${gpu.name}` : "GPU chưa phát hiện";
   if (apiEndpoint) apiEndpoint.textContent = `API ${window.location.host || "127.0.0.1"}`;
   const recovery = jobRecoverySnapshot(state);
-  jobSummary.textContent = `Jobs: ${recovery.counts.active} active · ${recovery.counts.total} records`;
+  jobSummary.textContent = `${translateText("Jobs")}: ${recovery.counts.active} ${translateText("active")} · ${recovery.counts.total} ${translateText("records")}`;
 };
 
 const render = ({ background = false, focus = "" } = {}) => {
@@ -754,6 +756,12 @@ const applyBootstrap = (payload) => {
   state.productionCatalog = payload.production_catalog || state.productionCatalog;
   state.tools = payload.tools || [];
   state.settings = payload.settings || {};
+  state.settingsDirty = false;
+  // Settings are persisted by the server-owned SettingsPersistence service;
+  // hydrate the current shell from that snapshot before the first render so a
+  // restart does not silently fall back to stale localStorage preferences.
+  if (["vi", "en", "zh", "ja", "ko"].includes(state.settings.language)) setLanguage(state.settings.language);
+  if (["system", "dark", "light"].includes(state.settings.theme)) applyTheme(state.settings.theme);
   state.lifecycle = payload.lifecycle || {};
   if (payload.workflow_library && typeof payload.workflow_library === "object") state.workflowLibrary = payload.workflow_library;
 };
@@ -854,6 +862,7 @@ const updateStorageScanDom = (result) => {
   const status = String(scan.status || result?.status || "idle");
   const mode = String(scan.mode || result?.scan_mode || "fast");
   const progress = Math.max(0, Math.min(100, Number.isFinite(Number(scan.progress)) ? Number(scan.progress) : 0));
+  const savedAt = typeof scan.saved_at === "string" && scan.saved_at.trim() ? scan.saved_at.trim() : "";
   const banner = view.querySelector("[data-storage-scan-status]");
   if (!banner) { render(); return; }
   banner.dataset.storageScanStatus = status;
@@ -867,13 +876,13 @@ const updateStorageScanDom = (result) => {
       : status === "running"
       ? `${mode === "deep_exact" ? "Đang tính chính xác" : "Đang quét nhanh"} · ${progress}%${area}`
       : status === "cancelling" ? "Đang hủy quét …"
-        : status === "completed" && scan.exact === true ? "Đã quét xong · tổng chính xác"
+        : status === "completed" && scan.exact === true ? (savedAt ? `Chính xác tại ${savedAt}` : "Đã quét xong · tổng chính xác")
           : status === "partial" ? "Đã quét một phần · tổng chưa đủ"
             : status === "cancelled" ? "Đã hủy quét · tổng chưa đủ"
               : status === "unavailable" ? "Quét storage chưa khả dụng" : "Chưa có lần quét storage";
   }
   const badge = banner.querySelector(".card-title-row span");
-  if (badge) badge.textContent = scan.exact === true ? "chính xác" : status === "running" ? "đang đếm" : "có giới hạn";
+  if (badge) badge.textContent = scan.exact === true ? (savedAt ? `Chính xác tại ${savedAt}` : "chính xác") : status === "running" ? "đang đếm" : "có giới hạn";
   const bar = banner.querySelector(".progress-bar");
   const track = banner.querySelector("[role=progressbar]");
   if (bar) bar.style.width = `${progress}%`;
@@ -896,11 +905,18 @@ const updateStorageScanDom = (result) => {
       : "";
     pollingNotice.hidden = scan.polling_limited !== true;
   }
+  const savedAtNode = banner.querySelector("[data-storage-scan-saved-at]");
+  if (savedAtNode) {
+    savedAtNode.textContent = savedAt ? `Chính xác tại ${savedAt}; bấm Quét lại sau khi filesystem thay đổi.` : "";
+    savedAtNode.hidden = !savedAt;
+  }
 
   const areas = result?.areas && typeof result.areas === "object" ? result.areas : {};
+  const rootCounts = result?.managed_root_counts && typeof result.managed_root_counts === "object" ? result.managed_root_counts : {};
+  const areaProjection = { ...rootCounts, ...areas };
   const list = view.querySelector("[data-storage-area-list]");
   if (list) {
-    Object.entries(areas).forEach(([name, value]) => {
+    Object.entries(areaProjection).forEach(([name, value]) => {
       let row = list.querySelector(`[data-storage-area="${CSS.escape(name)}"]`);
       if (!row) {
         row = document.createElement("div");
@@ -916,7 +932,7 @@ const updateStorageScanDom = (result) => {
       const partial = value?.complete === false || value?.status === "partial" || value?.status === "running";
       if (label) label.textContent = name;
       if (valueNode) valueNode.textContent = partial ? `Ít nhất ${formatGb(bytes)}` : formatGb(bytes);
-      if (countNode) countNode.textContent = `${Number(value?.files_scanned ?? value?.entries_scanned ?? 0)} tệp`;
+      if (countNode) countNode.textContent = `${Number(value?.entries_scanned || 0)} mục · ${Number(value?.files_scanned || 0)} tệp · ${Number(value?.reparse_entries || 0)} reparse · ${Number(value?.unreadable_entries || 0)} không đọc được · ${value?.deduplicated === true ? "đã gộp trùng" : value?.complete === true ? "đã hoàn tất" : "chưa hoàn tất"}`;
     });
   }
   const action = view.querySelector("[data-storage-scan-action]");
@@ -1020,6 +1036,7 @@ const loadRouteData = async ({ scan = false } = {}) => {
         state.settings = setRes.value.settings;
         state.settings_revision = setRes.value.settings_revision;
         state.settingsRecovery = setRes.value.recovery;
+        state.settingsDirty = false;
       }
       if (backRes.status === "fulfilled" && backRes.value?.backups) {
         state.backups = backRes.value.backups;
@@ -1319,7 +1336,26 @@ const handleImageMaskForm = async (form) => {
   return result?.preset?.title ? `Đã lưu preset ${result.preset.title}.` : result?.layer?.name ? `Đã cập nhật layer ${result.layer.name}.` : "Đã autosave Image & Mask Studio cục bộ.";
 };
 
+const updateSettingsDirtyUi = () => {
+  const dirty = state.settingsDirty === true;
+  const banner = document.querySelector("[data-settings-dirty]");
+  if (banner) {
+    banner.dataset.settingsDirty = String(dirty);
+    banner.classList.toggle("is-dirty", dirty);
+    const title = banner.querySelector("strong");
+    const detail = banner.querySelector("span");
+    if (title) title.textContent = dirty ? "Có thay đổi chưa áp dụng" : "Cài đặt đã đồng bộ";
+    if (detail) detail.textContent = dirty ? "Các giá trị chỉ có hiệu lực sau khi bạn bấm Áp dụng & lưu." : "Không có thay đổi cục bộ đang chờ.";
+  }
+  const save = document.querySelector("[data-save-settings]");
+  if (save) save.disabled = !dirty;
+  const discard = document.querySelector("[data-discard-settings]");
+  if (discard) discard.disabled = !dirty;
+};
+
 document.addEventListener("change", (event) => {
+  const setting = event.target.closest("[data-setting-key]");
+  if (setting) { state.settingsDirty = true; updateSettingsDirtyUi(); return; }
   const modelCategory = event.target.closest("[data-model-category]");
   if (modelCategory) { state.modelFilters.category = String(modelCategory.value || "").slice(0, 48); render(); return; }
   const modelInstalled = event.target.closest("[data-model-installed]");
@@ -1362,6 +1398,8 @@ document.addEventListener("error", (event) => {
 }, true);
 
 document.addEventListener("input", (event) => {
+  const setting = event.target.closest("[data-setting-key]");
+  if (setting) { state.settingsDirty = true; updateSettingsDirtyUi(); return; }
   const jobSearch = event.target.closest("[data-job-search]");
   if (jobSearch) { state.jobQuery = String(jobSearch.value || "").slice(0, 120); state.jobPage = 1; render(); return; }
   const modelSearch = event.target.closest("[data-model-search]");
@@ -1948,6 +1986,12 @@ document.addEventListener("click", async (event) => {
     }
     return;
   }
+  if (event.target.closest("[data-discard-settings]")) {
+    state.settingsDirty = false;
+    state.settingsActionStatus = "Đã hủy các thay đổi chưa áp dụng.";
+    render();
+    return;
+  }
   if (event.target.closest("[data-save-settings]")) {
     const saveButton = event.target.closest("[data-save-settings]");
     const expectedRevision = Number(saveButton.dataset.expectedRevision ?? state.settings_revision ?? 0);
@@ -1970,6 +2014,13 @@ document.addEventListener("click", async (event) => {
       if (result.accepted) {
         state.settings = result.settings;
         state.settings_revision = result.settings_revision;
+        state.settingsDirty = false;
+        state.settingsActionStatus = `Đã áp dụng & lưu cài đặt · revision ${result.settings_revision}.`;
+        // The server has persisted the values atomically.  Reflect the same
+        // contract in the current shell immediately; otherwise language and
+        // theme appear to save successfully but stay stale until restart.
+        setLanguage(lang);
+        applyTheme(theme);
         showToast("Đã lưu cài đặt thành công.", "success");
         render();
       } else if (result.status === "conflict") {
@@ -1992,6 +2043,8 @@ document.addEventListener("click", async (event) => {
       if (result.accepted) {
         state.settings = result.settings;
         state.settings_revision = result.settings_revision;
+        state.settingsDirty = false;
+        state.settingsActionStatus = `Đã đặt lại cấu hình phần ${section} · revision ${result.settings_revision}.`;
         showToast(`Đã đặt lại cấu hình phần ${section}.`, "success");
         render();
       }

@@ -885,9 +885,63 @@ class ProductionCatalog:
         projected.update({"status": status, "execution": "not_run", "dry_run": True, "operational": status == "OPERATIONAL", "runtime_fingerprint": runtime_fingerprint(self.paths, record, binding=binding), "leaves": leaves, "source_availability": self.source_availability.cached(runtime_id, record, binding=self._source_availability_binding(runtime_id, record, component_type="runtime")), "reason": reason, "next_action": "Use Verify and run the bounded runtime smoke before operational promotion." if status != "OPERATIONAL" else "Runtime is operational under the last matching bounded evidence."})
         return projected
 
+    @staticmethod
+    def _inventory_counts(records: list[Mapping[str, Any]]) -> dict[str, int]:
+        """Summarise registry health separately from executable readiness.
+
+        ``NOT_INSTALLED`` means that a catalog leaf was not observed locally;
+        it is not the same thing as ``UNAVAILABLE`` (a known unusable or
+        blocked resource).  Likewise, ``INSTALLED_UNVERIFIED`` is useful
+        inventory evidence but must never inflate the verified or operational
+        counts.  Keeping these counters explicit prevents a healthy registry
+        from being read as a claim that every listed model can run.
+        """
+
+        statuses = [str(item.get("status") or "UNKNOWN").upper() for item in records]
+        return {
+            "registry_records": len(records),
+            "observed_count": sum(
+                1
+                for item, status in zip(records, statuses)
+                if item.get("observed_local") is True
+                or status in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"}
+                or any(
+                    isinstance(leaf, Mapping) and leaf.get("present") is True
+                    for leaf in item.get("leaves", [])
+                )
+            ),
+            "verified_installed": sum(1 for status in statuses if status == "INSTALLED"),
+            "installed_unverified_count": sum(1 for status in statuses if status == "INSTALLED_UNVERIFIED"),
+            "operational_count": sum(
+                1
+                for item, status in zip(records, statuses)
+                if status == "OPERATIONAL" and item.get("operational") is True
+            ),
+            "partial_count": sum(1 for status in statuses if status == "PARTIAL"),
+            "unknown_count": sum(1 for status in statuses if status in {"UNKNOWN", "NOT_PUBLISHED"}),
+            "not_installed_count": sum(1 for status in statuses if status == "NOT_INSTALLED"),
+            "unavailable_count": sum(1 for status in statuses if status == "UNAVAILABLE"),
+        }
+
     def snapshot(self, *, query: str = "", category: str = "", installed: bool | None = None) -> dict[str, Any]:
         models = [self.inspect_model(model_id) for model_id in sorted(self.models)]
         runtimes = [self.inspect_runtime(runtime_id) for runtime_id in sorted(self.runtimes)]
+        # Inventory health describes whether the registry and fixed-leaf
+        # metadata could be read.  It is deliberately separate from component
+        # readiness: an inventory can be healthy while individual models still
+        # need import, license review or a bounded runtime smoke.
+        inventory_models = list(models)
+        inventory_runtimes = list(runtimes)
+        inventory = {
+            "status": "healthy",
+            **self._inventory_counts(inventory_models),
+            "readiness_note": "Healthy chỉ xác nhận registry đọc được; model chỉ được coi là operational khi có bằng chứng runtime riêng.",
+            "runtimes": {
+                "status": "healthy",
+                **self._inventory_counts(inventory_runtimes),
+                "readiness_note": "Runtime inventory chỉ xác nhận registry và fixed leaves; import, worker và bounded smoke được đánh giá riêng.",
+            },
+        }
         needle = query.strip().casefold()
         if needle:
             models = [item for item in models if needle in str(item.get("model_id", "")).casefold() or needle in str(item.get("display_name", "")).casefold()]
@@ -896,7 +950,7 @@ class ProductionCatalog:
             models = [item for item in models if str(item.get("category", "")).casefold() == category.casefold()]
         if installed is not None:
             models = [item for item in models if (item["status"] in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"}) is installed]
-        return {"schema_version": "v7-production-catalog-snapshot.v1", "catalog_schema_version": self.catalog_schema_version, "catalog_version": self.catalog_version, "status": "completed", "execution": "not_run", "dry_run": True, "catalog_fingerprint": self.fingerprint, "models": models, "runtimes": runtimes, "counts": {"models": len(models), "runtimes": len(runtimes), "installed_models": sum(item["status"] in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"} for item in models), "install_ready": sum(item["disposition"] == "AUTO_INSTALL_READY" for item in models)}, "reason": "Catalog and fixed-leaf discovery only; no model/runtime process or network action ran.", "next_action": "Select a server-owned component plan before any installation."}
+        return {"schema_version": "v7-production-catalog-snapshot.v1", "catalog_schema_version": self.catalog_schema_version, "catalog_version": self.catalog_version, "status": "completed", "execution": "not_run", "dry_run": True, "catalog_fingerprint": self.fingerprint, "models": models, "runtimes": runtimes, "inventory": inventory, "counts": {"models": len(models), "runtimes": len(runtimes), "installed_models": sum(item["status"] in {"INSTALLED", "INSTALLED_UNVERIFIED", "OPERATIONAL"} for item in models), "install_ready": sum(item["disposition"] == "AUTO_INSTALL_READY" for item in models)}, "reason": "Catalog and fixed-leaf discovery only; no model/runtime process or network action ran.", "next_action": "Select a server-owned component plan before any installation."}
 
     def refresh_model_size(self, model_id: str, *, max_files: int = 10000) -> dict[str, Any]:
         """Explicit user-requested bounded size refresh; never runs on every UI refresh."""

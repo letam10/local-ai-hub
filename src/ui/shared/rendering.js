@@ -608,25 +608,55 @@ const readinessModuleDetails = (modules) => modules.length
   ? modules.map((item) => `<article class="readiness-module" data-status="${escapeHtml(item.status)}" role="listitem">${statusExplanation({ name: item.label, technicalId: item.id, purpose: item.purpose || `${item.kind || "Server-owned"} capability`, status: item.status, reason: item.reason, impact: item.impact, nextAction: item.nextAction })}</article>`).join("")
   : `<div class="empty-state compact"><strong>Chưa có dòng module</strong><span>Snapshot server chưa công bố projection module an toàn; không có lỗi runtime nào được suy đoán.</span></div>`;
 const readinessFitLabel = (fit) => fit === true ? "Fit" : fit === false ? "No fit" : "Unknown";
+const readinessGpuLabel = (value) => {
+  const candidate = String(value || "");
+  if (!candidate || candidate === "unassigned" || candidate === "unknown") return "Chưa cần gán tài nguyên riêng";
+  return candidate;
+};
+const readinessFitExplanation = (kind, fit) => {
+  if (kind === "Physical fit") return fit === true ? "GPU đáp ứng yêu cầu VRAM đã khai báo." : fit === false ? "Không có GPU phù hợp với yêu cầu vật lý." : "Chưa có đủ snapshot phần cứng để kết luận.";
+  return fit === true ? "Có thể xếp cùng chế độ đã chọn trong snapshot preflight." : fit === false ? "Không đủ tài nguyên để chạy song song; cân nhắc chế độ tuần tự." : "Chưa có đủ dữ liệu để kết luận khả năng chạy đồng thời.";
+};
+const RESOURCE_ERROR_COPY = Object.freeze({
+  hardware_shape: "Snapshot phần cứng không đúng cấu trúc an toàn.",
+  hardware_gpu_invalid: "Thông tin GPU trong snapshot không hợp lệ.",
+  module_request_invalid: "Yêu cầu tài nguyên của module không hợp lệ.",
+  resource_hint_invalid: "Gợi ý CPU/RAM/đĩa của module không hợp lệ.",
+  mode_invalid: "Chế độ preflight không được hỗ trợ.",
+});
 const readinessResourceDetails = (resource) => {
   const target = resource.targetGpu;
   const targetText = target
     ? `${target.vendor} · ${target.deviceClass} · ${target.model}${target.vramMb == null ? "" : ` · ${target.vramMb} MB VRAM`}`
-    : "No target GPU published";
+    : "Chưa công bố GPU mục tiêu";
+  const modeText = resource.mode === "parallel" ? "Song song — các module có thể dùng chung snapshot tài nguyên nếu còn đủ VRAM." : resource.mode === "serial" ? "Tuần tự — mỗi module được đánh giá lần lượt, không cộng dồn tải." : "Chưa công bố chế độ.";
   const fitRows = [
     ...resource.physical.map((item) => ({ ...item, kind: "Physical fit", fit: item.fit })),
     ...resource.concurrent.map((item) => ({ ...item, kind: "Concurrent fit", fit: item.fit })),
   ];
-  const rows = fitRows.length
-    ? fitRows.map((item) => `<div class="readiness-resource-row"><span>${uiTextHtml(item.kind)} · ${escapeHtml(item.id)}</span><span>${escapeHtml(item.gpu)} · ${uiTextHtml(readinessFitLabel(item.fit))}</span></div>`).join("")
+  const fitGroups = new Map();
+  fitRows.forEach((item) => {
+    const key = `${item.kind}|${String(item.fit)}|${item.gpu}`;
+    const current = fitGroups.get(key) || { ...item, count: 0 };
+    current.count += 1;
+    fitGroups.set(key, current);
+  });
+  const fitSummary = fitRows.length
+    ? `<div class="readiness-resource-fit-summary" data-resource-fit-summary>${[...fitGroups.values()].map((item) => `<div class="readiness-resource-fit-summary__item"><strong>${uiTextHtml(item.kind)} · ${uiTextHtml(readinessFitLabel(item.fit))}</strong><span>${escapeHtml(String(item.count))} module · ${escapeHtml(readinessGpuLabel(item.gpu))}</span><small>${escapeHtml(readinessFitExplanation(item.kind, item.fit))}</small></div>`).join("")}</div>`
+    : "";
+  const detailRows = fitRows.length
+    ? fitRows.map((item) => `<div class="readiness-resource-row"><span><strong>${uiTextHtml(item.kind)}</strong> · ${escapeHtml(item.id)}<small>${escapeHtml(readinessFitExplanation(item.kind, item.fit))}</small></span><span>${escapeHtml(readinessGpuLabel(item.gpu))} · ${uiTextHtml(readinessFitLabel(item.fit))}</span></div>`).join("")
     : `<div class="empty-state compact"><span>${uiTextHtml("No per-module resource fit was published.")}</span></div>`;
+  const rows = fitRows.length
+    ? `${fitSummary}<details class="readiness-resource-details" data-resource-fit-details><summary>${uiTextHtml("Xem chi tiết")} (${escapeHtml(String(fitRows.length))})</summary><div class="readiness-resource-list__details">${detailRows}</div></details>`
+    : detailRows;
   const errors = resource.errors.length
-    ? `<div class="readiness-resource-errors"><strong>${uiTextHtml("Resource notes")}</strong>${resource.errors.map((item) => `<span>${escapeHtml(item.code)}${item.module ? ` · ${escapeHtml(item.module)}` : ""}</span>`).join("")}</div>`
+    ? `<div class="readiness-resource-errors"><strong>${uiTextHtml("Resource notes")}</strong>${resource.errors.map((item) => `<span>${escapeHtml(RESOURCE_ERROR_COPY[item.code] || "Không thể đánh giá một mục tài nguyên.")} <code>${escapeHtml(item.code)}</code>${item.module ? ` · ${escapeHtml(item.module)}` : ""}</span>`).join("")}</div>`
     : "";
   const actions = resource.actions.length
     ? `<div class="readiness-guidance"><div><span>${uiTextHtml("Next safe action")}</span><p>${escapeHtml(resource.actions[0])}</p></div></div>`
     : "";
-  return `<section class="readiness-resource card card--flat" aria-labelledby="readiness-resource-title" data-resource-plan-status="${escapeHtml(resource.status)}"><div class="card-title-row"><div><span class="eyebrow">${uiTextHtml("RESOURCE PREFLIGHT")}</span><h2 id="readiness-resource-title">${uiTextHtml("Dry-run resource fit")}</h2></div>${statusPill(resource.status, readinessStatusLabel(resource.status))}</div><div class="readiness-resource-summary"><div><span>${uiTextHtml("Mode")}</span><strong>${escapeHtml(resource.mode)}</strong></div><div><span>${uiTextHtml("Target")}</span><strong>${escapeHtml(targetText)}</strong></div><div><span>${uiTextHtml("Source")}</span><strong>${uiTextHtml("Server-owned")}</strong></div></div><div class="readiness-resource-list">${rows}</div>${errors}${actions}<p class="small muted">${uiTextHtml("Resource fit is planning evidence only; no provider, install, repair, uninstall, GPU or media operation ran.")}</p></section>`;
+  return `<section class="readiness-resource card card--flat" aria-labelledby="readiness-resource-title" data-resource-plan-status="${escapeHtml(resource.status)}"><div class="card-title-row"><div><span class="eyebrow">${uiTextHtml("RESOURCE PREFLIGHT")}</span><h2 id="readiness-resource-title">${uiTextHtml("Dry-run resource fit")}</h2><p class="small">${uiTextHtml("Đây là đánh giá lập kế hoạch, không phải chạy provider/model/GPU.")}</p></div>${statusPill(resource.status, readinessStatusLabel(resource.status))}</div><div class="readiness-resource-summary"><div><span>${uiTextHtml("Mode")}</span><strong>${escapeHtml(resource.mode)}</strong><small>${escapeHtml(modeText)}</small></div><div><span>${uiTextHtml("Target")}</span><strong>${escapeHtml(targetText)}</strong><small>${uiTextHtml("GPU mục tiêu và VRAM được lấy từ snapshot server-owned.")}</small></div><div><span>${uiTextHtml("Source")}</span><strong>${uiTextHtml("Server-owned")}</strong><small>${uiTextHtml("Không truy cập provider hoặc tải model.")}</small></div></div><div class="readiness-resource-list">${rows}</div>${errors}${actions}<p class="small muted">${uiTextHtml("Resource fit is planning evidence only; no provider, install, repair, uninstall, GPU or media operation ran.")}</p></section>`;
 };
 const readinessStorageDetails = (volumes) => `<section class="readiness-storage card card--flat" aria-labelledby="readiness-storage-title"><div class="card-title-row"><div><span class="eyebrow">STORAGE CONSTRAINTS</span><h2 id="readiness-storage-title">Allowlisted volume constraints</h2></div><span class="tag">C: / D:</span></div><div class="readiness-storage-grid">${volumes.map((volume) => {
   const value = (key) => {
@@ -645,7 +675,7 @@ const fieldDynamic = (label, control, extra = "") => `<label class="field ${extr
 const file = (label, key, accept = "") => field(label, `<input type="file" data-asset-key="${escapeHtml(key)}" ${accept ? `accept="${escapeHtml(accept)}"` : ""} /><div class="file-preview" data-file-preview aria-live="polite"></div>`);
 const files = (label, key, accept = "") => field(label, `<input type="file" data-asset-key="${escapeHtml(key)}" multiple ${accept ? `accept="${escapeHtml(accept)}"` : ""} /><div class="file-preview" data-file-preview aria-live="polite"></div>`);
 const button = (text, extra = "") => `<button class="button ${extra}" type="submit">${uiTextHtml(text)}</button>`;
-const capability = (name, item, note, direct = {}) => `<div class="capability"><div><strong>${escapeHtml(name)}</strong><p>${escapeHtml(note)}</p>${direct.reason ? `<p>${escapeHtml(direct.reason)}</p>` : ""}${direct.action ? `<p class="capability-action"><strong>Bước tiếp theo:</strong> ${escapeHtml(direct.action)}</p>` : ""}</div>${statusPill(direct.tool_status || item.component_status || item.status || "missing")}</div>`;
+const capability = (name, item, note, direct = {}) => `<div class="capability"><div><strong>${uiTextHtml(name)}</strong><p>${uiTextHtml(note)}</p>${direct.reason ? `<p>${escapeHtml(direct.reason)}</p>` : ""}${direct.action ? `<p class="capability-action"><strong>Bước tiếp theo:</strong> ${escapeHtml(direct.action)}</p>` : ""}</div>${statusPill(direct.tool_status || item.component_status || item.status || "missing")}</div>`;
 const workspaceState = (label, item = {}, fallbackAction = "Kiểm tra backend rồi thử lại trong Jobs.") => {
   const status = item.tool_status || item.status || item.component_status || "missing";
   const reason = item.reason || "Chưa có snapshot readiness cho backend này.";

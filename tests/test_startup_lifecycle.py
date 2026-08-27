@@ -248,11 +248,48 @@ class StartupLifecycleTests(unittest.TestCase):
     def test_external_api_with_active_jobs_still_uses_the_safe_three_choice_close_gate(self) -> None:
         bridge = desktop.DesktopBridge()
         window = Mock()
-        with patch.object(desktop, "_api_active_job_count", return_value=1):
+        with patch.object(desktop, "_probe_api", return_value=(desktop.API_PROBE_COMPATIBLE, {"active_jobs": 1})):
             bridge._bind(window)
             self.assertFalse(bridge._request_window_close())
         self.assertIsNotNone(bridge._controller)
         self.assertEqual(bridge._controller.state, "prompted")
+
+    def test_external_zero_job_close_is_allowed_without_owned_cleanup(self) -> None:
+        bridge = desktop.DesktopBridge()
+        window = Mock()
+        with patch.object(desktop, "_probe_api", return_value=(desktop.API_PROBE_COMPATIBLE, {"active_jobs": 0})):
+            bridge._bind(window)
+            self.assertTrue(bridge._request_window_close())
+        self.assertTrue(bridge._controller.cleanup_allowed)
+
+    def test_external_active_job_never_offers_cancel(self) -> None:
+        prompts: list[dict] = []
+        controller = DesktopCloseController(
+            lambda: {"verification": "verified", "owner": "external", "active_jobs": 2, "can_cancel": False, "message": "external"},
+            lambda _timeout: (True, "ok"),
+            prompts.append,
+        )
+        self.assertFalse(controller.request_window_close())
+        self.assertEqual(prompts[-1]["active_jobs"], 2)
+        self.assertFalse(prompts[-1]["can_cancel"])
+
+    def test_unknown_close_probe_does_not_become_one_active_job(self) -> None:
+        prompts: list[dict] = []
+        controller = DesktopCloseController(lambda: (_ for _ in ()).throw(RuntimeError("unknown")), lambda _timeout: (True, "ok"), prompts.append)
+        self.assertFalse(controller.request_window_close())
+        self.assertIsNone(prompts[-1]["active_jobs"])
+        self.assertFalse(prompts[-1]["can_cancel"])
+
+    def test_same_installation_old_build_is_not_reused_by_candidate(self) -> None:
+        expected = {"product_id": desktop.PRODUCT_ID, "product_version": desktop.PRODUCT_VERSION, "api_protocol_version": desktop.API_PROTOCOL_VERSION, "app_user_model_id": "LocalAIHub.Desktop", "process_owner": "local-ai-hub", "installation_id": "i" * 32}
+        payload = {**expected, "build_source_commit": "a" * 40, "build_payload_id": "main-aaaaaaaaaaaa"}
+        with patch.object(desktop, "_expected_api_identity", return_value=expected), patch.object(desktop, "_expected_build_identity", return_value=("b" * 40, "main-bbbbbbbbbbbb")):
+            self.assertEqual(desktop._classify_api_identity(payload), desktop.API_PROBE_LOCAL_WRONG_BUILD)
+
+    def test_old_build_listener_selects_fallback_port_without_scanning_or_killing_it(self) -> None:
+        old = {"product_id": desktop.PRODUCT_ID, "product_version": desktop.PRODUCT_VERSION, "api_protocol_version": desktop.API_PROTOCOL_VERSION, "app_user_model_id": "LocalAIHub.Desktop", "process_owner": "local-ai-hub", "installation_id": "i" * 32, "build_source_commit": "a" * 40, "build_payload_id": "main-aaaaaaaaaaaa"}
+        with patch.object(desktop, "_configured_port", return_value=8765), patch.object(desktop, "_probe_api", return_value=(desktop.API_PROBE_LOCAL_WRONG_BUILD, old)), patch.object(desktop, "_free_loopback_port", return_value=52943):
+            self.assertEqual(desktop._select_api_port(), (52943, desktop.API_PROBE_LOCAL_WRONG_BUILD))
 
     def test_close_prompt_falls_back_to_a_visible_three_choice_bridge_page(self) -> None:
         bridge = desktop.DesktopBridge()

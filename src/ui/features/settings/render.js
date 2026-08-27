@@ -5,15 +5,17 @@ export function createSettingsRenderer(deps) {
   const revision = Number(state.settings_revision ?? settings.settings_revision ?? 0);
   const recovery = state.settingsRecovery || settings.recovery || {};
   const snapshot = readinessSnapshot(state);
+  const settingsDirty = state.settingsDirty === true;
   const recoveryBanner = recovery.status === "recovery_required" ? `
     <div class="callout callout--danger">
       <strong>Cảnh báo khôi phục cấu hình:</strong> ${escapeHtml(recovery.reason || "File settings bị lỗi.")}
       <p>${escapeHtml(recovery.action || "Vui lòng restore từ backup hoặc reset section.")}</p>
     </div>
   ` : "";
+  const dirtyBanner = `<div class="settings-dirty-banner${settingsDirty ? " is-dirty" : ""}" data-settings-dirty="${settingsDirty}" role="status" aria-live="polite"><strong>${settingsDirty ? "Có thay đổi chưa áp dụng" : "Cài đặt đã đồng bộ"}</strong><span>${settingsDirty ? "Các giá trị chỉ có hiệu lực sau khi bạn bấm Áp dụng & lưu." : "Không có thay đổi cục bộ đang chờ."}</span></div>`;
 
   return heading("SYSTEM", "Settings", "Cấu hình startup, chính sách GPU, lưu trữ và sao lưu / khôi phục dữ liệu machine-local an toàn.") + `
-    ${recoveryBanner}
+    ${recoveryBanner}${dirtyBanner}
     <section class="readiness-page" aria-labelledby="readiness-page-title" data-readiness-source="server-snapshot">
       <section class="readiness-summary card" aria-labelledby="readiness-page-title" data-readiness-status="${escapeHtml(snapshot.status)}">
         <div class="card-title-row"><div><span class="eyebrow" data-i18n="SERVER SNAPSHOT">${uiTextHtml("SERVER SNAPSHOT")}</span><h2 id="readiness-page-title" data-i18n="Readiness & Module Plan">${uiTextHtml("Readiness & Module Plan")}</h2><p data-i18n="Bootstrap product-surface evidence is shown as received; fast refresh never promotes it to execution.">${uiTextHtml("Bootstrap product-surface evidence is shown as received; fast refresh never promotes it to execution.")}</p></div><div class="readiness-summary__pills">${statusPill(snapshot.status, readinessStatusLabel(snapshot.status))}<span class="tag">${escapeHtml(snapshot.resourceSnapshot)}</span></div></div>
@@ -29,7 +31,7 @@ export function createSettingsRenderer(deps) {
       ${card("Giao diện & Khởi động", `
         <div class="row-list">
           <div class="row-item">
-            <span>Ngôn ngữ</span>
+            <span><span>Ngôn ngữ</span><small class="setting-effect">Áp dụng ngay sau khi bấm Áp dụng & lưu.</small></span>
             <select id="settings-lang" class="input input--select" data-setting-key="ui.language">
               <option value="vi" ${settings.language === "vi" ? "selected" : ""}>Tiếng Việt (vi)</option>
               <option value="en" ${settings.language === "en" ? "selected" : ""}>English (en)</option>
@@ -39,7 +41,7 @@ export function createSettingsRenderer(deps) {
             </select>
           </div>
           <div class="row-item">
-            <span>Giao diện</span>
+            <span><span>Giao diện</span><small class="setting-effect">Chỉ áp dụng sau khi bấm Áp dụng & lưu; thay đổi chưa lưu chưa đổi giao diện.</small></span>
             <select id="settings-theme" class="input input--select" data-setting-key="ui.theme">
               <option value="system" ${settings.theme === "system" ? "selected" : ""}>Theo hệ thống (system)</option>
               <option value="dark" ${settings.theme === "dark" ? "selected" : ""}>Tối (dark)</option>
@@ -47,15 +49,15 @@ export function createSettingsRenderer(deps) {
             </select>
           </div>
           <div class="row-item">
-            <span>Khởi động tối đa hóa</span>
+            <span><span>Khởi động tối đa hóa</span><small class="setting-effect">Có hiệu lực từ lần mở app tiếp theo.</small></span>
             <input type="checkbox" id="settings-maximized" data-setting-key="window.start_maximized" ${settings.start_maximized ? "checked" : ""} />
           </div>
           <div class="row-item">
-            <span>Chiều rộng tối thiểu (800..3840)</span>
+            <span><span>Chiều rộng tối thiểu (800..3840)</span><small class="setting-effect">Có hiệu lực ở lần khởi động kế tiếp.</small></span>
             <input type="number" id="settings-min-width" min="800" max="3840" class="input input--compact" data-setting-key="window.minimum_width" value="${escapeHtml(settings.minimum_width || 1280)}" />
           </div>
           <div class="row-item">
-            <span>Chiều cao tối thiểu (600..2160)</span>
+            <span><span>Chiều cao tối thiểu (600..2160)</span><small class="setting-effect">Có hiệu lực ở lần khởi động kế tiếp.</small></span>
             <input type="number" id="settings-min-height" min="600" max="2160" class="input input--compact" data-setting-key="window.minimum_height" value="${escapeHtml(settings.minimum_height || 720)}" />
           </div>
         </div>
@@ -67,14 +69,14 @@ export function createSettingsRenderer(deps) {
       ${card("Chính sách & Tài nguyên", `
         <div class="row-list">
           <div class="row-item">
-            <span>Chính sách nạp Model</span>
+            <span><span>Chính sách nạp Model</span><small class="setting-effect">Dùng cho các tác vụ mới; không tự nạp model lúc lưu.</small></span>
             <select id="settings-model-policy" class="input input--select" data-setting-key="jobs.model_load_policy">
               <option value="on_demand" ${settings.model_load_policy === "on_demand" ? "selected" : ""}>Nạp khi cần (on_demand)</option>
               <option value="keep_loaded" ${settings.model_load_policy === "keep_loaded" ? "selected" : ""}>Giữ trong VRAM (keep_loaded)</option>
             </select>
           </div>
           <div class="row-item">
-            <span>Số job GPU nặng đồng thời</span>
+            <span><span>Số job GPU nặng đồng thời</span><small class="setting-effect">Áp dụng cho các tác vụ mới; không chạy GPU lúc lưu.</small></span>
             <input type="number" id="settings-gpu-jobs" min="1" max="4" class="input input--compact" data-setting-key="jobs.max_heavy_gpu_jobs" value="${escapeHtml(settings.max_heavy_gpu_jobs || 1)}" />
           </div>
           <div class="row-item">
@@ -88,7 +90,8 @@ export function createSettingsRenderer(deps) {
         </div>
         <div class="form-actions">
           <button class="button button--compact" type="button" data-reset-settings="jobs">Đặt lại Jobs</button>
-          <button class="button button--accent" type="button" data-save-settings data-expected-revision="${revision}">Lưu cài đặt</button>
+          <button class="button button--compact" type="button" data-discard-settings ${settingsDirty ? "" : "disabled"}>Hủy thay đổi</button>
+          <button class="button button--accent" type="button" data-save-settings data-apply-settings data-expected-revision="${revision}" ${settingsDirty ? "" : "disabled"}>Áp dụng & lưu</button>
         </div>
         <div id="settings-save-status" role="status" aria-live="polite">${escapeHtml(String(state.settingsActionStatus || "").slice(0, 240))}</div>
       `)}

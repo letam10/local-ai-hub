@@ -23,6 +23,13 @@ development/legacy non-installed mode.
 
 ## Owned startup failure and diagnostics
 
+The identity-free frontend compatibility handshake is limited to the explicit
+historical `8.0.1` payload.  Any other version-looking pointer (including test
+or hotfix labels) is rejected.  When `product.json`, `installation.json`,
+`current.json` metadata or a version manifest is present, the handshake also
+verifies the fixed product/install identity and manifest digest; a pending
+health marker always keeps the strict recovery path active.
+
 Every API process spawned by the desktop remains owned until readiness succeeds.
 Early exit, timeout, malformed/foreign health, identity mismatch, or WebView
 startup failure terminates and reaps only that child tree. Existing external

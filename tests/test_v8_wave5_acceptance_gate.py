@@ -16,6 +16,7 @@ import unittest
 from scripts.v8_acceptance_gate import (
     EVIDENCE_SCHEMA_VERSION,
     REPORT_SCHEMA_VERSION,
+    WEBVIEW_CAPABILITY_REPORT_SCHEMA_VERSION,
     AcceptanceGateError,
     current_head,
     evaluate,
@@ -26,6 +27,31 @@ from scripts.v8_acceptance_gate import (
 
 
 class V8Wave5AcceptanceGateTests(unittest.TestCase):
+    @staticmethod
+    def _webview_capabilities(item: dict[str, object]) -> dict[str, object]:
+        contract = item["capability_evidence"]
+        assert isinstance(contract, dict)
+        values = contract["native_dpi_values"]
+        scales = contract["layout_scales"]
+        assert isinstance(values, list) and isinstance(scales, list)
+        return {
+            "schema_version": contract["schema_version"],
+            "native_host_dpi_current": 125,
+            "native_host_dpi": {
+                str(value): "PASS" if value == 125 else "NOT_AVAILABLE_ON_TEST_HOST"
+                for value in values
+            },
+            "webview_layout": {
+                str(scale): {
+                    "status": "PASS",
+                    "no_clipping": True,
+                    "no_overlap": True,
+                    "usable_controls": True,
+                }
+                for scale in scales
+            },
+        }
+
     def _write_bundle(self, repo: Path, root: Path, *, source_commit: str | None = None, status: str = "PASS", tamper_digest: bool = False) -> Path:
         contract = load_gate_contract(repo / "architecture" / "v8_acceptance_gates.json")
         source = source_commit or current_head(repo)
@@ -38,14 +64,17 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
             gate_id = item["gate_id"]
             digest: str | None = None
             if status == "PASS":
+                required_checks = list(item["required_checks"])
                 report = {
-                    "schema_version": REPORT_SCHEMA_VERSION,
+                    "schema_version": WEBVIEW_CAPABILITY_REPORT_SCHEMA_VERSION if item.get("capability_evidence") is not None else REPORT_SCHEMA_VERSION,
                     "gate_id": gate_id,
                     "status": "PASS",
                     "platform": contract["required_platform"],
                     "source_commit": source,
-                    "checks": {"synthetic_contract_check": True},
+                    "checks": {check_id: True for check_id in required_checks},
                 }
+                if item.get("capability_evidence") is not None:
+                    report["capabilities"] = self._webview_capabilities(item)
                 raw = json.dumps(report, sort_keys=True).encode("utf-8")
                 (reports / f"{gate_id}.json").write_bytes(raw)
                 digest = hashlib.sha256(raw).hexdigest()
@@ -152,6 +181,19 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
         self.assertEqual(contract["required_platform"], "windows-x64")
         self.assertEqual(contract["required_evidence_class"], "local_windows")
         self.assertTrue(all(item["required"] is True for item in contract["gates"]))
+        self.assertTrue(all(item["required_checks"] for item in contract["gates"]))
+        self.assertTrue(all(len(item["required_checks"]) == len(set(item["required_checks"])) for item in contract["gates"]))
+        by_id = {item["gate_id"]: set(item["required_checks"]) for item in contract["gates"]}
+        self.assertTrue({"route_render", "real_navigation", "dark", "light", "native_host_dpi_current", "native_host_dpi_capability_recorded", "webview_layout_100_no_clipping_overlap_or_unusable_controls", "webview_layout_125_no_clipping_overlap_or_unusable_controls", "webview_layout_150_no_clipping_overlap_or_unusable_controls", "degraded_error_recovery", "frontend_ready", "normal_close", "trusted_native_interaction"}.issubset(by_id["webview2_product_ux"]))
+        webview = next(item for item in contract["gates"] if item["gate_id"] == "webview2_product_ux")
+        self.assertEqual(webview["capability_evidence"], {
+            "schema_version": "v8-webview-dpi-evidence.v1",
+            "native_dpi_values": [100, 125, 150],
+            "native_unavailable_status": "NOT_AVAILABLE_ON_TEST_HOST",
+            "layout_scales": [100, 125, 150],
+        })
+        self.assertTrue({"api_start_failure_or_frontend_timeout", "watchdog_rollback_previous_relaunch"}.issubset(by_id["crash_recovery"]))
+        self.assertIn("real_lightweight_helper_execution", by_id["real_component_lifecycle"])
         self.assertEqual(contract["release_policy"]["main_merge"], "user_approved_only")
         self.assertEqual(contract["release_policy"]["version_change"], "user_approved_only")
         self.assertEqual(contract["release_policy"]["tag_change"], "user_approved_only")
@@ -167,6 +209,123 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
             with self.assertRaises(AcceptanceGateError) as caught:
                 load_gate_contract(path)
         self.assertEqual(caught.exception.code, "GATE_CONTRACT_ROOT_INVALID")
+
+    def test_pass_report_missing_declared_check_is_rejected(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            evidence_path = self._write_bundle(repo, root)
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            gate_id = next(iter(evidence["gates"]))
+            report_path = root / "reports" / f"{gate_id}.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            removed = next(iter(report["checks"]))
+            report["checks"].pop(removed)
+            raw = json.dumps(report, sort_keys=True).encode("utf-8")
+            report_path.write_bytes(raw)
+            evidence["gates"][gate_id]["report_sha256"] = hashlib.sha256(raw).hexdigest()
+            evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+            result = evaluate(evidence_path=evidence_path, repo_root=repo)
+        self.assertFalse(result["local_evidence"]["valid"])
+        self.assertIn("EVIDENCE_REPORT_REQUIRED_CHECKS_MISSING", result["blockers"])
+
+    def test_pass_report_with_only_arbitrary_true_key_is_rejected(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            evidence_path = self._write_bundle(repo, root)
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            gate_id = next(iter(evidence["gates"]))
+            report_path = root / "reports" / f"{gate_id}.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["checks"] = {"synthetic_contract_check": True}
+            raw = json.dumps(report, sort_keys=True).encode("utf-8")
+            report_path.write_bytes(raw)
+            evidence["gates"][gate_id]["report_sha256"] = hashlib.sha256(raw).hexdigest()
+            evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+            result = evaluate(evidence_path=evidence_path, repo_root=repo)
+        self.assertFalse(result["local_evidence"]["valid"])
+        self.assertIn("EVIDENCE_REPORT_REQUIRED_CHECKS_MISSING", result["blockers"])
+
+    def test_gate_contract_rejects_missing_required_check_declaration(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        contract = json.loads((repo / "architecture" / "v8_acceptance_gates.json").read_text(encoding="utf-8"))
+        contract["gates"][0].pop("required_checks")
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "gates.json"
+            path.write_text(json.dumps(contract), encoding="utf-8")
+            with self.assertRaises(AcceptanceGateError) as caught:
+                load_gate_contract(path)
+        self.assertEqual(caught.exception.code, "GATE_CONTRACT_GATE_INVALID")
+
+    def test_gate_contract_rejects_missing_webview_capability_declaration(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        contract = json.loads((repo / "architecture" / "v8_acceptance_gates.json").read_text(encoding="utf-8"))
+        webview = next(item for item in contract["gates"] if item["gate_id"] == "webview2_product_ux")
+        webview.pop("capability_evidence")
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "gates.json"
+            path.write_text(json.dumps(contract), encoding="utf-8")
+            with self.assertRaises(AcceptanceGateError) as caught:
+                load_gate_contract(path)
+        self.assertEqual(caught.exception.code, "GATE_CONTRACT_CAPABILITY_INVALID")
+
+    def test_webview_native_unavailable_is_allowed_when_current_native_and_all_layout_scales_pass(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp:
+            result = evaluate(evidence_path=self._write_bundle(repo, Path(temp)), repo_root=repo)
+        self.assertTrue(result["local_evidence"]["valid"])
+        self.assertTrue(result["merge_ready"])
+
+    def test_webview_current_native_and_layout_results_are_fail_closed(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            evidence_path = self._write_bundle(repo, root)
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            report_path = root / "reports" / "webview2_product_ux.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["capabilities"]["native_host_dpi"]["125"] = "NOT_AVAILABLE_ON_TEST_HOST"
+            raw = json.dumps(report, sort_keys=True).encode("utf-8")
+            report_path.write_bytes(raw)
+            evidence["gates"]["webview2_product_ux"]["report_sha256"] = hashlib.sha256(raw).hexdigest()
+            evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+            result = evaluate(evidence_path=evidence_path, repo_root=repo)
+        self.assertFalse(result["local_evidence"]["valid"])
+        self.assertIn("EVIDENCE_WEBVIEW_NATIVE_CURRENT_MISSING", result["blockers"])
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            evidence_path = self._write_bundle(repo, root)
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            report_path = root / "reports" / "webview2_product_ux.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["capabilities"]["webview_layout"]["150"]["no_overlap"] = False
+            raw = json.dumps(report, sort_keys=True).encode("utf-8")
+            report_path.write_bytes(raw)
+            evidence["gates"]["webview2_product_ux"]["report_sha256"] = hashlib.sha256(raw).hexdigest()
+            evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+            result = evaluate(evidence_path=evidence_path, repo_root=repo)
+        self.assertFalse(result["local_evidence"]["valid"])
+        self.assertIn("EVIDENCE_WEBVIEW_LAYOUT_FAILED", result["blockers"])
+
+    def test_webview_pass_report_cannot_omit_capability_evidence(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            evidence_path = self._write_bundle(repo, root)
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            report_path = root / "reports" / "webview2_product_ux.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report.pop("capabilities")
+            report["schema_version"] = REPORT_SCHEMA_VERSION
+            raw = json.dumps(report, sort_keys=True).encode("utf-8")
+            report_path.write_bytes(raw)
+            evidence["gates"]["webview2_product_ux"]["report_sha256"] = hashlib.sha256(raw).hexdigest()
+            evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+            result = evaluate(evidence_path=evidence_path, repo_root=repo)
+        self.assertFalse(result["local_evidence"]["valid"])
+        self.assertIn("EVIDENCE_REPORT_INVALID", result["blockers"])
 
 
 if __name__ == "__main__":

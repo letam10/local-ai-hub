@@ -46,7 +46,37 @@ Cấu trúc local:
 
 Mỗi gate `PASS` phải có `report_sha256` và file deterministic `reports/<gate_id>.json`.
 
-PASS report dùng schema `v8-local-gate-report.v1` và phải bind:
+Mỗi gate trong `architecture/v8_acceptance_gates.json` cũng khai báo
+`required_checks`.  Report `PASS` phải có đúng tập check đã khai báo và mọi
+giá trị phải là boolean `true`; một key `true` tùy ý hoặc report thiếu check
+không được coi là bằng chứng.  Preflight vẫn đối chiếu digest report, source
+commit và platform trước khi tính gate.
+
+Riêng `webview2_product_ux` là capability-aware: report phải có ít nhất một
+native Windows DPI thật (`native_host_dpi_current`) và ghi capability của
+native host cho 100/125/150. Mức native không tồn tại trên test host phải ghi
+đúng `NOT_AVAILABLE_ON_TEST_HOST`; không được giả là PASS và cũng không tự
+block merge vì giới hạn hardware/host. Song song, layout/WebView bắt buộc được
+kiểm tra ở scale 100/125/150 với `no_clipping`, `no_overlap` và
+`usable_controls` đều PASS. Chỉ lỗi UI ở một scale đã kiểm tra mới làm gate
+FAIL. Report vẫn phải báo route render, điều hướng thật, dark/light,
+degraded/error recovery, frontend-ready, normal close và ít nhất một đường
+tương tác native/trusted. Nếu UIA InvokePattern không dùng được, report phải
+ghi rõ đường mouse/keyboard native thay thế hoặc để check đó `BLOCKED`; không
+được che khuất giới hạn host.
+
+`crash_recovery` phải có bằng chứng lỗi khởi động API/frontend hoặc process
+failure cùng watchdog rollback và relaunch payload trước. `real_component_lifecycle`
+dùng check `real_lightweight_helper_execution`: gate PASS chỉ khi một helper
+nhẹ đã thực sự được start/verify/stop an toàn; không được dùng một boolean
+"truthful limitation" chung để làm PASS cho gate có chữ REAL.
+
+Luồng self-update hai pha, owner external, fallback port và restart-session
+watchdog được mô tả ở `docs/operations/V8_SELF_UPDATE_TRANSACTION.md`.
+
+PASS report thông thường dùng schema `v8-local-gate-report.v1`; riêng
+`webview2_product_ux` dùng `v8-local-gate-report.v2` với object
+`capabilities` được hash cùng report. Mọi report vẫn phải bind:
 
 - exact `gate_id`;
 - status `PASS`;

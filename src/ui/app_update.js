@@ -26,6 +26,7 @@ const css = `
 .app-update-build{padding:10px 12px;border-radius:12px;background:rgba(15,23,42,.22);display:grid;gap:3px}.app-update-build span{font-size:.76rem;opacity:.72}.app-update-build code{font-size:.86rem;overflow-wrap:anywhere}
 .app-update-card__actions{display:flex;gap:8px;flex-wrap:wrap}.app-update-card__actions button{min-height:38px}
 .app-update-card__message{margin:0;font-size:.88rem}.app-update-card__changes{margin:0;padding-left:20px;display:grid;gap:6px;font-size:.86rem}.app-update-card__changes code{margin-right:6px}
+.app-update-modal{position:fixed;inset:0;z-index:10000;display:grid;place-items:center;padding:24px;background:rgba(3,7,18,.76)}.app-update-modal__panel{width:min(560px,100%);display:grid;gap:14px;padding:22px;border:1px solid var(--border-color,#45639d);border-radius:16px;background:#111b33;box-shadow:0 18px 60px rgba(0,0,0,.4)}.app-update-modal__panel h2{margin:0;font-size:1.15rem}.app-update-modal__panel p{margin:0;color:#b7c3df;line-height:1.5}.app-update-modal__builds{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.app-update-modal__build{display:grid;gap:3px;padding:10px 12px;border-radius:10px;background:rgba(15,23,42,.5)}.app-update-modal__build span{font-size:.76rem;opacity:.75}.app-update-modal__build code{overflow-wrap:anywhere}.app-update-modal__actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap}.app-update-modal__actions button{min-height:38px}@media (max-width:520px){.app-update-modal__builds{grid-template-columns:1fr}}
 @media (max-width:720px){.app-update-card__builds{grid-template-columns:1fr}}
 `;
 
@@ -64,6 +65,7 @@ const statusLabel = (value) => ({
   downloading: "Đang tải",
   verifying: "Đang xác minh",
   staging: "Đang stage",
+  staged: "Đã stage · chờ khởi động lại",
   ready_to_restart: "Sẵn sàng khởi động lại",
   restarting: "Đang khởi động lại",
   rollback: "Đang rollback",
@@ -86,6 +88,8 @@ const statusMessage = (value) => {
   if (value?.status === "incompatible_runtime") return "Payload yêu cầu runtime/launcher khác; updater đã fail-closed và chưa đổi current pointer.";
   if (value?.status === "failed") return "Cập nhật không hoàn tất; payload hiện tại vẫn được giữ nguyên hoặc đã rollback.";
   if (value?.status === "no_artifact") return "Main chưa có update artifact thành công. Hub sẽ không cập nhật từ một build chưa qua CI.";
+  if (value?.status === "staged") return "Candidate đã được stage và xác minh; current pointer chưa đổi. Bấm khởi động lại để commit–restart an toàn.";
+  if (value?.retry_attempts) return `Đã thử lại kiểm tra GitHub ${value.retry_attempts}/3 lần do lỗi tạm thời; kết quả hiện tại đã được xác minh.`;
   if (value?.code === "GITHUB_CLI_REQUIRED") return "Cần cài GitHub CLI (gh) để Hub đọc artifact của repo private mà không nhúng token vào ứng dụng.";
   return String(value?.action || "Không thể xác minh bản cập nhật lúc này; phiên bản đang chạy vẫn được giữ nguyên.");
 };
@@ -95,6 +99,34 @@ const make = (tag, className = "") => {
   if (className) node.className = className;
   return node;
 };
+
+const showConfirmModal = ({ title, current, candidate, message, confirmLabel }) => new Promise((resolve) => {
+  const overlay = make("div", "app-update-modal");
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  const panel = make("section", "app-update-modal__panel");
+  const heading = make("h2"); heading.textContent = title;
+  const copy = make("p"); copy.textContent = message;
+  const builds = make("div", "app-update-modal__builds");
+  const oldBuild = make("div", "app-update-modal__build");
+  const oldLabel = make("span"); oldLabel.textContent = "Build hiện tại (giữ để rollback)";
+  const oldValue = make("code"); oldValue.textContent = String(current || "—");
+  oldBuild.append(oldLabel, oldValue);
+  const newBuild = make("div", "app-update-modal__build");
+  const newLabel = make("span"); newLabel.textContent = "Build candidate";
+  const newValue = make("code"); newValue.textContent = String(candidate || "—");
+  newBuild.append(newLabel, newValue); builds.append(oldBuild, newBuild);
+  const actions = make("div", "app-update-modal__actions");
+  const cancel = make("button", "button button--compact"); cancel.type = "button"; cancel.textContent = "Hủy";
+  const confirm = make("button", "button button--compact"); confirm.type = "button"; confirm.textContent = confirmLabel;
+  actions.append(cancel, confirm); panel.append(heading, copy, builds, actions); overlay.append(panel); document.body.append(overlay);
+  const finish = (value) => { overlay.remove(); resolve(value); };
+  cancel.addEventListener("click", () => finish(false));
+  confirm.addEventListener("click", () => finish(true));
+  overlay.addEventListener("click", (event) => { if (event.target === overlay) finish(false); });
+  panel.addEventListener("keydown", (event) => { if (event.key === "Escape") finish(false); });
+  confirm.focus();
+});
 
 const ensureCard = () => {
   const dashboard = document.querySelector("#module-view .dashboard-page");
@@ -162,6 +194,9 @@ const render = (card, value) => {
   card.querySelector("[data-update-message]").textContent = statusMessage(value);
   card.querySelector("[data-app-update-changes]").disabled = !value?.latest_build;
   card.querySelector("[data-app-update-apply]").disabled = value?.available !== true;
+  const restartButton = card.querySelector("[data-app-update-restart]");
+  restartButton.hidden = !(["staged", "activated", "ready_to_restart"].includes(state) && value?.restart_required !== false);
+  card.querySelector("[data-app-update-rollback]").hidden = !(["staged", "activated", "ready_to_restart", "restarting"].includes(state));
   const authButton = card.querySelector("[data-app-update-auth]");
   const needsAuth = value?.status === "auth_required" || value?.status === "oauth_configuration_required";
   authButton.hidden = !needsAuth;
@@ -210,18 +245,25 @@ const showChanges = async (card) => {
 const applyUpdate = async (card) => {
   if (!lastStatus?.available) return;
   const latest = shortBuild(lastStatus.latest_build);
-  if (!window.confirm(`Cập nhật Local AI Hub lên main@${latest}? Payload hiện tại được giữ lại để rollback.`)) return;
+  const confirmed = await showConfirmModal({
+    title: "Xác nhận cập nhật Local AI Hub",
+    current: shortBuild(lastStatus.current_build || lastStatus.current_payload),
+    candidate: `main@${latest}`,
+    message: "Payload cũ được giữ nguyên để rollback. Candidate chỉ đổi current pointer sau khi preflight đóng desktop đã sẵn sàng.",
+    confirmLabel: "Cập nhật",
+  });
+  if (!confirmed) return;
   const button = card.querySelector("[data-app-update-apply]");
   button.disabled = true;
   render(card, { ...(lastStatus || {}), status: "downloading", available: true });
   card.querySelector("[data-update-message]").textContent = "Đang tải, xác minh SHA, stage payload và kiểm tra imports…";
   try {
     const value = await api(API.prepare, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: true }) });
-    lastStatus = { ...(lastStatus || {}), status: value.status, available: false, current_payload: value.payload_id, current_build: value.source_commit };
+    lastStatus = { ...(lastStatus || {}), status: value.status, available: false, staged_payload: value.payload_id, staged_build: value.source_commit };
     card.dataset.state = "ready_to_restart";
     card.querySelector("[data-update-badge]").textContent = "Sẵn sàng khởi động lại";
     card.querySelector("[data-update-current]").textContent = shortBuild(value.source_commit);
-    card.querySelector("[data-update-message]").textContent = "Payload mới đã được xác minh và kích hoạt atomically. Launcher, shortcut và DATA_ROOT không thay đổi.";
+    card.querySelector("[data-update-message]").textContent = "Payload mới đã được xác minh và stage an toàn; current pointer chưa đổi. Bấm khởi động lại để commit–restart. Launcher, shortcut và DATA_ROOT không thay đổi.";
     card.querySelector("[data-app-update-restart]").hidden = value.restart_required !== true;
     card.querySelector("[data-app-update-rollback]").hidden = false;
   } catch (error) {
@@ -247,7 +289,14 @@ const restart = async (card) => {
 };
 
 const rollback = async (card) => {
-  if (!window.confirm("Quay current.json về payload trước? File dữ liệu người dùng không bị xóa.")) return;
+  const confirmed = await showConfirmModal({
+    title: "Xác nhận rollback payload",
+    current: shortBuild(lastStatus?.current_build || lastStatus?.current_payload),
+    candidate: "Payload trước đã xác minh",
+    message: "File dữ liệu người dùng không bị xóa; current pointer sẽ quay về payload trước.",
+    confirmLabel: "Rollback",
+  });
+  if (!confirmed) return;
   const button = card.querySelector("[data-app-update-rollback]");
   button.disabled = true;
   render(card, { ...(lastStatus || {}), status: "rollback", available: false });

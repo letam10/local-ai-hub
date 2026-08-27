@@ -47,6 +47,16 @@ _MANAGED_DESCRIPTOR_SUMMARY = {
     "resources": {"cpu_slots": 1, "gpu_slots": 0, "ram_mb": 0, "disk_mb": 0, "exclusive_group": None},
 }
 
+
+def is_reconstruct_only_pending(record: dict[str, Any]) -> bool:
+    """Return true for a durable queued record with no dispatching worker."""
+
+    if str(record.get("status") or "") != "queued":
+        return False
+    if record.get("retry_mode") == "reconstruct_only" or record.get("reconstruct_only_pending") is True:
+        return True
+    return record.get("execution") == "not_run" and record.get("dry_run") is True
+
 _lock = threading.RLock()
 _jobs: dict[str, dict[str, Any]] = {}
 
@@ -601,12 +611,12 @@ def list_jobs(*, limit: int = DEFAULT_LIST_LIMIT) -> list[dict[str, Any]]:
     with _lock:
         records = list(_jobs.values())
     active = sorted(
-        (record for record in records if str(record.get("status")) in ACTIVE_STATUSES),
+        (record for record in records if str(record.get("status")) in ACTIVE_STATUSES and not is_reconstruct_only_pending(record)),
         key=lambda value: str(value.get("created_at") or ""),
         reverse=True,
     )
     terminal = sorted(
-        (record for record in records if str(record.get("status")) not in ACTIVE_STATUSES),
+        (record for record in records if str(record.get("status")) not in ACTIVE_STATUSES or is_reconstruct_only_pending(record)),
         key=_terminal_sort_key,
         reverse=True,
     )
@@ -615,11 +625,11 @@ def list_jobs(*, limit: int = DEFAULT_LIST_LIMIT) -> list[dict[str, Any]]:
 
 def active_jobs() -> list[dict[str, Any]]:
     with _lock:
-        return [dict(item) for item in _jobs.values() if str(item.get("status")) in ACTIVE_STATUSES]
+        return [dict(item) for item in _jobs.values() if str(item.get("status")) in ACTIVE_STATUSES and not is_reconstruct_only_pending(item)]
 
 
 def active_heavy_jobs() -> list[dict[str, Any]]:
-    return [item for item in list_jobs() if item.get("status") in {"queued", "starting", "running", "cancelling"}]
+    return [item for item in list_jobs() if item.get("status") in {"queued", "starting", "running", "cancelling"} and not is_reconstruct_only_pending(item)]
 
 
 _load()

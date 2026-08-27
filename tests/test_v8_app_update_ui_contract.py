@@ -34,6 +34,9 @@ class V8AppUpdateUiContractTests(unittest.TestCase):
         self.assertIn("if (!card || existing) return;", module)
         self.assertEqual(module.count('if (lastStatus) render(card, lastStatus);'), 1)
         self.assertNotIn("git pull", module.lower().replace("không git pull", ""))
+        self.assertNotIn("window.confirm", module)
+        self.assertIn("showConfirmModal", module)
+        self.assertIn("current pointer chưa đổi", module)
 
     def test_restart_bridge_is_opt_in_and_does_not_replace_close_contract(self) -> None:
         class FixtureBridge:

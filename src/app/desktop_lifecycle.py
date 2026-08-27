@@ -15,7 +15,7 @@ from typing import Any
 
 
 ClosePrompt = Callable[[dict[str, Any]], None]
-ActiveJobs = Callable[[], int]
+ActiveJobs = Callable[[], int | dict[str, Any]]
 CancelAndWait = Callable[[float], tuple[bool, str]]
 PrepareClose = Callable[[], dict[str, Any]]
 Background = Callable[[], tuple[bool, str]]
@@ -159,7 +159,7 @@ class DesktopCloseController:
         with self._lock:
             return self._state
 
-    def _show_prompt(self, *, message: str = "", kind: str = "attention", active_count: int | None = None, verification: str = "verified", can_cancel: bool = False) -> None:
+    def _show_prompt(self, *, message: str = "", kind: str = "attention", active_count: int | None = None, verification: str = "verified", can_cancel: bool = False, owner: str = "unknown") -> None:
         if verification != "verified" or active_count is None:
             count = None
             can_cancel = False
@@ -168,7 +168,40 @@ class DesktopCloseController:
         else:
             count = max(0, int(active_count))
             can_cancel = bool(can_cancel and count > 0)
-        self._prompt({"active_jobs": count, "verification": verification, "can_cancel": can_cancel, "message": message, "kind": kind})
+        self._prompt({"active_jobs": count, "verification": verification, "owner": owner, "can_cancel": can_cancel, "message": message, "kind": kind})
+
+    @staticmethod
+    def _normalize_active_probe(value: object) -> dict[str, Any]:
+        """Normalize an owned/external/unknown active-job observation.
+
+        The old close path converted *any* probe exception into ``1``.  That
+        made an external or unreachable API look like one owned active job and
+        exposed a cancellation button the desktop could not safely use.  A
+        probe is now a typed observation: only a verified non-negative integer
+        is allowed to participate in the active-job decision.
+        """
+
+        if isinstance(value, bool):
+            return {"verification": "unknown", "owner": "unknown", "active_jobs": None, "can_cancel": False, "message": "Không thể xác minh trạng thái tác vụ; Hub chưa đóng để đảm bảo an toàn."}
+        if isinstance(value, int):
+            if value < 0:
+                return {"verification": "unknown", "owner": "unknown", "active_jobs": None, "can_cancel": False, "message": "Không thể xác minh trạng thái tác vụ; Hub chưa đóng để đảm bảo an toàn."}
+            return {"verification": "verified", "owner": "owned", "active_jobs": value, "can_cancel": value > 0, "message": ""}
+        if not isinstance(value, dict):
+            return {"verification": "unknown", "owner": "unknown", "active_jobs": None, "can_cancel": False, "message": "Không thể xác minh trạng thái tác vụ; Hub chưa đóng để đảm bảo an toàn."}
+        verification = str(value.get("verification") or "unknown")
+        owner = str(value.get("owner") or "unknown")
+        raw_count = value.get("active_jobs")
+        count = raw_count if isinstance(raw_count, int) and not isinstance(raw_count, bool) and raw_count >= 0 else None
+        if verification != "verified" or count is None:
+            return {"verification": verification, "owner": owner, "active_jobs": None, "can_cancel": False, "message": str(value.get("message") or "Không thể xác minh trạng thái tác vụ; Hub chưa đóng để đảm bảo an toàn.")}
+        return {
+            "verification": "verified",
+            "owner": owner if owner in {"owned", "external"} else "unknown",
+            "active_jobs": count,
+            "can_cancel": bool(value.get("can_cancel")) and count > 0,
+            "message": str(value.get("message") or ""),
+        }
 
     def request_window_close(self) -> bool:
         """Return True only when pywebview may actually destroy the window."""
@@ -183,16 +216,36 @@ class DesktopCloseController:
             self._show_prompt(message="Hub đang yêu cầu hủy job. Cửa sổ sẽ chỉ đóng sau khi các worker trở thành terminal.", kind="progress")
             return False
         try:
-            active = max(0, int(self._active_jobs()))
+            probe = self._normalize_active_probe(self._active_jobs())
         except Exception:
-            active = 1
+            # Unknown is a safety veto, never a fabricated active count.
+            probe = self._normalize_active_probe(None)
+        verification = str(probe.get("verification") or "unknown")
+        active_value = probe.get("active_jobs")
+        owner = str(probe.get("owner") or "unknown")
+        if verification != "verified" or not isinstance(active_value, int) or isinstance(active_value, bool):
+            with self._lock:
+                self._state = "prompted"
+            self._show_prompt(
+                message=str(probe.get("message") or "Không thể xác minh trạng thái tác vụ; Hub chưa đóng để đảm bảo an toàn."),
+                kind="error",
+                verification=verification,
+                active_count=None,
+                can_cancel=False,
+                owner=owner,
+            )
+            return False
+        active = active_value
         if active:
             with self._lock:
                 self._state = "prompted"
-            # The active-count callback is an owned, in-process verification
-            # boundary for this controller. Preserve the count and expose the
-            # cancel choice only for this verified owned path.
-            self._show_prompt(active_count=active, verification="verified", can_cancel=True)
+            # External jobs are observable but never cancellable by this
+            # desktop.  Preserve the verified count while keeping the cancel
+            # action hidden unless the API explicitly says it is owned.
+            message = str(probe.get("message") or "")
+            if owner == "external" and not message:
+                message = f"API do dịch vụ khác quản lý đang có {active} job; desktop không thể hủy các job này."
+            self._show_prompt(active_count=active, verification="verified", can_cancel=bool(probe.get("can_cancel")), message=message, kind="attention" if bool(probe.get("can_cancel")) else "error", owner=owner)
             return False
         try:
             prepared = self._prepare_close()
@@ -222,6 +275,32 @@ class DesktopCloseController:
             self._state = "exiting"
             self._cleanup_allowed = True
         return True
+
+    def authorize_update_restart(self) -> bool:
+        """Commit the single close transaction used by an update restart.
+
+        This is intentionally separate from the public bridge methods.  Once
+        the updater has atomically committed its pending pointer and scheduled
+        the watchdog, the subsequent native ``destroy`` must not re-enter the
+        normal close decision gate and show a second active-job prompt.
+        """
+
+        with self._lock:
+            if self._state == "cancelling":
+                return False
+            if self._cleanup_allowed:
+                return self._state == "update_restart_committed"
+            self._state = "update_restart_committed"
+            self._cleanup_allowed = True
+            return True
+
+    def abort_update_restart(self) -> None:
+        """Return to the normal gate after a post-commit restart veto."""
+
+        with self._lock:
+            if self._state == "update_restart_committed":
+                self._state = "interactive"
+                self._cleanup_allowed = False
 
     def return_to_hub(self) -> dict[str, str]:
         with self._lock:

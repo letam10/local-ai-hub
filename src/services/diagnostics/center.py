@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +72,38 @@ _PUBLIC_UNSAFE_TEXT_RE = re.compile(
 _MAX_PUBLIC_COUNT = 100000
 _MAX_PUBLIC_BYTES = 2**63 - 1
 _PUBLIC_CATEGORY_FLAGS = ("draft", "temp", "unknown")
+_CHECKED_AT_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.+-]+Z$")
+_DIAGNOSTIC_INSPECTIONS = {
+    "git_integrity": "Đã kiểm tra repository identity, branch và trạng thái worktree.",
+    "config_registry": "Đã kiểm tra ba tệp cấu hình server-owned và schema_version có thể đọc được.",
+    "jobs_store": "Đã đọc snapshot hàng đợi và lịch sử tác vụ qua API jobs giới hạn.",
+    "artifact_store": "Đã kiểm tra chỉ mục artifact do Hub quản lý và khả năng đọc metadata.",
+    "workflow_store": "Đã kiểm tra metadata Workflow Library và revision hiện tại.",
+    "models_inventory": "Đã kiểm tra registry model và sự hiện diện của các root model; không nạp model.",
+    "environments_inventory": "Đã kiểm tra root environment và các thư mục con cấp một; không chạy environment.",
+    "runtime_inventory": "Đã kiểm tra các runtime leaf được allowlist; không khởi chạy runtime.",
+    "storage": "Đã đọc metadata dung lượng volume allowlist; không quét lại cây storage.",
+    "gpu": "Đã đọc metadata GPU bằng truy vấn nvidia-smi; không nạp model hoặc chạy inference.",
+    "latest_app_errors": "Đã đọc hữu hạn các dòng lỗi gần đây từ log; giá trị nhạy cảm được loại bỏ.",
+    "recovery_forensic": "Đã kiểm tra metadata draft, temporary và recovery; không xóa hay sửa dữ liệu.",
+}
+
+
+def _decorate_snapshot(name: str, value: object) -> dict[str, Any]:
+    """Attach bounded inspection metadata to one internal diagnostic result.
+
+    The public projection validates and drops unsafe values.  Keeping this
+    decoration at the center boundary means every subsystem has the same
+    ``inspected``, ``evidence_summary`` and ``checked_at`` contract without
+    making each low-level check duplicate timestamp/wording logic.
+    """
+
+    result = dict(value) if isinstance(value, dict) else {"status": UNKNOWN}
+    result.setdefault("inspected", _DIAGNOSTIC_INSPECTIONS.get(name, "Đã kiểm tra snapshot server-owned."))
+    result.setdefault("evidence_summary", result.get("reason", "Snapshot chưa công bố bằng chứng chi tiết."))
+    result.setdefault("impact", "Trạng thái này chỉ mô tả bằng chứng hiện có; không tự chạy workload.")
+    result.setdefault("checked_at", datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"))
+    return result
 
 
 def _status(status: str, reason: str, next_action: str) -> dict[str, str]:
@@ -93,7 +126,8 @@ def _public_bool(value: object) -> bool | None:
 
 
 def _public_base(raw: object) -> dict[str, Any]:
-    status = raw.get("status") if type(raw) is dict else UNKNOWN
+    source = raw if type(raw) is dict else {}
+    status = source.get("status") if type(raw) is dict else UNKNOWN
     if type(raw) is dict:
         for key in ("reason", "next_action"):
             if key in raw and (type(raw[key]) is not str or len(raw[key]) > 256 or _PUBLIC_UNSAFE_TEXT_RE.search(raw[key])):
@@ -104,14 +138,25 @@ def _public_base(raw: object) -> dict[str, Any]:
         reason, action, code = _PUBLIC_STATUS_MESSAGES[UNKNOWN]
     else:
         reason, action, code = _PUBLIC_STATUS_MESSAGES[status]
-    return {
+    result: dict[str, Any] = {
         "status": status,
-        "reason": reason,
-        "next_action": action,
+        "reason": source.get("reason", reason) if status != UNKNOWN and isinstance(source.get("reason", reason), str) else reason,
+        "next_action": source.get("next_action", action) if status != UNKNOWN and isinstance(source.get("next_action", action), str) else action,
         "reason_code": code,
         "execution": "not_run",
         "dry_run": True,
     }
+    # These optional fields are emitted only by the center's decorated
+    # snapshots.  Hostile/legacy input without them keeps the historical
+    # fixed projection shape, while real diagnostics expose what was checked.
+    for key in ("inspected", "evidence_summary", "impact"):
+        value = source.get(key)
+        if isinstance(value, str) and 0 < len(value) <= 256 and not _PUBLIC_UNSAFE_TEXT_RE.search(value):
+            result[key] = value
+    checked_at = source.get("checked_at")
+    if isinstance(checked_at, str) and len(checked_at) <= 80 and _CHECKED_AT_RE.fullmatch(checked_at):
+        result["checked_at"] = checked_at
+    return result
 
 
 def _public_fallback() -> dict[str, Any]:
@@ -225,7 +270,15 @@ def _public_inventory(raw: object, field: str) -> dict[str, Any]:
         total = _public_int(raw.get("total_count"))
         if present is None or total is None or total < present:
             return _public_fallback()
-        return {**_public_base(raw), "present_count": present, "total_count": total}
+        result = {**_public_base(raw), "present_count": present, "total_count": total}
+        return _public_inventory_summary(result, raw)
+    if field not in raw:
+        # A missing managed root is still a meaningful unavailable inventory
+        # result; do not turn it into an unexplained UNKNOWN merely because
+        # there are no child identifiers to project.
+        base = _public_base(raw)
+        base.update({"present_count": 0, "total_count": 0})
+        return _public_inventory_summary(base, raw)
     value = raw.get(field, {})
     if field == "environments":
         if type(value) is not list or len(value) > _MAX_PUBLIC_COUNT or any(type(item) is not str or len(item) > 256 or _PUBLIC_UNSAFE_TEXT_RE.search(item) for item in value):
@@ -249,7 +302,37 @@ def _public_inventory(raw: object, field: str) -> dict[str, Any]:
         total = _public_int(raw.get("total_count", len(value)))
     if total is None or total < present:
         return _public_fallback()
-    return {**_public_base(raw), "present_count": present, "total_count": min(total, _MAX_PUBLIC_COUNT)}
+    result = {**_public_base(raw), "present_count": present, "total_count": min(total, _MAX_PUBLIC_COUNT)}
+    return _public_inventory_summary(result, raw)
+
+
+def _public_inventory_summary(result: dict[str, Any], raw: object) -> dict[str, Any]:
+    """Copy bounded inventory/readiness counters without exposing registry IDs."""
+
+    source = raw if isinstance(raw, dict) else {}
+    for key in (
+        "registry_records",
+        "observed_count",
+        "root_present_count",
+        "reparse_count",
+        "verified_installed",
+        "installed_unverified_count",
+        "operational_count",
+        "partial_count",
+        "unknown_count",
+        "not_installed_count",
+        "unavailable_count",
+    ):
+        value = _public_int(source.get(key))
+        if value is not None:
+            result[key] = value
+    healthy = _public_bool(source.get("inventory_healthy"))
+    if healthy is not None:
+        result["inventory_healthy"] = healthy
+    note = source.get("readiness_note")
+    if isinstance(note, str) and len(note) <= 256 and not _PUBLIC_UNSAFE_TEXT_RE.search(note):
+        result["readiness_note"] = note
+    return result
 
 
 def _public_storage(raw: object) -> dict[str, Any]:
@@ -267,14 +350,38 @@ def _public_storage(raw: object) -> dict[str, Any]:
     if len(drives) > 16:
         return _public_fallback()
     for key, value in drives.items():
-        if type(key) is not str or len(key) > 96 or _PUBLIC_UNSAFE_TEXT_RE.search(key):
+        # Validate the fixed allowlist keys but never return them.  Arbitrary
+        # drive/path labels remain rejected to keep the projection path-free.
+        if type(key) is not str or key not in {"C:\\", "D:\\", "C:", "D:"}:
             return _public_fallback()
         if type(value) is not dict:
             return _public_fallback()
         for key in ("total_bytes", "used_bytes", "free_bytes"):
             if key in value and (type(value[key]) is not int or type(value[key]) is bool or value[key] < 0 or value[key] > _MAX_PUBLIC_BYTES):
                 return _public_fallback()
-    return {**_public_base(raw), "drive_count": min(len(drives), 16), "low_space": raw.get("status") == NEEDS_ATTENTION}
+    result = {**_public_base(raw), "drive_count": min(len(drives), 16), "low_space": raw.get("status") == NEEDS_ATTENTION}
+    # Storage diagnostics reuse the storage-manager snapshot instead of doing
+    # another recursive walk.  Keep only bounded counters/state; never expose
+    # the managed root or a caller-supplied path.
+    scan = raw.get("scan")
+    if isinstance(scan, dict):
+        scan_status = scan.get("status")
+        if isinstance(scan_status, str) and scan_status in {"idle", "running", "cancelling", "cancelled", "partial", "completed", "unavailable"}:
+            result["scan_status"] = scan_status
+        scan_mode = scan.get("mode")
+        if isinstance(scan_mode, str) and scan_mode in {"fast", "deep_exact"}:
+            result["scan_mode"] = scan_mode
+        if type(scan.get("exact")) is bool:
+            result["scan_exact"] = scan["exact"]
+        for source_key, public_key in (("progress", "scan_progress"), ("files_scanned", "scan_files"), ("total_bytes_counted", "scan_bytes")):
+            value = _public_int(scan.get(source_key), maximum=_MAX_PUBLIC_COUNT if source_key == "progress" else _MAX_PUBLIC_BYTES)
+            if value is not None:
+                result[public_key] = value
+        for source_key, public_key in (("reason", "scan_reason"), ("next_action", "scan_next_action")):
+            value = scan.get(source_key)
+            if isinstance(value, str) and len(value) <= 256 and not _PUBLIC_UNSAFE_TEXT_RE.search(value):
+                result[public_key] = value
+    return result
 
 
 def _public_gpu(raw: object) -> dict[str, Any]:
@@ -346,7 +453,11 @@ def _public_subsystem(name: str, raw: object) -> dict[str, Any]:
             "workflow_count", "library_revision", "models", "environments", "runtimes", "present_count",
             "total_count", "drives", "drive_count", "low_space", "gpus", "gpu_count", "lines", "error_count",
             "has_errors", "digest", "files", "recovery_count", "has_recovery_files", "category_flags",
-            "root_verified", "inside_work_tree",
+            "root_verified", "inside_work_tree", "inspected", "evidence_summary", "impact", "checked_at",
+            "registry_records", "observed_count", "root_present_count", "reparse_count", "verified_installed", "installed_unverified_count",
+            "operational_count", "partial_count", "unknown_count", "not_installed_count", "unavailable_count",
+            "inventory_healthy", "readiness_note", "scan_status", "scan_mode", "scan_exact",
+            "scan_progress", "scan_files", "scan_bytes", "scan_reason", "scan_next_action",
         }
         if not any(key in raw for key in detail_keys):
             return _public_fallback()
@@ -580,29 +691,150 @@ class DiagnosticsCenter:
     # Inventory subsystems (read-only filesystem scan)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _catalog_inventory_counts(section: str) -> dict[str, int] | None:
+        """Read the bounded production-catalog counters without starting a scan.
+
+        The catalog owns fixed-leaf model/runtime readiness.  Diagnostics may
+        reuse that metadata, but it must not recursively walk Models or
+        Environments a second time just to render a health card.
+        """
+
+        try:
+            from src.platform.paths import get_paths
+            from src.services.productization.catalog import ProductionCatalog
+
+            # Build the catalog directly instead of calling the compatibility
+            # ``catalog_snapshot`` façade.  The façade may consult legacy
+            # model summaries (and an Ollama loopback tags endpoint); a
+            # diagnostics refresh must stay metadata-only and never probe a
+            # provider just to render inventory counters.
+            snapshot = ProductionCatalog(paths=get_paths()).snapshot()
+            source: object = snapshot.get("inventory") if isinstance(snapshot, dict) else None
+            if section == "runtimes" and isinstance(source, dict):
+                source = source.get("runtimes")
+            if not isinstance(source, dict) or source.get("status") != "healthy":
+                return None
+            result: dict[str, int] = {}
+            for key in (
+                "registry_records",
+                "observed_count",
+                "verified_installed",
+                "installed_unverified_count",
+                "operational_count",
+                "partial_count",
+                "unknown_count",
+                "not_installed_count",
+                "unavailable_count",
+            ):
+                value = source.get(key)
+                if type(value) is int and value >= 0 and value <= _MAX_PUBLIC_COUNT:
+                    result[key] = value
+            return result if result.get("registry_records", 0) > 0 else None
+        except Exception:
+            # Diagnostics must remain available even when an optional catalog
+            # snapshot cannot be read; the caller falls back to fixed roots.
+            return None
+
+    @staticmethod
+    def _inventory_reason(
+        label: str,
+        counts: dict[str, int],
+        *,
+        healthy: bool,
+    ) -> str:
+        """Build a path-free explanation of inventory versus readiness."""
+
+        records = counts.get("registry_records", 0)
+        observed = counts.get("observed_count", 0)
+        root_present = counts.get("root_present_count", observed)
+        verified = counts.get("verified_installed", 0)
+        unverified = counts.get("installed_unverified_count", 0)
+        operational = counts.get("operational_count", 0)
+        partial = counts.get("partial_count", 0)
+        unknown = counts.get("unknown_count", 0)
+        not_installed = counts.get("not_installed_count", 0)
+        unavailable = counts.get("unavailable_count", 0)
+        prefix = "Registry đọc được" if healthy else "Chưa đọc đủ registry"
+        return (
+            f"{prefix}: {records} bản ghi {label}; catalog cục bộ {observed}; root managed {root_present}; đã xác minh {verified}; "
+            f"operational {operational}; chưa xác minh {unverified}; một phần {partial}; "
+            f"chưa rõ {unknown}; chưa cài {not_installed}; không khả dụng {unavailable}. "
+            "Healthy chỉ nói registry đọc được, không bảo đảm mọi mục chạy được."
+        )
+
     def models_inventory(self) -> dict[str, Any]:
-        """Scan Models/ directory for registered model families without loading."""
+        """Read the model registry/root presence without recursively walking it.
+
+        Recursive accounting belongs to the explicit storage DEEP_EXACT worker.
+        Diagnostics must stay bounded and must not turn a refresh click into a
+        second multi-hundred-thousand-entry scan.  Presence here is therefore
+        inventory evidence only, never model-readiness or operational proof.
+        """
+        catalog_counts = self._catalog_inventory_counts("models")
         if not MODEL_ROOT.exists():
-            return _status(UNAVAILABLE, "Models/ directory not found.", "Model paths not initialised; review/install requires explicit user action.")
+            fallback_counts = catalog_counts or {
+                "registry_records": len(MODEL_PATHS),
+                "observed_count": 0,
+                "root_present_count": 0,
+                "reparse_count": 0,
+                "verified_installed": 0,
+                "installed_unverified_count": 0,
+                "operational_count": 0,
+                "partial_count": 0,
+                "unknown_count": len(MODEL_PATHS),
+                "not_installed_count": 0,
+                "unavailable_count": len(MODEL_PATHS),
+            }
+            return {
+                **_status(UNAVAILABLE, "Models/ directory not found. " + self._inventory_reason("model", fallback_counts, healthy=False), "Review the managed model root before requesting component setup."),
+                **fallback_counts,
+                "inventory_healthy": False,
+                "readiness_note": "Inventory không xác nhận model readiness; cần kiểm tra root managed và component evidence riêng.",
+            }
         entries: dict[str, Any] = {}
-        total_bytes = 0
         for key, path in MODEL_PATHS.items():
-            if path.exists():
-                try:
-                    size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
-                    entries[key] = {"present": True, "size_bytes": size}
-                    total_bytes += size
-                except OSError:
-                    entries[key] = {"present": True, "size_bytes": -1}
-            else:
-                entries[key] = {"present": False, "size_bytes": 0}
+            try:
+                stat = path.stat(follow_symlinks=False)
+                is_reparse = bool(getattr(stat, "st_file_attributes", 0) & 0x400) or path.is_symlink()
+                entries[key] = {"present": bool(path.exists()), "reparse": is_reparse, "size_bytes": None}
+            except OSError:
+                entries[key] = {"present": False, "reparse": False, "size_bytes": None}
         present = sum(1 for v in entries.values() if v["present"])
         missing_keys = [k for k, v in entries.items() if not v["present"]]
-        next_action = f"Missing model dependencies: {', '.join(missing_keys[:3])}; review/install requires explicit user action." if missing_keys else "No action required."
+        reparse_partial = sum(1 for value in entries.values() if value["present"] and value.get("reparse"))
+        counts = catalog_counts or {
+            "registry_records": len(entries),
+            "observed_count": present,
+            "root_present_count": present,
+            "reparse_count": reparse_partial,
+            "verified_installed": 0,
+            "installed_unverified_count": 0,
+            "operational_count": 0,
+            "partial_count": reparse_partial,
+            "unknown_count": 0,
+            "not_installed_count": len(missing_keys),
+            "unavailable_count": 0,
+        }
+        counts = {**counts, "root_present_count": present, "reparse_count": reparse_partial}
+        if reparse_partial:
+            counts["partial_count"] = counts.get("partial_count", 0) + reparse_partial
+        missing_count = counts.get("not_installed_count", len(missing_keys))
+        needs_review = counts.get("installed_unverified_count", 0) + counts.get("partial_count", 0) + counts.get("unknown_count", 0)
+        next_action = (
+            f"Có {missing_count} model chưa cài; mở Components để xem import/license/runtime và không tải lại resource đã quan sát."
+            if missing_count else
+            "Inventory đã đọc được; mở Components để xem model nào đã được xác minh runtime."
+        )
+        if needs_review:
+            next_action += " Các mục một phần/chưa xác minh vẫn chưa nên coi là operational."
         return {
-            **_status(HEALTHY if present else UNAVAILABLE, f"{present}/{len(entries)} model families present.", next_action),
+            **_status(HEALTHY if catalog_counts is not None or present or not missing_keys else NEEDS_ATTENTION, self._inventory_reason("model", counts, healthy=catalog_counts is not None or bool(present or not missing_keys)), next_action),
             "models": entries,
-            "total_size_bytes": total_bytes,
+            "registry_records": len(entries),
+            **counts,
+            "inventory_healthy": catalog_counts is not None or bool(present or not missing_keys),
+            "readiness_note": "Healthy chỉ mô tả registry/root inventory; model chỉ được coi là operational khi có bằng chứng runtime riêng.",
         }
 
     def environments_inventory(self) -> dict[str, Any]:
@@ -610,19 +842,65 @@ class DiagnosticsCenter:
         envs_root = ROOT / "Environments"
         if not envs_root.exists():
             return _status(UNAVAILABLE, "Environments/ directory not found.", "Environment paths not found; review/install requires explicit user action.")
-        envs = [d.name for d in envs_root.iterdir() if d.is_dir()] if envs_root.exists() else []
+        envs: list[str] = []
+        unreadable = 0
+        try:
+            for entry in envs_root.iterdir():
+                try:
+                    if entry.is_dir() and not entry.is_symlink():
+                        envs.append(entry.name)
+                except OSError:
+                    unreadable += 1
+        except OSError:
+            unreadable = 1
+        status = HEALTHY if unreadable == 0 else NEEDS_ATTENTION
+        counts = {
+            "registry_records": len(envs),
+            "observed_count": len(envs),
+            "root_present_count": len(envs),
+            "reparse_count": 0,
+            "verified_installed": 0,
+            "installed_unverified_count": 0,
+            "operational_count": 0,
+            "partial_count": unreadable,
+            "unknown_count": 0,
+            "not_installed_count": 0 if envs else 1,
+            "unavailable_count": 0,
+        }
         return {
-            **_status(HEALTHY if envs else NEEDS_ATTENTION, f"{len(envs)} environment(s) found.", "Review environments; install/update requires explicit user action." if not envs else "No action required."),
+            **_status(status, self._inventory_reason("environment", counts, healthy=unreadable == 0), "Mở Components để kiểm tra runtime/environment readiness; cài đặt cần thao tác rõ ràng." if not envs else "Inventory đã đọc được; readiness runtime cần bằng chứng riêng."),
             "environments": envs,
+            **counts,
+            "inventory_healthy": unreadable == 0,
+            "readiness_note": "Environment inventory chỉ xác nhận root cấp một; runtime/import/worker smoke được đánh giá riêng.",
         }
 
     def runtime_inventory(self) -> dict[str, Any]:
         """Check presence of registered runtime paths."""
         entries: dict[str, bool] = {key: path.exists() for key, path in RUNTIME_PATHS.items()}
         present = sum(entries.values())
+        catalog_counts = self._catalog_inventory_counts("runtimes")
+        counts = catalog_counts or {
+            "registry_records": len(entries),
+            "observed_count": present,
+            "root_present_count": present,
+            "reparse_count": 0,
+            "verified_installed": 0,
+            "installed_unverified_count": 0,
+            "operational_count": 0,
+            "partial_count": 0,
+            "unknown_count": 0,
+            "not_installed_count": len(entries) - present,
+            "unavailable_count": 0,
+        }
+        counts = {**counts, "root_present_count": present, "reparse_count": 0}
+        healthy = catalog_counts is not None or bool(present)
         return {
-            **_status(HEALTHY if present else UNAVAILABLE, f"{present}/{len(entries)} runtime paths present.", "Review runtime engines; install requires explicit user action." if present < len(entries) else "No action required."),
+            **_status(HEALTHY if healthy else UNAVAILABLE, self._inventory_reason("runtime", counts, healthy=healthy), "Mở Components để kiểm tra import/runtime smoke và trạng thái cài đặt." if counts.get("not_installed_count", 0) else "Inventory đã đọc được; runtime vẫn cần bằng chứng bounded smoke."),
             "runtimes": entries,
+            **counts,
+            "inventory_healthy": healthy,
+            "readiness_note": "Runtime inventory chỉ xác nhận registry/fixed leaves; import, worker và bounded smoke được đánh giá riêng.",
         }
 
     # ------------------------------------------------------------------
@@ -630,7 +908,12 @@ class DiagnosticsCenter:
     # ------------------------------------------------------------------
 
     def storage_state(self) -> dict[str, Any]:
-        """Report C: and D: drive disk usage."""
+        """Report volume usage plus the existing storage-scan snapshot.
+
+        This is intentionally a bounded diagnostic read.  The storage manager
+        owns the optional deep walk; Diagnostics only consumes its latest
+        path-free state and never starts a second scan.
+        """
         results: dict[str, Any] = {}
         for drive in ("C:\\", "D:\\"):
             try:
@@ -648,12 +931,33 @@ class DiagnosticsCenter:
             for v in results.values()
             if "error" not in v
         )
-        return {
+        result: dict[str, Any] = {
             **_status(NEEDS_ATTENTION if low_space else HEALTHY,
                       "Low disk space detected." if low_space else "Disk space adequate.",
                       "Free disk space on affected drives." if low_space else "No action required."),
             "drives": results,
         }
+        try:
+            from src.services.storage_manager.overview import storage_scan_snapshot
+
+            snapshot = storage_scan_snapshot()
+            scan = snapshot.get("scan") if isinstance(snapshot, dict) else None
+            if isinstance(scan, dict):
+                result["scan"] = {
+                    key: scan[key]
+                    for key in (
+                        "status", "mode", "exact", "progress", "files_scanned",
+                        "total_bytes_counted", "owned_storage_total_bytes", "owned_storage_exact",
+                        "owned_storage_scope", "deduplicated_targets", "saved_at", "managed_root_counts",
+                        "reason", "next_action",
+                    )
+                    if key in scan
+                }
+        except Exception:
+            # A diagnostics refresh must remain useful even if the optional
+            # storage manager snapshot is unavailable.
+            result["scan"] = {"status": "unavailable", "mode": "fast", "exact": False, "progress": 0, "files_scanned": 0, "total_bytes_counted": 0, "reason": "Chưa đọc được snapshot storage hiện tại.", "next_action": "Mở Models & Storage và thử Quét lại nếu cần."}
+        return result
 
     def gpu_detection(self) -> dict[str, Any]:
         """Read-only GPU detection via nvidia-smi query (no model load/inference)."""
@@ -683,7 +987,12 @@ class DiagnosticsCenter:
         try:
             for log_file in sorted(LOG_ROOT.glob("*.log"), key=lambda f: f.stat().st_mtime, reverse=True)[:3]:
                 try:
-                    text = log_file.read_text(encoding="utf-8", errors="replace")
+                    # Read only a bounded tail.  Diagnostics refresh must not
+                    # synchronously buffer an ever-growing log file.
+                    with log_file.open("rb") as handle:
+                        handle.seek(0, os.SEEK_END)
+                        handle.seek(max(0, handle.tell() - 128 * 1024), os.SEEK_SET)
+                        text = handle.read(128 * 1024).decode("utf-8", errors="replace")
                     file_lines = [_sanitize_log_line(l) for l in text.splitlines() if "error" in l.lower() or "exception" in l.lower() or "critical" in l.lower()]
                     lines.extend(file_lines[-20:])
                     if len(lines) >= max_lines:
@@ -721,7 +1030,7 @@ class DiagnosticsCenter:
     def _raw_snapshot(self) -> dict[str, Any]:
         """Collect internal diagnostics; callers must use ``snapshot`` for public data."""
         with self._lock:
-            return {
+            checks = {
                 "git_integrity": self.git_integrity_state(),
                 "config_registry": self.config_registry_state(),
                 "jobs_store": self.jobs_store_state(),
@@ -735,6 +1044,7 @@ class DiagnosticsCenter:
                 "latest_app_errors": self.latest_app_errors(),
                 "recovery_forensic": self.recovery_forensic_state(),
             }
+            return {name: _decorate_snapshot(name, value) for name, value in checks.items()}
 
     def snapshot(self) -> dict[str, Any]:
         """Return the bounded, path-free public diagnostics projection."""
