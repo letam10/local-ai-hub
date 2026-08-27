@@ -61,6 +61,10 @@ domains:
     owner: [src/services/capability_graph/]
     depends_on: [shared]
     forbidden: [ui, raw-public-paths, provider-execution, startup-download, model-load]
+  component_lifecycle_engine:
+    owner: [src/services/component_lifecycle_engine/]
+    depends_on: [capability_graph, component_installer, shared]
+    forbidden: [ui, raw-public-paths, direct-provider-execution, startup-download, model-load]
   sam2:
     owner: [src/modules/sam2/]
     depends_on: [artifact_store, job_manager]

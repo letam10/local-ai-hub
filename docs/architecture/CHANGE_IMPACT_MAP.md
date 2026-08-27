@@ -21,6 +21,8 @@ machine data. Never infer permission from a filename alone.
 | Runtime Manager | `src/services/runtime_manager/` | diagnostics/modules UI | runtime catalog tests | no driver/CUDA change; no environment overwrite |
 | Component Installer | `src/services/component_installer/` | Components / AI Setup API/UI | Phase 2 component contract tests | trusted HTTPS, bounded staging, resume/checksum/archive safety, opaque plans |
 | Component maintenance | `src/services/api/components.py`, manager | Components / AI Setup | Phase 2 API/UI tests | repair/update/uninstall are plan-only; preserve shared/user data |
+| Capability Graph V2 | `src/services/capability_graph/` | `/api/capabilities/v2`, Components | `tests/test_post_v8_capability_graph_v2.py` | bounded server-owned metadata/evidence; no path, provider or workload execution |
+| Component Lifecycle Engine V2 | `src/services/component_lifecycle_engine/` | `/api/component-lifecycle/v2`, Components | `tests/test_post_v8_component_lifecycle_engine.py` | V8 plan facade only; unregistered start/health/stop/rollback adapters stay blocked |
 | Installer/bootstrap | `scripts/bootstrap_core.py`, `src/services/bootstrap_core.py` | desktop launchers | clean-clone tests | model-free, offline, idempotent, preserve local files |
 | Versioning | `src/shared/version.py` | health/installer/docs | version consistency | one product source; schema versions unchanged |
 | Production catalog | `src/services/productization/catalog.py`, `Config/v7_production_catalog.example.json` | Models / Components / Dashboard | `tests/test_v7_final_productization.py` | fixed leaves, real disposition, no fabricated size or source |

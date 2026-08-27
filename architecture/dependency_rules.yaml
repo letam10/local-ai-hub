@@ -44,3 +44,5 @@ rules:
     text: Update activation preserves unchanged component files and a rollback slot; only the reviewed candidate leaf is replaced.
   - id: capability-graph-read-only
     text: Capability Graph V2 composes only server-owned snapshots and evidence; it cannot launch, download, import, or promote an unverified capability to operational.
+  - id: component-lifecycle-v2-authority
+    text: Component Lifecycle Engine V2 may create only existing V8 server-owned plans; confirmation and execution remain with the durable V8 coordinator, while unregistered lifecycle adapters stay blocked.

@@ -516,6 +516,44 @@
       "transport_class": "SPECIAL_PROTOCOL"
     },
     {
+      "route_id": "component_lifecycle.v2_snapshot",
+      "method": "GET",
+      "path": "/api/component-lifecycle/v2",
+      "domain": "components",
+      "owner": "src/services/api/routes/component_lifecycle_v2.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "component_lifecycle.v2_detail",
+      "method": "GET",
+      "path": "/api/component-lifecycle/v2/{capability_id}",
+      "domain": "components",
+      "owner": "src/services/api/routes/component_lifecycle_v2.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "components.snapshot",
       "method": "GET",
       "path": "/api/components",
@@ -2053,6 +2091,25 @@
       ],
       "transport": "router",
       "transport_class": "SPECIAL_PROTOCOL"
+    },
+    {
+      "route_id": "component_lifecycle.v2_plan",
+      "method": "POST",
+      "path": "/api/component-lifecycle/v2/{capability_id}/plans",
+      "domain": "components",
+      "owner": "src/services/api/routes/component_lifecycle_v2.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "components.bundle_plan",

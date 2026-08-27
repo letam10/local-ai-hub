@@ -98,6 +98,13 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
             catalog_snapshot=catalog_snapshot,
         )
 
+    def component_lifecycle_engine() -> Any:
+        """Compose the V2 lifecycle planning facade from the V2 graph only."""
+
+        from src.services.component_lifecycle_engine import ComponentLifecycleEngine
+
+        return ComponentLifecycleEngine(graph=capability_graph())
+
     def prepare_shutdown() -> dict[str, Any]:
         status, payload = get("prepare_owned_shutdown")()
         return {**payload, "http_status": status}
@@ -129,6 +136,9 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         "capability_graph_blockers": lambda capability_id: capability_graph().blockers(capability_id),
         "capability_graph_safe_actions": lambda capability_id: capability_graph().safe_actions(capability_id),
         "capability_graph_verification_evidence": lambda capability_id: capability_graph().verification_evidence(capability_id),
+        "component_lifecycle_v2_snapshot": lambda: component_lifecycle_engine().snapshot(),
+        "component_lifecycle_v2_detail": lambda capability_id: component_lifecycle_engine().inspect(capability_id),
+        "component_lifecycle_v2_plan": lambda capability_id, action: component_lifecycle_engine().plan(capability_id, action, planner=component_api.component_lifecycle),
         "tools_payload": lambda: {"status": "completed", "tools": get("tool_catalog")(get("component_statuses")())},
         "component_statuses": get("component_statuses"), "component_snapshot": component_api.snapshot,
         "component_detail": component_api.detail, "component_plan_lookup": component_api.lookup_plan,
