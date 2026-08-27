@@ -274,6 +274,7 @@ def _api_context() -> ApiContext:
             "health": health,
             "bootstrap_payload": _bootstrap_payload,
             "capability_control_plane": capability_control_plane,
+            "resource_scheduler_hardware": lambda: __import__("src.services.api.config", fromlist=["module_manager_config"]).module_manager_config().get("hardware_snapshot"),
             "lifecycle_payload": _lifecycle_payload,
             "component_statuses": component_statuses,
             "component_manager": component_api,

@@ -69,6 +69,10 @@ domains:
     owner: [src/services/model_manager_v2/]
     depends_on: [capability_graph, component_lifecycle_engine, model_manager, productization, shared]
     forbidden: [ui, raw-public-paths, recursive-model-scan, direct-download, model-load, destructive-remove]
+  resource_scheduler:
+    owner: [src/services/resource_scheduler/]
+    depends_on: [shared]
+    forbidden: [ui, gpu-probe, worker-launch, provider-execution, browser-reservation-input]
   sam2:
     owner: [src/modules/sam2/]
     depends_on: [artifact_store, job_manager]

@@ -1485,6 +1485,63 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "resource_scheduler.v2_snapshot",
+      "method": "GET",
+      "path": "/api/resource-scheduler/v2",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/resource_scheduler_v2.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "resource_scheduler.v2_job",
+      "method": "GET",
+      "path": "/api/resource-scheduler/v2/jobs/{job_id}",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/resource_scheduler_v2.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "resource_scheduler.v2_profiles",
+      "method": "GET",
+      "path": "/api/resource-scheduler/v2/profiles",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/resource_scheduler_v2.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "runtimes.list",
       "method": "GET",
       "path": "/api/runtimes",

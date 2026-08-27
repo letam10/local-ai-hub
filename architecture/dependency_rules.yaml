@@ -48,3 +48,5 @@ rules:
     text: Component Lifecycle Engine V2 may create only existing V8 server-owned plans; confirmation and execution remain with the durable V8 coordinator, while unregistered lifecycle adapters stay blocked.
   - id: model-manager-v2-bounded-inventory
     text: Model Manager V2 uses bounded catalog observations and opaque locations only; it blocks duplicate downloads, never scans all Models at page load, and delegates any import/reuse/verify/remove action to an existing V8 plan.
+  - id: resource-scheduler-server-owned
+    text: Resource Scheduler V2 accepts only a server-owned inventory/profile and exact internal job-worker identity; it reserves capacity without probing GPU or launching a worker, while browsers can inspect only read-only projections.

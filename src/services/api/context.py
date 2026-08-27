@@ -45,6 +45,7 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
     runtime_manager: RuntimeManager | None = None
     productization_service: Any | None = None
     update_service: Any | None = None
+    resource_scheduler_service: Any | None = None
     get = bindings.get
 
     def model_service() -> ModelManager:
@@ -115,6 +116,18 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
             lifecycle_engine=component_lifecycle_engine(),
         )
 
+    def resource_scheduler() -> Any:
+        """Create one in-process scheduler from a configuration snapshot only."""
+
+        nonlocal resource_scheduler_service
+        if resource_scheduler_service is None:
+            from src.services.resource_scheduler import ResourceScheduler
+
+            hardware_provider = get("resource_scheduler_hardware")
+            hardware_snapshot = hardware_provider() if callable(hardware_provider) else None
+            resource_scheduler_service = ResourceScheduler(hardware_snapshot=hardware_snapshot)
+        return resource_scheduler_service
+
     def prepare_shutdown() -> dict[str, Any]:
         status, payload = get("prepare_owned_shutdown")()
         return {**payload, "http_status": status}
@@ -153,6 +166,8 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         "model_manager_v2_detail": lambda model_id: model_manager_v2().detail(model_id),
         "model_manager_v2_preflight": lambda model_id: model_manager_v2().preflight(model_id),
         "model_manager_v2_plan": lambda model_id, action, selection_id=None: model_manager_v2().plan(model_id, action, planner=component_api.component_lifecycle, selection_id=selection_id),
+        "resource_scheduler_v2_snapshot": lambda: resource_scheduler().snapshot(),
+        "resource_scheduler_v2_job": lambda job_id: resource_scheduler().job(job_id),
         "tools_payload": lambda: {"status": "completed", "tools": get("tool_catalog")(get("component_statuses")())},
         "component_statuses": get("component_statuses"), "component_snapshot": component_api.snapshot,
         "component_detail": component_api.detail, "component_plan_lookup": component_api.lookup_plan,
