@@ -105,6 +105,16 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
 
         return ComponentLifecycleEngine(graph=capability_graph())
 
+    def model_manager_v2() -> Any:
+        """Compose the V2 model inventory from the bounded production catalog."""
+
+        from src.services.model_manager_v2 import ModelManagerV2
+
+        return ModelManagerV2(
+            catalog_snapshot=productization().catalog.snapshot(),
+            lifecycle_engine=component_lifecycle_engine(),
+        )
+
     def prepare_shutdown() -> dict[str, Any]:
         status, payload = get("prepare_owned_shutdown")()
         return {**payload, "http_status": status}
@@ -139,6 +149,10 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         "component_lifecycle_v2_snapshot": lambda: component_lifecycle_engine().snapshot(),
         "component_lifecycle_v2_detail": lambda capability_id: component_lifecycle_engine().inspect(capability_id),
         "component_lifecycle_v2_plan": lambda capability_id, action: component_lifecycle_engine().plan(capability_id, action, planner=component_api.component_lifecycle),
+        "model_manager_v2_snapshot": lambda: model_manager_v2().snapshot(),
+        "model_manager_v2_detail": lambda model_id: model_manager_v2().detail(model_id),
+        "model_manager_v2_preflight": lambda model_id: model_manager_v2().preflight(model_id),
+        "model_manager_v2_plan": lambda model_id, action, selection_id=None: model_manager_v2().plan(model_id, action, planner=component_api.component_lifecycle, selection_id=selection_id),
         "tools_payload": lambda: {"status": "completed", "tools": get("tool_catalog")(get("component_statuses")())},
         "component_statuses": get("component_statuses"), "component_snapshot": component_api.snapshot,
         "component_detail": component_api.detail, "component_plan_lookup": component_api.lookup_plan,

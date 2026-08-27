@@ -46,3 +46,5 @@ rules:
     text: Capability Graph V2 composes only server-owned snapshots and evidence; it cannot launch, download, import, or promote an unverified capability to operational.
   - id: component-lifecycle-v2-authority
     text: Component Lifecycle Engine V2 may create only existing V8 server-owned plans; confirmation and execution remain with the durable V8 coordinator, while unregistered lifecycle adapters stay blocked.
+  - id: model-manager-v2-bounded-inventory
+    text: Model Manager V2 uses bounded catalog observations and opaque locations only; it blocks duplicate downloads, never scans all Models at page load, and delegates any import/reuse/verify/remove action to an existing V8 plan.
