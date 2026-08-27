@@ -193,6 +193,17 @@ class V8WindowsUxClosureTests(unittest.TestCase):
         self.assertIn("componentStatusCopy", components)
         self.assertIn("INSTALLED_UNVERIFIED", components)
 
+    def test_webview_dpi_contract_is_capability_aware_not_hardware_blocking(self) -> None:
+        contract = json.loads((ROOT / "architecture" / "v8_acceptance_gates.json").read_text(encoding="utf-8"))
+        webview = next(item for item in contract["gates"] if item["gate_id"] == "webview2_product_ux")
+        checks = set(webview["required_checks"])
+        self.assertIn("native_host_dpi_current", checks)
+        self.assertIn("native_host_dpi_capability_recorded", checks)
+        self.assertNotIn("dpi_100", checks)
+        self.assertNotIn("dpi_125", checks)
+        self.assertNotIn("dpi_150", checks)
+        self.assertEqual(webview["capability_evidence"]["native_unavailable_status"], "NOT_AVAILABLE_ON_TEST_HOST")
+
     def test_edited_javascript_parses(self) -> None:
         for relative in (
             "src/ui/app.js",

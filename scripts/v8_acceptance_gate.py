@@ -30,6 +30,7 @@ from scripts.v8_release_provenance import ReleasePolicyError, release_policy_sna
 GATES_PATH = ROOT / "architecture" / "v8_acceptance_gates.json"
 EVIDENCE_SCHEMA_VERSION = "v8-local-acceptance-evidence.v1"
 REPORT_SCHEMA_VERSION = "v8-local-gate-report.v1"
+WEBVIEW_CAPABILITY_REPORT_SCHEMA_VERSION = "v8-local-gate-report.v2"
 REPORTS_DIR_NAME = "reports"
 MAX_JSON_BYTES = 256 * 1024
 MAX_REPORT_BYTES = 512 * 1024
@@ -38,6 +39,8 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 GATE_ID = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
 CHECK_ID = re.compile(r"^[a-z][a-z0-9_.-]{1,95}$")
 EVIDENCE_STATUSES = frozenset({"PASS", "FAIL", "BLOCKED", "NOT_RUN"})
+_WEBVIEW_CAPABILITY_SCHEMA = "v8-webview-dpi-evidence.v1"
+_WEBVIEW_NATIVE_STATUSES = frozenset({"PASS", "NOT_AVAILABLE_ON_TEST_HOST"})
 REQUIRED_SOURCE_FILES = (
     "Plan_Miss.md",
     "architecture/v8_foundation.yaml",
@@ -128,7 +131,7 @@ def load_gate_contract(path: Path = GATES_PATH) -> dict[str, Any]:
     seen: set[str] = set()
     normalized: list[dict[str, Any]] = []
     for item in gates:
-        if not isinstance(item, dict) or set(item) != {"gate_id", "required", "required_checks"}:
+        if not isinstance(item, dict) or not {"gate_id", "required", "required_checks"}.issubset(item) or set(item) - {"gate_id", "required", "required_checks", "capability_evidence"}:
             raise AcceptanceGateError("GATE_CONTRACT_GATE_INVALID")
         gate_id = item.get("gate_id")
         required = item.get("required")
@@ -142,8 +145,27 @@ def load_gate_contract(path: Path = GATES_PATH) -> dict[str, Any]:
             if not isinstance(check_id, str) or CHECK_ID.fullmatch(check_id) is None or check_id in check_ids:
                 raise AcceptanceGateError("GATE_CONTRACT_REQUIRED_CHECKS_INVALID")
             check_ids.append(check_id)
+        capability_evidence = item.get("capability_evidence")
+        if gate_id == "webview2_product_ux" and capability_evidence is None:
+            raise AcceptanceGateError("GATE_CONTRACT_CAPABILITY_INVALID")
+        if capability_evidence is not None:
+            expected_capability = {"schema_version", "native_dpi_values", "native_unavailable_status", "layout_scales"}
+            if gate_id != "webview2_product_ux" or not isinstance(capability_evidence, dict) or set(capability_evidence) != expected_capability:
+                raise AcceptanceGateError("GATE_CONTRACT_CAPABILITY_INVALID")
+            native_values = capability_evidence.get("native_dpi_values")
+            layout_scales = capability_evidence.get("layout_scales")
+            if (
+                capability_evidence.get("schema_version") != _WEBVIEW_CAPABILITY_SCHEMA
+                or capability_evidence.get("native_unavailable_status") != "NOT_AVAILABLE_ON_TEST_HOST"
+                or not isinstance(native_values, list)
+                or not isinstance(layout_scales, list)
+                or native_values != [100, 125, 150]
+                or layout_scales != [100, 125, 150]
+            ):
+                raise AcceptanceGateError("GATE_CONTRACT_CAPABILITY_INVALID")
+            capability_evidence = dict(capability_evidence)
         seen.add(gate_id)
-        normalized.append({"gate_id": gate_id, "required": required, "required_checks": check_ids})
+        normalized.append({"gate_id": gate_id, "required": required, "required_checks": check_ids, "capability_evidence": capability_evidence})
 
     policy = value.get("release_policy")
     expected_policy = {
@@ -270,14 +292,19 @@ def _validate_pass_report(
     platform: str,
     expected_sha256: str,
     required_checks: list[str],
+    capability_evidence: Mapping[str, Any] | None = None,
 ) -> None:
     raw = _read_bytes(path, max_bytes=MAX_REPORT_BYTES, unreadable_code="EVIDENCE_REPORT_MISSING", too_large_code="EVIDENCE_REPORT_TOO_LARGE")
     if hashlib.sha256(raw).hexdigest() != expected_sha256:
         raise AcceptanceGateError("EVIDENCE_REPORT_DIGEST_MISMATCH")
     value = _parse_json(raw, invalid_code="EVIDENCE_REPORT_INVALID")
-    if not isinstance(value, dict) or set(value) != {"schema_version", "gate_id", "status", "platform", "source_commit", "checks"}:
+    expected_fields = {"schema_version", "gate_id", "status", "platform", "source_commit", "checks"}
+    if capability_evidence is not None:
+        expected_fields.add("capabilities")
+    if not isinstance(value, dict) or set(value) != expected_fields:
         raise AcceptanceGateError("EVIDENCE_REPORT_INVALID")
-    if value.get("schema_version") != REPORT_SCHEMA_VERSION or value.get("gate_id") != gate_id or value.get("status") != "PASS":
+    report_schema = WEBVIEW_CAPABILITY_REPORT_SCHEMA_VERSION if capability_evidence is not None else REPORT_SCHEMA_VERSION
+    if value.get("schema_version") != report_schema or value.get("gate_id") != gate_id or value.get("status") != "PASS":
         raise AcceptanceGateError("EVIDENCE_REPORT_BINDING_INVALID")
     if value.get("platform") != platform or value.get("source_commit") != source_commit:
         raise AcceptanceGateError("EVIDENCE_REPORT_BINDING_INVALID")
@@ -297,12 +324,61 @@ def _validate_pass_report(
     for check_id, passed in checks.items():
         if not isinstance(check_id, str) or CHECK_ID.fullmatch(check_id) is None or passed is not True:
             raise AcceptanceGateError("EVIDENCE_REPORT_CHECKS_INVALID")
+    if capability_evidence is not None:
+        _validate_webview_capabilities(value.get("capabilities"), capability_evidence)
+
+
+def _validate_webview_capabilities(value: Any, contract: Mapping[str, Any]) -> None:
+    """Validate bounded native-host availability and real WebView layout QA.
+
+    Native monitor DPI is a capability of the Windows test host, not a
+    requirement that every host can force into existence.  A PASS therefore
+    needs one actual native DPI and a real layout result for every requested
+    WebView scale.  Unavailable native levels stay explicit evidence, never
+    synthetic PASS booleans and never a product failure by themselves.
+    """
+
+    expected = {"schema_version", "native_host_dpi_current", "native_host_dpi", "webview_layout"}
+    if not isinstance(value, dict) or set(value) != expected:
+        raise AcceptanceGateError("EVIDENCE_WEBVIEW_CAPABILITY_INVALID")
+    values = contract.get("native_dpi_values")
+    scales = contract.get("layout_scales")
+    unavailable = contract.get("native_unavailable_status")
+    current = value.get("native_host_dpi_current")
+    native = value.get("native_host_dpi")
+    layout = value.get("webview_layout")
+    if (
+        value.get("schema_version") != contract.get("schema_version")
+        or not isinstance(values, list)
+        or not isinstance(scales, list)
+        or not isinstance(current, int)
+        or current not in values
+        or not isinstance(native, dict)
+        or not isinstance(layout, dict)
+        or set(native) != {str(item) for item in values}
+        or set(layout) != {str(item) for item in scales}
+    ):
+        raise AcceptanceGateError("EVIDENCE_WEBVIEW_CAPABILITY_INVALID")
+    if native.get(str(current)) != "PASS":
+        raise AcceptanceGateError("EVIDENCE_WEBVIEW_NATIVE_CURRENT_MISSING")
+    if not any(status == "PASS" for status in native.values()):
+        raise AcceptanceGateError("EVIDENCE_WEBVIEW_NATIVE_CURRENT_MISSING")
+    for scale in values:
+        status = native.get(str(scale))
+        if status not in _WEBVIEW_NATIVE_STATUSES or (status == "NOT_AVAILABLE_ON_TEST_HOST" and status != unavailable):
+            raise AcceptanceGateError("EVIDENCE_WEBVIEW_NATIVE_STATUS_INVALID")
+    for scale in scales:
+        item = layout.get(str(scale))
+        if not isinstance(item, dict) or set(item) != {"status", "no_clipping", "no_overlap", "usable_controls"}:
+            raise AcceptanceGateError("EVIDENCE_WEBVIEW_LAYOUT_INVALID")
+        if item.get("status") != "PASS" or item.get("no_clipping") is not True or item.get("no_overlap") is not True or item.get("usable_controls") is not True:
+            raise AcceptanceGateError("EVIDENCE_WEBVIEW_LAYOUT_FAILED")
 
 
 def _verify_pass_reports(evidence: Mapping[str, Any], evidence_path: Path, contract: Mapping[str, Any]) -> None:
     reports_dir = evidence_path.parent / REPORTS_DIR_NAME
     required_by_gate = {
-        str(item["gate_id"]): [str(check) for check in item["required_checks"]]
+        str(item["gate_id"]): item
         for item in contract["gates"]
         if item["required"] is True
     }
@@ -315,7 +391,8 @@ def _verify_pass_reports(evidence: Mapping[str, Any], evidence_path: Path, contr
             source_commit=str(evidence["source_commit"]),
             platform=str(evidence["platform"]),
             expected_sha256=str(item["report_sha256"]),
-            required_checks=required_by_gate[gate_id],
+            required_checks=[str(check) for check in required_by_gate[gate_id]["required_checks"]],
+            capability_evidence=required_by_gate[gate_id].get("capability_evidence"),
         )
 
 
@@ -447,6 +524,7 @@ __all__ = [
     "EVIDENCE_SCHEMA_VERSION",
     "GATES_PATH",
     "REPORT_SCHEMA_VERSION",
+    "WEBVIEW_CAPABILITY_REPORT_SCHEMA_VERSION",
     "ROOT",
     "current_head",
     "evaluate",
