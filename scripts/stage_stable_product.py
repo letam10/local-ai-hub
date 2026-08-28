@@ -335,7 +335,10 @@ def stage_product(
     product = {
         "schema_version": PRODUCT_SCHEMA,
         "product_id": PRODUCT_ID,
-        "version": version,
+        # The product remains the reviewed 8.0.1 shell; only the payload
+        # pointer carries a ``main-<sha>`` candidate identity.  A local
+        # exact-head smoke must never masquerade as a product-version bump.
+        "version": PRODUCT_VERSION,
         "launcher": "LocalAIHub.exe",
         "icon": ICON_NAME,
         "current_pointer": "current.json",

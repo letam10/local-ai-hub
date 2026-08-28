@@ -186,6 +186,7 @@ class StableProductShellTests(unittest.TestCase):
             self.assertEqual(result["identity"], "exact_source_head")
             self.assertEqual(result["version"], payload_id)
             self.assertEqual(result["source_commit"], commit)
+            self.assertEqual(json.loads((install / "product.json").read_text(encoding="utf-8"))["version"], "8.0.1")
             build = json.loads((install / "versions" / payload_id / "build.json").read_text(encoding="utf-8"))
             self.assertEqual(build["source_commit"], commit)
             self.assertEqual(resolve_launch_plan(install, allow_test_root=True).environment["LOCALAIHUB_BUILD_SHA"], commit)
