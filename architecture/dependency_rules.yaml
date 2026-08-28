@@ -54,3 +54,9 @@ rules:
     text: Resource Scheduler V2 accepts only a server-owned inventory/profile and exact internal job-worker lease identity; it reserves capacity without probing GPU or launching a worker, while browsers can inspect only read-only projections.
   - id: durable-job-engine-v2-truthful-execution
     text: Durable Job Engine V2 persists only opaque metadata with revision CAS and compensated scheduler bindings. Browser routes cannot claim or drive a worker; stale pre-start records require trusted readmission, queued/reconstruct-only records are never presented as executing, and history deletion never deletes artifacts.
+  - id: workflow-runtime-v2-plan-only
+    text: Workflow Runtime V2 validates typed graphs and creates only bounded capability/resource/artifact preflight plans. It cannot persist a workflow, reserve a scheduler slot, claim a worker, run a node, expose a local path or infer execution authority from a READY plan.
+  - id: workflow-data-v2-existing-owner
+    text: Project Workspace V2 and Artifact Library V2 are read-only path-free projections over existing server-owned stores. They cannot create a second metadata owner, generate a thumbnail, delete an artifact, mutate a project or broaden preview access.
+  - id: media-pipeline-v2-closed-preflight
+    text: Media Pipeline V2 accepts only opaque artifacts and finite allowlisted operations/backends. Its preflight never invokes FFmpeg, AnimeSR, RIFE, a provider or GPU workload, and FFmpeg fallbacks are never labelled as AI operations.

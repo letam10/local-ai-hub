@@ -78,6 +78,26 @@ class WorkflowLibrarySchemaTests(unittest.TestCase):
         result["library"]["workflows"][0]["title"] = "detached"
         self.assertEqual(entry()["title"], "Image review")
 
+    def test_optional_recent_and_favorite_metadata_are_typed_not_truthy_coerced(self) -> None:
+        from src.shared.schemas.workflow_library import validate_workflow_library
+
+        legacy = validate_workflow_library(library(entry()))
+        self.assertTrue(legacy["valid"])
+        self.assertFalse(legacy["library"]["workflows"][0]["favorite"])
+        self.assertEqual(legacy["library"]["workflows"][0]["last_opened_at"], "")
+
+        favorite = entry()
+        favorite["favorite"] = True
+        favorite["last_opened_at"] = "2026-08-28T00:00:00+00:00"
+        self.assertTrue(validate_workflow_library(library(favorite))["valid"])
+
+        malformed = entry()
+        malformed["favorite"] = "false"
+        self.assertFalse(validate_workflow_library(library(malformed))["valid"])
+        malformed = entry()
+        malformed["last_opened_at"] = 1
+        self.assertFalse(validate_workflow_library(library(malformed))["valid"])
+
     def test_rejects_unknown_path_secret_command_and_does_not_reflect_values(self) -> None:
         from src.shared.schemas.workflow_library import validate_workflow_library
 
@@ -388,6 +408,55 @@ class WorkflowLibraryStoreTests(unittest.TestCase):
             self.assertTrue(exported["ready"])
             exported["content"] = "mutated"
             self.assertNotEqual(store.export_json()["content"], "mutated")
+
+    def test_favorite_and_explicit_open_use_cas_and_keep_graph_detached(self) -> None:
+        from src.services.workflow_library import WorkflowLibraryStore
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store = WorkflowLibraryStore(Path(temporary) / "workflow_library.json")
+            saved = store.save_workflow(entry(), expected_revision=0)
+            self.assertTrue(saved["accepted"])
+            before = store.get_workflow("image-review")["workflow"]
+            favorite = store.set_favorite("image-review", True, expected_revision=1)
+            self.assertTrue(favorite["accepted"])
+            self.assertTrue(favorite["workflow"]["favorite"])
+            stale = store.mark_opened("image-review", expected_revision=1)
+            self.assertFalse(stale["accepted"])
+            self.assertEqual(stale["status"], "conflict")
+            opened = store.mark_opened("image-review", expected_revision=2)
+            self.assertTrue(opened["accepted"])
+            self.assertTrue(opened["workflow"]["last_opened_at"])
+            listing = store.list_workflows()
+            self.assertEqual(listing["recent_workflows"][0]["id"], "image-review")
+            self.assertTrue(listing["recent_workflows"][0]["favorite"])
+            self.assertEqual(store.get_workflow("image-review")["workflow"]["graph"], before["graph"])
+
+    def test_favorite_and_recent_routes_are_explicit_mutations(self) -> None:
+        from src.services.api.context import ApiContext
+        from src.services.api.router import ApiRequest
+        from src.services.api.router_registry import build_router
+        from src.services.workflow_library import WorkflowLibraryStore
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store = WorkflowLibraryStore(Path(temporary) / "workflow_library.json")
+            self.assertTrue(store.save_workflow(entry(), expected_revision=0)["accepted"])
+            router = build_router()
+
+            def dispatch(path: str, body: dict[str, object]) -> object:
+                return router.dispatch(
+                    ApiRequest(method="POST", path=path, query={}, headers={}, _body_reader=lambda _strict: body),
+                    ApiContext({"workflow_library_store": lambda: store}),
+                )
+
+            bad = dispatch("/api/workflow-library/image-review/favorite", {"favorite": "true"})
+            self.assertEqual(bad.status, 400)
+            favorite = dispatch("/api/workflow-library/image-review/favorite", {"favorite": True, "expected_revision": 1})
+            self.assertEqual(favorite.status, 200)
+            self.assertTrue(favorite.payload["accepted"])
+            opened = dispatch("/api/workflow-library/image-review/opened", {"expected_revision": 2})
+            self.assertEqual(opened.status, 200)
+            self.assertTrue(opened.payload["accepted"])
+            self.assertTrue(store.list_workflows()["recent_workflows"][0]["favorite"])
 
     def test_invalid_local_file_requires_recovery_without_overwrite(self) -> None:
         from src.services.workflow_library import WorkflowLibraryStore

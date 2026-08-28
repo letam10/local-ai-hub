@@ -15,6 +15,7 @@ import {
   getNodeAvailability,
   formatStatus,
   getNodeRun,
+  preflightWorkflowRuntimeV2,
   runNodeGraph,
   uploadFile,
   validateNodeGraph,
@@ -504,7 +505,7 @@ class HubGraphEditor {
     this.onRecipeApplied = onRecipeApplied;
     this.onPresetApplied = onPresetApplied;
     this.workflowLibrary = workflowLibrary;
-    this.workflowLibraryState = { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trước khi đồng bộ." };
+    this.workflowLibraryState = { status: "partial", reason: "Workflow Library server-owned adapter chưa khả dụng.", action: "Tiếp tục local draft; kiểm tra endpoint typed trước khi đồng bộ." };
     this.workflowLibraryRevision = null;
     this.registry = new Map();
     this.availability = { counts: {}, nodes: [] };
@@ -529,6 +530,7 @@ class HubGraphEditor {
     this.abort = new AbortController();
     this.minimapBounds = null;
     this.validation = null;
+    this.runtimePreflightResult = null;
     this.runStatus = "idle";
     this.savedFingerprint = "";
     this.unsaved = false;
@@ -757,7 +759,7 @@ class HubGraphEditor {
     const entry = workflowLibraryEntry(this.toHubGraph(), this.scope);
     const result = this.workflowLibrary?.save
       ? await this.workflowLibrary.save(entry, this.workflowLibraryRevision)
-      : { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trước khi đồng bộ." };
+      : { status: "partial", reason: "Workflow Library server-owned adapter chưa khả dụng.", action: "Tiếp tục local draft; kiểm tra endpoint typed trước khi đồng bộ." };
     this.workflowLibraryState = result || this.workflowLibraryState;
     if (Number.isInteger(result?.library_revision)) this.workflowLibraryRevision = result.library_revision;
     this.renderWorkflowStatus();
@@ -789,6 +791,40 @@ class HubGraphEditor {
     recent.value = this.graphData.id || "";
   }
 
+  libraryOptions() {
+    const values = Array.isArray(this.workflowLibraryState?.workflows) ? this.workflowLibraryState.workflows : [];
+    return values.slice(0, 120).map((item) => {
+      const id = typeof item?.id === "string" ? item.id : "";
+      if (!id) return "";
+      const favorite = item.favorite === true ? "★ " : "";
+      const title = String(item.title || id).slice(0, 160);
+      return `<option value="${escapeHtml(id)}">${escapeHtml(`${favorite}${title} · v${Number(item.revision) || 1}`)}</option>`;
+    }).join("");
+  }
+
+  currentLibraryWorkflow() {
+    const id = String(this.graphData?.id || "");
+    const values = Array.isArray(this.workflowLibraryState?.workflows) ? this.workflowLibraryState.workflows : [];
+    return values.find((item) => item?.id === id) || null;
+  }
+
+  refreshLibraryControls() {
+    const select = this.root?.querySelector("[data-graph-library]");
+    if (select) {
+      const selected = String(this.graphData?.id || "");
+      select.innerHTML = `<option value="">Mở workflow Library…</option>${this.libraryOptions()}`;
+      select.value = selected;
+    }
+    const favorite = this.root?.querySelector("[data-graph-action='favorite-library']");
+    if (favorite) {
+      const current = this.currentLibraryWorkflow();
+      favorite.disabled = !current;
+      favorite.setAttribute("aria-disabled", String(!current));
+      favorite.textContent = current?.favorite ? "Bỏ favorite" : "Favorite";
+      favorite.title = current ? "Cập nhật favorite qua Workflow Library server-owned." : "Lưu workflow vào Library trước khi đặt favorite.";
+    }
+  }
+
   renderWorkflowStatus() {
     const target = this.root?.querySelector("[data-graph-save-state]");
     if (!target) return;
@@ -802,6 +838,7 @@ class HubGraphEditor {
       libraryStatus.title = this.workflowLibraryState.reason || "";
     }
     this.refreshRecentControls();
+    this.refreshLibraryControls();
   }
 
   recentOptions() {
@@ -829,6 +866,61 @@ class HubGraphEditor {
       this.persist({ source: "recent", saved: true });
       this.showToast("Đã mở workflow trong Recent.");
     } catch (error) { this.showToast(error.message, "error"); }
+  }
+
+  async loadLibraryWorkflow(id) {
+    if (!id) return;
+    try {
+      const result = this.workflowLibrary?.get ? await this.workflowLibrary.get(id) : null;
+      const workflow = result?.workflow;
+      if (result?.status !== "ready" || !workflow?.graph) throw new Error(result?.action || result?.reason || "Không tìm thấy workflow trong Library.");
+      const validation = await validateNodeGraph(workflow.graph, false);
+      if (!validation.validation?.valid) throw new Error(validation.validation?.errors?.[0]?.message || "Workflow Library không còn hợp lệ.");
+      this.history = [];
+      this.future = [];
+      this.nodeStates.clear();
+      this.runProvenance = [];
+      this.hydrateLiteGraph(validation.validation.graph);
+      this.savedFingerprint = graphFingerprint(validation.validation.graph);
+      this.unsaved = false;
+      this.dirty = new Set(validation.validation.graph.nodes.map((node) => node.id));
+      this.recovered = false;
+      this.persist({ source: "library", saved: true });
+      // This is an explicit user-open action.  A Library GET itself remains
+      // side-effect free, while recent metadata gets the same CAS treatment
+      // as a favorite mutation.
+      const opened = this.workflowLibrary?.markOpened
+        ? await this.workflowLibrary.markOpened(id, this.workflowLibraryRevision)
+        : null;
+      if (Number.isInteger(opened?.library_revision)) this.workflowLibraryRevision = opened.library_revision;
+      await this.refreshWorkflowLibrary();
+      this.renderWorkflowStatus();
+      this.showToast("Đã mở workflow từ Workflow Library. Chưa thực thi node nào.");
+    } catch (error) {
+      this.showToast(error.message || "Không thể mở workflow từ Library.", "error");
+      this.refreshLibraryControls();
+    }
+  }
+
+  async toggleLibraryFavorite() {
+    const current = this.currentLibraryWorkflow();
+    if (!current) {
+      this.showToast("Lưu workflow vào Library trước khi đặt favorite.", "warning");
+      return;
+    }
+    try {
+      const result = this.workflowLibrary?.setFavorite
+        ? await this.workflowLibrary.setFavorite(current.id, !current.favorite, this.workflowLibraryRevision)
+        : null;
+      if (!result?.accepted) throw new Error(result?.action || result?.reason || "Không thể cập nhật favorite Workflow Library.");
+      this.workflowLibraryRevision = Number.isInteger(result.library_revision) ? result.library_revision : this.workflowLibraryRevision;
+      await this.refreshWorkflowLibrary();
+      this.renderWorkflowStatus();
+      this.showToast(current.favorite ? "Đã bỏ favorite workflow." : "Đã đặt favorite workflow.");
+    } catch (error) {
+      this.showToast(error.message || "Không thể cập nhật favorite Workflow Library.", "error");
+      this.refreshLibraryControls();
+    }
   }
 
   duplicateWorkflow() {
@@ -925,13 +1017,13 @@ class HubGraphEditor {
           <div><span class="eyebrow">NODE WORKFLOW</span><h2>${escapeHtml(this.graphData.title || `Image ${this.scope}`)}</h2><p>Canvas typed socket cho người mới: nối đúng kiểu dữ liệu, kiểm tra trước khi chạy và luôn thấy trạng thái backend.</p></div>
           <div class="graph-editor__header-status" data-graph-summary><span class="status-pill" data-status="idle">Chưa chạy</span><span class="tag">${escapeHtml(this.scope)}</span></div>
         </header>
-        <div class="graph-editor__workflow-bar"><label class="graph-workflow-title"><span>Tên workflow</span><input data-graph-title aria-label="Tên workflow" value="${escapeHtml(this.graphData.title || "")}" /></label><label class="graph-workflow-recent"><span>Recent</span><select data-graph-recent aria-label="Recent workflows"><option value="">Chọn workflow local…</option>${this.recentOptions()}</select></label><span class="graph-save-state" data-graph-save-state>Đã lưu local</span><button class="button button--compact" type="button" data-graph-action="duplicate">Nhân bản</button></div>
+        <div class="graph-editor__workflow-bar"><label class="graph-workflow-title"><span>Tên workflow</span><input data-graph-title aria-label="Tên workflow" value="${escapeHtml(this.graphData.title || "")}" /></label><label class="graph-workflow-recent"><span>Recent local</span><select data-graph-recent aria-label="Recent local workflows"><option value="">Chọn workflow local…</option>${this.recentOptions()}</select></label><label class="graph-workflow-recent"><span>Workflow Library</span><select data-graph-library aria-label="Workflow Library"><option value="">Mở workflow Library…</option>${this.libraryOptions()}</select></label><span class="graph-save-state" data-graph-save-state>Đã lưu local</span><button class="button button--compact" type="button" data-graph-action="favorite-library" disabled>Favorite</button><button class="button button--compact" type="button" data-graph-action="duplicate">Nhân bản</button></div>
         <div class="graph-editor__toolbar">
-          <div class="graph-editor__toolbar-group"><button class="button button--primary" type="button" data-graph-action="run" aria-label="${escapeHtml(nodeText("Run Graph"))}"${this.runButtonAttributes()}>Chạy workflow</button><button class="button" type="button" data-graph-action="validate">Kiểm tra</button><button class="button" type="button" data-graph-action="cancel" disabled>Hủy job</button><button class="button" type="button" data-graph-action="undo">Hoàn tác</button><button class="button" type="button" data-graph-action="redo">Làm lại</button></div>
+          <div class="graph-editor__toolbar-group"><button class="button button--primary" type="button" data-graph-action="run" aria-label="${escapeHtml(nodeText("Run Graph"))}"${this.runButtonAttributes()}>Chạy workflow</button><button class="button" type="button" data-graph-action="validate">Kiểm tra</button><button class="button" type="button" data-graph-action="runtime-preflight">Preflight V2</button><button class="button" type="button" data-graph-action="cancel" disabled>Hủy job</button><button class="button" type="button" data-graph-action="undo">Hoàn tác</button><button class="button" type="button" data-graph-action="redo">Làm lại</button></div>
           <div class="graph-editor__toolbar-group"><select data-graph-preset aria-label="Preset workflow"><option value="">Chọn template…</option>${this.presets.map((item) => `<option value="${escapeHtml(item.id)}" title="${escapeHtml(item.description || "")}">${escapeHtml(item.title)}${item.stage ? ` · ${escapeHtml(item.stage)}` : ""}</option>`).join("")}</select><button class="button" type="button" data-graph-action="save-local">Lưu local</button><button class="button" type="button" data-graph-action="export">Export JSON</button><label class="button graph-editor__import">Import JSON<input type="file" data-graph-import accept="application/json,.json" /></label></div>
         </div>
         <div class="graph-editor__options"><label><input type="checkbox" data-graph-option="auto" ${this.autoPreview ? "checked" : ""} /> Preview tự động (Auto Preview)</label><label><input type="checkbox" data-graph-option="draft" ${this.draft ? "checked" : ""} /> Draft ảnh</label><span>Bấm node để cộng dồn lựa chọn · Ctrl/Shift cũng cộng dồn · kéo nhóm để di chuyển · kéo vùng để chọn · bấm nền trống, Esc hoặc Xóa chọn để bỏ chọn</span></div>
-        <div class="graph-editor__statusbar"><span data-graph-validation>Chưa kiểm tra workflow.</span><span class="graph-editor__availability">${this.availability.counts?.operational || 0} ${escapeHtml(nodeText("operational"))} · ${this.availability.counts?.partial || 0} ${escapeHtml(nodeText("partial"))} · ${this.availability.counts?.unavailable || 0} ${escapeHtml(nodeText("unavailable"))}</span><span class="graph-operation-scope-status" data-graph-operation-evidence role="status">${escapeHtml(this.operationScopeSummary())}</span></div>
+        <div class="graph-editor__statusbar"><span data-graph-validation>Chưa kiểm tra workflow.</span><span data-graph-runtime-preflight>Chưa có preflight Workflow Runtime V2.</span><span class="graph-editor__availability">${this.availability.counts?.operational || 0} ${escapeHtml(nodeText("operational"))} · ${this.availability.counts?.partial || 0} ${escapeHtml(nodeText("partial"))} · ${this.availability.counts?.unavailable || 0} ${escapeHtml(nodeText("unavailable"))}</span><span class="graph-operation-scope-status" data-graph-operation-evidence role="status">${escapeHtml(this.operationScopeSummary())}</span></div>
         <div class="graph-editor__panel-controls" role="toolbar" aria-label="Node Studio panels">
           <button class="button button--compact" type="button" data-graph-action="toggle-palette" aria-expanded="${String(this.panelState.palette !== "collapsed")}">Palette</button>
           <button class="button button--compact" type="button" data-graph-action="toggle-inspector" aria-expanded="${String(this.panelState.inspector !== "collapsed")}">Inspector</button>
@@ -1067,6 +1159,7 @@ class HubGraphEditor {
       if (option === "auto") { this.autoPreview = event.target.checked; this.persist(); return; }
       if (option === "draft") { this.draft = event.target.checked; this.persist(); return; }
       if (event.target.matches("[data-graph-recent]")) { this.loadRecent(event.target.value); return; }
+      if (event.target.matches("[data-graph-library]")) { this.loadLibraryWorkflow(event.target.value); return; }
       if (event.target.matches("[data-graph-preset]")) { this.loadPreset(event.target.value); return; }
       if (event.target.matches("[data-graph-property]")) { this.changeProperty(event.target); return; }
       if (event.target.matches("[data-graph-asset]")) { this.uploadAsset(event.target); return; }
@@ -1433,6 +1526,20 @@ class HubGraphEditor {
       validation.textContent = errors.length ? `${errors.length} lỗi cần sửa: ${errors[0].message || errors[0].code}` : (this.validation ? "Workflow hợp lệ để lưu; bấm Chạy workflow để kiểm tra input bắt buộc." : "Chưa kiểm tra workflow.");
       validation.className = errors.length ? "graph-editor__validation graph-editor__validation--error" : "graph-editor__validation";
     }
+    const runtimePreflight = this.root.querySelector("[data-graph-runtime-preflight]");
+    if (runtimePreflight) {
+      const plan = this.runtimePreflightResult || {};
+      const state = String(plan.workflow_state || "");
+      const blockers = Array.isArray(plan.capability_plan?.blockers) ? plan.capability_plan.blockers.length : 0;
+      const resourceBlockers = Array.isArray(plan.resource_plan?.blockers) ? plan.resource_plan.blockers.length : 0;
+      const artifactBlockers = Array.isArray(plan.artifact_plan?.blockers) ? plan.artifact_plan.blockers.length : 0;
+      runtimePreflight.textContent = !this.runtimePreflightResult
+        ? "Chưa có preflight Workflow Runtime V2."
+        : plan.status === "invalid"
+          ? `Preflight V2 không hợp lệ: ${plan.error || "graph"}.`
+          : `Preflight V2 · ${state || "DRAFT"} · ${blockers + resourceBlockers + artifactBlockers} blocker · chưa thực thi.`;
+      runtimePreflight.dataset.runtimePreflight = String(plan.status || "not_run");
+    }
     this.renderWorkflowStatus();
     this.updateToolbar();
   }
@@ -1504,6 +1611,7 @@ class HubGraphEditor {
     }
     this.beforeChange = null;
     this.graphData = next;
+    this.runtimePreflightResult = null;
     this.unsaved = true;
     this.markDirty(next.nodes.map((node) => node.id));
     this.persist();
@@ -1623,6 +1731,7 @@ class HubGraphEditor {
 
   hydrateLiteGraph(graph) {
     this.hydrating = true;
+    this.runtimePreflightResult = null;
     this.liteGraph.clear();
     this.liteCanvas.clear();
     this.groups = clone(graph.groups || []);
@@ -1821,6 +1930,22 @@ class HubGraphEditor {
     }
   }
 
+  async runtimePreflight() {
+    try {
+      this.runtimePreflightResult = await preflightWorkflowRuntimeV2({ graph: this.toHubGraph() });
+      this.renderGraphStatus();
+      const state = this.runtimePreflightResult?.workflow_state || "DRAFT";
+      const status = this.runtimePreflightResult?.status || "unavailable";
+      this.showToast(status === "completed" ? `Đã tạo preflight V2 · ${state}. Chưa có node nào được thực thi.` : (this.runtimePreflightResult?.error || "Preflight V2 chưa khả dụng."), status === "completed" ? "success" : "warning");
+      return this.runtimePreflightResult;
+    } catch (error) {
+      this.runtimePreflightResult = { status: "unavailable", error: error.message || "workflow_runtime_v2_unavailable" };
+      this.renderGraphStatus();
+      this.showToast(error.message || "Không thể tạo Workflow Runtime V2 preflight.", "error");
+      return this.runtimePreflightResult;
+    }
+  }
+
   exportGraph() {
     const graph = this.toHubGraph();
     const blob = new Blob([JSON.stringify(graph, null, 2)], { type: "application/json" });
@@ -1918,6 +2043,7 @@ class HubGraphEditor {
       this.run();
     }
     if (action === "validate") this.validate(false);
+    if (action === "runtime-preflight") this.runtimePreflight();
     if (action === "cancel") this.cancel();
     if (action === "undo") this.undo();
     if (action === "redo") this.redo();
@@ -1935,6 +2061,7 @@ class HubGraphEditor {
     if (action === "fit") this.fitView();
     if (action === "export") this.exportGraph();
     if (action === "save-library") { this.saveToLibrary(); return; }
+    if (action === "favorite-library") { this.toggleLibraryFavorite(); return; }
     if (action === "save-local") { this.persist(); this.showToast("Workflow đã lưu local trong WebView."); }
   }
 

@@ -105,6 +105,62 @@ _FEATURES: tuple[dict[str, Any], ...] = (
         "reason": "Persists/reconciles opaque job metadata, but actual dispatch requires a separately registered server-owned execution owner.",
         "next_action": "Treat reconstruct-only records as not executed until a real owner claims an exact reservation.",
     },
+    {
+        "feature_id": "workflow_runtime_v2",
+        "api_version": "v2",
+        "feature_state": "PLAN_ONLY",
+        "execution": "not_run",
+        "dry_run": True,
+        "routes": [
+            _route("workflow_runtime.v2_contract", "GET", "/api/workflow-runtime/v2", execution_mode="read_only"),
+            _route("workflow_runtime.v2_preflight", "POST", "/api/workflow-runtime/v2/preflight", execution_mode="plan_only"),
+            _route("workflow_runtime.v2_dispatch", "POST", "/api/workflow-runtime/v2/dispatch", execution_mode="owner_required"),
+        ],
+        "reason": "Builds a typed graph/capability/resource/artifact preflight without reserving or executing a workflow.",
+        "next_action": "Review the plan and register a separately verified server-owned execution owner before dispatch.",
+    },
+    {
+        "feature_id": "project_workspace_v2",
+        "api_version": "v2",
+        "feature_state": "METADATA_ONLY",
+        "execution": "not_run",
+        "dry_run": True,
+        "routes": [
+            _route("project_workspace.v2_snapshot", "GET", "/api/project-workspace/v2", execution_mode="read_only"),
+            _route("project_workspace.v2_detail", "GET", "/api/project-workspace/v2/{project_id}", execution_mode="read_only"),
+            _route("project_workspace.v2_export_manifest", "GET", "/api/project-workspace/v2/{project_id}/manifest", execution_mode="read_only"),
+            _route("project_workspace.v2_attach_workflow", "POST", "/api/project-workspace/v2/{project_id}/workflows", execution_mode="metadata_only"),
+            _route("project_workspace.v2_attach_job", "POST", "/api/project-workspace/v2/{project_id}/jobs", execution_mode="metadata_only"),
+        ],
+        "reason": "Projects are projected from existing server-owned metadata; an explicit route may attach only an already-validated opaque workflow/job reference.",
+        "next_action": "Review the project state, then attach an existing opaque reference explicitly; this does not run a workflow or copy an artifact.",
+    },
+    {
+        "feature_id": "artifact_library_v2",
+        "api_version": "v2",
+        "feature_state": "READ_ONLY",
+        "execution": "not_run",
+        "dry_run": True,
+        "routes": [
+            _route("artifact_library.v2_snapshot", "GET", "/api/artifact-library/v2", execution_mode="read_only"),
+            _route("artifact_library.v2_detail", "GET", "/api/artifact-library/v2/{artifact_id}", execution_mode="read_only"),
+        ],
+        "reason": "Exposes only existing opaque artifact metadata and bounded loopback preview references.",
+        "next_action": "Inspect lineage or open an existing preview; no thumbnail or export task runs from this surface.",
+    },
+    {
+        "feature_id": "media_pipeline_v2",
+        "api_version": "v2",
+        "feature_state": "PLAN_ONLY",
+        "execution": "not_run",
+        "dry_run": True,
+        "routes": [
+            _route("media_pipeline.v2_contract", "GET", "/api/media-pipeline/v2", execution_mode="read_only"),
+            _route("media_pipeline.v2_preflight", "POST", "/api/media-pipeline/v2/preflight", execution_mode="plan_only"),
+        ],
+        "reason": "Publishes a closed media allowlist and preflight; FFmpeg, AnimeSR, RIFE and providers are not executed.",
+        "next_action": "Review the media plan and use a future server-owned execution owner after bounded evidence exists.",
+    },
 )
 
 _FEATURE_IDS = frozenset(item["feature_id"] for item in _FEATURES)

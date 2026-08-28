@@ -34,6 +34,9 @@ from .schemas import (
     MAX_COMPARE_ITEMS,
     MAX_PROJECTS,
     MAX_RECIPES,
+    MAX_JOBS_PER_PROJECT,
+    MAX_WORKFLOWS_PER_PROJECT,
+    JOB_ID_RE,
     PRESET_ID_RE,
     PROJECT_CONTRACT,
     PROJECT_EXPORT_CONTRACT,
@@ -42,6 +45,7 @@ from .schemas import (
     RECIPE_ID_RE,
     RECIPE_PACK_CONTRACT,
     WORKSPACE_CONTRACT,
+    WORKFLOW_ID_RE,
     is_artifact_id,
     new_id,
     normalize_project,
@@ -686,6 +690,8 @@ class CreativeProjectManager:
             "tags": list(project.get("tags", [])),
             "asset_count": len(project.get("asset_ids", [])),
             "recipe_count": len(project.get("recipe_ids", [])),
+            "workflow_count": len(project.get("workflow_ids", [])),
+            "job_count": len(project.get("job_ids", [])),
             "image_mask_studio_link_count": len(project.get("image_mask_studio_links", [])),
             "selected_asset_id": project.get("selected_asset_id"),
             "selected_recipe_id": project.get("selected_recipe_id"),
@@ -810,6 +816,8 @@ class CreativeProjectManager:
                 "project": self._public_project(project, state),
                 "assets": [self._decorate_asset(asset_id, state) for asset_id in project.get("asset_ids", [])],
                 "recipes": [self._public_recipe(state["recipes"][recipe_id]) for recipe_id in project.get("recipe_ids", []) if recipe_id in state["recipes"]],
+                "workflow_ids": list(project.get("workflow_ids", [])),
+                "job_ids": list(project.get("job_ids", [])),
                 "image_mask_studio_links": _copy(project.get("image_mask_studio_links", [])),
                 "compare": board,
                 "recovery": recovery,
@@ -850,7 +858,7 @@ class CreativeProjectManager:
             if project is None:
                 raise KeyError(project_id)
             next_value = {**project}
-            for field in ("title", "description", "tags", "workflow_preset", "selected_asset_id", "selected_recipe_id"):
+            for field in ("title", "description", "tags", "workflow_preset", "selected_asset_id", "selected_recipe_id", "workflow_ids", "job_ids"):
                 if field in source:
                     next_value[field] = source[field]
             normalized = normalize_project(next_value, allow_id=True)
@@ -859,6 +867,51 @@ class CreativeProjectManager:
             return self._public_project(project, state)
 
         return {"status": "completed", "project": self._mutate(mutate)}
+
+    def attach_workflow(self, project_id: str, workflow_id: object) -> dict[str, Any]:
+        """Attach an already-known workflow identifier without copying its graph.
+
+        The caller must separately confirm that the workflow is available from
+        the server-owned Workflow Library.  The Project Manager persists only
+        the opaque/finite reference, never a graph path or duplicated schema.
+        """
+
+        if not PROJECT_ID_RE.fullmatch(project_id) or not isinstance(workflow_id, str) or not WORKFLOW_ID_RE.fullmatch(workflow_id):
+            raise ValueError("Workflow reference không hợp lệ.")
+
+        def mutate(state: dict[str, Any]) -> dict[str, Any]:
+            project = state["projects"].get(project_id)
+            if project is None:
+                raise KeyError(project_id)
+            references = project.setdefault("workflow_ids", [])
+            if workflow_id not in references:
+                if len(references) >= MAX_WORKFLOWS_PER_PROJECT:
+                    raise ValueError("Project đã đạt giới hạn workflow reference.")
+                references.append(workflow_id)
+            self._touch_project(state, project_id)
+            return self._public_project(project, state)
+
+        return {"status": "completed", "project": self._mutate(mutate), "workflow_id": workflow_id}
+
+    def attach_job(self, project_id: str, job_id: object) -> dict[str, Any]:
+        """Attach an existing server-owned job identity without mutating it."""
+
+        if not PROJECT_ID_RE.fullmatch(project_id) or not isinstance(job_id, str) or not JOB_ID_RE.fullmatch(job_id):
+            raise ValueError("Job reference không hợp lệ.")
+
+        def mutate(state: dict[str, Any]) -> dict[str, Any]:
+            project = state["projects"].get(project_id)
+            if project is None:
+                raise KeyError(project_id)
+            references = project.setdefault("job_ids", [])
+            if job_id not in references:
+                if len(references) >= MAX_JOBS_PER_PROJECT:
+                    raise ValueError("Project đã đạt giới hạn job reference.")
+                references.append(job_id)
+            self._touch_project(state, project_id)
+            return self._public_project(project, state)
+
+        return {"status": "completed", "project": self._mutate(mutate), "job_id": job_id}
 
     def archive_project(self, project_id: str, *, archived: bool = True) -> dict[str, Any]:
         def mutate(state: dict[str, Any]) -> dict[str, Any]:
@@ -1534,7 +1587,7 @@ class CreativeProjectManager:
             return {"found": False, "artifact_id": artifact_id, "project_ids": [], "favorite": False, "tags": []}
         project_ids = []
         for proj in state.get("projects", {}).values():
-            if artifact_id in (proj.get("artifact_ids") or []):
+            if artifact_id in (proj.get("asset_ids") or []):
                 project_ids.append(proj.get("id"))
         return {
             "found": True,

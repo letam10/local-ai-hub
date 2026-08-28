@@ -417,6 +417,11 @@ class WorkflowLibraryStore:
             "schema_version": WORKFLOW_LIBRARY_SCHEMA_VERSION,
             "library_revision": library["library_revision"],
             "workflows": _copy(library["workflows"]),
+            "recent_workflows": _copy(sorted(
+                library["workflows"],
+                key=lambda item: (str(item.get("last_opened_at") or ""), str(item.get("updated_at") or ""), str(item.get("id") or "")),
+                reverse=True,
+            )[:12]),
             "recovery": snapshot["recovery"],
         }
 
@@ -525,6 +530,8 @@ class WorkflowLibraryStore:
         value.setdefault("status", "draft")
         value.setdefault("source", "local")
         value.setdefault("tags", [])
+        value.setdefault("favorite", False)
+        value.setdefault("last_opened_at", "")
         value.setdefault("created_at", _now())
         value["updated_at"] = _now()
         value["revision"] = revision
@@ -546,7 +553,11 @@ class WorkflowLibraryStore:
             existing = next((item for item in library["workflows"] if item["id"] == workflow["id"]), None)
             next_revision = current_revision + 1
             entry_revision = int(existing["revision"]) + 1 if existing else 1
-            prepared = self._prepare_workflow(workflow, revision=entry_revision)
+            candidate = _copy(workflow)
+            if existing is not None:
+                candidate.setdefault("favorite", existing.get("favorite", False))
+                candidate.setdefault("last_opened_at", existing.get("last_opened_at", ""))
+            prepared = self._prepare_workflow(candidate, revision=entry_revision)
             if prepared is None:
                 return {"accepted": False, "status": "invalid", "errors": [_error("invalid", "Sửa workflow theo schema rồi thử lại.")]}
             workflows = [item for item in library["workflows"] if item["id"] != prepared["id"]]
@@ -562,6 +573,65 @@ class WorkflowLibraryStore:
             return {"accepted": True, "status": "ready", "library_revision": next_revision, "workflow": _copy(prepared)}
 
     upsert = save_workflow
+
+    def set_favorite(self, workflow_id: str, favorite: object, *, expected_revision: int | None = None) -> dict[str, Any]:
+        """Persist one explicit favorite marker without touching its graph."""
+
+        if not isinstance(workflow_id, str) or type(favorite) is not bool:
+            return {"accepted": False, "status": "invalid", "errors": [_error("invalid", "Chọn workflow và trạng thái favorite hợp lệ.")]}
+        with self._locked() as (location, code):
+            if location is None:
+                return {"accepted": False, "status": "recovery_required", "errors": [_error("recovery_required", "Review the managed Workflow Library location before retrying.")]}
+            library, recovery, source_bytes = self._read_with_bytes(location)
+            if recovery["status"] != "clean":
+                return {"accepted": False, "status": "recovery_required", "errors": [_error("recovery_required", recovery["action"])]}
+            if expected_revision is not None and expected_revision != library["library_revision"]:
+                return {"accepted": False, "status": "conflict", "library_revision": library["library_revision"], "errors": [_error("revision_conflict", "Tải lại Library trước khi cập nhật favorite.")]}
+            existing = next((item for item in library["workflows"] if item["id"] == workflow_id), None)
+            if existing is None:
+                return {"accepted": False, "status": "not_found", "errors": [_error("not_found", "Chọn workflow tồn tại trước khi cập nhật favorite.")]}
+            next_entry = _copy(existing)
+            next_entry["favorite"] = favorite
+            next_entry["updated_at"] = _now()
+            next_entry["revision"] = int(existing["revision"]) + 1
+            workflows = [next_entry if item["id"] == workflow_id else item for item in library["workflows"]]
+            next_library = {"schema_version": WORKFLOW_LIBRARY_SCHEMA_VERSION, "library_revision": library["library_revision"] + 1, "workflows": workflows}
+            write_status = self._atomic_write(next_library, expected_bytes=source_bytes, expected_guard=location)
+            if write_status == "written":
+                return {"accepted": True, "status": "ready", "library_revision": next_library["library_revision"], "workflow": _copy(next_entry)}
+            if write_status == "conflict":
+                return {"accepted": False, "status": "conflict", "library_revision": library["library_revision"], "errors": [_error("revision_conflict", "Tải lại Library trước khi cập nhật favorite.")]}
+            return {"accepted": False, "status": "recovery_required" if write_status == "recovery" else "error", "errors": [_error("recovery_required" if write_status == "recovery" else "write_failed", "Giữ dữ liệu hiện có và kiểm tra recovery trước khi thử lại.")]}
+
+    def mark_opened(self, workflow_id: str, *, expected_revision: int | None = None) -> dict[str, Any]:
+        """Record an explicit library-open event; GET remains side-effect free."""
+
+        if not isinstance(workflow_id, str):
+            return {"accepted": False, "status": "invalid", "errors": [_error("invalid", "Chọn workflow hợp lệ trước khi đánh dấu gần đây.")]}
+        with self._locked() as (location, code):
+            if location is None:
+                return {"accepted": False, "status": "recovery_required", "errors": [_error("recovery_required", "Review the managed Workflow Library location before retrying.")]}
+            library, recovery, source_bytes = self._read_with_bytes(location)
+            if recovery["status"] != "clean":
+                return {"accepted": False, "status": "recovery_required", "errors": [_error("recovery_required", recovery["action"])]}
+            if expected_revision is not None and expected_revision != library["library_revision"]:
+                return {"accepted": False, "status": "conflict", "library_revision": library["library_revision"], "errors": [_error("revision_conflict", "Tải lại Library trước khi đánh dấu workflow gần đây.")]}
+            existing = next((item for item in library["workflows"] if item["id"] == workflow_id), None)
+            if existing is None:
+                return {"accepted": False, "status": "not_found", "errors": [_error("not_found", "Chọn workflow tồn tại trước khi đánh dấu gần đây.")]}
+            next_entry = _copy(existing)
+            now = _now()
+            next_entry["last_opened_at"] = now
+            next_entry["updated_at"] = now
+            next_entry["revision"] = int(existing["revision"]) + 1
+            workflows = [next_entry if item["id"] == workflow_id else item for item in library["workflows"]]
+            next_library = {"schema_version": WORKFLOW_LIBRARY_SCHEMA_VERSION, "library_revision": library["library_revision"] + 1, "workflows": workflows}
+            write_status = self._atomic_write(next_library, expected_bytes=source_bytes, expected_guard=location)
+            if write_status == "written":
+                return {"accepted": True, "status": "ready", "library_revision": next_library["library_revision"], "workflow": _copy(next_entry)}
+            if write_status == "conflict":
+                return {"accepted": False, "status": "conflict", "library_revision": library["library_revision"], "errors": [_error("revision_conflict", "Tải lại Library trước khi đánh dấu workflow gần đây.")]}
+            return {"accepted": False, "status": "recovery_required" if write_status == "recovery" else "error", "errors": [_error("recovery_required" if write_status == "recovery" else "write_failed", "Giữ dữ liệu hiện có và kiểm tra recovery trước khi thử lại.")]}
 
     def delete_workflow(self, workflow_id: str, *, expected_revision: int | None = None) -> dict[str, Any]:
         with self._locked() as (location, code):

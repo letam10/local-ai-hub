@@ -49,6 +49,10 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
     update_service: Any | None = None
     resource_scheduler_service: Any | None = None
     durable_job_engine_v2_service: Any | None = None
+    workflow_runtime_v2_service: Any | None = None
+    project_workspace_v2_service: Any | None = None
+    artifact_library_v2_service: Any | None = None
+    media_pipeline_v2_service: Any | None = None
     from src.services.projection_cache import BoundedProjectionCache
 
     projection_cache = BoundedProjectionCache()
@@ -274,6 +278,83 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
             artifact_complete=artifact_complete if callable(artifact_complete) else None,
         )
 
+    def artifact_describer(artifact_id: str) -> Mapping[str, Any] | None:
+        """Read an existing opaque artifact projection without creating a store."""
+
+        from src.services.artifact_access_v8 import describe
+
+        value = describe(artifact_id)
+        return value if isinstance(value, Mapping) else None
+
+    def artifact_lister(*, limit: int = 120) -> list[dict[str, Any]]:
+        from src.services.artifact_access_v8 import list_artifacts
+
+        value = list_artifacts(limit=limit)
+        return value if isinstance(value, list) else []
+
+    def workflow_runtime_v2() -> Any:
+        """Compose the plan-only M2 workflow facade from existing read models."""
+
+        nonlocal workflow_runtime_v2_service
+        if workflow_runtime_v2_service is None:
+            from src.services.workflow_runtime_v2 import WorkflowRuntimeV2
+
+            workflow_runtime_v2_service = WorkflowRuntimeV2(
+                capability_snapshot=lambda: capability_graph().snapshot(),
+                resource_snapshot=lambda: resource_scheduler().snapshot(),
+                artifact_describer=artifact_describer,
+                durable_admit=lambda request: durable_job_engine_v2().admit(request),
+                dispatch_binding=(get("workflow_runtime_v2_execution_binding") if isinstance(get("workflow_runtime_v2_execution_binding"), Mapping) else None),
+            )
+        return workflow_runtime_v2_service
+
+    def workflow_library_store() -> Any | None:
+        """Resolve the existing Library owner once without changing its API.
+
+        API routes intentionally receive the factory and call it per request.
+        The M2 read projection needs the resulting store object, not the
+        callable itself.  Keeping that distinction here avoids a second store
+        and preserves the V5 no-follow/CAS implementation.
+        """
+
+        value = get("workflow_library_store")
+        try:
+            return value() if callable(value) else value
+        except Exception:
+            return None
+
+    def project_workspace_v2() -> Any:
+        nonlocal project_workspace_v2_service
+        if project_workspace_v2_service is None:
+            from src.services.workflow_runtime_v2 import ProjectWorkspaceV2
+
+            project_workspace_v2_service = ProjectWorkspaceV2(
+                project,
+                workflow_library_store(),
+                durable_job_lookup=lambda job_id: durable_job_engine_v2().get(job_id),
+            )
+        return project_workspace_v2_service
+
+    def artifact_library_v2() -> Any:
+        nonlocal artifact_library_v2_service
+        if artifact_library_v2_service is None:
+            from src.services.workflow_runtime_v2 import ArtifactLibraryV2
+
+            artifact_library_v2_service = ArtifactLibraryV2(
+                artifact_lister=artifact_lister,
+                artifact_describer=artifact_describer,
+                project_manager=project,
+            )
+        return artifact_library_v2_service
+
+    def media_pipeline_v2() -> Any:
+        nonlocal media_pipeline_v2_service
+        if media_pipeline_v2_service is None:
+            from src.services.workflow_runtime_v2 import MediaPipelineV2
+
+            media_pipeline_v2_service = MediaPipelineV2(artifact_describer)
+        return media_pipeline_v2_service
+
     def prepare_shutdown() -> dict[str, Any]:
         status, payload = get("prepare_owned_shutdown")()
         return {**payload, "http_status": status}
@@ -325,6 +406,18 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         "durable_job_v2_archive": lambda job_id: durable_job_engine_v2().archive(job_id),
         "durable_job_v2_delete_history": lambda job_ids: durable_job_engine_v2().delete_history(job_ids),
         "durable_job_v2_reconcile_startup": reconcile_durable_job_v2_startup,
+        "workflow_runtime_v2_contract": lambda: workflow_runtime_v2().contract(),
+        "workflow_runtime_v2_preflight": lambda payload: workflow_runtime_v2().preflight(payload),
+        "workflow_runtime_v2_dispatch": lambda payload: workflow_runtime_v2().dispatch(payload),
+        "project_workspace_v2_snapshot": lambda: project_workspace_v2().snapshot(),
+        "project_workspace_v2_detail": lambda project_id: project_workspace_v2().detail(project_id),
+        "project_workspace_v2_attach_workflow": lambda project_id, workflow_id: project_workspace_v2().attach_workflow(project_id, workflow_id),
+        "project_workspace_v2_attach_job": lambda project_id, job_id: project_workspace_v2().attach_job(project_id, job_id),
+        "project_workspace_v2_export_manifest": lambda project_id: project_workspace_v2().export_manifest(project_id),
+        "artifact_library_v2_snapshot": lambda limit=120: artifact_library_v2().snapshot(limit=limit),
+        "artifact_library_v2_detail": lambda artifact_id: artifact_library_v2().detail(artifact_id),
+        "media_pipeline_v2_contract": lambda: media_pipeline_v2().contract(),
+        "media_pipeline_v2_preflight": lambda payload: media_pipeline_v2().preflight(payload),
         "tools_payload": lambda: {"status": "completed", "tools": get("tool_catalog")(get("component_statuses")())},
         "component_statuses": get("component_statuses"), "component_snapshot": component_api.snapshot,
         "component_detail": component_api.detail, "component_plan_lookup": component_api.lookup_plan,

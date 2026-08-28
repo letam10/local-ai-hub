@@ -60,6 +60,12 @@ to-video nhưng trả `unavailable` có hướng dẫn vì chưa có adapter gen
 local đã smoke. Chi tiết template và ma trận backend nằm ở
 [Video Creative Workflow Milestone 2](VIDEO_CREATIVE_WORKFLOW_MILESTONE_2.md).
 
+Post-V8 M2 bắt đầu bằng lớp `workflow-runtime.v2` preflight và các projection
+`project-workspace.v2`, `artifact-library.v2`, `media-pipeline.v2`. Các lớp này
+không thay thế owner persistence V7/V8, không reserve GPU/job, không chạy media
+và chỉ dùng opaque artifact ID. Chi tiết hợp đồng xem
+[Post-V8 Workflow & Data M2](architecture/POST_V8_WORKFLOW_DATA_M2.md).
+
 ## API và kiểm thử
 
 Các route Node Studio chính:

@@ -20,6 +20,10 @@ _FEATURES = {
     "model_manager_v2": "PLAN_ONLY",
     "resource_scheduler_v2": "READ_ONLY",
     "durable_job_engine_v2": "OWNER_REQUIRED",
+    "workflow_runtime_v2": "PLAN_ONLY",
+    "project_workspace_v2": "METADATA_ONLY",
+    "artifact_library_v2": "READ_ONLY",
+    "media_pipeline_v2": "PLAN_ONLY",
 }
 
 

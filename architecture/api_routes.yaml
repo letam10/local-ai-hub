@@ -174,6 +174,44 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "artifact_library.v2_snapshot",
+      "method": "GET",
+      "path": "/api/artifact-library/v2",
+      "domain": "artifacts",
+      "owner": "src/services/api/routes/artifact_library_v2.py",
+      "service": "artifacts",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "artifact_library.v2_detail",
+      "method": "GET",
+      "path": "/api/artifact-library/v2/{artifact_id}",
+      "domain": "artifacts",
+      "owner": "src/services/api/routes/artifact_library_v2.py",
+      "service": "artifacts",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "artifacts.get",
       "method": "GET",
       "path": "/api/artifacts/{artifact_id}",
@@ -1086,6 +1124,25 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "media_pipeline.v2_contract",
+      "method": "GET",
+      "path": "/api/media-pipeline/v2",
+      "domain": "media",
+      "owner": "src/services/api/routes/media_pipeline_v2.py",
+      "service": "media",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "model_manager.v2_snapshot",
       "method": "GET",
       "path": "/api/model-manager/v2",
@@ -1377,6 +1434,63 @@
       "domain": "productization",
       "owner": "src/services/api/routes/productization.py",
       "service": "productization",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "project_workspace.v2_snapshot",
+      "method": "GET",
+      "path": "/api/project-workspace/v2",
+      "domain": "projects",
+      "owner": "src/services/api/routes/project_workspace_v2.py",
+      "service": "projects",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "project_workspace.v2_detail",
+      "method": "GET",
+      "path": "/api/project-workspace/v2/{project_id}",
+      "domain": "projects",
+      "owner": "src/services/api/routes/project_workspace_v2.py",
+      "service": "projects",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "project_workspace.v2_export_manifest",
+      "method": "GET",
+      "path": "/api/project-workspace/v2/{project_id}/manifest",
+      "domain": "projects",
+      "owner": "src/services/api/routes/project_workspace_v2.py",
+      "service": "projects",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -1813,6 +1927,25 @@
       "path": "/api/workflow-library/{workflow_id}",
       "domain": "workflows",
       "owner": "src/services/api/routes/workflows.py",
+      "service": "workflows",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "workflow_runtime.v2_contract",
+      "method": "GET",
+      "path": "/api/workflow-runtime/v2",
+      "domain": "workflows",
+      "owner": "src/services/api/routes/workflow_runtime_v2.py",
       "service": "workflows",
       "streaming": false,
       "body_limit": "json_default",
@@ -3119,6 +3252,25 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "media_pipeline.v2_preflight",
+      "method": "POST",
+      "path": "/api/media-pipeline/v2/preflight",
+      "domain": "media",
+      "owner": "src/services/api/routes/media_pipeline_v2.py",
+      "service": "media",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "media.run",
       "method": "POST",
       "path": "/api/media/run",
@@ -3277,6 +3429,44 @@
       "domain": "productization",
       "owner": "src/services/api/routes/productization.py",
       "service": "productization",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "project_workspace.v2_attach_job",
+      "method": "POST",
+      "path": "/api/project-workspace/v2/{project_id}/jobs",
+      "domain": "projects",
+      "owner": "src/services/api/routes/project_workspace_v2.py",
+      "service": "projects",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "project_workspace.v2_attach_workflow",
+      "method": "POST",
+      "path": "/api/project-workspace/v2/{project_id}/workflows",
+      "domain": "projects",
+      "owner": "src/services/api/routes/project_workspace_v2.py",
+      "service": "projects",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -3732,6 +3922,82 @@
       "path": "/api/workflow-library/migration/plan",
       "domain": "workflows",
       "owner": "src/services/api/routes/workflows.py",
+      "service": "workflows",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "workflows.favorite",
+      "method": "POST",
+      "path": "/api/workflow-library/{workflow_id}/favorite",
+      "domain": "workflows",
+      "owner": "src/services/api/routes/workflows.py",
+      "service": "workflows",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "workflows.opened",
+      "method": "POST",
+      "path": "/api/workflow-library/{workflow_id}/opened",
+      "domain": "workflows",
+      "owner": "src/services/api/routes/workflows.py",
+      "service": "workflows",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "workflow_runtime.v2_dispatch",
+      "method": "POST",
+      "path": "/api/workflow-runtime/v2/dispatch",
+      "domain": "workflows",
+      "owner": "src/services/api/routes/workflow_runtime_v2.py",
+      "service": "workflows",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "workflow_runtime.v2_preflight",
+      "method": "POST",
+      "path": "/api/workflow-runtime/v2/preflight",
+      "domain": "workflows",
+      "owner": "src/services/api/routes/workflow_runtime_v2.py",
       "service": "workflows",
       "streaming": false,
       "body_limit": "json_default",

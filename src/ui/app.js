@@ -28,6 +28,10 @@ import {
   getComfyBridgeWorkflow,
   getComfyBridgeWorkflows,
   getCreativeOverview,
+  getProjectWorkspaceV2,
+  getArtifactLibraryV2,
+  getMediaPipelineV2,
+  preflightMediaPipelineV2,
   getImageMaskCompare,
   getImageMaskSession,
   getImageMaskStudioOverview,
@@ -38,8 +42,11 @@ import {
   getDurableJobs,
   retryDurableJob,
   getWorkflowLibrary,
+  getWorkflowLibraryEntry,
   saveWorkflowLibrary,
   deleteWorkflowLibrary,
+  setWorkflowLibraryFavorite,
+  markWorkflowLibraryOpened,
   planWorkflowLibraryMigration,
   confirmWorkflowLibraryMigration,
   getLifecycle,
@@ -58,6 +65,7 @@ import {
   getStorage,
   getStorageScan,
   getProject,
+  attachProjectWorkflowV2,
   getSettings,
   patchSettings,
   resetSettingsSection,
@@ -127,9 +135,9 @@ globalThis.__localAiHubFrontendStarted = true;
 
 const state = {
   health: {}, capabilities: {}, productization: {}, components: [], componentManager: {}, componentPlans: {}, tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", jobQuery: "", jobTypeFilter: "all", jobSort: "newest", jobPage: 1, apiStatus: "loading", apiError: "",
-  creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
+  creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, projectWorkspaceV2: {}, artifactLibraryV2: {}, mediaPipelineV2: {}, mediaPipelinePreflight: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
-  workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trong V5-D trước khi đồng bộ." },
+  workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa khả dụng.", action: "Tiếp tục local draft; kiểm tra endpoint typed trước khi đồng bộ." },
   storageScan: { status: "idle", progress: 0, exact: false },
   productionCatalog: { status: "partial", models: [], runtimes: [] }, updateCenter: { settings: { policy: "manual" }, records: [] }, modelFilters: { query: "", category: "", installed: "all" }, modelActionStatus: "", settingsActionStatus: "", settingsDirty: false,
   featureRegistry: FEATURE_REGISTRY,
@@ -197,8 +205,11 @@ const artifactPreviewLayer = document.querySelector("#artifact-preview-layer");
 const mainContent = document.querySelector("#main-content");
 const workflowLibraryAdapter = createWorkflowLibraryAdapter(null, {
   list: getWorkflowLibrary,
+  get: ({ id }) => getWorkflowLibraryEntry(id),
   save: ({ entry, expected_revision }) => saveWorkflowLibrary(entry, expected_revision),
   remove: ({ id, expected_revision }) => deleteWorkflowLibrary(id, expected_revision),
+  set_favorite: ({ id, favorite, expected_revision }) => setWorkflowLibraryFavorite(id, favorite, expected_revision),
+  mark_opened: ({ id, expected_revision }) => markWorkflowLibraryOpened(id, expected_revision),
   plan_migration: ({ entries }) => planWorkflowLibraryMigration(entries),
   confirm_migration: ({ entries, expected_revision }) => confirmWorkflowLibraryMigration(entries, expected_revision),
 });
@@ -802,8 +813,15 @@ const refreshFast = async ({ quiet = false, renderView = true } = {}) => {
 const refreshCreative = async ({ renderView = true } = {}) => {
   state.creativeLoading = true;
   try {
-    const creative = await getCreativeOverview();
-    state.creative = creative || {};
+    const [creativeResult, workspaceResult, artifactsResult] = await Promise.allSettled([
+      getCreativeOverview(),
+      getProjectWorkspaceV2(),
+      getArtifactLibraryV2(120),
+    ]);
+    if (creativeResult.status !== "fulfilled") throw creativeResult.reason;
+    state.creative = creativeResult.value || {};
+    if (workspaceResult.status === "fulfilled") state.projectWorkspaceV2 = workspaceResult.value || {};
+    if (artifactsResult.status === "fulfilled") state.artifactLibraryV2 = artifactsResult.value || {};
     const projects = state.creative.projects || [];
     const selected = state.selectedProjectId && projects.some((item) => item.id === state.selectedProjectId)
       ? state.selectedProjectId
@@ -1019,6 +1037,32 @@ const loadRouteData = async ({ scan = false } = {}) => {
     }
     render();
   }
+  if (route === "media" || route === "video" || route === "animesr") {
+    if (routeLoad) return routeLoad;
+    routeLoad = Promise.allSettled([getMediaPipelineV2(), getArtifactLibraryV2(120)]).then((results) => {
+      if (results[0].status === "fulfilled") state.mediaPipelineV2 = results[0].value || {};
+      else state.mediaPipelineV2 = { status: "unavailable", execution: "not_run", dry_run: true };
+      if (results[1].status === "fulfilled") state.artifactLibraryV2 = results[1].value || state.artifactLibraryV2;
+      render();
+    }).catch(() => {
+      state.mediaPipelineV2 = { status: "unavailable", execution: "not_run", dry_run: true };
+      render();
+    }).finally(() => { routeLoad = null; });
+    return routeLoad;
+  }
+  if (route === "projects") {
+    if (routeLoad) return routeLoad;
+    // The bootstrap contains the legacy Creative overview for a fast first
+    // paint, but M2 project/artifact projections are route data.  Fetch them
+    // when Projects is selected rather than rendering a false unavailable
+    // fallback until the user happens to press the manual refresh button.
+    routeLoad = refreshCreative({ renderView: false }).then(() => {
+      if (routeId() === "projects") render();
+    }).catch((error) => {
+      if (routeId() === "projects") showToast(error.message || "Không thể tải Creative Workspace.", "error");
+    }).finally(() => { routeLoad = null; });
+    return routeLoad;
+  }
   if (route === "diagnostics") {
     if (routeLoad) return routeLoad;
     routeLoad = getDiagnosticsSnapshot().then((res) => {
@@ -1222,6 +1266,10 @@ const handleCreativeForm = async (form) => {
   } else if (kind === "import-project") {
     result = await importProject({ manifest: JSON.parse(String(values.manifest || "{}")), conflict: values.conflict || "copy" });
     state.selectedProjectId = result.project?.id || state.selectedProjectId;
+  } else if (kind === "attach-workflow-v2") {
+    const projectId = form.dataset.projectId || state.selectedProjectId;
+    if (!projectId || !values.workflow_id) throw new Error("Chọn project và workflow hợp lệ trước khi liên kết.");
+    result = await attachProjectWorkflowV2(projectId, values.workflow_id);
   } else if (kind === "asset-tags") {
     result = await updateAsset(form.dataset.assetId, { tags: splitTags(values.tags) });
   } else if (kind === "asset-collection") {
@@ -1412,6 +1460,37 @@ document.addEventListener("input", (event) => {
 });
 
 document.addEventListener("submit", async (event) => {
+  const mediaPreflightForm = event.target.closest("form[data-media-preflight-form]");
+  if (mediaPreflightForm) {
+    event.preventDefault();
+    const submit = mediaPreflightForm.querySelector("button[type=submit]"); if (submit) submit.disabled = true;
+    inlineResult(mediaPreflightForm, "Đang lập kế hoạch media từ artifact opaque…");
+    try {
+      const values = Object.fromEntries(new FormData(mediaPreflightForm).entries());
+      const operation = String(values.operation || "");
+      const options = operation === "trim"
+        ? { start_seconds: numberOr(values.start_seconds, 0), end_seconds: numberOr(values.end_seconds, 0) }
+        : operation === "resize"
+          ? { width: Math.trunc(numberOr(values.width, 0)), height: Math.trunc(numberOr(values.height, 0)) }
+          : operation === "fps" || operation === "frame_interpolation"
+            ? { fps: numberOr(values.fps, 0) }
+            : operation === "video_upscale"
+              ? { scale: Math.trunc(numberOr(values.scale, 0)) }
+              : {};
+      const payload = { artifact_id: String(values.artifact_id || ""), operation, options };
+      if (values.backend) payload.backend = String(values.backend);
+      const result = await preflightMediaPipelineV2(payload);
+      state.mediaPipelinePreflight = result || null;
+      const resultText = result?.status === "partial"
+        ? `Đã lập preflight ${result.operation || operation} bằng ${result.backend || "backend"}. Chưa thực thi.`
+        : result?.reason || result?.error || "Preflight media chưa khả dụng.";
+      inlineResult(mediaPreflightForm, resultText, result?.status === "partial" ? "success" : "warning");
+      showToast(resultText, result?.status === "partial" ? "success" : "warning");
+      render({ focus: "main" });
+    } catch (error) { inlineResult(mediaPreflightForm, error.message, "error"); showToast(error.message, "error"); }
+    finally { if (submit) submit.disabled = false; }
+    return;
+  }
   const imageMaskForm = event.target.closest("form[data-image-mask-form]");
   if (imageMaskForm) {
     event.preventDefault();
