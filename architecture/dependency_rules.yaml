@@ -43,14 +43,14 @@ rules:
   - id: update-delta-preservation
     text: Update activation preserves unchanged component files and a rollback slot; only the reviewed candidate leaf is replaced.
   - id: capability-graph-read-only
-    text: Capability Graph V2 composes only server-owned snapshots and evidence; it cannot launch, download, import, or promote an unverified capability to operational.
+    text: Capability Graph V2 composes only server-owned snapshots and fresh fingerprinted evidence; it cannot launch, download, import, or promote an unverified or stale capability to operational.
   - id: feature-discovery-v2-protocol-only
-    text: Feature Discovery V2 advertises finite API contracts only. It cannot infer runtime readiness, probe hardware, expose local paths, or imply that a discoverable endpoint can execute work.
+    text: Feature Discovery V2 advertises only finite contracts confirmed by the active Router. It cannot infer runtime readiness, probe hardware, expose local paths, or imply that a discoverable endpoint can execute work.
   - id: component-lifecycle-v2-authority
     text: Component Lifecycle Engine V2 may create only existing V8 server-owned plans; confirmation and execution remain with the durable V8 coordinator, while unregistered lifecycle adapters stay blocked.
   - id: model-manager-v2-bounded-inventory
     text: Model Manager V2 uses bounded catalog observations and opaque locations only; it blocks duplicate downloads, never scans all Models at page load, and delegates any import/reuse/verify/remove action to an existing V8 plan.
   - id: resource-scheduler-server-owned
-    text: Resource Scheduler V2 accepts only a server-owned inventory/profile and exact internal job-worker identity; it reserves capacity without probing GPU or launching a worker, while browsers can inspect only read-only projections.
+    text: Resource Scheduler V2 accepts only a server-owned inventory/profile and exact internal job-worker lease identity; it reserves capacity without probing GPU or launching a worker, while browsers can inspect only read-only projections.
   - id: durable-job-engine-v2-truthful-execution
-    text: Durable Job Engine V2 persists only opaque metadata and exact scheduler bindings. Browser routes cannot claim or drive a worker; queued/reconstruct-only records are never presented as executing, and history deletion never deletes artifacts.
+    text: Durable Job Engine V2 persists only opaque metadata with revision CAS and compensated scheduler bindings. Browser routes cannot claim or drive a worker; stale pre-start records require trusted readmission, queued/reconstruct-only records are never presented as executing, and history deletion never deletes artifacts.

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 from typing import Any, Callable, Mapping
 
 
@@ -47,7 +49,45 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
     update_service: Any | None = None
     resource_scheduler_service: Any | None = None
     durable_job_engine_v2_service: Any | None = None
+    from src.services.projection_cache import BoundedProjectionCache
+
+    projection_cache = BoundedProjectionCache()
     get = bindings.get
+
+    def projection_fingerprint(value: object) -> str:
+        """Fingerprint already-owned bounded metadata without public output."""
+
+        try:
+            encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError):
+            # An uncanonicalizable binding is never cached.  The fixed
+            # fingerprint keeps the builder path deterministic without
+            # reflecting a potentially unsafe value in any API result.
+            return "uncacheable"
+        return hashlib.sha256(encoded).hexdigest()
+
+    def bound_value(name: str, default: object) -> object:
+        value = get(name)
+        return value() if callable(value) else default if value is None else value
+
+    def catalog_snapshot() -> tuple[dict[str, Any], str]:
+        raw = productization().catalog.snapshot()
+        catalog = dict(raw) if isinstance(raw, Mapping) else {"models": [], "runtimes": []}
+        fingerprint = projection_fingerprint(catalog)
+        return projection_cache.get_or_build("post_v8.catalog", fingerprint, lambda: catalog, cacheable=fingerprint != "uncacheable"), fingerprint
+
+    def has_live_execution(items: object) -> bool:
+        if not isinstance(items, list):
+            return False
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("component_status") or item.get("status") or "").casefold() == "running":
+                return True
+            smoke = item.get("last_smoke")
+            if isinstance(smoke, Mapping) and smoke.get("execution") in {"running", "cancelling", "paused"}:
+                return True
+        return False
 
     def model_service() -> ModelManager:
         nonlocal model_manager
@@ -86,35 +126,94 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
             return service.catalog.inspect_runtime(component_id)
         return None
 
-    def capability_graph() -> Any:
+    def capability_graph_bundle() -> tuple[Any, str, bool]:
         """Compose V2 from existing server-owned, bounded snapshots only."""
 
         from src.services.capability_graph import build_component_capability_graph
 
         component_items = get("component_statuses")()
         tool_items = get("tool_catalog")(component_items)
-        catalog_snapshot = productization().catalog.snapshot()
-        return build_component_capability_graph(
-            component_statuses=component_items,
-            tool_records=tool_items,
-            catalog_snapshot=catalog_snapshot,
+        catalog, catalog_fingerprint = catalog_snapshot()
+        engine_evidence = bound_value("capability_engine_evidence", {})
+        resource_evidence = bound_value("capability_resource_evidence", {})
+        if not resource_evidence:
+            # A scheduler/hardware-fit observation is a bounded server-owned
+            # source for resource:gpu.  It is accepted only when the snapshot
+            # itself carries a current observed-free value and fingerprint;
+            # declared total VRAM never promotes the dependency on its own.
+            scheduler_snapshot = resource_scheduler().snapshot()
+            inventory = scheduler_snapshot.get("inventory") if isinstance(scheduler_snapshot, Mapping) else {}
+            gpus = inventory.get("gpus") if isinstance(inventory, Mapping) else []
+            gpu = next((item for item in gpus if isinstance(item, Mapping) and isinstance(item.get("vram_free_observed_mb"), int) and isinstance(item.get("observed_at"), str) and isinstance(item.get("source_fingerprint"), str)), None)
+            if gpu is not None:
+                resource_evidence = {
+                    "gpu": {
+                        "status": "available",
+                        "fingerprint": gpu["source_fingerprint"],
+                        "source_fingerprint": gpu["source_fingerprint"],
+                        "source_revision": str(scheduler_snapshot.get("schema_version") or "resource-scheduler"),
+                        "observed_at": gpu["observed_at"],
+                        "freshness_seconds": 300,
+                    },
+                }
+        inputs = {
+            "components": component_items,
+            "tools": tool_items,
+            "catalog_fingerprint": catalog_fingerprint,
+            "engine_evidence": engine_evidence,
+            "resource_evidence": resource_evidence,
+        }
+        fingerprint = projection_fingerprint(inputs)
+        dynamic_evidence = bool(engine_evidence) or bool(resource_evidence)
+        cacheable = fingerprint != "uncacheable" and not has_live_execution(component_items) and not dynamic_evidence
+        graph = projection_cache.get_or_build(
+            "post_v8.capability_graph",
+            fingerprint,
+            lambda: build_component_capability_graph(
+                component_statuses=component_items,
+                tool_records=tool_items,
+                catalog_snapshot=catalog,
+                engine_evidence=engine_evidence if isinstance(engine_evidence, Mapping) else None,
+                resource_evidence=resource_evidence if isinstance(resource_evidence, Mapping) else None,
+            ),
+            cacheable=cacheable,
         )
+        return graph, fingerprint, cacheable
+
+    def capability_graph() -> Any:
+        return capability_graph_bundle()[0]
 
     def component_lifecycle_engine() -> Any:
         """Compose the V2 lifecycle planning facade from the V2 graph only."""
 
         from src.services.component_lifecycle_engine import ComponentLifecycleEngine
 
-        return ComponentLifecycleEngine(graph=capability_graph())
+        graph, fingerprint, cacheable = capability_graph_bundle()
+        return projection_cache.get_or_build(
+            "post_v8.component_lifecycle",
+            fingerprint,
+            lambda: ComponentLifecycleEngine(graph=graph),
+            cacheable=cacheable,
+        )
 
     def model_manager_v2() -> Any:
         """Compose the V2 model inventory from the bounded production catalog."""
 
         from src.services.model_manager_v2 import ModelManagerV2
 
-        return ModelManagerV2(
-            catalog_snapshot=productization().catalog.snapshot(),
-            lifecycle_engine=component_lifecycle_engine(),
+        catalog, catalog_fingerprint = catalog_snapshot()
+        graph, graph_fingerprint, cacheable = capability_graph_bundle()
+        observations = bound_value("model_manager_v2_observations", [])
+        fingerprint = projection_fingerprint({"catalog": catalog_fingerprint, "graph": graph_fingerprint, "observations": observations})
+        return projection_cache.get_or_build(
+            "post_v8.model_manager",
+            fingerprint,
+            lambda: ModelManagerV2(
+                catalog_snapshot=catalog,
+                lifecycle_engine=component_lifecycle_engine(),
+                observations=observations if isinstance(observations, list) else None,
+            ),
+            cacheable=cacheable and fingerprint != "uncacheable",
         )
 
     def resource_scheduler() -> Any:
@@ -126,7 +225,12 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
 
             hardware_provider = get("resource_scheduler_hardware")
             hardware_snapshot = hardware_provider() if callable(hardware_provider) else None
-            resource_scheduler_service = ResourceScheduler(hardware_snapshot=hardware_snapshot)
+            profile_provider = get("resource_scheduler_profiles")
+            profiles = profile_provider() if callable(profile_provider) else None
+            resource_scheduler_service = ResourceScheduler(
+                hardware_snapshot=hardware_snapshot,
+                profiles=profiles if isinstance(profiles, Mapping) else None,
+            )
         return resource_scheduler_service
 
     def durable_job_engine_v2() -> Any:
@@ -150,6 +254,7 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
                 store=DurableJobStoreV2(store_path),
                 scheduler=resource_scheduler(),
                 owners=owners,
+                readmission_preflight=(get("durable_job_v2_readmission_preflight") if callable(get("durable_job_v2_readmission_preflight")) else None),
             )
         return durable_job_engine_v2_service
 
@@ -200,8 +305,8 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         "capability_graph_blockers": lambda capability_id: capability_graph().blockers(capability_id),
         "capability_graph_safe_actions": lambda capability_id: capability_graph().safe_actions(capability_id),
         "capability_graph_verification_evidence": lambda capability_id: capability_graph().verification_evidence(capability_id),
-        "feature_discovery_v2_snapshot": lambda: __import__("src.services.feature_discovery_v2", fromlist=["snapshot"]).snapshot(),
-        "feature_discovery_v2_detail": lambda feature_id: __import__("src.services.feature_discovery_v2", fromlist=["detail"]).detail(feature_id),
+        "feature_discovery_v2_snapshot": lambda: __import__("src.services.feature_discovery_v2", fromlist=["snapshot"]).snapshot(__import__("src.services.api.router_registry", fromlist=["build_router"]).build_router()),
+        "feature_discovery_v2_detail": lambda feature_id: __import__("src.services.feature_discovery_v2", fromlist=["detail"]).detail(feature_id, __import__("src.services.api.router_registry", fromlist=["build_router"]).build_router()),
         "component_lifecycle_v2_snapshot": lambda: component_lifecycle_engine().snapshot(),
         "component_lifecycle_v2_detail": lambda capability_id: component_lifecycle_engine().inspect(capability_id),
         "component_lifecycle_v2_plan": lambda capability_id, action: component_lifecycle_engine().plan(capability_id, action, planner=component_api.component_lifecycle),
@@ -215,6 +320,7 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         "durable_job_v2_detail": lambda job_id: durable_job_engine_v2().get(job_id),
         "durable_job_v2_admit": lambda request: durable_job_engine_v2().admit(request),
         "durable_job_v2_retry": lambda job_id, mode: durable_job_engine_v2().retry(job_id, mode=mode),
+        "durable_job_v2_readmit_after_restart": lambda job_id: durable_job_engine_v2().readmit_after_restart(job_id),
         "durable_job_v2_cancel": lambda job_id: durable_job_engine_v2().cancel(job_id),
         "durable_job_v2_archive": lambda job_id: durable_job_engine_v2().archive(job_id),
         "durable_job_v2_delete_history": lambda job_ids: durable_job_engine_v2().delete_history(job_ids),

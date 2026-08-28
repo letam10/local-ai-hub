@@ -104,11 +104,13 @@ class ComponentLifecycleEngineV2Tests(unittest.TestCase):
         snapshot = self.engine.snapshot()
         self.assertEqual(snapshot["schema_version"], COMPONENT_LIFECYCLE_SCHEMA_VERSION)
         self.assertEqual(snapshot["supported_actions"], list(LIFECYCLE_ACTIONS))
+        self.assertEqual(snapshot["supported_capability_kinds"], ["model", "runtime"])
         records = {item["capability_id"]: item for item in snapshot["components"]}
         model = records["model:faster-whisper-large-v3"]
         component = records["component:whisper"]
         self.assertTrue(model["lifecycle_eligible"])
         self.assertFalse(component["lifecycle_eligible"])
+        self.assertIn("inspect-only", component["lifecycle_limitation"])
         self.assertEqual(model["component_type"], "model")
         self.assertIn("worker:whisper", {item["capability_id"] for item in model["blockers"]})
         actions = {item["action"]: item for item in model["actions"]}

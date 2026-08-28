@@ -24,6 +24,10 @@ def _job(char: str) -> str:
     return "jobv5_" + char * 32
 
 
+def _numbered_job(value: int) -> str:
+    return "jobv5_" + f"{value:032x}"
+
+
 def _hardware(*, vram_mb: int = 8192) -> dict[str, object]:
     return {
         "cpu_slots": 8,
@@ -66,9 +70,10 @@ class ResourceSchedulerTests(unittest.TestCase):
         self.assertEqual(wrong_worker["code"], "reservation_identity_mismatch")
         running = self.scheduler.claim_running(_job("d"), "worker:whisper", reservation)
         self.assertEqual(running["state"], "RUNNING")
-        wrong_reservation = self.scheduler.finish(_job("d"), "worker:whisper", "resv_" + "f" * 32, succeeded=True)
+        lease = running["lease"]["lease_id"]
+        wrong_reservation = self.scheduler.finish(_job("d"), "worker:whisper", "resv_" + "f" * 32, succeeded=True, lease_id=lease)
         self.assertEqual(wrong_reservation["code"], "reservation_identity_mismatch")
-        completed = self.scheduler.finish(_job("d"), "worker:whisper", reservation, succeeded=True)
+        completed = self.scheduler.finish(_job("d"), "worker:whisper", reservation, succeeded=True, lease_id=lease)
         self.assertEqual(completed["state"], "SUCCEEDED")
         self.assertIsNone(completed["reservation"])
         self.assertEqual(self.scheduler.snapshot()["inventory"]["gpus"][0]["vram_reserved_mb"], 0)
@@ -78,8 +83,9 @@ class ResourceSchedulerTests(unittest.TestCase):
         waiting = self.scheduler.submit(_job("8"), "worker:vision", "vision_gpu_2gb")
         self.assertEqual(waiting["state"], "WAITING_RESOURCE")
         reservation = first["reservation"]["reservation_id"]
-        self.assertEqual(self.scheduler.claim_running(_job("7"), "worker:whisper", reservation)["state"], "RUNNING")
-        self.assertEqual(self.scheduler.finish(_job("7"), "worker:whisper", reservation, succeeded=True)["state"], "SUCCEEDED")
+        running = self.scheduler.claim_running(_job("7"), "worker:whisper", reservation)
+        self.assertEqual(running["state"], "RUNNING")
+        self.assertEqual(self.scheduler.finish(_job("7"), "worker:whisper", reservation, succeeded=True, lease_id=running["lease"]["lease_id"])["state"], "SUCCEEDED")
         promoted = self.scheduler.job(_job("8"))
         self.assertEqual(promoted["state"], "PREPARING")
         self.assertIsNotNone(promoted["reservation"])
@@ -128,6 +134,73 @@ class ResourceSchedulerTests(unittest.TestCase):
         encoded = json.dumps(snapshot).lower()
         self.assertNotIn("path", encoded)
         self.assertNotIn("secret", encoded)
+
+    def test_worker_lease_is_required_and_expiry_releases_reservation_without_a_worker(self) -> None:
+        scheduler = ResourceScheduler(hardware_snapshot=_hardware(), lease_ttl_seconds=10)
+        start = time.monotonic()
+        prepared = scheduler.submit(_job("a"), "worker:whisper", "whisper_gpu_2gb", now=start)
+        reservation = prepared["reservation"]["reservation_id"]
+        running = scheduler.claim_running(_job("a"), "worker:whisper", reservation, now=start)
+        self.assertRegex(running["lease"]["lease_id"], r"^lease_[a-f0-9]{32}$")
+        missing_lease = scheduler.finish(_job("a"), "worker:whisper", reservation, succeeded=True)
+        self.assertEqual(missing_lease["code"], "worker_lease_required")
+        reconciliation = scheduler.reconcile(now=start + 11)
+        self.assertEqual(reconciliation["lease_expired"], 1)
+        self.assertEqual(scheduler.job(_job("a"))["state"], "FAILED")
+        self.assertEqual(scheduler.job(_job("a"))["reason_code"], "worker_lease_expired")
+        self.assertIsNone(scheduler.job(_job("a"))["reservation"])
+
+    def test_terminal_records_are_pruned_so_more_than_512_sequential_jobs_remain_admissible(self) -> None:
+        scheduler = ResourceScheduler(hardware_snapshot=_hardware())
+        start = time.monotonic()
+        for index in range(600):
+            admitted = scheduler.submit(_numbered_job(index), "worker:ffmpeg", "ffmpeg_probe", now=start)
+            self.assertEqual(admitted["state"], "PREPARING")
+            reservation = admitted["reservation"]["reservation_id"]
+            running = scheduler.claim_running(_numbered_job(index), "worker:ffmpeg", reservation, now=start)
+            completed = scheduler.finish(
+                _numbered_job(index), "worker:ffmpeg", reservation,
+                succeeded=True, lease_id=running["lease"]["lease_id"],
+            )
+            self.assertEqual(completed["state"], "SUCCEEDED")
+        snapshot = scheduler.snapshot()
+        self.assertLessEqual(len(snapshot["jobs"]), 128)
+        later = scheduler.submit(_numbered_job(601), "worker:ffmpeg", "ffmpeg_probe", now=start)
+        self.assertEqual(later["state"], "PREPARING")
+
+    def test_gpu_exclusivity_is_enforced_for_both_existing_and_new_reservations(self) -> None:
+        common = {
+            "estimated_vram_mb": 1024, "estimated_ram_mb": 256, "gpu_required": True,
+            "cpu_fallback": False, "priority": 50, "interruptible": True, "batchable": True,
+            "cpu_slots": 1, "disk_mb": 64, "runtime_slot": None, "provider_slot": None,
+        }
+        profiles = {
+            "shared_gpu": {"profile_id": "shared_gpu", "exclusive": False, **common},
+            "exclusive_gpu": {"profile_id": "exclusive_gpu", "exclusive": True, **common},
+        }
+        forward = ResourceScheduler(hardware_snapshot=_hardware(), profiles=profiles)
+        self.assertEqual(forward.submit(_job("1"), "worker:ffmpeg", "shared_gpu")["state"], "PREPARING")
+        blocked_new = forward.submit(_job("2"), "worker:whisper", "exclusive_gpu")
+        self.assertEqual(blocked_new["reason_code"], "gpu_exclusive_conflict")
+        reverse = ResourceScheduler(hardware_snapshot=_hardware(), profiles=profiles)
+        self.assertEqual(reverse.submit(_job("3"), "worker:ffmpeg", "exclusive_gpu")["state"], "PREPARING")
+        blocked_existing = reverse.submit(_job("4"), "worker:whisper", "shared_gpu")
+        self.assertEqual(blocked_existing["reason_code"], "gpu_exclusive_conflict")
+
+    def test_server_owned_current_free_vram_and_safety_margin_bound_admission(self) -> None:
+        hardware = _hardware(vram_mb=8192)
+        hardware["gpu_safety_margin_mb"] = 512
+        hardware["gpus"][0]["free_vram_mb"] = 2600
+        hardware["gpus"][0]["observed_at"] = "2026-08-28T00:00:00+00:00"
+        hardware["gpus"][0]["source_fingerprint"] = "a" * 64
+        scheduler = ResourceScheduler(hardware_snapshot=hardware)
+        allowed = scheduler.submit(_job("5"), "worker:whisper", "whisper_gpu_2gb")
+        self.assertEqual(allowed["state"], "PREPARING")
+        # The 2 GiB reservation plus the fixed 512 MiB margin means no
+        # additional GPU profile can be admitted from the observed free value.
+        snapshot = scheduler.snapshot()
+        self.assertEqual(snapshot["inventory"]["gpus"][0]["vram_free_observed_mb"], 2600)
+        self.assertEqual(snapshot["inventory"]["gpus"][0]["vram_available_for_reservation_mb"], 40)
 
 
 class ResourceSchedulerApiTests(unittest.TestCase):

@@ -107,8 +107,15 @@ class DurableJobStoreV2:
             connection.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS durable_jobs_v2("
-                "job_id TEXT PRIMARY KEY, record_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+                "job_id TEXT PRIMARY KEY, record_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+                "revision INTEGER NOT NULL DEFAULT 1)"
             )
+            columns = {str(item[1]) for item in connection.execute("PRAGMA table_info(durable_jobs_v2)").fetchall()}
+            if "revision" not in columns:
+                # A prior V2 preview record is preserved.  It receives an
+                # implicit initial revision on read; no row is discarded or
+                # rewritten merely because this additive column is missing.
+                connection.execute("ALTER TABLE durable_jobs_v2 ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
             row = connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
             if row is None:
                 connection.execute("INSERT INTO meta(key,value) VALUES('schema_version',?)", (STORE_SCHEMA_VERSION,))
@@ -135,14 +142,24 @@ class DurableJobStoreV2:
         return value
 
     @staticmethod
-    def _decode(value: object) -> dict[str, Any] | None:
+    def _decode(value: object, revision: object) -> dict[str, Any] | None:
         if not isinstance(value, str) or len(value.encode("utf-8")) > _MAX_RECORD_BYTES:
             return None
         try:
             parsed = json.loads(value)
         except (TypeError, ValueError, json.JSONDecodeError):
             return None
-        return parsed if isinstance(parsed, dict) else None
+        if not isinstance(parsed, dict) or not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+            return None
+        embedded = parsed.get("revision")
+        if embedded is None:
+            # Compatibility with records created before CAS existed.  The
+            # database column is authoritative and becomes explicit on the
+            # next successful transition.
+            parsed["revision"] = revision
+        elif embedded != revision or isinstance(embedded, bool) or not isinstance(embedded, int):
+            return None
+        return parsed
 
     def get(self, job_id: object) -> dict[str, Any] | None:
         identifier = self._validate_job_id(job_id)
@@ -151,12 +168,12 @@ class DurableJobStoreV2:
             if connection is None:
                 return None
             try:
-                row = connection.execute("SELECT record_json FROM durable_jobs_v2 WHERE job_id=?", (identifier,)).fetchone()
+                row = connection.execute("SELECT record_json, revision FROM durable_jobs_v2 WHERE job_id=?", (identifier,)).fetchone()
             except sqlite3.Error as exc:
                 raise DurableJobStoreV2Error("durable_job_v2_store_unavailable") from exc
             finally:
                 connection.close()
-        record = self._decode(row[0]) if row is not None else None
+        record = self._decode(row[0], row[1]) if row is not None else None
         if row is not None and record is None:
             raise DurableJobStoreV2Error("durable_job_v2_record_invalid")
         return record
@@ -167,24 +184,29 @@ class DurableJobStoreV2:
             if connection is None:
                 return []
             try:
-                rows = connection.execute("SELECT record_json FROM durable_jobs_v2 ORDER BY created_at DESC, job_id DESC LIMIT 512").fetchall()
+                rows = connection.execute("SELECT record_json, revision FROM durable_jobs_v2 ORDER BY created_at DESC, job_id DESC LIMIT 512").fetchall()
             except sqlite3.Error as exc:
                 raise DurableJobStoreV2Error("durable_job_v2_store_unavailable") from exc
             finally:
                 connection.close()
         result: list[dict[str, Any]] = []
         for row in rows:
-            record = self._decode(row[0])
+            record = self._decode(row[0], row[1])
             if record is None:
                 raise DurableJobStoreV2Error("durable_job_v2_record_invalid")
             result.append(record)
         return result
 
-    def put(self, record: Mapping[str, Any]) -> dict[str, Any]:
+    def put(self, record: Mapping[str, Any], *, expected_revision: int | None = None) -> dict[str, Any]:
         if not isinstance(record, Mapping):
             raise DurableJobStoreV2Error("durable_job_v2_record_invalid")
         detached = json.loads(_canonical(dict(record)))
         job_id = self._validate_job_id(detached.get("job_id"))
+        revision = detached.get("revision")
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+            raise DurableJobStoreV2Error("durable_job_v2_record_invalid")
+        if expected_revision is not None and (not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision < 1):
+            raise DurableJobStoreV2Error("durable_job_v2_revision_invalid")
         timestamps = detached.get("timestamps") if isinstance(detached.get("timestamps"), Mapping) else {}
         created_at = timestamps.get("created_at")
         updated_at = timestamps.get("updated_at")
@@ -200,11 +222,24 @@ class DurableJobStoreV2:
             try:
                 self._initialize(connection)
                 connection.execute("BEGIN IMMEDIATE")
-                connection.execute(
-                    "INSERT INTO durable_jobs_v2(job_id,record_json,created_at,updated_at) VALUES(?,?,?,?) "
-                    "ON CONFLICT(job_id) DO UPDATE SET record_json=excluded.record_json, updated_at=excluded.updated_at",
-                    (job_id, encoded, created_at, updated_at),
-                )
+                existing = connection.execute("SELECT revision FROM durable_jobs_v2 WHERE job_id=?", (job_id,)).fetchone()
+                if existing is None:
+                    if expected_revision is not None or revision != 1:
+                        raise DurableJobStoreV2Error("durable_job_v2_revision_conflict")
+                    connection.execute(
+                        "INSERT INTO durable_jobs_v2(job_id,record_json,created_at,updated_at,revision) VALUES(?,?,?,?,?)",
+                        (job_id, encoded, created_at, updated_at, revision),
+                    )
+                else:
+                    current_revision = existing[0]
+                    if not isinstance(current_revision, int) or expected_revision is None or current_revision != expected_revision or revision != expected_revision + 1:
+                        raise DurableJobStoreV2Error("durable_job_v2_revision_conflict")
+                    updated = connection.execute(
+                        "UPDATE durable_jobs_v2 SET record_json=?, updated_at=?, revision=? WHERE job_id=? AND revision=?",
+                        (encoded, updated_at, revision, job_id, expected_revision),
+                    )
+                    if updated.rowcount != 1:
+                        raise DurableJobStoreV2Error("durable_job_v2_revision_conflict")
                 connection.execute("COMMIT")
             except DurableJobStoreV2Error:
                 raise
@@ -218,7 +253,7 @@ class DurableJobStoreV2:
                 connection.close()
         return detached
 
-    def delete_many(self, job_ids: Sequence[object]) -> int:
+    def delete_many(self, job_ids: Sequence[object], *, expected_revisions: Mapping[str, int] | None = None) -> int:
         """Atomically remove selected metadata rows only.
 
         Callers must have already established that each row is terminal. The
@@ -241,11 +276,19 @@ class DurableJobStoreV2:
                 connection.execute("BEGIN IMMEDIATE")
                 placeholders = ",".join("?" for _ in identifiers)
                 rows = connection.execute(
-                    f"SELECT job_id FROM durable_jobs_v2 WHERE job_id IN ({placeholders})",
+                    f"SELECT job_id, revision FROM durable_jobs_v2 WHERE job_id IN ({placeholders})",
                     tuple(identifiers),
                 ).fetchall()
                 if len(rows) != len(identifiers):
                     raise DurableJobStoreV2Error("durable_job_v2_record_missing")
+                if expected_revisions is not None:
+                    if set(expected_revisions) != set(identifiers) or any(
+                        not isinstance(expected_revisions.get(str(job_id)), int)
+                        or isinstance(expected_revisions.get(str(job_id)), bool)
+                        or expected_revisions.get(str(job_id)) != revision
+                        for job_id, revision in rows
+                    ):
+                        raise DurableJobStoreV2Error("durable_job_v2_revision_conflict")
                 row = connection.execute(
                     f"DELETE FROM durable_jobs_v2 WHERE job_id IN ({placeholders})",
                     tuple(identifiers),
@@ -267,9 +310,10 @@ class DurableJobStoreV2:
             finally:
                 connection.close()
 
-    def delete(self, job_id: object) -> bool:
+    def delete(self, job_id: object, *, expected_revision: int | None = None) -> bool:
         try:
-            return self.delete_many([job_id]) == 1
+            expected = {str(job_id): expected_revision} if expected_revision is not None else None
+            return self.delete_many([job_id], expected_revisions=expected) == 1
         except DurableJobStoreV2Error as exc:
             if exc.code == "durable_job_v2_record_missing":
                 return False

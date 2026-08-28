@@ -1,9 +1,8 @@
-"""Explicit, path-free API feature discovery for the Post-V8 platform.
+"""Router-bound, path-free Post-V8 API feature discovery.
 
-The document advertises protocol surfaces, not runtime health. A feature may be
-discoverable while its execution mode is read-only, plan-only, or requires a
-separately registered server-owned owner. This keeps clients from inferring
-that an endpoint implies a model, provider, worker, or GPU workload is ready.
+The discovery response is generated from the process Router contract instead
+of a hand-maintained string list.  It describes protocol surfaces only: it
+does not claim a worker, model, provider, GPU, or lifecycle action executed.
 """
 
 from __future__ import annotations
@@ -11,8 +10,20 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from src.services.api.router import Router
+
 
 FEATURE_DISCOVERY_V2_SCHEMA_VERSION = "feature-discovery.v2"
+
+
+def _route(route_id: str, method: str, path: str, *, execution_mode: str) -> dict[str, str]:
+    return {
+        "route_id": route_id,
+        "method": method,
+        "path": path,
+        "contract_version": "v2",
+        "execution_mode": execution_mode,
+    }
 
 
 _FEATURES: tuple[dict[str, Any], ...] = (
@@ -23,12 +34,12 @@ _FEATURES: tuple[dict[str, Any], ...] = (
         "execution": "not_run",
         "dry_run": True,
         "routes": [
-            "/api/capabilities/v2",
-            "/api/capabilities/v2/{capability_id}",
-            "/api/capabilities/v2/{capability_id}/dependency-tree",
-            "/api/capabilities/v2/{capability_id}/blockers",
-            "/api/capabilities/v2/{capability_id}/safe-actions",
-            "/api/capabilities/v2/{capability_id}/verification-evidence",
+            _route("capabilities.v2_snapshot", "GET", "/api/capabilities/v2", execution_mode="read_only"),
+            _route("capabilities.v2_detail", "GET", "/api/capabilities/v2/{capability_id}", execution_mode="read_only"),
+            _route("capabilities.v2_dependency_tree", "GET", "/api/capabilities/v2/{capability_id}/dependency-tree", execution_mode="read_only"),
+            _route("capabilities.v2_blockers", "GET", "/api/capabilities/v2/{capability_id}/blockers", execution_mode="read_only"),
+            _route("capabilities.v2_safe_actions", "GET", "/api/capabilities/v2/{capability_id}/safe-actions", execution_mode="read_only"),
+            _route("capabilities.v2_verification_evidence", "GET", "/api/capabilities/v2/{capability_id}/verification-evidence", execution_mode="read_only"),
         ],
         "reason": "Publishes bounded server-owned capability/dependency evidence only.",
         "next_action": "Inspect exact blockers before requesting a lifecycle plan.",
@@ -40,9 +51,9 @@ _FEATURES: tuple[dict[str, Any], ...] = (
         "execution": "not_run",
         "dry_run": True,
         "routes": [
-            "/api/component-lifecycle/v2",
-            "/api/component-lifecycle/v2/{capability_id}",
-            "/api/component-lifecycle/v2/{capability_id}/plans",
+            _route("component_lifecycle.v2_snapshot", "GET", "/api/component-lifecycle/v2", execution_mode="read_only"),
+            _route("component_lifecycle.v2_detail", "GET", "/api/component-lifecycle/v2/{capability_id}", execution_mode="read_only"),
+            _route("component_lifecycle.v2_plan", "POST", "/api/component-lifecycle/v2/{capability_id}/plans", execution_mode="plan_only"),
         ],
         "reason": "Creates existing V8 server-owned plans; confirmation/execution stays outside this discovery surface.",
         "next_action": "Review the plan and its ownership requirements before confirmation.",
@@ -54,10 +65,10 @@ _FEATURES: tuple[dict[str, Any], ...] = (
         "execution": "not_run",
         "dry_run": True,
         "routes": [
-            "/api/model-manager/v2",
-            "/api/model-manager/v2/{model_id}",
-            "/api/model-manager/v2/{model_id}/preflight",
-            "/api/model-manager/v2/{model_id}/plans",
+            _route("model_manager.v2_snapshot", "GET", "/api/model-manager/v2", execution_mode="read_only"),
+            _route("model_manager.v2_detail", "GET", "/api/model-manager/v2/{model_id}", execution_mode="read_only"),
+            _route("model_manager.v2_preflight", "GET", "/api/model-manager/v2/{model_id}/preflight", execution_mode="read_only"),
+            _route("model_manager.v2_plan", "POST", "/api/model-manager/v2/{model_id}/plans", execution_mode="plan_only"),
         ],
         "reason": "Uses bounded catalog metadata and delegates supported plans to V8; it does not load or download a model.",
         "next_action": "Use model preflight and a separately confirmed server-owned plan.",
@@ -69,9 +80,9 @@ _FEATURES: tuple[dict[str, Any], ...] = (
         "execution": "not_run",
         "dry_run": True,
         "routes": [
-            "/api/resource-scheduler/v2",
-            "/api/resource-scheduler/v2/profiles",
-            "/api/resource-scheduler/v2/jobs/{job_id}",
+            _route("resource_scheduler.v2_snapshot", "GET", "/api/resource-scheduler/v2", execution_mode="read_only"),
+            _route("resource_scheduler.v2_profiles", "GET", "/api/resource-scheduler/v2/profiles", execution_mode="read_only"),
+            _route("resource_scheduler.v2_job", "GET", "/api/resource-scheduler/v2/jobs/{job_id}", execution_mode="read_only"),
         ],
         "reason": "Exposes server-owned resource reservations without probing GPU or launching a worker.",
         "next_action": "Use a separately owned durable admission path for any future dispatch.",
@@ -83,12 +94,13 @@ _FEATURES: tuple[dict[str, Any], ...] = (
         "execution": "not_run",
         "dry_run": True,
         "routes": [
-            "/api/durable-job-engine/v2",
-            "/api/durable-job-engine/v2/{job_id}",
-            "/api/durable-job-engine/v2/{job_id}/retry",
-            "/api/durable-job-engine/v2/{job_id}/cancel",
-            "/api/durable-job-engine/v2/{job_id}/archive",
-            "/api/durable-job-engine/v2/history/delete",
+            _route("durable_job_engine.v2_snapshot", "GET", "/api/durable-job-engine/v2", execution_mode="read_only"),
+            _route("durable_job_engine.v2_detail", "GET", "/api/durable-job-engine/v2/{job_id}", execution_mode="read_only"),
+            _route("durable_job_engine.v2_admit", "POST", "/api/durable-job-engine/v2", execution_mode="owner_required"),
+            _route("durable_job_engine.v2_retry", "POST", "/api/durable-job-engine/v2/{job_id}/retry", execution_mode="reconstruct_or_owner_required"),
+            _route("durable_job_engine.v2_cancel", "POST", "/api/durable-job-engine/v2/{job_id}/cancel", execution_mode="owner_required"),
+            _route("durable_job_engine.v2_archive", "POST", "/api/durable-job-engine/v2/{job_id}/archive", execution_mode="metadata_only"),
+            _route("durable_job_engine.v2_history_delete", "POST", "/api/durable-job-engine/v2/history/delete", execution_mode="metadata_only"),
         ],
         "reason": "Persists/reconciles opaque job metadata, but actual dispatch requires a separately registered server-owned execution owner.",
         "next_action": "Treat reconstruct-only records as not executed until a real owner claims an exact reservation.",
@@ -98,28 +110,71 @@ _FEATURES: tuple[dict[str, Any], ...] = (
 _FEATURE_IDS = frozenset(item["feature_id"] for item in _FEATURES)
 
 
-def snapshot() -> dict[str, Any]:
-    """Return a detached finite protocol catalog with no runtime assertion."""
+def _router_or_default(router: Router | None) -> Router:
+    if isinstance(router, Router):
+        return router
+    # Lazy import avoids an API composition cycle at module import time.  It
+    # only constructs the route table; it neither starts the API nor executes
+    # a component.
+    from src.services.api.router_registry import build_router
 
+    return build_router()
+
+
+def _actual_contracts(router: Router) -> dict[str, tuple[str, str]]:
+    return {route.route_id: (route.method, route.path) for route in router.routes()}
+
+
+def _bound_features(router: Router) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    actual = _actual_contracts(router)
+    bound: list[dict[str, Any]] = []
+    missing: list[dict[str, str]] = []
+    for feature in _FEATURES:
+        expected_routes = feature["routes"]
+        absent = [
+            route for route in expected_routes
+            if actual.get(route["route_id"]) != (route["method"], route["path"])
+        ]
+        if absent:
+            missing.extend({
+                "feature_id": feature["feature_id"],
+                "route_id": route["route_id"],
+                "method": route["method"],
+                "path": route["path"],
+            } for route in absent)
+            continue
+        bound.append(deepcopy(feature))
+    return bound, missing
+
+
+def snapshot(router: Router | None = None) -> dict[str, Any]:
+    """Return only feature contracts confirmed by this process Router."""
+
+    features, missing = _bound_features(_router_or_default(router))
+    complete = not missing and len(features) == len(_FEATURES)
     return {
         "schema_version": FEATURE_DISCOVERY_V2_SCHEMA_VERSION,
-        "status": "completed",
-        "features": deepcopy(list(_FEATURES)),
-        "reason": "Feature discovery describes supported API contracts; runtime/capability state remains separately server-owned.",
-        "next_action": "Use the advertised route only after inspecting its specific capability or preflight response.",
+        "status": "completed" if complete else "unavailable",
+        "features": features,
+        "missing_required_routes": missing,
+        "reason": "Feature discovery is bound to the active Router contract; absent or mismatched routes are not advertised." if not complete else "Feature discovery describes Router-confirmed API contracts; runtime/capability state remains separately server-owned.",
+        "next_action": "Restore every required Post-V8 route contract before relying on discovery." if not complete else "Use the advertised route only after inspecting its specific capability or preflight response.",
         "execution": "not_run",
         "dry_run": True,
     }
 
 
-def detail(feature_id: object) -> dict[str, Any] | None:
+def detail(feature_id: object, router: Router | None = None) -> dict[str, Any] | None:
     if not isinstance(feature_id, str) or feature_id not in _FEATURE_IDS:
         return None
-    match = next(item for item in _FEATURES if item["feature_id"] == feature_id)
+    features, _ = _bound_features(_router_or_default(router))
+    match = next((item for item in features if item["feature_id"] == feature_id), None)
+    if match is None:
+        return None
     return {
         "schema_version": FEATURE_DISCOVERY_V2_SCHEMA_VERSION,
         "status": "completed",
-        "feature": deepcopy(match),
+        "feature": match,
         "execution": "not_run",
         "dry_run": True,
     }

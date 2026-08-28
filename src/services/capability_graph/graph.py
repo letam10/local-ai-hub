@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
+from datetime import datetime, timezone
 import hashlib
 import json
 import re
@@ -25,6 +26,7 @@ MAX_DEPENDENCIES = 64
 MAX_BLOCKERS = 64
 MAX_TREE_DEPTH = 12
 MAX_TEXT = 320
+MAX_EVIDENCE_FRESHNESS_SECONDS = 7 * 24 * 60 * 60
 CAPABILITY_ID_RE = re.compile(r"^[a-z][a-z0-9._:-]{1,127}$")
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+:-]{0,119}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -129,21 +131,43 @@ def _fingerprint(value: object) -> str:
 
 
 def _evidence(value: object, *, verification_state: str) -> dict[str, object]:
-    if not isinstance(value, Mapping) or set(value) - {"state", "tier", "fingerprint", "observed_at"}:
+    if not isinstance(value, Mapping) or set(value) - {"state", "tier", "fingerprint", "observed_at", "source_revision", "source_fingerprint", "freshness_seconds"}:
         raise CapabilityGraphError("invalid_evidence")
     state = value.get("state", "not_run")
     tier = value.get("tier", verification_state)
     fingerprint = value.get("fingerprint")
     observed_at = _safe_timestamp(value.get("observed_at"))
+    source_revision = _safe_text(value.get("source_revision"), "",) or None
+    source_fingerprint = value.get("source_fingerprint")
+    freshness_seconds = value.get("freshness_seconds")
     if state not in EVIDENCE_STATES or tier not in VERIFICATION_STATES:
         raise CapabilityGraphError("invalid_evidence")
     if fingerprint is not None and (not isinstance(fingerprint, str) or SHA256_RE.fullmatch(fingerprint) is None):
         raise CapabilityGraphError("invalid_evidence")
+    if source_fingerprint is not None and (not isinstance(source_fingerprint, str) or SHA256_RE.fullmatch(source_fingerprint) is None):
+        raise CapabilityGraphError("invalid_evidence")
+    if freshness_seconds is not None and (not isinstance(freshness_seconds, int) or isinstance(freshness_seconds, bool) or not 1 <= freshness_seconds <= MAX_EVIDENCE_FRESHNESS_SECONDS):
+        raise CapabilityGraphError("invalid_evidence")
+    freshness = "not_observed"
+    if observed_at is not None and freshness_seconds is not None:
+        try:
+            parsed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                raise ValueError("timezone_required")
+            freshness = "current" if (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds() <= freshness_seconds else "stale"
+        except (TypeError, ValueError, OverflowError):
+            freshness = "stale"
+    elif observed_at is not None:
+        freshness = "unknown"
     return {
         "state": state,
         "tier": tier,
         "fingerprint": fingerprint,
         "observed_at": observed_at,
+        "source_revision": source_revision,
+        "source_fingerprint": source_fingerprint,
+        "freshness_seconds": freshness_seconds,
+        "freshness": freshness,
     }
 
 
@@ -189,6 +213,10 @@ def validate_capability_descriptor(value: object) -> dict[str, Any]:
             raise CapabilityGraphError("operational_evidence_required")
         if runtime_state not in {"STARTABLE", "RUNNING"}:
             raise CapabilityGraphError("operational_runtime_required")
+        if evidence["freshness"] != "current" or evidence["source_revision"] is None or evidence["source_fingerprint"] is None:
+            # The receipt is still useful as a verification signal, but it
+            # cannot continue to imply *current* operational readiness.
+            operational_state = "VERIFIED"
     if install_state in {"UNAVAILABLE", "BROKEN"} and operational_state == "OPERATIONAL":
         raise CapabilityGraphError("operational_install_state_conflict")
 
@@ -477,6 +505,10 @@ def _descriptor(
     next_action: str,
     fingerprint: str | None = None,
     evidence_completed: bool = False,
+    observed_at: str | None = None,
+    source_revision: str | None = None,
+    source_fingerprint: str | None = None,
+    freshness_seconds: int | None = None,
     disposition: object = None,
 ) -> dict[str, Any]:
     install_state, runtime_state, verification_state, operational_state = states
@@ -484,7 +516,10 @@ def _descriptor(
         "state": "completed" if evidence_completed else "static",
         "tier": verification_state,
         "fingerprint": fingerprint if evidence_completed else None,
-        "observed_at": None,
+        "observed_at": observed_at if evidence_completed else None,
+        "source_revision": source_revision if evidence_completed else None,
+        "source_fingerprint": source_fingerprint if evidence_completed else None,
+        "freshness_seconds": freshness_seconds if evidence_completed else None,
     }
     return {
         "capability_id": capability_id,
@@ -498,7 +533,7 @@ def _descriptor(
         "runtime_state": runtime_state,
         "verification_state": verification_state,
         "operational_state": operational_state,
-        "last_verified": None,
+        "last_verified": observed_at if evidence_completed else None,
         "evidence": evidence,
         "reason": reason,
         "next_action": next_action,
@@ -560,6 +595,72 @@ def _registered_requirement(
     )
 
 
+def _bridge_evidence(value: object) -> dict[str, object] | None:
+    """Normalize a bounded server-owned engine/resource observation only."""
+
+    if not isinstance(value, Mapping):
+        return None
+    status = str(value.get("status") or "").casefold()
+    fingerprint = value.get("fingerprint") or value.get("source_fingerprint")
+    observed_at = _safe_timestamp(value.get("observed_at"))
+    source_revision = _safe_text(value.get("source_revision"), "") or None
+    source_fingerprint = value.get("source_fingerprint")
+    freshness = value.get("freshness_seconds", 300)
+    if (
+        status not in {"available", "verified", "healthy", "startable"}
+        or not isinstance(fingerprint, str) or SHA256_RE.fullmatch(fingerprint) is None
+        or observed_at is None
+        or not isinstance(freshness, int) or isinstance(freshness, bool) or not 1 <= freshness <= MAX_EVIDENCE_FRESHNESS_SECONDS
+        or (source_fingerprint is not None and (not isinstance(source_fingerprint, str) or SHA256_RE.fullmatch(source_fingerprint) is None))
+    ):
+        return None
+    return {
+        "fingerprint": fingerprint,
+        "observed_at": observed_at,
+        "source_revision": source_revision,
+        "source_fingerprint": source_fingerprint or fingerprint,
+        "freshness_seconds": freshness,
+    }
+
+
+def _bridge_requirement(
+    *,
+    capability_id: str,
+    provider: str,
+    runtime: str | None,
+    evidence: object,
+    reason: str,
+    next_action: str,
+) -> dict[str, Any]:
+    bridge = _bridge_evidence(evidence)
+    if bridge is None:
+        return _registered_requirement(
+            capability_id=capability_id,
+            provider=provider,
+            runtime=runtime,
+            reason=reason,
+            next_action=next_action,
+        )
+    return _descriptor(
+        capability_id=capability_id,
+        provider=provider,
+        component=None,
+        runtime=runtime,
+        model=None,
+        dependencies=[],
+        version="server-observation",
+        states=("INSTALLED", "STARTABLE", "RUNTIME_IMPORT", "VERIFIED"),
+        reason="A bounded server-owned observation is current for this dependency; no provider/model work was executed.",
+        next_action="Use the dependent capability's own preflight before any separately authorized workload.",
+        fingerprint=str(bridge["fingerprint"]),
+        evidence_completed=True,
+        observed_at=str(bridge["observed_at"]),
+        source_revision=bridge["source_revision"] if isinstance(bridge["source_revision"], str) else None,
+        source_fingerprint=str(bridge["source_fingerprint"]),
+        freshness_seconds=int(bridge["freshness_seconds"]),
+    )
+
+
 def _minimum_vram_requirement(item: Mapping[str, Any]) -> bool:
     value = item.get("minimum_vram_mb")
     # Treat the catalog value solely as a declared requirement.  This function
@@ -572,6 +673,8 @@ def build_component_capability_graph(
     component_statuses: Iterable[Mapping[str, Any]],
     tool_records: Iterable[Mapping[str, Any]],
     catalog_snapshot: Mapping[str, Any] | None = None,
+    engine_evidence: Mapping[str, Mapping[str, Any]] | None = None,
+    resource_evidence: Mapping[str, Any] | None = None,
 ) -> CapabilityGraph:
     """Compose the graph from already-owned, bounded server projections.
 
@@ -589,6 +692,8 @@ def build_component_capability_graph(
     models_by_runtime: dict[str, list[str]] = {}
     resource_dependencies_by_model: dict[str, list[str]] = {}
     records: dict[str, dict[str, Any]] = {}
+    engines = dict(engine_evidence) if isinstance(engine_evidence, Mapping) else {}
+    resources = dict(resource_evidence) if isinstance(resource_evidence, Mapping) else {}
 
     for item in runtimes:
         runtime_id = _safe_id(item.get("runtime_id"))
@@ -597,10 +702,11 @@ def build_component_capability_graph(
         capability_id = f"runtime:{runtime_id}"
         engine_id = _safe_id(item.get("kind")) or "runtime"
         engine_capability = f"engine:{engine_id}"
-        records.setdefault(engine_capability, _registered_requirement(
+        records.setdefault(engine_capability, _bridge_requirement(
             capability_id=engine_capability,
             provider="catalog",
             runtime=engine_id,
+            evidence=engines.get(engine_id),
             reason="This engine type is registered by the server-owned runtime catalog but has no current process or import verification.",
             next_action="Verify the exact runtime engine before requesting a component lifecycle action.",
         ))
@@ -639,10 +745,11 @@ def build_component_capability_graph(
         capability_id = f"model:{model_id}"
         resource_dependencies = ["resource:gpu"] if _minimum_vram_requirement(item) else []
         if resource_dependencies:
-            records.setdefault("resource:gpu", _registered_requirement(
+            records.setdefault("resource:gpu", _bridge_requirement(
                 capability_id="resource:gpu",
                 provider="hub",
                 runtime=None,
+                evidence=resources.get("gpu"),
                 reason="A catalog-declared GPU requirement has no current scheduler reservation or hardware-fit evidence.",
                 next_action="Run a separately authorized resource preflight before requesting a GPU workload.",
             ))

@@ -173,21 +173,56 @@ class ModelManagerV2Tests(unittest.TestCase):
         import_plan = manager.plan("faster-whisper-large-v3", "IMPORT_EXISTING", planner=self.planner, selection_id="selection_" + "c" * 32)
         review = manager.plan("faster-whisper-large-v3", "REVIEW_LICENSE", planner=self.planner)
         update = manager.plan("faster-whisper-large-v3", "UPDATE_METADATA", planner=self.planner)
-        for result in (install, verify, remove, reuse, import_plan):
+        for result in (install, remove, reuse, import_plan):
             self.assertEqual(result["status"], "planned")
             self.assertEqual(result["execution"], "not_run")
             self.assertTrue(result["dry_run"])
             self.assertRegex(result["plan"]["operation_id"], r"^compop_[a-f0-9]{32}$")
+        self.assertEqual(verify["status"], "completed")
+        self.assertEqual(verify["checksum"], {"state": "checksum_not_declared", "verification": "not_verified"})
         self.assertEqual(import_missing["code"], "native_selection_required")
         self.assertEqual(review["status"], "completed")
         self.assertEqual(update["code"], "metadata_update_adapter_unavailable")
         self.assertEqual(self.planner.calls, [
             ("install", "faster-whisper-large-v3"),
-            ("verify", "faster-whisper-large-v3"),
             ("uninstall", "faster-whisper-large-v3"),
             ("reuse", "faster-whisper-large-v3"),
             ("import", "selection_" + "c" * 32),
         ])
+
+    def test_content_digest_is_distinct_from_metadata_identity_and_strong_duplicate_requires_content_evidence(self) -> None:
+        # The identity digest is a JSON metadata fingerprint.  A bounded file
+        # observation that happens to equal it must never become a content
+        # checksum match.
+        baseline = self.manager()
+        identity = baseline.detail("faster-whisper-large-v3")["checksum"]["identity_digest"]
+        candidate = self.manager(observations=[{
+            "model_id": "faster-whisper-large-v3",
+            "location_id": "external:matching-size",
+            "size_bytes": 4096,
+            "sha256": identity,
+            "present": True,
+        }]).detail("faster-whisper-large-v3")
+        duplicate = candidate["duplicate_analysis"]["candidates"][0]
+        self.assertEqual(duplicate["match"], "size_and_identity_candidate")
+        self.assertEqual(duplicate["strength"], "candidate")
+        self.assertNotEqual(duplicate["match"], "content_sha256")
+
+        content = _fingerprint("actual-model-content")
+        declared = _model()
+        declared["content_sha256"] = content
+        verified = self.manager(model=declared, observations=[{
+            "model_id": "faster-whisper-large-v3",
+            "location_id": "model:faster-whisper-large-v3",
+            "size_bytes": 4096,
+            "sha256": content,
+            "present": True,
+        }])
+        detail = verified.detail("faster-whisper-large-v3")
+        self.assertEqual(detail["checksum"]["verification"], "verified_evidence_available")
+        result = verified.plan("faster-whisper-large-v3", "VERIFY_CHECKSUM", planner=self.planner)
+        self.assertEqual(result["status"], "planned")
+        self.assertEqual(result["checksum"]["verification"], "verified_evidence_available")
 
     def test_unknown_and_unsafe_inputs_remain_non_reflecting(self) -> None:
         manager = self.manager()

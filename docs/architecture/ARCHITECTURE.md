@@ -88,3 +88,15 @@ contracts and legacy imports remain unchanged. Existing `src/shared/paths` is a
 compatibility facade over the new platform registry. `Services/Whisper/` is a
 first-party backend implementation; `src/modules/whisper/` is the Hub adapter
 and contract boundary.
+
+## Post-V8 foundation hardening
+
+Post-V8 V2 surfaces add a typed capability graph, lifecycle planning facade,
+model manager, resource scheduler, durable job engine and Router-bound feature
+discovery without replacing the V7 productization path. The authoritative M1.1
+ownership, SQLite/scheduler saga, lease, restart-readmission, digest, evidence
+freshness and cache contract is
+[`POST_V8_FOUNDATION_HARDENING_M1_1.md`](POST_V8_FOUNDATION_HARDENING_M1_1.md).
+These additions are metadata/planning contracts only: they do not turn a
+provider, model or GPU workload operational without separately authorized
+runtime evidence and execution ownership.

@@ -38,6 +38,7 @@ LIFECYCLE_ACTIONS = (
 _ACTION_SET = frozenset(LIFECYCLE_ACTIONS)
 _PLAN_ACTIONS = frozenset({"PLAN_INSTALL", "VERIFY_INSTALL", "UPDATE", "REPAIR", "UNINSTALL"})
 _READ_ONLY_ACTIONS = frozenset({"DISCOVER", "INSPECT"})
+SUPPORTED_LIFECYCLE_CAPABILITY_KINDS = ("model", "runtime")
 _LIFECYCLE_CAPABILITY_ID = re.compile(r"^(?:model|runtime|component):[a-z][a-z0-9._-]{1,95}$")
 _GRAPH_CAPABILITY_ID = re.compile(r"^[a-z][a-z0-9._-]{1,31}:[a-z][a-z0-9._-]{1,95}$")
 _COMPONENT_ID = re.compile(r"^[a-z][a-z0-9._-]{1,95}$")
@@ -98,7 +99,7 @@ def _safe_blockers(value: object) -> list[dict[str, str]]:
 
 def _component_kind(capability_id: str) -> tuple[str, str] | None:
     prefix, _, component_id = capability_id.partition(":")
-    if prefix not in {"model", "runtime"} or _safe_component_id(component_id) is None:
+    if prefix not in {"model", "runtime", "component"} or _safe_component_id(component_id) is None:
         return None
     return component_id, prefix
 
@@ -230,7 +231,9 @@ class ComponentLifecycleEngine:
             "capability_id": identifier,
             "component_id": component_id,
             "component_type": component_type,
-            "lifecycle_eligible": component_type in {"model", "runtime"},
+            "lifecycle_eligible": component_type in SUPPORTED_LIFECYCLE_CAPABILITY_KINDS,
+            "supported_capability_kinds": list(SUPPORTED_LIFECYCLE_CAPABILITY_KINDS),
+            "lifecycle_limitation": None if component_type in SUPPORTED_LIFECYCLE_CAPABILITY_KINDS else "Component capability discovery is inspect-only in V2; no component START/STOP/INSTALL adapter is registered.",
             "install_state": record.get("install_state"),
             "runtime_state": record.get("runtime_state"),
             "verification_state": record.get("verification_state"),
@@ -262,6 +265,7 @@ class ComponentLifecycleEngine:
             "components": components,
             "counts": counts,
             "supported_actions": list(LIFECYCLE_ACTIONS),
+            "supported_capability_kinds": list(SUPPORTED_LIFECYCLE_CAPABILITY_KINDS),
             "reason": "The lifecycle engine is a server-owned planning facade; only existing V8 component plans can be created here.",
             "next_action": "Inspect an eligible model or runtime and create only the explicit plan supported by its current V8 authority.",
             "execution": "not_run",
@@ -361,6 +365,7 @@ class ComponentLifecycleEngine:
 __all__ = [
     "COMPONENT_LIFECYCLE_SCHEMA_VERSION",
     "LIFECYCLE_ACTIONS",
+    "SUPPORTED_LIFECYCLE_CAPABILITY_KINDS",
     "ComponentLifecycleEngine",
     "ComponentLifecycleEngineError",
 ]

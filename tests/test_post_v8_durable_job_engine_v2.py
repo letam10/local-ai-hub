@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -17,6 +18,7 @@ from src.services.durable_job_engine_v2 import (
     DURABLE_JOB_ENGINE_V2_SCHEMA_VERSION,
     DurableJobEngineV2,
     DurableJobStoreV2,
+    DurableJobStoreV2Error,
     ExecutionOwnerRegistry,
 )
 from src.services.resource_scheduler import ResourceScheduler
@@ -51,6 +53,20 @@ def _request(*, owner: str = "worker:synthetic", profile: str = "ffmpeg_probe") 
     }
 
 
+class _FailingStore(DurableJobStoreV2):
+    """Inject one write failure after a scheduler transition in a test only."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.fail_next_put = False
+
+    def put(self, record, *, expected_revision=None):  # type: ignore[no-untyped-def]
+        if self.fail_next_put:
+            self.fail_next_put = False
+            raise DurableJobStoreV2Error("durable_job_v2_store_unavailable")
+        return super().put(record, expected_revision=expected_revision)
+
+
 class DurableJobEngineV2Tests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -61,6 +77,15 @@ class DurableJobEngineV2Tests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def _running(self, engine: DurableJobEngineV2 | None = None) -> tuple[DurableJobEngineV2, dict[str, object], str]:
+        current = engine or self.engine
+        admitted = current.admit(_request())
+        job = admitted["job"]
+        reservation = job["reservation_id"]
+        running = current.claim_running(job["job_id"], "worker:synthetic", reservation)
+        self.assertEqual(running["job"]["state"], "RUNNING")
+        return current, running["job"], reservation
 
     def test_read_snapshot_does_not_create_store_and_unavailable_owner_creates_no_record(self) -> None:
         self.assertFalse(self.store_path.exists())
@@ -206,6 +231,132 @@ class DurableJobEngineV2Tests(unittest.TestCase):
         self.assertEqual(record["error_code"], "worker_liveness_unavailable_after_restart")
         self.assertEqual(record["artifact_refs"], [_artifact("b")])
 
+    def test_restart_requires_trusted_readmission_for_a_pre_start_record(self) -> None:
+        admitted = self.engine.admit(_request())
+        job = admitted["job"]
+        restarted = DurableJobEngineV2(
+            store=DurableJobStoreV2(self.store_path),
+            scheduler=ResourceScheduler(hardware_snapshot=_hardware()),
+            owners=self.owners,
+            readmission_preflight=lambda record: record["workflow_id"] == "workflow.fixture",
+        )
+        result = restarted.reconcile_startup()
+        self.assertEqual(result["needs_readmission"], 1)
+        stale = restarted.get(job["job_id"])
+        self.assertEqual(stale["state"], "NEEDS_READMISSION")
+        self.assertFalse(stale["dispatchable"])
+        readmitted = restarted.readmit_after_restart(job["job_id"])
+        self.assertEqual(readmitted["status"], "accepted")
+        self.assertEqual(readmitted["job"]["state"], "PREPARING")
+        self.assertFalse(readmitted["job"]["actual_execution"])
+
+    def test_store_revision_cas_rejects_stale_update_without_last_write_wins(self) -> None:
+        admitted = self.engine.admit(_request())
+        raw = self.engine.store.get(admitted["job"]["job_id"])
+        stale = dict(raw)
+        updated = dict(raw)
+        updated["revision"] = raw["revision"] + 1
+        updated["reason"] = "A fresh local transition changed this record."
+        updated["timestamps"] = {**raw["timestamps"], "updated_at": "2026-08-28T00:00:01+00:00"}
+        self.engine.store.put(updated, expected_revision=raw["revision"])
+        stale["revision"] = raw["revision"] + 1
+        stale["reason"] = "A stale writer must not win."
+        stale["timestamps"] = {**raw["timestamps"], "updated_at": "2026-08-28T00:00:02+00:00"}
+        with self.assertRaisesRegex(DurableJobStoreV2Error, "durable_job_v2_revision_conflict"):
+            self.engine.store.put(stale, expected_revision=raw["revision"])
+
+    def test_scheduler_mutations_are_compensated_when_sqlite_fails_after_claim_pause_resume_cancel_and_finish(self) -> None:
+        failing = _FailingStore(self.store_path)
+        owners = ExecutionOwnerRegistry({"worker:synthetic": {"dispatch": True, "pause": True, "resume": True}})
+        engine = DurableJobEngineV2(store=failing, scheduler=self.scheduler, owners=owners)
+        admitted = engine.admit(_request())
+        job_id = admitted["job"]["job_id"]
+        reservation = admitted["job"]["reservation_id"]
+
+        failing.fail_next_put = True
+        claim = engine.claim_running(job_id, "worker:synthetic", reservation)
+        self.assertEqual(claim["status"], "unavailable")
+        self.assertTrue(claim["scheduler_compensated"])
+        self.assertEqual(engine.get(job_id)["state"], "PREPARING")
+        self.assertEqual(self.scheduler.job(job_id)["state"], "PREPARING")
+
+        running = engine.claim_running(job_id, "worker:synthetic", reservation)
+        self.assertEqual(running["job"]["state"], "RUNNING")
+
+        failing.fail_next_put = True
+        progress = engine.progress(job_id, "worker:synthetic", reservation, 37)
+        self.assertEqual(progress["status"], "unavailable")
+        self.assertTrue(progress["scheduler_compensated"])
+        self.assertEqual(engine.get(job_id)["progress"], 0)
+        self.assertEqual(self.scheduler.job(job_id)["progress"], 0)
+
+        failing.fail_next_put = True
+        paused = engine.pause(job_id, "worker:synthetic", reservation)
+        self.assertEqual(paused["status"], "unavailable")
+        self.assertTrue(paused["scheduler_compensated"])
+        self.assertEqual(engine.get(job_id)["state"], "RUNNING")
+        self.assertEqual(self.scheduler.job(job_id)["state"], "RUNNING")
+
+        self.assertEqual(engine.pause(job_id, "worker:synthetic", reservation)["job"]["state"], "PAUSED")
+        failing.fail_next_put = True
+        resumed = engine.resume(job_id, "worker:synthetic", reservation)
+        self.assertEqual(resumed["status"], "unavailable")
+        self.assertTrue(resumed["scheduler_compensated"])
+        self.assertEqual(engine.get(job_id)["state"], "PAUSED")
+        self.assertEqual(self.scheduler.job(job_id)["state"], "PAUSED")
+
+        self.assertEqual(engine.resume(job_id, "worker:synthetic", reservation)["job"]["state"], "RUNNING")
+        failing.fail_next_put = True
+        terminal = engine.finish(job_id, "worker:synthetic", reservation, succeeded=True)
+        self.assertEqual(terminal["status"], "unavailable")
+        self.assertTrue(terminal["scheduler_compensated"])
+        self.assertEqual(engine.get(job_id)["state"], "RUNNING")
+        self.assertEqual(self.scheduler.job(job_id)["state"], "RUNNING")
+
+        failing.fail_next_put = True
+        cancelling = engine.cancel(job_id)
+        self.assertEqual(cancelling["status"], "unavailable")
+        self.assertTrue(cancelling["scheduler_compensated"])
+        self.assertEqual(engine.get(job_id)["state"], "RUNNING")
+        self.assertEqual(self.scheduler.job(job_id)["state"], "RUNNING")
+
+        self.assertEqual(engine.cancel(job_id)["job"]["state"], "CANCELLING")
+        failing.fail_next_put = True
+        acknowledged = engine.acknowledge_cancel(job_id, "worker:synthetic", reservation)
+        self.assertEqual(acknowledged["status"], "unavailable")
+        self.assertTrue(acknowledged["scheduler_compensated"])
+        self.assertEqual(engine.get(job_id)["state"], "CANCELLING")
+        self.assertEqual(self.scheduler.job(job_id)["state"], "CANCELLING")
+
+    def test_concurrent_finish_and_cancel_have_one_valid_winner_without_artifact_mutation(self) -> None:
+        engine, running, reservation = self._running()
+        barrier = threading.Barrier(3)
+        results: list[dict[str, object]] = []
+
+        def finish() -> None:
+            barrier.wait()
+            results.append(engine.finish(running["job_id"], "worker:synthetic", reservation, succeeded=True, artifact_refs=[_artifact("b")]))
+
+        def cancel() -> None:
+            barrier.wait()
+            results.append(engine.cancel(running["job_id"]))
+
+        workers = [threading.Thread(target=finish), threading.Thread(target=cancel)]
+        for worker in workers:
+            worker.start()
+        barrier.wait()
+        for worker in workers:
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+        statuses = [item["status"] for item in results]
+        self.assertIn("completed", statuses) if "completed" in statuses else self.assertIn("cancelling", statuses)
+        self.assertTrue(any(item["status"] == "conflict" for item in results))
+        record = engine.get(running["job_id"])
+        if record["state"] == "CANCELLING":
+            acknowledged = engine.acknowledge_cancel(running["job_id"], "worker:synthetic", reservation)
+            self.assertEqual(acknowledged["job"]["state"], "CANCELLED")
+        self.assertEqual(engine.get(running["job_id"])["artifact_refs"], [_artifact("b")])
+
     def test_archive_and_selected_history_delete_never_delete_artifacts(self) -> None:
         admitted = self.engine.admit(_request())
         job = admitted["job"]
@@ -340,7 +491,7 @@ class DurableJobEngineV2CompositionTests(unittest.TestCase):
             self.assertEqual(result["status"], "unavailable")
             self.assertEqual(result["code"], "execution_owner_unavailable")
             self.assertFalse(store_path.exists())
-            self.assertEqual(context.call("durable_job_v2_reconcile_startup"), {"waiting_resource": 0, "failed": 0, "succeeded": 0, "retained": 0})
+            self.assertEqual(context.call("durable_job_v2_reconcile_startup"), {"needs_readmission": 0, "failed": 0, "succeeded": 0, "retained": 0})
 
 
 class DurableJobEngineV2ArchitectureTests(unittest.TestCase):
@@ -349,6 +500,8 @@ class DurableJobEngineV2ArchitectureTests(unittest.TestCase):
         document = (ROOT / "src/ui/index.html").read_text(encoding="utf-8")
         self.assertIn("/api/durable-job-engine/v2", panel)
         self.assertIn("Đã tạo · chưa thực thi", panel)
+        self.assertIn("NEEDS_READMISSION", panel)
+        self.assertIn("Cần tái tiếp nhận · chưa thực thi", panel)
         self.assertIn("Xóa chỉ metadata history", panel)
         self.assertIn("durable_job_engine_v2.js", document)
         self.assertNotIn("setInterval", panel)

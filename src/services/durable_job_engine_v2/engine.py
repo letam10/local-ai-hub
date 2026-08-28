@@ -12,8 +12,10 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
+from functools import wraps
 import re
 import secrets
+import threading
 from typing import Any
 
 from src.services.resource_scheduler import ResourceScheduler
@@ -26,6 +28,7 @@ DURABLE_JOB_V2_STATES = (
     "QUEUED",
     "WAITING_RESOURCE",
     "PREPARING",
+    "NEEDS_READMISSION",
     "RUNNING",
     "PAUSED",
     "CANCELLING",
@@ -43,6 +46,7 @@ _WORKER_ID = re.compile(r"^[a-z][a-z0-9._:-]{1,95}$")
 _PROFILE_ID = re.compile(r"^[a-z][a-z0-9._-]{1,63}$")
 _ARTIFACT_ID = re.compile(r"^artifact_[a-f0-9]{32}$")
 _RESERVATION_ID = re.compile(r"^resv_[a-f0-9]{32}$")
+_LEASE_ID = re.compile(r"^lease_[a-f0-9]{32}$")
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _UNSAFE_TEXT = re.compile(
     r"(?i)(?:[a-z]:[\\/]|\\\\|(?:https?|file|data):|bearer\s|\b(?:api[_-]?key|secret|password|token)\b|\.\.[\\/])"
@@ -53,6 +57,20 @@ _MAX_QUERY = 80
 
 class DurableJobEngineV2Error(ValueError):
     """Fixed error when a V2 durable job request is invalid."""
+
+
+def _serialized(method):
+    """Cover a full scheduler-plus-SQLite saga, not only one SQL statement."""
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._transition_lock:
+            # Hold the scheduler's re-entrant coordinator through the SQLite
+            # CAS/compensation window. Without this, another scheduler caller
+            # could supersede the checkpoint between mutation and persistence.
+            with self.scheduler.saga():
+                return method(self, *args, **kwargs)
+    return wrapped
 
 
 def _now() -> str:
@@ -88,6 +106,16 @@ def _history(value: object, state: str) -> list[str]:
     return [*prior[-31:], state]
 
 
+def _durable_lease(value: object) -> dict[str, str] | None:
+    """Keep only the stable, path-free worker lease identity in SQLite."""
+
+    if not isinstance(value, Mapping):
+        return None
+    keys = ("lease_id", "worker_id", "job_id", "reservation_id", "heartbeat_at", "expires_at")
+    result = {key: value.get(key) for key in keys}
+    return result if all(isinstance(result[key], str) for key in keys) else None
+
+
 class ExecutionOwnerRegistry:
     """Server-owned capabilities for a future actual execution bridge.
 
@@ -118,12 +146,23 @@ class ExecutionOwnerRegistry:
 class DurableJobEngineV2:
     """Persist/reconcile job metadata and bind dispatchable jobs to scheduler."""
 
-    def __init__(self, *, store: DurableJobStoreV2, scheduler: ResourceScheduler, owners: ExecutionOwnerRegistry | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        store: DurableJobStoreV2,
+        scheduler: ResourceScheduler,
+        owners: ExecutionOwnerRegistry | None = None,
+        readmission_preflight: Callable[[Mapping[str, Any]], bool] | None = None,
+    ) -> None:
         if not isinstance(store, DurableJobStoreV2) or not isinstance(scheduler, ResourceScheduler):
             raise DurableJobEngineV2Error("durable_job_v2_dependencies_invalid")
         self.store = store
         self.scheduler = scheduler
         self.owners = owners or ExecutionOwnerRegistry()
+        self._readmission_preflight = readmission_preflight
+        # A process-local lock covers complete scheduler-plus-store sagas. The
+        # SQLite revision CAS below remains the cross-engine/process guard.
+        self._transition_lock = threading.RLock()
 
     def _validate_record(self, value: object) -> dict[str, Any] | None:
         if not isinstance(value, Mapping) or value.get("schema_version") != DURABLE_JOB_ENGINE_V2_SCHEMA_VERSION:
@@ -139,6 +178,19 @@ class DurableJobEngineV2:
         retry_of = value.get("retry_of")
         retry_mode = value.get("retry_mode")
         timestamps = value.get("timestamps")
+        revision = value.get("revision")
+        lease = value.get("lease")
+        if lease is not None:
+            if (
+                not isinstance(lease, Mapping)
+                or set(lease) != {"lease_id", "worker_id", "job_id", "reservation_id", "heartbeat_at", "expires_at"}
+                or _safe_id(lease.get("lease_id"), _LEASE_ID) is None
+                or lease.get("worker_id") != worker
+                or lease.get("job_id") != job_id
+                or lease.get("reservation_id") != value.get("reservation_id")
+                or not all(isinstance(lease.get(item), str) and 1 <= len(str(lease.get(item))) <= 64 for item in ("heartbeat_at", "expires_at"))
+            ):
+                return None
         if (
             job_id is None or workflow_id is None or owner is None or worker is None or profile is None or state not in _STATE_SET
             or inputs is None or artifacts is None or retry_mode not in {"new", "retry_execution", "reconstruct_only"}
@@ -146,6 +198,8 @@ class DurableJobEngineV2:
             or not isinstance(timestamps, Mapping) or set(timestamps) != {"created_at", "updated_at", "started_at", "completed_at"}
             or not all(value is None or isinstance(value, str) and 1 <= len(value) <= 64 for value in timestamps.values())
             or type(value.get("dispatchable")) is not bool or type(value.get("actual_execution")) is not bool or type(value.get("archived")) is not bool
+            or not isinstance(revision, int) or isinstance(revision, bool) or revision < 1
+            or ("reproducible" in value and type(value.get("reproducible")) is not bool)
         ):
             return None
         reservation_id = value.get("reservation_id")
@@ -153,6 +207,7 @@ class DurableJobEngineV2:
             return None
         return {
             "schema_version": DURABLE_JOB_ENGINE_V2_SCHEMA_VERSION,
+            "revision": revision,
             "job_id": job_id,
             "workflow_id": workflow_id,
             "input_artifact_ids": inputs,
@@ -167,6 +222,10 @@ class DurableJobEngineV2:
             "dispatchable": value["dispatchable"],
             "actual_execution": value["actual_execution"],
             "reservation_id": reservation_id,
+            "lease": dict(lease) if isinstance(lease, Mapping) else None,
+            # Historical V2 rows did not have a reversible, declared request
+            # contract.  They can be inspected but never assumed retryable.
+            "reproducible": bool(value.get("reproducible")) if "reproducible" in value else False,
             "timestamps": dict(timestamps),
             "error_code": value.get("error_code") if isinstance(value.get("error_code"), str) and _SAFE_CODE.fullmatch(value["error_code"]) else None,
             "reason": _safe_text(value.get("reason"), "Durable job metadata is awaiting a server-owned state transition."),
@@ -175,12 +234,12 @@ class DurableJobEngineV2:
             "archived": value["archived"],
         }
 
-    def _persist(self, record: Mapping[str, Any]) -> dict[str, Any]:
+    def _persist(self, record: Mapping[str, Any], *, expected_revision: int | None = None) -> dict[str, Any]:
         valid = self._validate_record(record)
         if valid is None:
             raise DurableJobEngineV2Error("durable_job_v2_record_invalid")
         try:
-            return self.store.put(valid)
+            return self.store.put(valid, expected_revision=expected_revision)
         except DurableJobStoreV2Error as exc:
             raise DurableJobEngineV2Error(exc.code) from exc
 
@@ -208,10 +267,15 @@ class DurableJobEngineV2:
         reservation_id: str | None = None,
         actual_execution: bool | None = None,
         dispatchable: bool | None = None,
+        lease: Mapping[str, Any] | None | object = None,
+        preserve_lease: bool = False,
     ) -> dict[str, Any]:
         if state not in _STATE_SET:
             raise DurableJobEngineV2Error("durable_job_v2_transition_invalid")
-        current = dict(record)
+        current = deepcopy(dict(record))
+        previous_revision = current.get("revision")
+        if not isinstance(previous_revision, int) or isinstance(previous_revision, bool) or previous_revision < 1:
+            raise DurableJobEngineV2Error("durable_job_v2_revision_invalid")
         timestamps = dict(current["timestamps"])
         now = _now()
         timestamps["updated_at"] = now
@@ -228,12 +292,21 @@ class DurableJobEngineV2:
             "progress": _progress(progress) if progress is not None else _progress(current.get("progress")),
             "reservation_id": reservation_id,
             "state_history": _history(current.get("state_history"), state),
+            "revision": previous_revision + 1,
         })
         if actual_execution is not None:
             current["actual_execution"] = actual_execution
         if dispatchable is not None:
             current["dispatchable"] = dispatchable
-        return self._persist(current)
+        if preserve_lease:
+            pass
+        elif lease is None:
+            current["lease"] = None
+        elif isinstance(lease, Mapping):
+            current["lease"] = dict(lease)
+        else:
+            raise DurableJobEngineV2Error("durable_job_v2_lease_invalid")
+        return self._persist(current, expected_revision=previous_revision)
 
     @staticmethod
     def _is_reconstruct_only(record: Mapping[str, Any]) -> bool:
@@ -248,6 +321,8 @@ class DurableJobEngineV2:
         active = state in _ACTIVE and not reconstruct and (dispatchable or actual_execution)
         if reconstruct:
             lifecycle = "Đã tạo · chưa thực thi"
+        elif state == "NEEDS_READMISSION":
+            lifecycle = "Cần tái tiếp nhận · chưa thực thi"
         elif state in {"QUEUED", "WAITING_RESOURCE", "PREPARING"} and not actual_execution:
             lifecycle = "Đã được lập lịch · chờ worker" if dispatchable else "Đã lập kế hoạch · chưa thực thi"
         elif state == "RUNNING":
@@ -272,6 +347,7 @@ class DurableJobEngineV2:
             dry_run = execution == "not_run"
         return {
             "job_id": record["job_id"],
+            "revision": record["revision"],
             "workflow_id": record["workflow_id"],
             "input_artifact_ids": list(record["input_artifact_ids"]),
             "artifact_refs": list(record["artifact_refs"]),
@@ -279,6 +355,7 @@ class DurableJobEngineV2:
             "retry_mode": record["retry_mode"],
             "dispatchable": dispatchable,
             "actual_execution": actual_execution,
+            "reproducible": record["reproducible"],
             "execution_owner": record["execution_owner"],
             "worker_id": record["worker_id"],
             "resource_profile_id": record["resource_profile_id"],
@@ -294,6 +371,7 @@ class DurableJobEngineV2:
             "next_action": record["next_action"],
             "archived": record["archived"],
             "reservation_id": record["reservation_id"],
+            "lease": dict(record["lease"]) if isinstance(record["lease"], Mapping) else None,
             "execution": execution,
             "dry_run": dry_run,
         }
@@ -304,25 +382,55 @@ class DurableJobEngineV2:
         job = self._public(record)
         return {"status": status, "job": job, "execution": job["execution"], "dry_run": job["dry_run"], **extra}
 
-    def _release_unpersisted_admission(self, job_id: str, worker_id: str, reservation_id: object) -> None:
-        """Release only this in-memory scheduler admission after a store failure.
+    def _release_unpersisted_admission(self, job_id: str, worker_id: str, scheduler_result: Mapping[str, Any]) -> bool:
+        """Drop exactly an admission that failed before any durable record.
 
-        No worker can have started before the durable record was persisted. The
-        bounded scheduler entry is therefore safe to cancel/acknowledge here;
-        this prevents a metadata write failure from consuming capacity for a
-        job that the durable engine cannot recover or expose.
+        This is deliberately not a best-effort cancellation saga: the worker
+        cannot claim an unpersisted job, so the scheduler offers a bounded
+        removal primitive keyed by the exact post-submit revision.
         """
 
         try:
-            cancelled = self.scheduler.cancel(job_id, worker_id)
-            if cancelled.get("state") == "CANCELLING" and isinstance(reservation_id, str):
-                self.scheduler.acknowledge_cancel(job_id, worker_id, reservation_id)
+            return self.scheduler.discard_unpersisted(
+                job_id,
+                worker_id,
+                expected_revision=scheduler_result.get("revision"),
+            )
         except Exception:
-            # The original durable-store failure remains authoritative. The
-            # scheduler is in-process-only and never represents an executing
-            # worker at this point, so no exception is exposed from cleanup.
-            pass
+            return False
 
+    def _saga_failure(
+        self,
+        *,
+        checkpoint: Mapping[str, Any] | None,
+        scheduler_result: Mapping[str, Any],
+        error: DurableJobEngineV2Error,
+    ) -> dict[str, Any]:
+        """Compensate an in-process scheduler change after SQLite rejects it."""
+
+        restored = False
+        if checkpoint is not None:
+            try:
+                restored = self.scheduler.restore_checkpoint(
+                    checkpoint,
+                    expected_revision=scheduler_result.get("revision"),
+                    expected_epoch=scheduler_result.get("scheduler_epoch"),
+                )
+            except Exception:
+                restored = False
+        code = error.args[0] if error.args else "durable_job_v2_store_unavailable"
+        status = "conflict" if code == "durable_job_v2_revision_conflict" else "unavailable"
+        return {
+            "status": status,
+            "code": code,
+            "reason": "The durable transition was not committed; the scheduler transition was compensated when its exact epoch still matched.",
+            "next_action": "Reload the canonical durable job projection before attempting another server-owned transition.",
+            "scheduler_compensated": restored,
+            "execution": "not_run",
+            "dry_run": True,
+        }
+
+    @_serialized
     def admit(self, request: object) -> dict[str, Any]:
         if not isinstance(request, Mapping) or set(request) != {"workflow_id", "input_artifact_ids", "artifact_refs", "execution_owner", "worker_id", "resource_profile_id"}:
             return {"status": "invalid", "code": "durable_job_v2_request_invalid", "execution": "not_run", "dry_run": True}
@@ -347,6 +455,7 @@ class DurableJobEngineV2:
         now = _now()
         record = {
             "schema_version": DURABLE_JOB_ENGINE_V2_SCHEMA_VERSION,
+            "revision": 1,
             "job_id": job_id,
             "workflow_id": workflow,
             "input_artifact_ids": inputs,
@@ -361,6 +470,8 @@ class DurableJobEngineV2:
             "dispatchable": True,
             "actual_execution": False,
             "reservation_id": scheduler_result.get("reservation", {}).get("reservation_id") if isinstance(scheduler_result.get("reservation"), Mapping) else None,
+            "lease": None,
+            "reproducible": True,
             "timestamps": {"created_at": now, "updated_at": now, "started_at": None, "completed_at": None},
             "error_code": None,
             "reason": "A durable job was admitted to the server-owned scheduler; no worker has started yet.",
@@ -371,45 +482,71 @@ class DurableJobEngineV2:
         try:
             persisted = self._persist(record)
         except DurableJobEngineV2Error as exc:
-            self._release_unpersisted_admission(job_id, worker, record["reservation_id"])
+            released = self._release_unpersisted_admission(job_id, worker, scheduler_result)
             return {
                 "status": "unavailable",
                 "code": exc.args[0] if exc.args else "durable_job_v2_store_unavailable",
-                "reason": "Durable metadata could not be persisted, so the in-memory scheduler admission was released before any worker started.",
+                "reason": "Durable metadata could not be persisted, so the in-memory scheduler admission was removed before any worker started." if released else "Durable metadata could not be persisted; the scheduler admission was not exposed as accepted and requires reconciliation.",
                 "next_action": "Inspect the durable metadata store and retry server-owned admission only after it is available.",
                 "execution": "not_run",
                 "dry_run": True,
+                "scheduler_compensated": released,
             }
         return self._result_for_job("accepted", persisted)
 
+    @_serialized
     def claim_running(self, job_id: object, worker_id: object, reservation_id: object) -> dict[str, Any] | None:
         record = self._get(job_id)
         if record is None:
             return None
         if record["dispatchable"] is not True or record["actual_execution"] is not False or record["state"] != "PREPARING":
             return {"status": "conflict", "code": "durable_job_not_preparing", "execution": "not_run", "dry_run": True}
+        checkpoint = self.scheduler.checkpoint(record["job_id"])
         scheduler = self.scheduler.claim_running(job_id, worker_id, reservation_id)
         if scheduler.get("state") != "RUNNING":
             return {"status": "conflict", "code": scheduler.get("code", "reservation_identity_mismatch"), "execution": "not_run", "dry_run": True}
-        updated = self._transition(
-            record,
-            state="RUNNING",
-            reason="The exact server-owned worker claimed its matching scheduler reservation and reported that execution started.",
-            next_action="The worker may report bounded progress and a terminal result.",
-            reservation_id=str(reservation_id),
-            actual_execution=True,
-        )
+        try:
+            updated = self._transition(
+                record,
+                state="RUNNING",
+                reason="The exact server-owned worker claimed its matching scheduler reservation and reported that execution started.",
+                next_action="The worker may report bounded progress and a terminal result.",
+                reservation_id=str(reservation_id),
+                actual_execution=True,
+                lease=_durable_lease(scheduler.get("lease")),
+            )
+        except DurableJobEngineV2Error as exc:
+            return self._saga_failure(checkpoint=checkpoint, scheduler_result=scheduler, error=exc)
         return self._result_for_job("running", updated)
 
+    @_serialized
     def progress(self, job_id: object, worker_id: object, reservation_id: object, value: object) -> dict[str, Any] | None:
         record = self._get(job_id)
         if record is None:
             return None
-        if record["actual_execution"] is not True or record["state"] != "RUNNING" or record.get("reservation_id") != reservation_id or record.get("worker_id") != worker_id or not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 100:
+        lease = _durable_lease(record.get("lease"))
+        if record["actual_execution"] is not True or record["state"] != "RUNNING" or record.get("reservation_id") != reservation_id or record.get("worker_id") != worker_id or lease is None or not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 100:
             return {"status": "conflict", "code": "durable_job_progress_rejected", "execution": "not_run", "dry_run": True}
-        updated = self._transition(record, state="RUNNING", reason="The exact server-owned worker reported bounded progress.", next_action="Continue only while the matching scheduler reservation remains bound.", progress=value, reservation_id=str(reservation_id))
+        checkpoint = self.scheduler.checkpoint(record["job_id"])
+        scheduler = self.scheduler.progress(job_id, worker_id, reservation_id, lease["lease_id"], value)
+        if scheduler.get("state") != "RUNNING":
+            return {"status": "conflict", "code": scheduler.get("code", "durable_job_progress_rejected"), "execution": "not_run", "dry_run": True}
+        try:
+            updated = self._transition(
+                record,
+                state="RUNNING",
+                reason="The exact server-owned worker reported bounded progress.",
+                next_action="Continue only while the matching scheduler reservation and lease remain bound.",
+                progress=value,
+                reservation_id=str(reservation_id),
+                actual_execution=True,
+                lease=_durable_lease(scheduler.get("lease")),
+            )
+        except DurableJobEngineV2Error as exc:
+            return self._saga_failure(checkpoint=checkpoint, scheduler_result=scheduler, error=exc)
         return self._result_for_job("completed", updated)
 
+    @_serialized
     def pause(self, job_id: object, worker_id: object, reservation_id: object) -> dict[str, Any] | None:
         """Record an already-confirmed worker pause; this method never pauses a process."""
 
@@ -421,18 +558,28 @@ class DurableJobEngineV2:
             return {"status": "unavailable", "code": "durable_job_pause_unavailable", "execution": "not_run", "dry_run": True}
         if record["actual_execution"] is not True or record["state"] != "RUNNING":
             return {"status": "conflict", "code": "durable_job_not_running", "execution": "not_run", "dry_run": True}
-        scheduler = self.scheduler.pause(job_id, worker_id, reservation_id)
+        lease = _durable_lease(record.get("lease"))
+        if lease is None:
+            return {"status": "conflict", "code": "durable_job_lease_missing", "execution": "not_run", "dry_run": True}
+        checkpoint = self.scheduler.checkpoint(record["job_id"])
+        scheduler = self.scheduler.pause(job_id, worker_id, reservation_id, lease["lease_id"])
         if scheduler.get("state") != "PAUSED":
             return {"status": "conflict", "code": scheduler.get("code", "reservation_identity_mismatch"), "execution": "not_run", "dry_run": True}
-        updated = self._transition(
-            record,
-            state="PAUSED",
-            reason="The exact server-owned worker confirmed that it paused under its existing reservation.",
-            next_action="Resume is available only when the same execution owner explicitly supports it.",
-            reservation_id=str(reservation_id),
-        )
+        try:
+            updated = self._transition(
+                record,
+                state="PAUSED",
+                reason="The exact server-owned worker confirmed that it paused under its existing reservation.",
+                next_action="Resume is available only when the same execution owner explicitly supports it.",
+                reservation_id=str(reservation_id),
+                actual_execution=True,
+                lease=_durable_lease(scheduler.get("lease")),
+            )
+        except DurableJobEngineV2Error as exc:
+            return self._saga_failure(checkpoint=checkpoint, scheduler_result=scheduler, error=exc)
         return self._result_for_job("paused", updated)
 
+    @_serialized
     def resume(self, job_id: object, worker_id: object, reservation_id: object) -> dict[str, Any] | None:
         """Record an already-confirmed worker resume; this method never starts a worker."""
 
@@ -444,18 +591,28 @@ class DurableJobEngineV2:
             return {"status": "unavailable", "code": "durable_job_resume_unavailable", "execution": "not_run", "dry_run": True}
         if record["actual_execution"] is not True or record["state"] != "PAUSED":
             return {"status": "conflict", "code": "durable_job_not_paused", "execution": "not_run", "dry_run": True}
-        scheduler = self.scheduler.resume(job_id, worker_id, reservation_id)
+        lease = _durable_lease(record.get("lease"))
+        if lease is None:
+            return {"status": "conflict", "code": "durable_job_lease_missing", "execution": "not_run", "dry_run": True}
+        checkpoint = self.scheduler.checkpoint(record["job_id"])
+        scheduler = self.scheduler.resume(job_id, worker_id, reservation_id, lease["lease_id"])
         if scheduler.get("state") != "RUNNING":
             return {"status": "conflict", "code": scheduler.get("code", "reservation_identity_mismatch"), "execution": "not_run", "dry_run": True}
-        updated = self._transition(
-            record,
-            state="RUNNING",
-            reason="The exact server-owned worker confirmed that it resumed under its existing reservation.",
-            next_action="Continue only while the matching scheduler reservation remains bound.",
-            reservation_id=str(reservation_id),
-        )
+        try:
+            updated = self._transition(
+                record,
+                state="RUNNING",
+                reason="The exact server-owned worker confirmed that it resumed under its existing reservation.",
+                next_action="Continue only while the matching scheduler reservation remains bound.",
+                reservation_id=str(reservation_id),
+                actual_execution=True,
+                lease=_durable_lease(scheduler.get("lease")),
+            )
+        except DurableJobEngineV2Error as exc:
+            return self._saga_failure(checkpoint=checkpoint, scheduler_result=scheduler, error=exc)
         return self._result_for_job("resumed", updated)
 
+    @_serialized
     def finish(self, job_id: object, worker_id: object, reservation_id: object, *, succeeded: bool, artifact_refs: object = None) -> dict[str, Any] | None:
         record = self._get(job_id)
         if record is None:
@@ -463,15 +620,23 @@ class DurableJobEngineV2:
         artifacts = _artifact_ids(artifact_refs) if artifact_refs is not None else list(record["artifact_refs"])
         if artifacts is None:
             return {"status": "invalid", "code": "durable_job_artifacts_invalid", "execution": "not_run", "dry_run": True}
-        scheduler = self.scheduler.finish(job_id, worker_id, reservation_id, succeeded=succeeded)
+        lease = _durable_lease(record.get("lease"))
+        if lease is None:
+            return {"status": "conflict", "code": "durable_job_lease_missing", "execution": "not_run", "dry_run": True}
+        checkpoint = self.scheduler.checkpoint(record["job_id"])
+        scheduler = self.scheduler.finish(job_id, worker_id, reservation_id, succeeded=succeeded, lease_id=lease["lease_id"])
         target = "SUCCEEDED" if succeeded else "FAILED"
         if scheduler.get("state") != target:
             return {"status": "conflict", "code": scheduler.get("code", "reservation_identity_mismatch"), "execution": "not_run", "dry_run": True}
         changed = dict(record)
         changed["artifact_refs"] = artifacts
-        updated = self._transition(changed, state=target, reason="The exact worker published a terminal result; artifacts remain referenced and are not deleted by the job engine.", next_action="Inspect artifacts or archive/delete only the metadata history when appropriate.", progress=100 if succeeded else record["progress"], reservation_id=None)
+        try:
+            updated = self._transition(changed, state=target, reason="The exact worker published a terminal result; artifacts remain referenced and are not deleted by the job engine.", next_action="Inspect artifacts or archive/delete only the metadata history when appropriate.", progress=100 if succeeded else record["progress"], reservation_id=None, actual_execution=True, lease=None)
+        except DurableJobEngineV2Error as exc:
+            return self._saga_failure(checkpoint=checkpoint, scheduler_result=scheduler, error=exc)
         return self._result_for_job("completed", updated)
 
+    @_serialized
     def cancel(self, job_id: object) -> dict[str, Any] | None:
         record = self._get(job_id)
         if record is None:
@@ -481,25 +646,39 @@ class DurableJobEngineV2:
             return self._result_for_job("cancelled", updated)
         if record["state"] not in _ACTIVE:
             return {"status": "conflict", "code": "durable_job_terminal", "execution": "not_run", "dry_run": True}
+        checkpoint = self.scheduler.checkpoint(record["job_id"])
         scheduler = self.scheduler.cancel(record["job_id"], record["worker_id"])
         if scheduler.get("state") == "CANCELLED":
-            updated = self._transition(record, state="CANCELLED", reason="The job was cancelled before a worker started; no artifact was deleted.", next_action="The job metadata can be archived or removed from history without deleting artifacts.", reservation_id=None)
+            try:
+                updated = self._transition(record, state="CANCELLED", reason="The job was cancelled before a worker started; no artifact was deleted.", next_action="The job metadata can be archived or removed from history without deleting artifacts.", reservation_id=None, actual_execution=False, lease=None)
+            except DurableJobEngineV2Error as exc:
+                return self._saga_failure(checkpoint=checkpoint, scheduler_result=scheduler, error=exc)
             return self._result_for_job("cancelled", updated)
         if scheduler.get("state") != "CANCELLING":
             return {"status": "conflict", "code": scheduler.get("code", "scheduler_cancellation_invalid"), "execution": "not_run", "dry_run": True}
-        updated = self._transition(record, state="CANCELLING", reason="Cancellation was requested from the exact scheduler worker binding.", next_action="Wait for the worker to acknowledge cancellation; artifacts remain preserved.", reservation_id=record["reservation_id"])
+        try:
+            updated = self._transition(record, state="CANCELLING", reason="Cancellation was requested from the exact scheduler worker binding.", next_action="Wait for the worker to acknowledge cancellation; artifacts remain preserved.", reservation_id=record["reservation_id"], actual_execution=record["actual_execution"], lease=_durable_lease(scheduler.get("lease")))
+        except DurableJobEngineV2Error as exc:
+            return self._saga_failure(checkpoint=checkpoint, scheduler_result=scheduler, error=exc)
         return self._result_for_job("cancelling", updated)
 
+    @_serialized
     def acknowledge_cancel(self, job_id: object, worker_id: object, reservation_id: object) -> dict[str, Any] | None:
         record = self._get(job_id)
         if record is None:
             return None
-        scheduler = self.scheduler.acknowledge_cancel(job_id, worker_id, reservation_id)
+        lease = _durable_lease(record.get("lease"))
+        checkpoint = self.scheduler.checkpoint(record["job_id"])
+        scheduler = self.scheduler.acknowledge_cancel(job_id, worker_id, reservation_id, lease["lease_id"] if lease is not None else None)
         if scheduler.get("state") != "CANCELLED":
             return {"status": "conflict", "code": scheduler.get("code", "reservation_identity_mismatch"), "execution": "not_run", "dry_run": True}
-        updated = self._transition(record, state="CANCELLED", reason="The exact worker acknowledged cancellation and its reservation was released.", next_action="Artifacts are retained; archive or remove only this terminal metadata record if desired.", reservation_id=None)
+        try:
+            updated = self._transition(record, state="CANCELLED", reason="The exact worker acknowledged cancellation and its reservation was released.", next_action="Artifacts are retained; archive or remove only this terminal metadata record if desired.", reservation_id=None, actual_execution=record["actual_execution"], lease=None)
+        except DurableJobEngineV2Error as exc:
+            return self._saga_failure(checkpoint=checkpoint, scheduler_result=scheduler, error=exc)
         return self._result_for_job("cancelled", updated)
 
+    @_serialized
     def retry(self, job_id: object, *, mode: object) -> dict[str, Any] | None:
         record = self._get(job_id)
         if record is None:
@@ -510,9 +689,19 @@ class DurableJobEngineV2:
             return {"status": "unavailable", "code": "actual_retry_execution_not_available", "reason": "No registered V2 owner dispatch bridge can truthfully retry execution in this product state.", "next_action": "Use Tạo lại tác vụ to create a reconstruct-only record, or wait for a separately registered execution owner.", "execution": "not_run", "dry_run": True}
         if mode != "RECONSTRUCT_ONLY":
             return {"status": "invalid", "code": "durable_job_retry_mode_invalid", "execution": "not_run", "dry_run": True}
+        if record["reproducible"] is not True:
+            return {
+                "status": "unavailable",
+                "code": "durable_job_reproducible_request_unavailable",
+                "reason": "The historical record has no retained sanitized reproducible request contract.",
+                "next_action": "Do not fabricate input paths, secrets, or user-media references; submit a new server-owned request instead.",
+                "execution": "not_run",
+                "dry_run": True,
+            }
         now = _now()
         new_record = {
             "schema_version": DURABLE_JOB_ENGINE_V2_SCHEMA_VERSION,
+            "revision": 1,
             "job_id": f"jobv2_{secrets.token_hex(16)}",
             "workflow_id": record["workflow_id"],
             "input_artifact_ids": list(record["input_artifact_ids"]),
@@ -527,6 +716,8 @@ class DurableJobEngineV2:
             "dispatchable": False,
             "actual_execution": False,
             "reservation_id": None,
+            "lease": None,
+            "reproducible": record["reproducible"],
             "timestamps": {"created_at": now, "updated_at": now, "started_at": None, "completed_at": None},
             "error_code": None,
             "reason": "A new durable record was reconstructed from sanitized reproducible metadata; no execution owner was started.",
@@ -537,6 +728,66 @@ class DurableJobEngineV2:
         stored = self._persist(new_record)
         return self._result_for_job("queued", stored, actual_retry_execution=False)
 
+    @_serialized
+    def readmit_after_restart(self, job_id: object) -> dict[str, Any] | None:
+        """Trusted server-only re-admission of a pre-start durable record.
+
+        There is intentionally no browser request data in this method.  It
+        reuses only the sanitized durable contract, rechecks the registered
+        server owner and configured profile, and still does not launch a
+        worker.  A caller can supply an additional server-owned preflight at
+        construction time for current capability/input policy.
+        """
+
+        record = self._get(job_id)
+        if record is None:
+            return None
+        if record["state"] != "NEEDS_READMISSION" or record["archived"] is True or record["reproducible"] is not True:
+            return {"status": "conflict", "code": "durable_job_readmission_not_eligible", "execution": "not_run", "dry_run": True}
+        capability = self.owners.capability(record["execution_owner"])
+        if capability is None or capability.get("dispatch") is not True:
+            return {"status": "unavailable", "code": "execution_owner_unavailable", "execution": "not_run", "dry_run": True}
+        if callable(self._readmission_preflight) and self._readmission_preflight(deepcopy(record)) is not True:
+            return {
+                "status": "unavailable",
+                "code": "durable_job_readmission_preflight_rejected",
+                "reason": "Current server-owned capability/input preflight did not permit rebuilding a reservation.",
+                "next_action": "Keep the durable record in NEEDS_READMISSION; do not fabricate a worker or input reference.",
+                "execution": "not_run",
+                "dry_run": True,
+            }
+        if self.scheduler.job(record["job_id"]) is not None:
+            return {"status": "conflict", "code": "durable_job_scheduler_record_exists", "execution": "not_run", "dry_run": True}
+        scheduler = self.scheduler.submit(record["job_id"], record["worker_id"], record["resource_profile_id"])
+        if scheduler.get("state") not in {"QUEUED", "WAITING_RESOURCE", "PREPARING"}:
+            return {"status": "unavailable", "code": scheduler.get("code", "scheduler_admission_unavailable"), "execution": "not_run", "dry_run": True}
+        # Submit is the first transition. For persistence failure the special
+        # discard primitive is safer than restoring a nonexistent checkpoint.
+        try:
+            updated = self._transition(
+                record,
+                state=str(scheduler["state"]),
+                reason="A trusted server-owned readmission path revalidated the durable request and rebuilt only an in-process reservation.",
+                next_action="The registered owner must claim the exact new reservation before any execution can be recorded.",
+                reservation_id=(scheduler.get("reservation") or {}).get("reservation_id") if isinstance(scheduler.get("reservation"), Mapping) else None,
+                actual_execution=False,
+                dispatchable=True,
+                lease=None,
+            )
+        except DurableJobEngineV2Error as exc:
+            # Restore is not applicable because submit did not have a prior
+            # scheduler state; delete the exact unpersisted entry instead.
+            released = self._release_unpersisted_admission(record["job_id"], record["worker_id"], scheduler)
+            return {
+                "status": "conflict" if (exc.args and exc.args[0] == "durable_job_v2_revision_conflict") else "unavailable",
+                "code": exc.args[0] if exc.args else "durable_job_v2_store_unavailable",
+                "scheduler_compensated": released,
+                "execution": "not_run",
+                "dry_run": True,
+            }
+        return self._result_for_job("accepted", updated)
+
+    @_serialized
     def archive(self, job_id: object) -> dict[str, Any] | None:
         record = self._get(job_id)
         if record is None:
@@ -546,9 +797,11 @@ class DurableJobEngineV2:
         updated = dict(record)
         updated["archived"] = True
         updated["timestamps"] = {**updated["timestamps"], "updated_at": _now()}
-        stored = self._persist(updated)
+        updated["revision"] = int(record["revision"]) + 1
+        stored = self._persist(updated, expected_revision=int(record["revision"]))
         return self._result_for_job("completed", stored, artifacts_preserved=True)
 
+    @_serialized
     def delete_history(self, job_ids: object) -> dict[str, Any]:
         if not isinstance(job_ids, list) or not 1 <= len(job_ids) <= 100 or not all(_safe_id(item, _JOB_ID) is not None for item in job_ids) or len(set(job_ids)) != len(job_ids):
             return {"status": "invalid", "code": "durable_job_history_selection_invalid", "execution": "not_run", "dry_run": True}
@@ -561,13 +814,17 @@ class DurableJobEngineV2:
                 return {"status": "conflict", "code": "durable_job_history_not_terminal", "execution": "not_run", "dry_run": True}
             records.append(record)
         try:
-            removed = self.store.delete_many([record["job_id"] for record in records])
+            removed = self.store.delete_many(
+                [record["job_id"] for record in records],
+                expected_revisions={str(record["job_id"]): int(record["revision"]) for record in records},
+            )
         except DurableJobStoreV2Error as exc:
             if exc.code == "durable_job_v2_record_missing":
                 return {"status": "not_found", "code": "durable_job_history_not_found", "execution": "not_run", "dry_run": True}
             raise DurableJobEngineV2Error(exc.code) from exc
         return {"status": "completed", "removed_count": removed, "artifacts_preserved": True, "execution": "not_run", "dry_run": True}
 
+    @_serialized
     def reconcile_startup(
         self,
         *,
@@ -580,7 +837,7 @@ class DurableJobEngineV2:
             records = self.store.list()
         except DurableJobStoreV2Error as exc:
             raise DurableJobEngineV2Error(exc.code) from exc
-        reconciled = {"waiting_resource": 0, "failed": 0, "succeeded": 0, "retained": 0}
+        reconciled = {"needs_readmission": 0, "failed": 0, "succeeded": 0, "retained": 0}
         for raw in records:
             record = self._validate_record(raw)
             if record is None or record["state"] in _TERMINAL or self._is_reconstruct_only(record):
@@ -589,15 +846,15 @@ class DurableJobEngineV2:
             if record["state"] in {"QUEUED", "WAITING_RESOURCE", "PREPARING"}:
                 updated = self._transition(
                     record,
-                    state="WAITING_RESOURCE",
+                    state="NEEDS_READMISSION",
                     reason="A pre-start scheduler reservation is not durable across process restart and was released for fresh admission.",
-                    next_action="Re-run server-owned resource admission before any worker can start.",
+                    next_action="A trusted server-owned readmission path must revalidate owner, inputs, capability, and resource profile before any worker can start.",
                     error_code="reservation_stale",
                     reservation_id=None,
                     dispatchable=False,
                 )
                 del updated
-                reconciled["waiting_resource"] += 1
+                reconciled["needs_readmission"] += 1
                 continue
             artifacts = list(record["artifact_refs"])
             complete = bool(callable(artifact_complete) and artifact_complete(artifacts))

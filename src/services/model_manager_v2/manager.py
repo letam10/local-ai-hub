@@ -168,6 +168,9 @@ def _catalog_files(model_id: str, leaves: object) -> tuple[list[dict[str, object
                 "present": leaf.get("present") is True,
                 "size_bytes": size,
                 "verification": "declared" if verification == "verified" or _FINGERPRINT.fullmatch(checksum) else "not_declared",
+                # The file-content digest is intentionally not copied into a
+                # broad browser duplicate index.  It remains usable only to
+                # decide whether the catalog declared any checksum evidence.
             })
     return public, "declared" if checksum_declared else "not_declared"
 
@@ -302,6 +305,11 @@ class ModelManagerV2:
             "source": source,
             "license": license_value,
         }
+        declared_content = value.get("content_sha256") or value.get("expected_content_sha256")
+        if not isinstance(declared_content, str) or _FINGERPRINT.fullmatch(declared_content.casefold()) is None:
+            declared_content = None
+        else:
+            declared_content = declared_content.casefold()
         return {
             "model_id": model_id,
             "display_name": _safe_text(value.get("display_name"), model_id, maximum=160),
@@ -327,7 +335,12 @@ class ModelManagerV2:
             "vram_estimate_mb": _safe_integer(value.get("minimum_vram_mb")),
             "ram_estimate_mb": None,
             "last_verified": None,
-            "checksum": {"state": checksum_state, "identity_digest": _digest(identity_material)},
+            "checksum": {
+                "state": "declared" if declared_content is not None else checksum_state,
+                "identity_digest": _digest(identity_material),
+                "content_sha256": declared_content,
+                "verification": "not_verified",
+            },
             "update_available": state == "UPDATE_AVAILABLE",
             "state": state,
             "reason": _safe_text(value.get("reason"), "The model catalog has no bounded local observation yet."),
@@ -347,19 +360,20 @@ class ModelManagerV2:
         canonical = str(record["canonical_location"]["location_id"]) if isinstance(record.get("canonical_location"), Mapping) else _canonical_location(model_id)
         model_observations = [item for item in self._observations if item["model_id"] == model_id]
         foreign_locations = [item for item in model_observations if item["location_id"] != canonical]
-        digest = record.get("checksum", {}).get("identity_digest") if isinstance(record.get("checksum"), Mapping) else None
+        content_digest = record.get("checksum", {}).get("content_sha256") if isinstance(record.get("checksum"), Mapping) else None
         size = record.get("size_bytes")
         duplicates: list[dict[str, object]] = []
         for item in self._observations:
             if item["model_id"] == model_id and item["location_id"] == canonical:
                 continue
-            same_digest = isinstance(item.get("sha256"), str) and item.get("sha256") == digest
+            same_digest = isinstance(content_digest, str) and isinstance(item.get("sha256"), str) and item.get("sha256") == content_digest
             same_size = isinstance(size, int) and size > 0 and item.get("size_bytes") == size
             if same_digest or (same_size and item["model_id"] == model_id):
                 duplicates.append({
                     "model_id": item["model_id"],
                     "location_id": item["location_id"],
-                    "match": "digest" if same_digest else "size_and_identity",
+                    "match": "content_sha256" if same_digest else "size_and_identity_candidate",
+                    "strength": "strong" if same_digest else "candidate",
                 })
         duplicate = {
             "state": "candidate_detected" if duplicates else "not_scanned" if not self._observations else "not_detected",
@@ -394,11 +408,20 @@ class ModelManagerV2:
             return None
         duplicate, moved = self._analysis(record)
         compatibility = self._compatibility(record)
+        checksum = dict(record.get("checksum") or {}) if isinstance(record.get("checksum"), Mapping) else {}
+        declared = checksum.get("content_sha256")
+        canonical = str(record["canonical_location"]["location_id"]) if isinstance(record.get("canonical_location"), Mapping) else _canonical_location(str(record["model_id"]))
+        matching_observation = any(
+            item["model_id"] == record["model_id"] and item["location_id"] == canonical and item.get("sha256") == declared
+            for item in self._observations
+        ) if isinstance(declared, str) else False
+        checksum["verification"] = "verified_evidence_available" if matching_observation else "not_verified"
         record.update({
             "schema_version": MODEL_MANAGER_V2_SCHEMA_VERSION,
             "duplicate_analysis": duplicate,
             "moved_analysis": moved,
             "runtime_compatibility": compatibility,
+            "checksum": checksum,
             "available_actions": list(MODEL_V2_ACTIONS),
             "execution": "not_run",
             "dry_run": True,
@@ -478,6 +501,24 @@ class ModelManagerV2:
             return {**base, "status": "completed", "compatibility": detail["runtime_compatibility"], "reason": "Compatibility is a static capability preflight, not a hardware or model execution test.", "next_action": "Resolve exact runtime/resource blockers before a separately authorized workload."}
         if requested == "UPDATE_METADATA":
             return {**base, "status": "unavailable", "code": "metadata_update_adapter_unavailable", "reason": "No typed V2 metadata-update adapter is registered; no config or registry was changed.", "next_action": "Use the tracked catalog review workflow until Configuration V2 provides a revisioned metadata writer."}
+        if requested == "VERIFY_CHECKSUM":
+            checksum = detail.get("checksum") if isinstance(detail.get("checksum"), Mapping) else {}
+            if checksum.get("content_sha256") is None:
+                return {
+                    **base,
+                    "status": "completed",
+                    "checksum": {"state": "checksum_not_declared", "verification": "not_verified"},
+                    "reason": "Catalog identity metadata is not a file-content SHA-256, so no checksum verification claim can be made.",
+                    "next_action": "Publish a server-owned declared content SHA-256 and a matching bounded observation before requesting checksum verification.",
+                }
+            if checksum.get("verification") != "verified_evidence_available":
+                return {
+                    **base,
+                    "status": "completed",
+                    "checksum": {"state": "declared", "verification": "not_verified"},
+                    "reason": "A content SHA-256 is declared, but no matching server-owned bounded content observation is available.",
+                    "next_action": "Refresh a bounded trusted observation; do not treat metadata identity or equal size as a verified checksum.",
+                }
         if planner is None:
             return {**base, "status": "unavailable", "code": "model_v2_planner_unavailable", "reason": "The server-owned V8 component planner is unavailable.", "next_action": "Restore the managed planner before requesting an import, reuse, verification, or maintenance plan."}
         try:
@@ -488,7 +529,8 @@ class ModelManagerV2:
                 lifecycle = self._lifecycle_engine.plan(f"model:{model}", lifecycle_action, planner=planner_instance)
                 if not isinstance(lifecycle, Mapping) or lifecycle.get("status") != "planned" or not isinstance(lifecycle.get("plan"), Mapping):
                     return {**base, "status": "unavailable", "code": "model_v2_lifecycle_plan_unavailable", "reason": "The existing V8 lifecycle authority did not publish a usable plan.", "next_action": "Review exact model blockers and create a fresh V8 plan when the server-owned planner is available."}
-                return {**base, "status": "planned", "plan": deepcopy(lifecycle["plan"]), "reason": "A durable V8 plan was created; it has not executed.", "next_action": "Review the opaque V8 operation and use the existing explicit confirmation flow if authorized."}
+                checksum_projection = {"state": "declared", "verification": "verified_evidence_available"} if requested == "VERIFY_CHECKSUM" else None
+                return {**base, "status": "planned", "plan": deepcopy(lifecycle["plan"]), "checksum": checksum_projection, "reason": "A durable V8 plan was created; it has not executed." if requested != "VERIFY_CHECKSUM" else "Matching declared content-hash evidence is available; the durable plan has not executed and does not claim a fresh byte verification.", "next_action": "Review the opaque V8 operation and use the existing explicit confirmation flow if authorized."}
             if requested == "REGISTER_EXISTING" or requested == "REPAIR_REGISTRY":
                 raw = planner_instance.plan_reuse(model, component_type="model")
             elif requested == "IMPORT_EXISTING":

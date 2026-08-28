@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -70,6 +71,13 @@ class CapabilityGraphV2Tests(unittest.TestCase):
             evidence_state="completed",
             fingerprint="a" * 64,
         )
+        record["evidence"] = {
+            **record["evidence"],
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "source_revision": "fixture-v1",
+            "source_fingerprint": "b" * 64,
+            "freshness_seconds": 300,
+        }
         record["safe_actions"] = ["inspect", "review_evidence"]
         return record
 
@@ -175,6 +183,78 @@ class CapabilityGraphV2Tests(unittest.TestCase):
         self.assertIn("runtime:faster-whisper", blocker_ids)
         self.assertIn("model:faster-whisper-large-v3", blocker_ids)
         self.assertIn("resource:gpu", blocker_ids)
+
+    def test_server_owned_engine_and_gpu_evidence_can_bridge_registered_dependencies_when_fresh(self) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        graph = build_component_capability_graph(
+            component_statuses=[],
+            tool_records=[],
+            catalog_snapshot={
+                "models": [{
+                    "model_id": "faster-whisper-large-v3", "runtime_id": "faster-whisper", "provider": "systran",
+                    "version": "large-v3", "modules": [], "status": "NOT_INSTALLED", "minimum_vram_mb": 2048,
+                }],
+                "runtimes": [{
+                    "runtime_id": "faster-whisper", "provider": "systran", "kind": "python", "version": "1.0.0", "modules": [], "status": "PARTIAL",
+                }],
+            },
+            engine_evidence={"python": {
+                "status": "verified", "fingerprint": "c" * 64, "source_fingerprint": "d" * 64,
+                "source_revision": "runtime-catalog-v1", "observed_at": now, "freshness_seconds": 300,
+            }},
+            resource_evidence={"gpu": {
+                "status": "available", "fingerprint": "e" * 64, "source_fingerprint": "f" * 64,
+                "source_revision": "scheduler-v3", "observed_at": now, "freshness_seconds": 300,
+            }},
+        )
+        engine = graph.capability("engine:python")
+        gpu = graph.capability("resource:gpu")
+        self.assertEqual(engine["operational_state"], "VERIFIED")
+        self.assertEqual(gpu["operational_state"], "VERIFIED")
+        self.assertEqual(engine["evidence"]["freshness"], "current")
+        self.assertEqual(gpu["evidence"]["source_revision"], "scheduler-v3")
+
+    def test_stale_operational_evidence_is_downgraded_instead_of_remaining_operational(self) -> None:
+        stale = self._operational("tool:stale")
+        stale["evidence"] = {
+            **stale["evidence"],
+            "observed_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
+            "source_revision": "catalog-v1",
+            "source_fingerprint": "b" * 64,
+            "freshness_seconds": 60,
+        }
+        result = CapabilityGraph([stale]).capability("tool:stale")
+        self.assertEqual(result["operational_state"], "VERIFIED")
+        self.assertEqual(result["evidence"]["freshness"], "stale")
+
+    def test_default_context_uses_only_bound_engine_and_scheduler_evidence_bridges(self) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+
+        class Catalog:
+            def snapshot(self):  # type: ignore[no-untyped-def]
+                return {
+                    "models": [{"model_id": "faster-whisper-large-v3", "runtime_id": "faster-whisper", "provider": "systran", "version": "v3", "modules": [], "status": "NOT_INSTALLED", "minimum_vram_mb": 2048}],
+                    "runtimes": [{"runtime_id": "faster-whisper", "provider": "systran", "kind": "python", "version": "1", "modules": [], "status": "PARTIAL"}],
+                }
+
+        with patch("src.services.productization.ComponentLifecycle", return_value=SimpleNamespace(catalog=Catalog())):
+            context = build_default_context({
+                "project_manager": SimpleNamespace(get_artifact_status=lambda artifact_id: None),
+                "component_statuses": lambda: [],
+                "tool_catalog": lambda components: [],
+                "capability_engine_evidence": {
+                    "python": {"status": "verified", "fingerprint": "a" * 64, "source_fingerprint": "b" * 64, "source_revision": "runtime-v1", "observed_at": now, "freshness_seconds": 300},
+                },
+                "resource_scheduler_hardware": lambda: {
+                    "cpu_slots": 4, "ram_mb": 8192, "disk_mb": 8192,
+                    "gpus": [{"id": "gpu-test", "vendor": "nvidia", "device_class": "discrete", "model": "Test GPU", "vram_mb": 4096, "free_vram_mb": 3072, "observed_at": now, "source_fingerprint": "c" * 64}],
+                    "runtime_slots": {}, "provider_slots": {},
+                },
+            })
+            snapshot = context.call("capability_graph_snapshot")
+        records = {item["capability_id"]: item for item in snapshot["capabilities"]}
+        self.assertEqual(records["engine:python"]["operational_state"], "VERIFIED")
+        self.assertEqual(records["resource:gpu"]["operational_state"], "VERIFIED")
 
     def test_public_graph_never_echoes_path_or_secret_like_text(self) -> None:
         hostile = _descriptor("component:hostile")

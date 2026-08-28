@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import unittest
 
 from src.services.api.context import ApiContext, build_default_context
-from src.services.api.router import ApiRequest
+from src.services.api.router import ApiRequest, Router
 from src.services.api.router_registry import build_router
 from src.services.feature_discovery_v2 import FEATURE_DISCOVERY_V2_SCHEMA_VERSION, detail, snapshot
 
@@ -33,7 +33,16 @@ class FeatureDiscoveryV2Tests(unittest.TestCase):
         rows = {item["feature_id"]: item for item in value["features"]}
         self.assertEqual({key: rows[key]["feature_state"] for key in _FEATURES}, _FEATURES)
         self.assertTrue(all(item["execution"] == "not_run" and item["dry_run"] is True for item in rows.values()))
-        self.assertIn("/api/durable-job-engine/v2", rows["durable_job_engine_v2"]["routes"])
+        durable_routes = rows["durable_job_engine_v2"]["routes"]
+        admitted = next(item for item in durable_routes if item["route_id"] == "durable_job_engine.v2_admit")
+        self.assertEqual(admitted, {
+            "route_id": "durable_job_engine.v2_admit",
+            "method": "POST",
+            "path": "/api/durable-job-engine/v2",
+            "contract_version": "v2",
+            "execution_mode": "owner_required",
+        })
+        self.assertTrue(all({"route_id", "method", "path", "contract_version", "execution_mode"}.issubset(route) for item in rows.values() for route in item["routes"]))
         encoded = json.dumps(value).lower()
         self.assertNotIn("c:/", encoded)
         self.assertNotIn("\\\\", encoded)
@@ -46,6 +55,27 @@ class FeatureDiscoveryV2Tests(unittest.TestCase):
         self.assertEqual(detail("capability_graph_v2")["feature"]["feature_state"], "READ_ONLY")
         self.assertIsNone(detail("C:/private"))
         self.assertIsNone(detail("unknown_feature"))
+
+    def test_router_mismatch_or_missing_required_route_is_never_advertised(self) -> None:
+        empty = snapshot(Router())
+        self.assertEqual(empty["status"], "unavailable")
+        self.assertEqual(empty["features"], [])
+        self.assertTrue(empty["missing_required_routes"])
+        self.assertIsNone(detail("capability_graph_v2", Router()))
+
+        router = Router()
+        router.register(
+            route_id="capabilities.v2_snapshot",
+            method="POST",
+            path="/api/capabilities/v2",
+            domain="capabilities",
+            owner="test",
+            handler=lambda request, context, params: None,
+        )
+        mismatch = snapshot(router)
+        self.assertEqual(mismatch["status"], "unavailable")
+        self.assertNotIn("capability_graph_v2", {item["feature_id"] for item in mismatch["features"]})
+        self.assertTrue(any(item["route_id"] == "capabilities.v2_snapshot" and item["method"] == "GET" for item in mismatch["missing_required_routes"]))
 
 
 class FeatureDiscoveryV2ApiTests(unittest.TestCase):
