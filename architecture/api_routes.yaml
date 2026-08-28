@@ -896,6 +896,44 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "feature_discovery.v2_snapshot",
+      "method": "GET",
+      "path": "/api/features/v2",
+      "domain": "capabilities",
+      "owner": "src/services/api/routes/feature_discovery_v2.py",
+      "service": "capabilities",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "feature_discovery.v2_detail",
+      "method": "GET",
+      "path": "/api/features/v2/{feature_id}",
+      "domain": "capabilities",
+      "owner": "src/services/api/routes/feature_discovery_v2.py",
+      "service": "capabilities",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "image_mask.overview",
       "method": "GET",
       "path": "/api/image-mask-studio/overview",

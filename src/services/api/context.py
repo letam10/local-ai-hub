@@ -200,6 +200,8 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         "capability_graph_blockers": lambda capability_id: capability_graph().blockers(capability_id),
         "capability_graph_safe_actions": lambda capability_id: capability_graph().safe_actions(capability_id),
         "capability_graph_verification_evidence": lambda capability_id: capability_graph().verification_evidence(capability_id),
+        "feature_discovery_v2_snapshot": lambda: __import__("src.services.feature_discovery_v2", fromlist=["snapshot"]).snapshot(),
+        "feature_discovery_v2_detail": lambda feature_id: __import__("src.services.feature_discovery_v2", fromlist=["detail"]).detail(feature_id),
         "component_lifecycle_v2_snapshot": lambda: component_lifecycle_engine().snapshot(),
         "component_lifecycle_v2_detail": lambda capability_id: component_lifecycle_engine().inspect(capability_id),
         "component_lifecycle_v2_plan": lambda capability_id, action: component_lifecycle_engine().plan(capability_id, action, planner=component_api.component_lifecycle),

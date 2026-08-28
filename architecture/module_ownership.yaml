@@ -61,6 +61,10 @@ domains:
     owner: [src/services/capability_graph/]
     depends_on: [shared]
     forbidden: [ui, raw-public-paths, provider-execution, startup-download, model-load]
+  feature_discovery_v2:
+    owner: [src/services/feature_discovery_v2.py]
+    depends_on: [shared]
+    forbidden: [ui, runtime-probe, raw-public-paths, worker-launch, provider-execution]
   component_lifecycle_engine:
     owner: [src/services/component_lifecycle_engine/]
     depends_on: [capability_graph, component_installer, shared]
