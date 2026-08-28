@@ -13,8 +13,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
+import subprocess
 import sys
 from typing import Any
 
@@ -39,6 +41,7 @@ MAX_FILES = 100_000
 MAX_RUNTIME_FILES = 50_000
 MAX_RUNTIME_BYTES = 1_000_000_000
 CORE_RUNTIME_MANIFEST_SCHEMA = "v8.0.1-core-runtime.v1"
+BUILD_INFO_SCHEMA = "local-ai-hub-build-info.v1"
 RUNTIME_EXCLUDED_PREFIXES = ("Lib/site-packages/bin/",)
 # The manifest is regenerated from the copied leaf inventory below.  Keeping
 # the source runtime's stale manifest in the destination would occupy the
@@ -151,8 +154,6 @@ def _copy_runtime_tree(source_root: Path, destination_root: Path) -> list[dict[s
 
 
 def _git_files(source_root: Path) -> list[str]:
-    import subprocess
-
     result = subprocess.run(
         ["git", "-C", str(source_root), "ls-files", "-z"],
         check=False,
@@ -171,6 +172,35 @@ def _git_files(source_root: Path) -> list[str]:
     if not selected or len(selected) > MAX_FILES:
         raise StableProductBuildError("SOURCE_SELECTION_INVALID")
     return sorted(selected)
+
+
+def _exact_source_commit(source_root: Path, requested: str | None) -> str | None:
+    """Return a source identity only when it is this checkout's exact HEAD.
+
+    A side-by-side candidate is useful for testing the post-update readiness
+    contract only when its payload identity proves the source bytes that were
+    staged.  Never accept a caller-supplied SHA merely as a label: this
+    builder already requires a Git-backed source tree, so bind the optional
+    identity to that tree's current commit before writing ``build.json``.
+    """
+
+    if requested is None:
+        return None
+    if not isinstance(requested, str) or not re.fullmatch(r"[0-9a-f]{40}", requested):
+        raise StableProductBuildError("SOURCE_COMMIT_INVALID")
+    result = subprocess.run(
+        ["git", "-C", str(source_root), "rev-parse", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    actual = result.stdout.strip()
+    if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", actual):
+        raise StableProductBuildError("SOURCE_COMMIT_UNAVAILABLE")
+    if actual != requested:
+        raise StableProductBuildError("SOURCE_COMMIT_MISMATCH")
+    return actual
 
 
 def _sha256(path: Path) -> str:
@@ -216,14 +246,20 @@ def stage_product(
     data_root: Path,
     source_root: Path = ROOT,
     version: str = PRODUCT_VERSION,
+    source_commit: str | None = None,
     allow_test_root: bool = False,
 ) -> dict[str, Any]:
-    if version != "8.0.1":
+    source = source_root.absolute()
+    exact_commit = _exact_source_commit(source, source_commit)
+    if exact_commit is not None:
+        if version != PRODUCT_VERSION:
+            raise StableProductBuildError("VERSION_SOURCE_CONFLICT")
+        version = f"main-{exact_commit[:12]}"
+    elif version != "8.0.1":
         raise StableProductBuildError("VERSION_NOT_REVIEWED")
     output = _ensure_task_root(output_root, allow_test_root=allow_test_root)
     if output.exists() and any(output.iterdir()):
         raise StableProductBuildError("OUTPUT_ROOT_OCCUPIED")
-    source = source_root.absolute()
     runtime = runtime_pythonw.absolute()
     launcher = launcher.absolute()
     data = data_root.absolute()
@@ -288,6 +324,14 @@ def stage_product(
     }
     manifest_path = payload / "manifest.json"
     _write_new_json(manifest_path, manifest)
+    if exact_commit is not None:
+        _write_new_json(payload / "build.json", {
+            "schema_version": BUILD_INFO_SCHEMA,
+            "source_commit": exact_commit,
+            "workflow_run_id": "local-candidate",
+            "channel": "candidate",
+            "product_version": PRODUCT_VERSION,
+        })
     product = {
         "schema_version": PRODUCT_SCHEMA,
         "product_id": PRODUCT_ID,
@@ -315,6 +359,8 @@ def stage_product(
         "schema_version": "v8.0.1-stable-product-candidate.v1",
         "product_id": PRODUCT_ID,
         "version": version,
+        "source_commit": exact_commit,
+        "identity": "exact_source_head" if exact_commit is not None else "legacy_stable_product",
         "pointer": pointer,
         "file_count": len(inventory),
         "inventory_sha256": hashlib.sha256(_canonical({"files": inventory})).hexdigest(),
@@ -333,9 +379,10 @@ def main() -> int:
     parser.add_argument("--launcher", type=Path, required=True)
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--source-root", type=Path, default=ROOT)
+    parser.add_argument("--source-commit", help="Exact lowercase Git HEAD to identity-bind a side-by-side candidate.")
     args = parser.parse_args()
     try:
-        print(json.dumps(stage_product(args.output_root, runtime_pythonw=args.runtime_pythonw, runtime_root=args.runtime_root, runtime_metadata=args.runtime_metadata, launcher=args.launcher, data_root=args.data_root, source_root=args.source_root), sort_keys=True, indent=2))
+        print(json.dumps(stage_product(args.output_root, runtime_pythonw=args.runtime_pythonw, runtime_root=args.runtime_root, runtime_metadata=args.runtime_metadata, launcher=args.launcher, data_root=args.data_root, source_root=args.source_root, source_commit=args.source_commit), sort_keys=True, indent=2))
         return 0
     except StableProductBuildError as exc:
         print(json.dumps({"status": "blocked", "code": exc.code, "execution": "not_run", "dry_run": True}, sort_keys=True))

@@ -153,6 +153,54 @@ class StableProductShellTests(unittest.TestCase):
                 stage_product(root / "Temp" / "stable-product", runtime_pythonw=root / "python.exe", launcher=root / "LocalAIHub.exe", data_root=root / "data", source_root=root, allow_test_root=True)
             self.assertEqual(caught.exception.code, "RUNTIME_REPARSE" if (root / "python.exe").is_symlink() else "BUNDLED_RUNTIME_REQUIRED")
 
+    def test_exact_head_candidate_binds_payload_identity_to_source_checkout(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="lah-801-exact-candidate-") as temp:
+            root = Path(temp)
+            source = root / "source"
+            (source / "src" / "app").mkdir(parents=True)
+            (source / "src" / "app" / "launcher.py").write_text("# fixture\n", encoding="utf-8")
+            (source / "distribution" / "assets").mkdir(parents=True)
+            (source / "distribution" / "assets" / "local-ai-hub.ico").write_bytes(b"icon")
+            (source / "README.md").write_text("fixture\n", encoding="utf-8")
+            subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.name", "test"], check=True)
+            subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(source), "commit", "-m", "fixture"], check=True, capture_output=True)
+            commit = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+            runtime = root / "pythonw.exe"
+            runtime.write_bytes(b"runtime")
+            launcher = root / "LocalAIHub.exe"
+            launcher.write_bytes(b"launcher")
+            install = root / "Temp" / "exact-head-product"
+            result = stage_product(
+                install,
+                runtime_pythonw=runtime,
+                launcher=launcher,
+                data_root=root / "data",
+                source_root=source,
+                source_commit=commit,
+                allow_test_root=True,
+            )
+            payload_id = f"main-{commit[:12]}"
+            self.assertEqual(result["identity"], "exact_source_head")
+            self.assertEqual(result["version"], payload_id)
+            self.assertEqual(result["source_commit"], commit)
+            build = json.loads((install / "versions" / payload_id / "build.json").read_text(encoding="utf-8"))
+            self.assertEqual(build["source_commit"], commit)
+            self.assertEqual(resolve_launch_plan(install, allow_test_root=True).environment["LOCALAIHUB_BUILD_SHA"], commit)
+            with self.assertRaises(StableProductBuildError) as caught:
+                stage_product(
+                    root / "Temp" / "mismatched-head-product",
+                    runtime_pythonw=runtime,
+                    launcher=launcher,
+                    data_root=root / "other-data",
+                    source_root=source,
+                    source_commit="a" * 40,
+                    allow_test_root=True,
+                )
+            self.assertEqual(caught.exception.code, "SOURCE_COMMIT_MISMATCH")
+
     def test_storage_summary_uses_installed_data_root_not_payload_checkout(self) -> None:
         from src.services.storage_manager import overview
 
