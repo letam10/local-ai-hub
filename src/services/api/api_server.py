@@ -712,6 +712,10 @@ def main() -> int:
         reconcile_durable_jobs()
     except Exception:
         LOG.warning("V5 durable recovery is unavailable; preserving the existing state.")
+    try:
+        _api_context().call("durable_job_v2_reconcile_startup")
+    except Exception:
+        LOG.warning("V2 durable recovery is unavailable; preserving the existing metadata for Diagnostics.")
     reconcile_startup()
     LOG.info("Local AI Hub listening on %s:%s", host, port)
     try:

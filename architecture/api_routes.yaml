@@ -839,6 +839,44 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "durable_job_engine.v2_snapshot",
+      "method": "GET",
+      "path": "/api/durable-job-engine/v2",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/durable_job_engine_v2.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "durable_job_engine.v2_detail",
+      "method": "GET",
+      "path": "/api/durable-job-engine/v2/{job_id}",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/durable_job_engine_v2.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "jobs.durable_list",
       "method": "GET",
       "path": "/api/durable-jobs",
@@ -2631,6 +2669,101 @@
       "domain": "diagnostics",
       "owner": "src/services/api/routes/diagnostics.py",
       "service": "diagnostics",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "durable_job_engine.v2_admit",
+      "method": "POST",
+      "path": "/api/durable-job-engine/v2",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/durable_job_engine_v2.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "durable_job_engine.v2_history_delete",
+      "method": "POST",
+      "path": "/api/durable-job-engine/v2/history/delete",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/durable_job_engine_v2.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "durable_job_engine.v2_archive",
+      "method": "POST",
+      "path": "/api/durable-job-engine/v2/{job_id}/archive",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/durable_job_engine_v2.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "durable_job_engine.v2_cancel",
+      "method": "POST",
+      "path": "/api/durable-job-engine/v2/{job_id}/cancel",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/durable_job_engine_v2.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "durable_job_engine.v2_retry",
+      "method": "POST",
+      "path": "/api/durable-job-engine/v2/{job_id}/retry",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/durable_job_engine_v2.py",
+      "service": "jobs",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [

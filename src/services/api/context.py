@@ -46,6 +46,7 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
     productization_service: Any | None = None
     update_service: Any | None = None
     resource_scheduler_service: Any | None = None
+    durable_job_engine_v2_service: Any | None = None
     get = bindings.get
 
     def model_service() -> ModelManager:
@@ -128,6 +129,46 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
             resource_scheduler_service = ResourceScheduler(hardware_snapshot=hardware_snapshot)
         return resource_scheduler_service
 
+    def durable_job_engine_v2() -> Any:
+        """Compose one server-owned Durable Job Engine V2 per API process.
+
+        Construction is read-only: the SQLite metadata leaf is created only
+        when a separately authorized durable-job mutation is admitted. No
+        execution owner is registered by default, so browser requests cannot
+        launch a worker, provider, model, or GPU workload.
+        """
+
+        nonlocal durable_job_engine_v2_service
+        if durable_job_engine_v2_service is None:
+            from src.platform.paths import get_paths
+            from src.services.durable_job_engine_v2 import DurableJobEngineV2, DurableJobStoreV2, ExecutionOwnerRegistry
+
+            store_path = get("durable_job_v2_store_path") or (get_paths().config_root / "durable_jobs_v2.sqlite3")
+            owner_binding = get("durable_job_v2_owners")
+            owners = owner_binding if isinstance(owner_binding, ExecutionOwnerRegistry) else ExecutionOwnerRegistry(owner_binding if isinstance(owner_binding, Mapping) else None)
+            durable_job_engine_v2_service = DurableJobEngineV2(
+                store=DurableJobStoreV2(store_path),
+                scheduler=resource_scheduler(),
+                owners=owners,
+            )
+        return durable_job_engine_v2_service
+
+    def reconcile_durable_job_v2_startup() -> dict[str, int]:
+        """Run one conservative metadata reconciliation during API startup.
+
+        The default application owns no V2 worker liveness bridge. Therefore a
+        pre-existing V2 RUNNING record is never adopted or reported as running
+        after restart; the engine records an explicit bounded failure instead.
+        Integrations can bind path-free worker/artifact predicates later.
+        """
+
+        worker_alive = get("durable_job_v2_worker_alive")
+        artifact_complete = get("durable_job_v2_artifact_complete")
+        return durable_job_engine_v2().reconcile_startup(
+            worker_alive=worker_alive if callable(worker_alive) else None,
+            artifact_complete=artifact_complete if callable(artifact_complete) else None,
+        )
+
     def prepare_shutdown() -> dict[str, Any]:
         status, payload = get("prepare_owned_shutdown")()
         return {**payload, "http_status": status}
@@ -168,6 +209,14 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         "model_manager_v2_plan": lambda model_id, action, selection_id=None: model_manager_v2().plan(model_id, action, planner=component_api.component_lifecycle, selection_id=selection_id),
         "resource_scheduler_v2_snapshot": lambda: resource_scheduler().snapshot(),
         "resource_scheduler_v2_job": lambda job_id: resource_scheduler().job(job_id),
+        "durable_job_v2_snapshot": lambda status=None, query=None, archived=False: durable_job_engine_v2().snapshot(status=status, query=query, archived=archived),
+        "durable_job_v2_detail": lambda job_id: durable_job_engine_v2().get(job_id),
+        "durable_job_v2_admit": lambda request: durable_job_engine_v2().admit(request),
+        "durable_job_v2_retry": lambda job_id, mode: durable_job_engine_v2().retry(job_id, mode=mode),
+        "durable_job_v2_cancel": lambda job_id: durable_job_engine_v2().cancel(job_id),
+        "durable_job_v2_archive": lambda job_id: durable_job_engine_v2().archive(job_id),
+        "durable_job_v2_delete_history": lambda job_ids: durable_job_engine_v2().delete_history(job_ids),
+        "durable_job_v2_reconcile_startup": reconcile_durable_job_v2_startup,
         "tools_payload": lambda: {"status": "completed", "tools": get("tool_catalog")(get("component_statuses")())},
         "component_statuses": get("component_statuses"), "component_snapshot": component_api.snapshot,
         "component_detail": component_api.detail, "component_plan_lookup": component_api.lookup_plan,

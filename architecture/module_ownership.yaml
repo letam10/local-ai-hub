@@ -73,6 +73,10 @@ domains:
     owner: [src/services/resource_scheduler/]
     depends_on: [shared]
     forbidden: [ui, gpu-probe, worker-launch, provider-execution, browser-reservation-input]
+  durable_job_engine_v2:
+    owner: [src/services/durable_job_engine_v2/]
+    depends_on: [resource_scheduler, platform.paths, shared]
+    forbidden: [ui, raw-public-paths, browser-worker-claim, worker-launch, provider-execution, artifact-delete]
   sam2:
     owner: [src/modules/sam2/]
     depends_on: [artifact_store, job_manager]

@@ -29,12 +29,12 @@ features:
     related_services: [src/services/workflow_library]
   - id: jobs
     owner: src/ui/features/jobs/
-    api_dependencies: [jobs, durable_jobs, artifacts]
+    api_dependencies: [jobs, durable_jobs, durable_job_engine_v2, artifacts]
     state_owner: app.jobs
     styles: src/ui/styles.css
     i18n_namespace: jobs
-    tests: [tests/test_v5_job_recovery_artifact_ui.py, tests/test_v6_durable_output_atomicity.py]
-    related_services: [src/services/api/jobs, src/services/artifact_store]
+    tests: [tests/test_v5_job_recovery_artifact_ui.py, tests/test_v6_durable_output_atomicity.py, tests/test_post_v8_durable_job_engine_v2.py]
+    related_services: [src/services/api/jobs, src/services/durable_job_engine_v2, src/services/artifact_store]
   - id: artifacts
     owner: src/ui/features/artifacts/
     api_dependencies: [artifacts]
