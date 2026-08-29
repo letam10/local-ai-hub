@@ -120,6 +120,8 @@ import {
   confirmComponentUpdate,
   rollbackComponentUpdate,
   getExternalIntegrationsV2,
+  getProductExperienceV2,
+  searchProductExperienceV2,
 } from "./api.js";
 // The compatibility resumeDurableJob endpoint remains available for older
 // clients; this UI deliberately uses retryDurableJob so V8 says "new record,
@@ -137,7 +139,7 @@ globalThis.__localAiHubFrontendStarted = true;
 
 const state = {
   health: {}, capabilities: {}, productization: {}, components: [], componentManager: {}, componentPlans: {}, tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", jobQuery: "", jobTypeFilter: "all", jobSort: "newest", jobPage: 1, apiStatus: "loading", apiError: "",
-  creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, projectWorkspaceV2: {}, artifactLibraryV2: {}, mediaPipelineV2: {}, mediaPipelinePreflight: null, externalIntegrationsV2: {}, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
+  creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, projectWorkspaceV2: {}, artifactLibraryV2: {}, mediaPipelineV2: {}, mediaPipelinePreflight: null, externalIntegrationsV2: {}, productExperienceV2: {}, globalSearch: { query: "", results: [] }, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
   workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa khả dụng.", action: "Tiếp tục local draft; kiểm tra endpoint typed trước khi đồng bộ." },
   storageScan: { status: "idle", progress: 0, exact: false },
@@ -147,6 +149,7 @@ const state = {
 const view = document.querySelector("#module-view");
 const nav = document.querySelector("#sidebar-nav");
 const topStatus = document.querySelector("#top-status");
+const globalSearchResults = document.querySelector("#global-search-results");
 const recordLoopbackFrontendEvent = async (event, route = null) => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 2000);
@@ -654,6 +657,15 @@ const renderNavigation = () => {
   });
 };
 
+const renderGlobalSearch = () => {
+  if (!globalSearchResults) return;
+  const search = state.globalSearch && typeof state.globalSearch === "object" ? state.globalSearch : {};
+  const results = Array.isArray(search.results) ? search.results : [];
+  if (!search.query) { globalSearchResults.hidden = true; globalSearchResults.replaceChildren(); return; }
+  globalSearchResults.hidden = false;
+  globalSearchResults.innerHTML = `<div class="global-search-results__panel"><strong>Kết quả tìm Hub</strong><span class="small">${escapeHtml(String(search.query).slice(0, 80))}</span>${results.length ? `<div class="global-search-results__rows">${results.map((item) => `<button class="button button--compact" type="button" data-route="${escapeHtml(item.route || "dashboard")}"><strong>${escapeHtml(item.label || item.id || "Workspace")}</strong><span class="row-meta">${escapeHtml(item.description || "")}</span></button>`).join("")}</div>` : `<p class="small">Không có workspace phù hợp trong catalog Hub.</p>`}</div>`;
+};
+
 const renderApiState = () => {
   if (state.apiStatus === "error") return `<section class="global-state global-state--error" role="alert"><strong>API Hub chưa sẵn sàng</strong><span>${state.apiError || "Kiểm tra listener loopback rồi thử lại."}</span><button class="button button--compact" type="button" data-refresh-api>Thử lại</button></section>`;
   if (state.apiStatus === "loading") return `<section class="global-state global-state--loading" role="status"><strong>Đang tải workspace</strong><span>Đang lấy health, capability và queue snapshot…</span></section>`;
@@ -716,6 +728,7 @@ const render = ({ background = false, focus = "" } = {}) => {
   disposeNodeStudios();
   disposeImageMaskCanvases();
   renderNavigation();
+  renderGlobalSearch();
   syncSidebarState();
   view.innerHTML = `${renderApiState()}${renderPage(routeId(), state)}`;
   applyToolActionGates();
@@ -1000,6 +1013,17 @@ const pollStorageScan = (scanId = "") => storageScanPoller.start(scanId);
 
 const loadRouteData = async ({ scan = false } = {}) => {
   const route = routeId();
+  if (route === "dashboard") {
+    if (routeLoad) return routeLoad;
+    routeLoad = getProductExperienceV2().then((value) => {
+      state.productExperienceV2 = value || {};
+      if (routeId() === "dashboard") render();
+    }).catch(() => {
+      state.productExperienceV2 = { status: "unavailable", execution: "not_run", dry_run: true };
+      if (routeId() === "dashboard") render();
+    }).finally(() => { routeLoad = null; });
+    return routeLoad;
+  }
   if (route === "models") {
     if (routeLoad) return routeLoad;
     routeLoad = Promise.allSettled([getModels(), scan ? scanStorage() : getStorage(), getProductionCatalog(), getUpdateSettings()]).then((results) => {
@@ -1473,6 +1497,22 @@ document.addEventListener("input", (event) => {
   // on every keystroke; the old change-only listener left the table stale
   // until a second unrelated control blurred.
   render();
+});
+
+document.addEventListener("submit", async (event) => {
+  const form = event.target.closest("[data-global-search-form]");
+  if (!form) return;
+  event.preventDefault();
+  const input = form.querySelector("[data-global-search-input]");
+  const query = String(input?.value || "").slice(0, 80);
+  try {
+    const result = await searchProductExperienceV2(query);
+    state.globalSearch = { query: result.query || query, results: result.results || [] };
+  } catch (error) {
+    state.globalSearch = { query, results: [] };
+    showToast(error.message || "Không thể tìm catalog Hub.", "error");
+  }
+  renderGlobalSearch();
 });
 
 document.addEventListener("submit", async (event) => {

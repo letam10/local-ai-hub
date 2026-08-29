@@ -189,6 +189,20 @@ _FEATURES: tuple[dict[str, Any], ...] = (
         "reason": "External integrations publish only finite, path-free installation/connection state and an explanatory launch capability; no external application is launched by this V2 surface.",
         "next_action": "Use only a separately reviewed official API or IPC adapter; credentials and external WebView control remain outside Hub.",
     },
+    {
+        "feature_id": "product_experience_v2",
+        "api_version": "v2",
+        "feature_state": "READ_ONLY",
+        "execution": "not_run",
+        "dry_run": True,
+        "routes": [
+            _route("product_experience.v2_snapshot", "GET", "/api/product-experience/v2", execution_mode="read_only"),
+            _route("product_experience.v2_onboarding", "GET", "/api/product-experience/v2/onboarding", execution_mode="read_only"),
+            _route("product_experience.v2_search", "GET", "/api/product-experience/v2/search", execution_mode="read_only"),
+        ],
+        "reason": "Publishes a finite dashboard/onboarding/search route catalog; it neither reads user content nor saves preferences.",
+        "next_action": "Choose a listed route and inspect its server-owned state.",
+    },
 )
 
 _FEATURE_IDS = frozenset(item["feature_id"] for item in _FEATURES)

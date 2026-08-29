@@ -61,6 +61,8 @@ export const confirmComponentUpdate = (planId, confirmed = false) => request(`/a
 export const rollbackComponentUpdate = (componentId) => request("/api/updates/rollback", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ component_id: String(componentId) }) });
 export const getApplications = () => request("/api/applications");
 export const getExternalIntegrationsV2 = () => request("/api/external-integrations/v2");
+export const getProductExperienceV2 = () => request("/api/product-experience/v2");
+export const searchProductExperienceV2 = (query = "") => request(`/api/product-experience/v2/search?${new URLSearchParams({ q: String(query || "").slice(0, 80) })}`);
 export const getSettings = () => request("/api/settings");
 export const getSettingsSchema = () => request("/api/settings/schema");
 export const patchSettings = (patch, expectedRevision) => request("/api/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...patch, expected_revision: expectedRevision }) });

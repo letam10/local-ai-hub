@@ -89,6 +89,10 @@ domains:
     owner: [src/services/provider_adapters_v2/external.py]
     depends_on: [runtime_registry, shared]
     forbidden: [ui, raw-public-paths, credential-read, endpoint-probe, webview-embed, external-process-launch]
+  product_experience_v2:
+    owner: [src/services/product_experience_v2.py]
+    depends_on: [shared]
+    forbidden: [filesystem, raw-public-paths, user-data-search, settings-write, provider-execution, worker-launch]
   sam2:
     owner: [src/modules/sam2/]
     depends_on: [artifact_store, job_manager]

@@ -74,6 +74,12 @@ hoặc external app, không embed WebView ngoài và không biến dependency đ
 quyền thực thi. Chi tiết xem
 [Post-V8 Provider Adapters & External Integrations M3](architecture/POST_V8_PROVIDER_ADAPTERS_M3.md).
 
+Post-V8 M4 thêm Product Experience V2: catalog Dashboard/onboarding/tìm kiếm
+global hữu hạn do Hub API sở hữu. Catalog chỉ dẫn đến các route sản phẩm hiện
+có; không tìm user data, không ghi Settings và không thực thi workflow. Theme
+và ngôn ngữ vẫn chỉ áp dụng sau **Áp dụng & lưu**. Chi tiết xem
+[Post-V8 Product Experience M4](architecture/POST_V8_PRODUCT_EXPERIENCE_M4.md).
+
 ## API và kiểm thử
 
 Các route Node Studio chính:

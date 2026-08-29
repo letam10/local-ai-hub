@@ -115,3 +115,12 @@ records.  AIRI remains `UNSUPPORTED_API` until an official reviewed API/IPC
 adapter is explicitly registered; Hub does not guess an endpoint, scrape a key
 or embed AIRI.  The contract is documented in
 [`POST_V8_PROVIDER_ADAPTERS_M3.md`](POST_V8_PROVIDER_ADAPTERS_M3.md).
+
+## Product Experience V2
+
+`src/services/product_experience_v2.py` owns a finite server-side catalog for
+Dashboard V2, reusable onboarding, global search, Settings wording and
+Diagnostics navigation. The UI consumes `/api/product-experience/v2` and its
+bounded onboarding/search routes, but the service never searches user data,
+reads paths, persists browser completion, saves settings or executes a
+provider/job. See [`POST_V8_PRODUCT_EXPERIENCE_M4.md`](POST_V8_PRODUCT_EXPERIENCE_M4.md).

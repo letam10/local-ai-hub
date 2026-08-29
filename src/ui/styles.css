@@ -71,6 +71,12 @@ button { cursor: pointer; }
 .brand-subtitle { color: var(--muted); font-size: 11px; margin-top: 2px; }
 .top-status { flex: 1; color: var(--muted); font-size: 13px; }
 .top-actions { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+.global-search { display: inline-flex; align-items: center; gap: 4px; }
+.global-search input { width: min(190px, 18vw); height: var(--control-height-compact); padding: 0 9px; border: 1px solid var(--border); border-radius: 9px; color: var(--text); background: var(--panel-raised); }
+.global-search-results { position: fixed; top: 58px; right: var(--shell-gutter); z-index: 30; width: min(420px, calc(100vw - 28px)); }
+.global-search-results__panel { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); box-shadow: var(--shadow); }
+.global-search-results__rows { display: grid; gap: 6px; }
+.global-search-results__rows .button { justify-content: flex-start; text-align: left; }
 .metric { white-space: nowrap; }
 .icon-button { width: var(--control-height-compact); height: var(--control-height-compact); border: 1px solid var(--border); border-radius: 9px; color: var(--text); background: var(--panel-raised); }
 .icon-button:hover, .icon-button:focus-visible { border-color: var(--accent); outline: none; }

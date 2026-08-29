@@ -26,6 +26,11 @@
           Đang kết nối API…
         </div>
         <div class="top-actions">
+          <form class="global-search" data-global-search-form role="search">
+            <label class="sr-only" for="global-search-input">Tìm trong Local AI Hub</label>
+            <input id="global-search-input" data-global-search-input type="search" maxlength="80" placeholder="Tìm workspace" autocomplete="off" />
+            <button class="icon-button" type="submit" aria-label="Tìm workspace">⌕</button>
+          </form>
           <span class="metric" id="disk-metric">Ổ đĩa —</span>
           <span class="metric" id="gpu-metric">GPU —</span>
           <button class="icon-button sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Mở điều hướng" data-i18n-aria-label="Mở điều hướng" aria-controls="sidebar" aria-expanded="false">☰</button>
@@ -43,6 +48,7 @@
           <button class="icon-button" id="theme-toggle" type="button" title="Đổi giao diện" aria-label="Đổi giao diện" data-i18n-title="Đổi giao diện" data-i18n-aria-label="Đổi giao diện">◐</button>
         </div>
       </header>
+      <section id="global-search-results" class="global-search-results" aria-live="polite" hidden></section>
 
       <div class="workspace">
         <aside class="sidebar" id="sidebar" aria-label="Điều hướng module" data-i18n-aria-label="Điều hướng module">

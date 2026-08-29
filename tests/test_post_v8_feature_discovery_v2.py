@@ -26,6 +26,7 @@ _FEATURES = {
     "media_pipeline_v2": "PLAN_ONLY",
     "provider_adapters_v2": "PLAN_ONLY",
     "external_integrations_v2": "READ_ONLY",
+    "product_experience_v2": "READ_ONLY",
 }
 
 
