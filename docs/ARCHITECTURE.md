@@ -80,6 +80,13 @@ có; không tìm user data, không ghi Settings và không thực thi workflow. 
 và ngôn ngữ vẫn chỉ áp dụng sau **Áp dụng & lưu**. Chi tiết xem
 [Post-V8 Product Experience M4](architecture/POST_V8_PRODUCT_EXPERIENCE_M4.md).
 
+Post-V8 M5 thêm Platform Hardening V2: một projection hữu hạn cho Updater V3,
+Backup/Recovery, Process Supervisor, Security và Performance. Bản này mô tả
+owner, state, failure và recovery của các service hiện hữu; mọi thao tác update,
+restore, process hoặc benchmark vẫn ở API owner/confirmation riêng và không
+được báo như đã thực thi. Chi tiết xem
+[Post-V8 Platform Hardening M5](architecture/POST_V8_PLATFORM_HARDENING_M5.md).
+
 ## API và kiểm thử
 
 Các route Node Studio chính:

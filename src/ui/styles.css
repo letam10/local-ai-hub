@@ -77,6 +77,9 @@ button { cursor: pointer; }
 .global-search-results__panel { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); box-shadow: var(--shadow); }
 .global-search-results__rows { display: grid; gap: 6px; }
 .global-search-results__rows .button { justify-content: flex-start; text-align: left; }
+.platform-hardening-card { margin-bottom: 16px; }
+.platform-hardening-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.platform-hardening-area { padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-soft); }
 .metric { white-space: nowrap; }
 .icon-button { width: var(--control-height-compact); height: var(--control-height-compact); border: 1px solid var(--border); border-radius: 9px; color: var(--text); background: var(--panel-raised); }
 .icon-button:hover, .icon-button:focus-visible { border-color: var(--accent); outline: none; }

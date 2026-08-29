@@ -203,6 +203,19 @@ _FEATURES: tuple[dict[str, Any], ...] = (
         "reason": "Publishes a finite dashboard/onboarding/search route catalog; it neither reads user content nor saves preferences.",
         "next_action": "Choose a listed route and inspect its server-owned state.",
     },
+    {
+        "feature_id": "platform_hardening_v2",
+        "api_version": "v2",
+        "feature_state": "READ_ONLY",
+        "execution": "not_run",
+        "dry_run": True,
+        "routes": [
+            _route("platform_hardening.v2_snapshot", "GET", "/api/platform-hardening/v2", execution_mode="read_only"),
+            _route("platform_hardening.v2_detail", "GET", "/api/platform-hardening/v2/{area_id}", execution_mode="read_only"),
+        ],
+        "reason": "Describes updater, backup/recovery, process ownership, security and performance boundaries without executing them.",
+        "next_action": "Use the owning area API and explicit confirmation/ownership gate before any operation.",
+    },
 )
 
 _FEATURE_IDS = frozenset(item["feature_id"] for item in _FEATURES)

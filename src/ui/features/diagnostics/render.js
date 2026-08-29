@@ -53,6 +53,9 @@ export function createDiagnosticsRenderer(deps) {
   const columnsHtml = [subsystems.slice(0, midpoint), subsystems.slice(midpoint)]
     .map((column, index) => `<div class="diagnostics-column" data-diagnostics-column="${index + 1}">${column.map(cardHtml).join("")}</div>`)
     .join("");
+  const hardening = state.platformHardeningV2 && typeof state.platformHardeningV2 === "object" ? state.platformHardeningV2 : {};
+  const hardeningAreas = Array.isArray(hardening.areas) ? hardening.areas.slice(0, 5) : [];
+  const hardeningHtml = `<section class="card platform-hardening-card" aria-labelledby="platform-hardening-title"><div class="card-title-row"><div><span class="eyebrow">PLATFORM HARDENING V2</span><h2 id="platform-hardening-title">Ranh giới bảo vệ nền tảng</h2><p class="small">${escapeHtml(hardening.reason || "Đang tải hợp đồng hardening từ Hub API…")}</p></div>${statusPill(hardening.status || "not_run", "Chỉ đọc · không thực thi")}</div>${hardeningAreas.length ? `<div class="platform-hardening-grid">${hardeningAreas.map((area) => { const areaState = String(area.state || "").toUpperCase(); const areaLabel = areaState === "READ_ONLY" ? "Chỉ đọc" : areaState === "PLAN_ONLY" ? "Kế hoạch" : "Chưa chạy"; return `<article class="platform-hardening-area" data-hardening-area="${escapeHtml(area.id || "unknown")}"><div class="card-title-row"><strong>${escapeHtml(area.label || area.id || "Area")}</strong>${statusPill(areaState === "READ_ONLY" ? "completed" : "not_run", areaLabel)}</div><p class="small">${escapeHtml(area.reason || "")}</p><p class="small"><strong>Khôi phục:</strong> ${escapeHtml(area.recovery || "")}</p></article>`; }).join("")}</div>` : `<p class="small">Hợp đồng hardening chưa khả dụng; kiểm tra lại loopback API.</p>`}<p class="small">Các thao tác update, restore, process và security vẫn cần API owner/confirmation riêng; card này không tự thực thi.</p></section>`;
 
   return heading("SYSTEM", "Diagnostics Center", "Kiểm tra toàn diện 12 subsystem phần mềm, phát hiện sự cố và hỗ trợ bảo trì an toàn (read-only first).", `
     <div class="form-actions">
@@ -60,6 +63,7 @@ export function createDiagnosticsRenderer(deps) {
       <button class="button button--accent" type="button" data-export-diagnostics>Xuất gói chẩn đoán (Sanitized)</button>
     </div>
   `) + `
+    ${hardeningHtml}
     <div class="diagnostics-grid" data-diagnostics-grid>${columnsHtml}</div>
     <section class="card repair-center-card">
       <div class="card-title-row">

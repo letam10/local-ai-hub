@@ -66,3 +66,5 @@ rules:
     text: External Integrations V2 projects only sanitized allowlisted application state and trusted enum observations. It never exposes a path, endpoint or credential, embeds an external WebView, guesses an API, launches an application from its V2 launch-plan route or relocates installer-managed software.
   - id: product-experience-v2-finite-catalog
     text: Product Experience V2 exposes only a finite server-owned navigation/onboarding/search catalog. It never searches user data, reads files, persists browser completion, saves settings, starts a provider or executes a workflow.
+  - id: platform-hardening-v2-read-only-contract
+    text: Platform Hardening V2 exposes only the existing updater, backup/recovery, process ownership, security and performance boundaries. Its projection never runs an update, restore, process action, benchmark or machine probe.

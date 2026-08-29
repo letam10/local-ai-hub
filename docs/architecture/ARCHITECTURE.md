@@ -124,3 +124,12 @@ Diagnostics navigation. The UI consumes `/api/product-experience/v2` and its
 bounded onboarding/search routes, but the service never searches user data,
 reads paths, persists browser completion, saves settings or executes a
 provider/job. See [`POST_V8_PRODUCT_EXPERIENCE_M4.md`](POST_V8_PRODUCT_EXPERIENCE_M4.md).
+
+## Platform Hardening V2
+
+`src/services/platform_hardening_v2.py` projects the existing updater,
+backup/recovery, process-supervision, security and performance boundaries as a
+finite read-only contract. It records the owning persistent state, API,
+failure modes and recovery path without probing the machine, applying an
+update/restore, controlling a process or running a benchmark. See
+[`POST_V8_PLATFORM_HARDENING_M5.md`](POST_V8_PLATFORM_HARDENING_M5.md).

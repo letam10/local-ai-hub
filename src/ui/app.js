@@ -122,6 +122,7 @@ import {
   getExternalIntegrationsV2,
   getProductExperienceV2,
   searchProductExperienceV2,
+  getPlatformHardeningV2,
 } from "./api.js";
 // The compatibility resumeDurableJob endpoint remains available for older
 // clients; this UI deliberately uses retryDurableJob so V8 says "new record,
@@ -139,7 +140,7 @@ globalThis.__localAiHubFrontendStarted = true;
 
 const state = {
   health: {}, capabilities: {}, productization: {}, components: [], componentManager: {}, componentPlans: {}, tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", jobQuery: "", jobTypeFilter: "all", jobSort: "newest", jobPage: 1, apiStatus: "loading", apiError: "",
-  creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, projectWorkspaceV2: {}, artifactLibraryV2: {}, mediaPipelineV2: {}, mediaPipelinePreflight: null, externalIntegrationsV2: {}, productExperienceV2: {}, globalSearch: { query: "", results: [] }, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
+  creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, projectWorkspaceV2: {}, artifactLibraryV2: {}, mediaPipelineV2: {}, mediaPipelinePreflight: null, externalIntegrationsV2: {}, productExperienceV2: {}, platformHardeningV2: {}, globalSearch: { query: "", results: [] }, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
   workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa khả dụng.", action: "Tiếp tục local draft; kiểm tra endpoint typed trước khi đồng bộ." },
   storageScan: { status: "idle", progress: 0, exact: false },
@@ -1105,8 +1106,10 @@ const loadRouteData = async ({ scan = false } = {}) => {
   }
   if (route === "diagnostics") {
     if (routeLoad) return routeLoad;
-    routeLoad = getDiagnosticsSnapshot().then((res) => {
+    routeLoad = Promise.allSettled([getDiagnosticsSnapshot(), getPlatformHardeningV2()]).then(([diagnosticsResult, hardeningResult]) => {
+      const res = diagnosticsResult.status === "fulfilled" ? diagnosticsResult.value : { status: "unavailable", snapshot: {} };
       state.diagnostics = res;
+      state.platformHardeningV2 = hardeningResult.status === "fulfilled" ? hardeningResult.value : { status: "unavailable", areas: [], execution: "not_run", dry_run: true };
       render();
     }).catch((err) => {
       showToast(err.message || "Không thể tải Diagnostics snapshot.", "error");

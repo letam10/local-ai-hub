@@ -1428,6 +1428,44 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "platform_hardening.v2_snapshot",
+      "method": "GET",
+      "path": "/api/platform-hardening/v2",
+      "domain": "platform_hardening",
+      "owner": "src/services/api/routes/platform_hardening_v2.py",
+      "service": "platform_hardening",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "platform_hardening.v2_detail",
+      "method": "GET",
+      "path": "/api/platform-hardening/v2/{area_id}",
+      "domain": "platform_hardening",
+      "owner": "src/services/api/routes/platform_hardening_v2.py",
+      "service": "platform_hardening",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "product_experience.v2_snapshot",
       "method": "GET",
       "path": "/api/product-experience/v2",
