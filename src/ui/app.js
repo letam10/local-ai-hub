@@ -141,7 +141,7 @@ globalThis.__localAiHubFrontendStarted = true;
 
 const state = {
   health: {}, capabilities: {}, productization: {}, components: [], componentManager: {}, componentPlans: {}, tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", jobQuery: "", jobTypeFilter: "all", jobSort: "newest", jobPage: 1, apiStatus: "loading", apiError: "",
-  creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, projectWorkspaceV2: {}, artifactLibraryV2: {}, mediaPipelineV2: {}, mediaPipelinePreflight: null, externalIntegrationsV2: {}, productExperienceV2: {}, platformHardeningV2: {}, platformExtensibilityV2: {}, globalSearch: { query: "", results: [] }, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
+  creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, projectWorkspaceV2: {}, artifactLibraryV2: {}, mediaPipelineV2: {}, mediaPipelinePreflight: null, externalIntegrationsV2: {}, productExperienceV2: {}, platformHardeningV2: {}, platformExtensibilityV2: {}, onboardingDismissed: false, commandPaletteOpen: false, globalSearch: { query: "", results: [] }, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
   workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa khả dụng.", action: "Tiếp tục local draft; kiểm tra endpoint typed trước khi đồng bộ." },
   storageScan: { status: "idle", progress: 0, exact: false },
@@ -152,6 +152,7 @@ const view = document.querySelector("#module-view");
 const nav = document.querySelector("#sidebar-nav");
 const topStatus = document.querySelector("#top-status");
 const globalSearchResults = document.querySelector("#global-search-results");
+const commandPalette = document.querySelector("#command-palette");
 const recordLoopbackFrontendEvent = async (event, route = null) => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 2000);
@@ -668,6 +669,22 @@ const renderGlobalSearch = () => {
   globalSearchResults.innerHTML = `<div class="global-search-results__panel"><strong>Kết quả tìm Hub</strong><span class="small">${escapeHtml(String(search.query).slice(0, 80))}</span>${results.length ? `<div class="global-search-results__rows">${results.map((item) => `<button class="button button--compact" type="button" data-route="${escapeHtml(item.route || "dashboard")}"><strong>${escapeHtml(item.label || item.id || "Workspace")}</strong><span class="row-meta">${escapeHtml(item.description || "")}</span></button>`).join("")}</div>` : `<p class="small">Không có workspace phù hợp trong catalog Hub.</p>`}</div>`;
 };
 
+const COMMANDS = Object.freeze([
+  { id: "open-models", label: "Mở Models", detail: "Xem model catalog và storage", route: "models" },
+  { id: "open-diagnostics", label: "Mở Diagnostics", detail: "Xem chẩn đoán sanitized", route: "diagnostics" },
+  { id: "new-workflow", label: "New Workflow", detail: "Mở workspace dự án; chưa tạo dữ liệu", route: "projects" },
+  { id: "check-update", label: "Check Update", detail: "Mở nơi kiểm tra update thủ công", route: "models" },
+  { id: "scan-storage", label: "Scan Storage", detail: "Mở Storage; bạn tự bấm Quét lại", route: "models" },
+  { id: "search-artifact", label: "Search Artifact", detail: "Tìm artifact trong metadata Hub", route: "" },
+]);
+
+const renderCommandPalette = () => {
+  if (!commandPalette) return;
+  if (state.commandPaletteOpen !== true) { commandPalette.hidden = true; commandPalette.replaceChildren(); return; }
+  commandPalette.hidden = false;
+  commandPalette.innerHTML = `<div class="command-palette__panel"><div class="card-title-row"><div><span class="eyebrow">COMMAND PALETTE</span><h2 id="command-palette-title">Bảng lệnh Hub</h2><p class="small">Ctrl+K · Escape để đóng. Lệnh chỉ điều hướng hoặc tìm metadata; không tự chạy thao tác nguy hiểm.</p></div><button class="button button--compact" type="button" data-command-close>Đóng</button></div><div class="command-palette__rows">${COMMANDS.map((command) => `<button class="button button--compact" type="button" data-command-action="${escapeHtml(command.id)}"${command.route ? ` data-command-route="${escapeHtml(command.route)}"` : ""}><strong>${escapeHtml(command.label)}</strong><span class="row-meta">${escapeHtml(command.detail)}</span></button>`).join("")}</div></div>`;
+};
+
 const renderApiState = () => {
   if (state.apiStatus === "error") return `<section class="global-state global-state--error" role="alert"><strong>API Hub chưa sẵn sàng</strong><span>${state.apiError || "Kiểm tra listener loopback rồi thử lại."}</span><button class="button button--compact" type="button" data-refresh-api>Thử lại</button></section>`;
   if (state.apiStatus === "loading") return `<section class="global-state global-state--loading" role="status"><strong>Đang tải workspace</strong><span>Đang lấy health, capability và queue snapshot…</span></section>`;
@@ -731,6 +748,7 @@ const render = ({ background = false, focus = "" } = {}) => {
   disposeImageMaskCanvases();
   renderNavigation();
   renderGlobalSearch();
+  renderCommandPalette();
   syncSidebarState();
   view.innerHTML = `${renderApiState()}${renderPage(routeId(), state)}`;
   applyToolActionGates();
@@ -1591,6 +1609,42 @@ document.addEventListener("submit", async (event) => {
 });
 
 document.addEventListener("click", async (event) => {
+  if (event.target.closest("[data-command-close]")) {
+    state.commandPaletteOpen = false;
+    renderCommandPalette();
+    return;
+  }
+  const commandAction = event.target.closest("[data-command-action]");
+  if (commandAction) {
+    const commandId = commandAction.dataset.commandAction || "";
+    state.commandPaletteOpen = false;
+    renderCommandPalette();
+    if (commandId === "search-artifact") {
+      const input = document.querySelector("[data-global-search-input]");
+      if (input) input.value = "artifact";
+      try {
+        const result = await searchProductExperienceV2("artifact");
+        state.globalSearch = { query: result.query || "artifact", results: result.results || [] };
+      } catch (error) { showToast(error.message || "Không thể tìm artifact metadata.", "error"); }
+      renderGlobalSearch();
+      return;
+    }
+    const route = commandAction.dataset.commandRoute;
+    if (route) window.location.hash = `#/${route}`;
+    return;
+  }
+  const skipOnboarding = event.target.closest("[data-onboarding-skip]");
+  if (skipOnboarding) {
+    state.onboardingDismissed = true;
+    render();
+    return;
+  }
+  const showOnboarding = event.target.closest("[data-onboarding-show]");
+  if (showOnboarding) {
+    state.onboardingDismissed = false;
+    render();
+    return;
+  }
   if (event.target.closest("#sidebar-toggle")) {
     toggleSidebar();
     return;
@@ -2502,7 +2556,19 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("keydown", async (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    state.commandPaletteOpen = state.commandPaletteOpen !== true;
+    renderCommandPalette();
+    return;
+  }
   if (event.key === "Escape") {
+    if (state.commandPaletteOpen === true) {
+      event.preventDefault();
+      state.commandPaletteOpen = false;
+      renderCommandPalette();
+      return;
+    }
     if (artifactPreviewLayer && !artifactPreviewLayer.matches(":empty")) {
       event.preventDefault();
       closeArtifactPreview();

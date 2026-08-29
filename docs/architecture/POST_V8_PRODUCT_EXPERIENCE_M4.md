@@ -13,16 +13,23 @@ their underlying services or invent an operational state.
 
 ## State and API
 
-There is no new persistent state.  Onboarding is reusable guidance and has no
-browser-local completion flag.  Global search matches only the finite
-server-owned product-surface catalog, never user projects, artifacts, files,
-paths or external applications.
+There is no new persistent state.  Onboarding is a skippable, reusable seven-
+step guide for system, GPU, storage, models, runtimes, external applications
+and privacy/update settings; it has no browser-local completion flag. Global
+search uses bounded projections of server-owned models, tools, projects,
+workflows, jobs, artifacts and a fixed Settings result. It never exposes
+paths, secrets or artifact bytes and never searches arbitrary filesystem data.
+
+The shell also provides an accessible `Ctrl+K` command palette with fixed
+navigation commands (open Models, Diagnostics, Projects, update/storage
+review, or Search Artifact). Commands navigate or request metadata only; they
+do not silently start an update, scan, workflow or destructive action.
 
 - `GET /api/product-experience/v2` — dashboard/onboarding/settings and
   diagnostics contract.
 - `GET /api/product-experience/v2/onboarding` — finite guide.
 - `GET /api/product-experience/v2/search?q=...` — bounded product-surface
-  search (maximum eight results).
+  search (maximum eight results, sourced from safe Hub metadata projections).
 
 All responses are `execution=not_run`, `dry_run=true`.  Settings still take
 effect only after the existing server accepts **Áp dụng & lưu**.
@@ -31,10 +38,10 @@ effect only after the existing server accepts **Áp dụng & lưu**.
 
 If the M4 endpoint is unavailable, Dashboard keeps the existing status and
 shows that onboarding is loading/unavailable; it does not claim completion.
-The search panel shows no result.  Recovery is to refresh the loopback Hub
-snapshot and use the existing Diagnostics route.  Neither behavior saves
-settings, starts a provider, launches a desktop application or performs a
-filesystem scan.
+The search panel shows no result. Recovery is to refresh the loopback Hub
+snapshot and use the existing Diagnostics route. Skipping onboarding only
+changes the current in-memory view. Neither behavior saves settings, starts a
+provider, launches a desktop application or performs a filesystem scan.
 
 ## Tests
 

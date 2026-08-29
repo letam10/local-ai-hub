@@ -31,6 +31,7 @@
             <input id="global-search-input" data-global-search-input type="search" maxlength="80" placeholder="Tìm workspace" autocomplete="off" />
             <button class="icon-button" type="submit" aria-label="Tìm workspace">⌕</button>
           </form>
+          <button class="icon-button command-palette-toggle" type="button" data-command-palette aria-label="Mở bảng lệnh (Ctrl+K)" title="Mở bảng lệnh (Ctrl+K)">⌘</button>
           <span class="metric" id="disk-metric">Ổ đĩa —</span>
           <span class="metric" id="gpu-metric">GPU —</span>
           <button class="icon-button sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Mở điều hướng" data-i18n-aria-label="Mở điều hướng" aria-controls="sidebar" aria-expanded="false">☰</button>
@@ -49,6 +50,7 @@
         </div>
       </header>
       <section id="global-search-results" class="global-search-results" aria-live="polite" hidden></section>
+      <section id="command-palette" class="command-palette" role="dialog" aria-modal="true" aria-labelledby="command-palette-title" hidden></section>
 
       <div class="workspace">
         <aside class="sidebar" id="sidebar" aria-label="Điều hướng module" data-i18n-aria-label="Điều hướng module">

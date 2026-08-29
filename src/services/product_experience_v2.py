@@ -9,12 +9,15 @@ authority over work, settings or external applications.
 from __future__ import annotations
 
 from copy import deepcopy
+from collections.abc import Mapping, Sequence
+import re
 from typing import Any
 
 
 PRODUCT_EXPERIENCE_V2_SCHEMA = "product-experience.v2"
 _MAX_QUERY_LENGTH = 80
 _MAX_RESULTS = 8
+_UNSAFE_PUBLIC_TEXT = re.compile(r"(?i)(?:[A-Z]:[\\/]|\\\\|/(?:users|home|tmp|var)/|https?://|api[_-]?key|token|password|secret|credential|private[_-]?key)")
 
 _SURFACES: tuple[dict[str, str], ...] = (
     {"id": "dashboard", "label": "Bảng điều khiển", "route": "dashboard", "api": "/api/product-experience/v2", "kind": "dashboard", "description": "Tóm tắt trạng thái Hub, điều hướng và bước tiếp theo."},
@@ -29,15 +32,24 @@ _SURFACES: tuple[dict[str, str], ...] = (
 )
 
 _ONBOARDING: tuple[dict[str, str], ...] = (
-    {"id": "review-dashboard", "step": "01", "title": "Kiểm tra Bảng điều khiển", "route": "dashboard", "reason": "Đọc snapshot loopback, module và job trước khi bắt đầu.", "action": "Mở Dashboard"},
-    {"id": "inspect-capabilities", "step": "02", "title": "Chọn workspace có bằng chứng", "route": "vision", "reason": "Mở một route và kiểm tra trạng thái/capability trước khi yêu cầu runtime.", "action": "Mở Studio thị giác"},
-    {"id": "review-jobs", "step": "03", "title": "Theo dõi tác vụ trong Hub", "route": "jobs", "reason": "Xem trạng thái, recovery và artifact bằng ID opaque thay vì đường dẫn máy.", "action": "Mở Tác vụ"},
-    {"id": "resolve-diagnostics", "step": "04", "title": "Xử lý blocker bằng Diagnostics", "route": "diagnostics", "reason": "Xuất hoặc đọc gói diagnostics đã sanitize trước khi thay đổi runtime.", "action": "Mở Diagnostics"},
+    {"id": "system-detected", "step": "01", "title": "Xác nhận hệ thống", "route": "dashboard", "reason": "Đọc snapshot loopback và kiểm tra Hub API trước khi bắt đầu.", "action": "Mở Dashboard"},
+    {"id": "gpu-review", "step": "02", "title": "Xem GPU / VRAM", "route": "dashboard", "reason": "Chỉ xem năng lực do server công bố; không tự dò GPU hoặc chạy model.", "action": "Xem snapshot"},
+    {"id": "storage-review", "step": "03", "title": "Xem dung lượng", "route": "models", "reason": "Kiểm tra storage projection; deep scan chỉ chạy khi bạn yêu cầu.", "action": "Mở Lưu trữ"},
+    {"id": "models-review", "step": "04", "title": "Kiểm tra model hiện có", "route": "models", "reason": "Xem model catalog/verification; không tự tải hoặc thay thế model.", "action": "Mở Models"},
+    {"id": "runtime-review", "step": "05", "title": "Kiểm tra runtime", "route": "components", "reason": "Xem component/runtime readiness và dependency blocker trước khi dùng.", "action": "Mở Components"},
+    {"id": "external-review", "step": "06", "title": "Xem ứng dụng ngoài", "route": "airi", "reason": "AIRI và ứng dụng ngoài vẫn external-managed; Hub không hack API/WebView.", "action": "Mở AIRI"},
+    {"id": "privacy-updates", "step": "07", "title": "Đặt quyền riêng tư / cập nhật", "route": "settings", "reason": "Cấu hình chỉ có hiệu lực sau Áp dụng & lưu; lịch update mặc định không tự cài.", "action": "Mở Cài đặt"},
 )
 
 
 def _surface_projection(item: dict[str, str]) -> dict[str, str]:
     return {key: item[key] for key in ("id", "label", "route", "api", "kind", "description")}
+
+
+def _search_projection(item: Mapping[str, Any]) -> dict[str, str]:
+    """Return one stable result shape for static and live metadata records."""
+
+    return {key: str(item.get(key) or "") for key in ("id", "label", "route", "category", "api", "kind", "description")}
 
 
 def snapshot() -> dict[str, Any]:
@@ -67,6 +79,7 @@ def onboarding() -> dict[str, Any]:
         "schema_version": PRODUCT_EXPERIENCE_V2_SCHEMA,
         "status": "completed",
         "steps": value["onboarding"],
+        "skip_supported": True,
         "persistent_state": "none",
         "execution": "not_run",
         "dry_run": True,
@@ -75,28 +88,76 @@ def onboarding() -> dict[str, Any]:
     }
 
 
-def search(query: object) -> dict[str, Any]:
-    """Search the closed route catalog only; query never reaches files or data."""
+def _record(category: str, identifier: object, label: object, description: object, route: str) -> dict[str, str] | None:
+    safe_id = str(identifier or "").strip()[:96]
+    raw_label = str(label or safe_id or "").strip()[:120]
+    raw_description = str(description or "").strip()[:240]
+    safe_label = raw_label if raw_label and not _UNSAFE_PUBLIC_TEXT.search(raw_label) else "Mục server-owned"
+    safe_description = raw_description if raw_description and not _UNSAFE_PUBLIC_TEXT.search(raw_description) else "Metadata server-owned đã được sanitize."
+    if not safe_id or not safe_label or any(char in safe_id for char in ("/", "\\", ":")) or _UNSAFE_PUBLIC_TEXT.search(safe_id):
+        return None
+    return {"id": safe_id, "label": safe_label, "description": safe_description, "route": route, "category": category}
+
+
+def _live_records(sources: Mapping[str, Any] | None) -> list[dict[str, str]]:
+    """Normalize bounded server-owned records into opaque search results."""
+
+    if not isinstance(sources, Mapping):
+        return []
+    records: list[dict[str, str]] = []
+    specs = (
+        ("models", "models", "models", "model_id", "display_name", "purpose"),
+        ("tools", "tools", "tools", "name", "display_name", "description"),
+        ("projects", "projects", "projects", "id", "title", "description"),
+        ("workflows", "workflows", "workflows", "id", "title", "description"),
+        ("jobs", "jobs", "jobs", "id", "title", "tool"),
+        ("artifacts", "artifacts", "artifacts", "id", "name", "media_type"),
+    )
+    for category, route, source_name, id_key, label_key, description_key in specs:
+        values = sources.get(source_name, [])
+        if isinstance(values, Mapping):
+            values = values.get(source_name) or values.get("records") or values.get("items") or []
+        if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
+            continue
+        for value in list(values)[:120]:
+            if not isinstance(value, Mapping):
+                continue
+            identifier = value.get(id_key) or value.get("id") or value.get("artifact_id") or value.get("job_id")
+            label = value.get(label_key) or value.get("name") or value.get("title") or identifier
+            description = value.get(description_key) or value.get("description") or value.get("status") or ""
+            item = _record(category, identifier, label, description, route)
+            if item is not None:
+                records.append(item)
+    settings_item = _record("settings", "settings", "Cài đặt", "Ngôn ngữ, theme, cửa sổ và chính sách job.", "settings")
+    if settings_item is not None:
+        records.append(settings_item)
+    return records
+
+
+def search(query: object, *, sources: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Search bounded server-owned records, falling back to route catalog."""
 
     raw = query if isinstance(query, str) else ""
     normalized = " ".join(raw.strip().casefold().split())[:_MAX_QUERY_LENGTH]
+    live_records = _live_records(sources)
+    catalog = live_records or [_surface_projection(item) | {"category": item["kind"]} for item in _SURFACES]
     if not normalized:
-        matches = list(_SURFACES[:_MAX_RESULTS])
+        matches = list(catalog[:_MAX_RESULTS])
     else:
         terms = tuple(normalized.split(" "))
         matches = [
-            item for item in _SURFACES
+            item for item in catalog
             if all(term in " ".join((item["id"], item["label"], item["route"], item["description"])).casefold() for term in terms)
         ][: _MAX_RESULTS]
     return {
         "schema_version": PRODUCT_EXPERIENCE_V2_SCHEMA,
         "status": "completed",
         "query": normalized,
-        "results": [_surface_projection(item) for item in matches],
+        "results": [_search_projection(item) for item in matches],
         "truncated": len(matches) >= _MAX_RESULTS,
         "execution": "not_run",
         "dry_run": True,
-        "reason": "Search is limited to the finite server-owned product surface catalog; no project, artifact, filesystem or external application data is searched.",
+        "reason": "Search uses only the finite server-owned product surface catalog and bounded metadata projections; it never exposes paths, secrets, artifact bytes or external application data.",
         "next_action": "Choose a result to navigate inside the Hub.",
     }
 
