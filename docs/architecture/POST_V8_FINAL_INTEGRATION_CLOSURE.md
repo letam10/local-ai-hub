@@ -19,7 +19,7 @@ worker to execute.
 | M2 Artifact/Media | artifact/project stores | UI, workflow preflight | opaque artifact IDs | bounded metadata / plan-only media | existing stores / owner required | None found | No byte/path projection |
 | M3 Provider Adapter Registry | static adapter specs | adapter preflight | adapter/capability/requirement IDs | availability is not provider execution | registry / `UNBOUND` | adapters declared orphan concrete profile IDs | adapters declare only canonical logical requirements |
 | M4 Product Experience | product experience service | app.js → `renderPage` | category → route | navigation/search only | API / no execution | live categories returned non-routable routes; exact-8 truncation lied | one category route map, correct truncation |
-| M5 Platform Hardening | hardening boundary | Diagnostics | area IDs | contract readiness differs from runtime state | existing owners / not run | `completed` could be read as executed | explicit `contract_state`, `runtime_state`, `execution_state` |
+| M5 Platform Hardening | hardening boundary + native launcher | Diagnostics + API child | area IDs + payload/build identity | contract readiness differs from runtime state; API must import selected payload | existing owners / not run | `completed` could be read as executed; embedded runtime could import an old payload before the new one | explicit state dimensions; fixed bootstrap inserts the selected payload root before API module resolution |
 | M6 Extensibility | static SDK/remote-worker contract | Diagnostics | area/protocol IDs | declarative contract differs from plugin/worker runtime | no owner / `NOT_CONFIGURED` | UI could appear green for a contract | explicit dimensions and neutral wording |
 
 ## Canonical resource taxonomy
@@ -61,6 +61,16 @@ profile.  A provider or runner cannot select its own hardware profile.
 | P1 | Prove project attachment uses authoritative workflow/job lookups | phantom references rejected; valid references remain opaque/idempotent |
 | P1 | Normalize M5/M6 contract versus runtime projections | diagnostics says contract ready, not operational/executed |
 | Final | Run source, API/UI, candidate and CI gates on exact final head | test logs, exact GitHub run, isolated candidate evidence |
+
+## Exact payload startup invariant
+
+An embedded runtime can have an older application directory before
+`PYTHONPATH`. Therefore a child API is never launched with only
+`-m src.services.api.api_server`. The desktop path and staged-updater preflight
+both use the same fixed bootstrap: insert the selected, verified payload root
+at `sys.path[0]`, then run the allowlisted API module. The child remains bound
+to the normal build/payload identity handshake; this is not a generic command
+or an execution owner for model/provider work.
 
 ## Deliberate limits
 
