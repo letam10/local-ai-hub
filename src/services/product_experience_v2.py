@@ -23,9 +23,12 @@ _SURFACES: tuple[dict[str, str], ...] = (
     {"id": "dashboard", "label": "Bảng điều khiển", "route": "dashboard", "api": "/api/product-experience/v2", "kind": "dashboard", "description": "Tóm tắt trạng thái Hub, điều hướng và bước tiếp theo."},
     {"id": "image", "label": "Hình ảnh AI", "route": "image", "api": "/api/lifecycle", "kind": "workspace", "description": "Mở không gian ảnh và Image & Mask Studio."},
     {"id": "vision", "label": "Studio thị giác", "route": "vision", "api": "/api/capabilities", "kind": "workspace", "description": "Kiểm tra các công cụ thị giác qua Hub."},
+    {"id": "tools", "label": "Công cụ", "route": "vision", "api": "/tools", "kind": "catalog", "description": "Tìm công cụ đã được Hub công bố."},
     {"id": "media", "label": "Phương tiện", "route": "media", "api": "/api/media-pipeline/v2", "kind": "workspace", "description": "Xem preflight media có kiểu dữ liệu."},
     {"id": "jobs", "label": "Tác vụ", "route": "jobs", "api": "/api/jobs", "kind": "control_plane", "description": "Theo dõi hàng đợi, lịch sử và phục hồi tác vụ."},
     {"id": "models", "label": "Mô hình & Lưu trữ", "route": "models", "api": "/api/model-manager/v2", "kind": "control_plane", "description": "Xem inventory và preflight server-owned."},
+    {"id": "workflows", "label": "Workflow Library", "route": "projects", "api": "/api/workflow-library", "kind": "workspace", "description": "Tìm workflow đã lưu và template đã kiểm tra."},
+    {"id": "artifacts", "label": "Artifact Library", "route": "projects", "api": "/api/artifact-library/v2", "kind": "control_plane", "description": "Tìm artifact bằng metadata opaque."},
     {"id": "projects", "label": "Dự án & Công thức", "route": "projects", "api": "/api/project-workspace/v2", "kind": "workspace", "description": "Quản lý metadata dự án, workflow và artifact."},
     {"id": "diagnostics", "label": "Diagnostics", "route": "diagnostics", "api": "/api/diagnostics/snapshot", "kind": "diagnostics", "description": "Xem chẩn đoán sanitized và bước phục hồi."},
     {"id": "settings", "label": "Cài đặt", "route": "settings", "api": "/api/settings", "kind": "settings", "description": "Chỉ áp dụng theme, ngôn ngữ và cấu hình sau khi bấm Áp dụng & lưu."},
@@ -140,9 +143,20 @@ def search(query: object, *, sources: Mapping[str, Any] | None = None) -> dict[s
     raw = query if isinstance(query, str) else ""
     normalized = " ".join(raw.strip().casefold().split())[:_MAX_QUERY_LENGTH]
     live_records = _live_records(sources)
-    catalog = live_records or [_surface_projection(item) | {"category": item["kind"]} for item in _SURFACES]
+    search_categories = {"models", "tools", "projects", "workflows", "jobs", "artifacts", "settings"}
+    static_records = [_surface_projection(item) | {"category": item["id"] if item["id"] in search_categories else item["kind"]} for item in _SURFACES]
+    catalog: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in [*static_records, *live_records]:
+        identity = (str(item.get("category") or ""), str(item.get("id") or ""))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        catalog.append(item)
     if not normalized:
-        matches = list(catalog[:_MAX_RESULTS])
+        priority = ("dashboard", "models", "tools", "projects", "workflows", "jobs", "artifacts", "settings")
+        priority_items = [item for wanted in priority for item in catalog if item.get("id") == wanted]
+        matches = priority_items[:_MAX_RESULTS]
     else:
         terms = tuple(normalized.split(" "))
         matches = [
