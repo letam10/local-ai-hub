@@ -87,6 +87,12 @@ restore, process hoặc benchmark vẫn ở API owner/confirmation riêng và kh
 được báo như đã thực thi. Chi tiết xem
 [Post-V8 Platform Hardening M5](architecture/POST_V8_PLATFORM_HARDENING_M5.md).
 
+Post-V8 M6 hoàn thiện lớp Extensibility V2: Plugin SDK khai báo quyền
+metadata-only, API versioning có identity/deprecation rõ ràng và remote-worker
+abstraction tương lai ở trạng thái `NOT_CONFIGURED`. Contract không import
+plugin, mở endpoint, đọc credential hay dispatch remote worker. Chi tiết xem
+[Post-V8 Platform Extensibility M6](architecture/POST_V8_PLATFORM_EXTENSIBILITY_M6.md).
+
 ## API và kiểm thử
 
 Các route Node Studio chính:

@@ -216,6 +216,19 @@ _FEATURES: tuple[dict[str, Any], ...] = (
         "reason": "Describes updater, backup/recovery, process ownership, security and performance boundaries without executing them.",
         "next_action": "Use the owning area API and explicit confirmation/ownership gate before any operation.",
     },
+    {
+        "feature_id": "platform_extensibility_v2",
+        "api_version": "v2",
+        "feature_state": "READ_ONLY",
+        "execution": "not_run",
+        "dry_run": True,
+        "routes": [
+            _route("extensibility.v2_snapshot", "GET", "/api/extensibility/v2", execution_mode="read_only"),
+            _route("extensibility.v2_detail", "GET", "/api/extensibility/v2/{area_id}", execution_mode="read_only"),
+        ],
+        "reason": "Describes the declarative Plugin SDK, API versioning and future remote-worker boundary without importing or connecting anything.",
+        "next_action": "Use static extension validation until a separately reviewed execution owner exists.",
+    },
 )
 
 _FEATURE_IDS = frozenset(item["feature_id"] for item in _FEATURES)

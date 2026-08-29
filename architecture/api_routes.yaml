@@ -934,6 +934,44 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "extensibility.v2_snapshot",
+      "method": "GET",
+      "path": "/api/extensibility/v2",
+      "domain": "extensibility",
+      "owner": "src/services/api/routes/platform_extensibility_v2.py",
+      "service": "extensibility",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "extensibility.v2_detail",
+      "method": "GET",
+      "path": "/api/extensibility/v2/{area_id}",
+      "domain": "extensibility",
+      "owner": "src/services/api/routes/platform_extensibility_v2.py",
+      "service": "extensibility",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "external_integrations.v2_snapshot",
       "method": "GET",
       "path": "/api/external-integrations/v2",

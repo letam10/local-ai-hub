@@ -53,12 +53,12 @@ features:
     related_services: [src/services/api/config, src/services/productization]
   - id: diagnostics
     owner: src/ui/features/diagnostics/
-    api_dependencies: [diagnostics, platform_hardening_v2]
+    api_dependencies: [diagnostics, platform_hardening_v2, platform_extensibility_v2]
     state_owner: app.diagnostics
     styles: src/ui/styles.css
     i18n_namespace: diagnostics
     tests: [tests/test_v7_final_productization.py]
-    related_services: [src/services/diagnostics, src/services/platform_hardening_v2]
+    related_services: [src/services/diagnostics, src/services/platform_hardening_v2, src/services/platform_extensibility_v2]
   - id: components
     owner: src/ui/features/components/
     api_dependencies: [productization, component_manager, capability_graph, component_lifecycle]

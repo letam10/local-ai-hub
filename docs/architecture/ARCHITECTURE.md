@@ -133,3 +133,11 @@ finite read-only contract. It records the owning persistent state, API,
 failure modes and recovery path without probing the machine, applying an
 update/restore, controlling a process or running a benchmark. See
 [`POST_V8_PLATFORM_HARDENING_M5.md`](POST_V8_PLATFORM_HARDENING_M5.md).
+
+## Platform Extensibility V2
+
+`src/services/platform_extensibility_v2.py` owns a finite declarative boundary
+for the Plugin SDK, API version identity/deprecation and a future remote
+worker. Plugin code, credentials, endpoints and workers remain unavailable;
+the Router only exposes read-only projections. See
+[`POST_V8_PLATFORM_EXTENSIBILITY_M6.md`](POST_V8_PLATFORM_EXTENSIBILITY_M6.md).

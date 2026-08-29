@@ -97,6 +97,10 @@ domains:
     owner: [src/services/platform_hardening_v2.py]
     depends_on: [shared]
     forbidden: [filesystem, process-control, update-apply, restore-apply, benchmark, raw-public-paths]
+  platform_extensibility_v2:
+    owner: [src/services/platform_extensibility_v2.py]
+    depends_on: [shared]
+    forbidden: [filesystem, dynamic-module-import, credential-read, endpoint-connect, remote-worker-launch, api-version-silent-change]
   sam2:
     owner: [src/modules/sam2/]
     depends_on: [artifact_store, job_manager]

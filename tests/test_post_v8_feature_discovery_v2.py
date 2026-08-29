@@ -28,6 +28,7 @@ _FEATURES = {
     "external_integrations_v2": "READ_ONLY",
     "product_experience_v2": "READ_ONLY",
     "platform_hardening_v2": "READ_ONLY",
+    "platform_extensibility_v2": "READ_ONLY",
 }
 
 

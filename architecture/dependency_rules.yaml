@@ -68,3 +68,5 @@ rules:
     text: Product Experience V2 exposes only a finite server-owned navigation/onboarding/search catalog. It never searches user data, reads files, persists browser completion, saves settings, starts a provider or executes a workflow.
   - id: platform-hardening-v2-read-only-contract
     text: Platform Hardening V2 exposes only the existing updater, backup/recovery, process ownership, security and performance boundaries. Its projection never runs an update, restore, process action, benchmark or machine probe.
+  - id: platform-extensibility-v2-owner-required
+    text: Platform Extensibility V2 exposes only declarative Plugin SDK, API versioning and future remote-worker contracts. It cannot import plugin code, read credentials, open an endpoint, dispatch a remote worker or silently change an API version.

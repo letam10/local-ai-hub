@@ -65,6 +65,8 @@ export const getProductExperienceV2 = () => request("/api/product-experience/v2"
 export const searchProductExperienceV2 = (query = "") => request(`/api/product-experience/v2/search?${new URLSearchParams({ q: String(query || "").slice(0, 80) })}`);
 export const getPlatformHardeningV2 = () => request("/api/platform-hardening/v2");
 export const getPlatformHardeningAreaV2 = (areaId) => request(`/api/platform-hardening/v2/${encodeURIComponent(areaId)}`);
+export const getPlatformExtensibilityV2 = () => request("/api/extensibility/v2");
+export const getPlatformExtensibilityAreaV2 = (areaId) => request(`/api/extensibility/v2/${encodeURIComponent(areaId)}`);
 export const getSettings = () => request("/api/settings");
 export const getSettingsSchema = () => request("/api/settings/schema");
 export const patchSettings = (patch, expectedRevision) => request("/api/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...patch, expected_revision: expectedRevision }) });
