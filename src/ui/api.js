@@ -60,6 +60,7 @@ export const planComponentUpdate = (componentId) => request("/api/updates/plan",
 export const confirmComponentUpdate = (planId, confirmed = false) => request(`/api/updates/plans/${encodeURIComponent(planId)}/confirm`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: Boolean(confirmed) }) });
 export const rollbackComponentUpdate = (componentId) => request("/api/updates/rollback", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ component_id: String(componentId) }) });
 export const getApplications = () => request("/api/applications");
+export const getExternalIntegrationsV2 = () => request("/api/external-integrations/v2");
 export const getSettings = () => request("/api/settings");
 export const getSettingsSchema = () => request("/api/settings/schema");
 export const patchSettings = (patch, expectedRevision) => request("/api/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...patch, expected_revision: expectedRevision }) });

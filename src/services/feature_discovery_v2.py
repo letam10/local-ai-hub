@@ -161,6 +161,34 @@ _FEATURES: tuple[dict[str, Any], ...] = (
         "reason": "Publishes a closed media allowlist and preflight; FFmpeg, AnimeSR, RIFE and providers are not executed.",
         "next_action": "Review the media plan and use a future server-owned execution owner after bounded evidence exists.",
     },
+    {
+        "feature_id": "provider_adapters_v2",
+        "api_version": "v2",
+        "feature_state": "PLAN_ONLY",
+        "execution": "not_run",
+        "dry_run": True,
+        "routes": [
+            _route("provider_adapters.v2_snapshot", "GET", "/api/provider-adapters/v2", execution_mode="read_only"),
+            _route("provider_adapters.v2_detail", "GET", "/api/provider-adapters/v2/{adapter_id}", execution_mode="read_only"),
+            _route("provider_adapters.v2_preflight", "POST", "/api/provider-adapters/v2/{adapter_id}/preflight", execution_mode="plan_only"),
+        ],
+        "reason": "First-party adapter contracts expose typed dependency/resource preflight only; no provider execution owner is registered.",
+        "next_action": "Inspect exact adapter blockers, then bind a separately reviewed server-owned execution owner before any runtime action.",
+    },
+    {
+        "feature_id": "external_integrations_v2",
+        "api_version": "v2",
+        "feature_state": "READ_ONLY",
+        "execution": "not_run",
+        "dry_run": True,
+        "routes": [
+            _route("external_integrations.v2_snapshot", "GET", "/api/external-integrations/v2", execution_mode="read_only"),
+            _route("external_integrations.v2_detail", "GET", "/api/external-integrations/v2/{integration_id}", execution_mode="read_only"),
+            _route("external_integrations.v2_launch_plan", "POST", "/api/external-integrations/v2/{integration_id}/launch-plan", execution_mode="plan_only"),
+        ],
+        "reason": "External integrations publish only finite, path-free installation/connection state and an explanatory launch capability; no external application is launched by this V2 surface.",
+        "next_action": "Use only a separately reviewed official API or IPC adapter; credentials and external WebView control remain outside Hub.",
+    },
 )
 
 _FEATURE_IDS = frozenset(item["feature_id"] for item in _FEATURES)

@@ -934,6 +934,44 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "external_integrations.v2_snapshot",
+      "method": "GET",
+      "path": "/api/external-integrations/v2",
+      "domain": "integrations",
+      "owner": "src/services/api/routes/external_integrations_v2.py",
+      "service": "integrations",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "external_integrations.v2_detail",
+      "method": "GET",
+      "path": "/api/external-integrations/v2/{integration_id}",
+      "domain": "integrations",
+      "owner": "src/services/api/routes/external_integrations_v2.py",
+      "service": "integrations",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "feature_discovery.v2_snapshot",
       "method": "GET",
       "path": "/api/features/v2",
@@ -1605,6 +1643,44 @@
       "domain": "projects",
       "owner": "src/services/api/routes/projects.py",
       "service": "projects",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "provider_adapters.v2_snapshot",
+      "method": "GET",
+      "path": "/api/provider-adapters/v2",
+      "domain": "providers",
+      "owner": "src/services/api/routes/provider_adapters_v2.py",
+      "service": "providers",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "provider_adapters.v2_detail",
+      "method": "GET",
+      "path": "/api/provider-adapters/v2/{adapter_id}",
+      "domain": "providers",
+      "owner": "src/services/api/routes/provider_adapters_v2.py",
+      "service": "providers",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -3005,6 +3081,25 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "external_integrations.v2_launch_plan",
+      "method": "POST",
+      "path": "/api/external-integrations/v2/{integration_id}/launch-plan",
+      "domain": "integrations",
+      "owner": "src/services/api/routes/external_integrations_v2.py",
+      "service": "integrations",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "image_mask.create",
       "method": "POST",
       "path": "/api/image-mask-studio/sessions",
@@ -3581,6 +3676,25 @@
       "domain": "projects",
       "owner": "src/services/api/routes/projects.py",
       "service": "projects",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "provider_adapters.v2_preflight",
+      "method": "POST",
+      "path": "/api/provider-adapters/v2/{adapter_id}/preflight",
+      "domain": "providers",
+      "owner": "src/services/api/routes/provider_adapters_v2.py",
+      "service": "providers",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [

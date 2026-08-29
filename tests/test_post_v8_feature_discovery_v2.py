@@ -24,6 +24,8 @@ _FEATURES = {
     "project_workspace_v2": "METADATA_ONLY",
     "artifact_library_v2": "READ_ONLY",
     "media_pipeline_v2": "PLAN_ONLY",
+    "provider_adapters_v2": "PLAN_ONLY",
+    "external_integrations_v2": "READ_ONLY",
 }
 
 

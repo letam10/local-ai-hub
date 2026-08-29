@@ -60,3 +60,7 @@ rules:
     text: Project Workspace V2 and Artifact Library V2 are read-only path-free projections over existing server-owned stores. They cannot create a second metadata owner, generate a thumbnail, delete an artifact, mutate a project or broaden preview access.
   - id: media-pipeline-v2-closed-preflight
     text: Media Pipeline V2 accepts only opaque artifacts and finite allowlisted operations/backends. Its preflight never invokes FFmpeg, AnimeSR, RIFE, a provider or GPU workload, and FFmpeg fallbacks are never labelled as AI operations.
+  - id: provider-adapters-v2-server-owned
+    text: Provider Adapters V2 is a finite first-party typed preflight catalog. It consumes only Capability Graph and Scheduler projections; it cannot import a dynamic module, accept a path/URL/command/provider body, probe GPU, load a model, start a worker or execute a provider without a separately reviewed server-owned owner.
+  - id: external-integrations-v2-path-free
+    text: External Integrations V2 projects only sanitized allowlisted application state and trusted enum observations. It never exposes a path, endpoint or credential, embeds an external WebView, guesses an API, launches an application from its V2 launch-plan route or relocates installer-managed software.

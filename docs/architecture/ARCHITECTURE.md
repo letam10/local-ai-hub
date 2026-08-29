@@ -100,3 +100,18 @@ freshness and cache contract is
 These additions are metadata/planning contracts only: they do not turn a
 provider, model or GPU workload operational without separately authorized
 runtime evidence and execution ownership.
+
+## Post-V8 provider and external-integration contracts
+
+`src/services/provider_adapters_v2/` is the M3 finite, typed first-party
+adapter registry.  It derives dependency readiness from Capability Graph V2
+and declared profiles from Resource Scheduler V2, but it never imports a
+legacy module, loads a model, reserves GPU, starts/cancels a worker or executes
+a provider.  Its default execution-owner state is `UNBOUND`.
+
+The same package owns External Integrations V2: a path-free and
+credential-free projection of existing sanitized allowlisted application
+records.  AIRI remains `UNSUPPORTED_API` until an official reviewed API/IPC
+adapter is explicitly registered; Hub does not guess an endpoint, scrape a key
+or embed AIRI.  The contract is documented in
+[`POST_V8_PROVIDER_ADAPTERS_M3.md`](POST_V8_PROVIDER_ADAPTERS_M3.md).

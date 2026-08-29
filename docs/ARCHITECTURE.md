@@ -66,6 +66,14 @@ không thay thế owner persistence V7/V8, không reserve GPU/job, không chạy
 và chỉ dùng opaque artifact ID. Chi tiết hợp đồng xem
 [Post-V8 Workflow & Data M2](architecture/POST_V8_WORKFLOW_DATA_M2.md).
 
+Post-V8 M3 thêm `provider-adapters.v2` và `external-integrations.v2`: catalog
+finite cho các first-party adapter với typed preflight, dependency và declared
+resource profile; cùng projection AIRI/ứng dụng ngoài không có path, endpoint
+hay credential. M3 không import adapter legacy, không khởi chạy worker/provider
+hoặc external app, không embed WebView ngoài và không biến dependency đủ thành
+quyền thực thi. Chi tiết xem
+[Post-V8 Provider Adapters & External Integrations M3](architecture/POST_V8_PROVIDER_ADAPTERS_M3.md).
+
 ## API và kiểm thử
 
 Các route Node Studio chính:

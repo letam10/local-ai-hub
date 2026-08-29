@@ -53,6 +53,8 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
     project_workspace_v2_service: Any | None = None
     artifact_library_v2_service: Any | None = None
     media_pipeline_v2_service: Any | None = None
+    provider_adapter_registry_v2_service: Any | None = None
+    external_integration_registry_v2_service: Any | None = None
     from src.services.projection_cache import BoundedProjectionCache
 
     projection_cache = BoundedProjectionCache()
@@ -355,6 +357,52 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
             media_pipeline_v2_service = MediaPipelineV2(artifact_describer)
         return media_pipeline_v2_service
 
+    def provider_adapters_v2() -> Any:
+        """Compose the closed M3 provider contract without loading modules."""
+
+        nonlocal provider_adapter_registry_v2_service
+        if provider_adapter_registry_v2_service is None:
+            from src.services.provider_adapters_v2 import ProviderAdapterRegistry
+
+            def provider_capability_snapshot() -> Mapping[str, Any]:
+                # Minimal/test compositions legitimately omit the legacy V8
+                # component bindings.  They must project exact missing
+                # dependencies (UNAVAILABLE), never fail the whole route or
+                # synthesize readiness.
+                try:
+                    value = capability_graph().snapshot()
+                except Exception:
+                    return {"capabilities": []}
+                return value if isinstance(value, Mapping) else {"capabilities": []}
+
+            def provider_resource_snapshot() -> Mapping[str, Any]:
+                try:
+                    value = resource_scheduler().snapshot()
+                except Exception:
+                    return {"profiles": []}
+                return value if isinstance(value, Mapping) else {"profiles": []}
+
+            provider_adapter_registry_v2_service = ProviderAdapterRegistry(
+                capability_snapshot=provider_capability_snapshot,
+                resource_snapshot=provider_resource_snapshot,
+            )
+        return provider_adapter_registry_v2_service
+
+    def external_integrations_v2() -> Any:
+        """Project only existing sanitized application registry information."""
+
+        nonlocal external_integration_registry_v2_service
+        if external_integration_registry_v2_service is None:
+            from src.services.provider_adapters_v2 import ExternalIntegrationRegistry
+
+            applications = get("applications")
+            observations = get("external_integrations_v2_observations")
+            external_integration_registry_v2_service = ExternalIntegrationRegistry(
+                applications_snapshot=(lambda: applications()) if callable(applications) else (lambda: []),
+                observations_snapshot=(lambda: observations()) if callable(observations) else (lambda: observations if isinstance(observations, Mapping) else {}),
+            )
+        return external_integration_registry_v2_service
+
     def prepare_shutdown() -> dict[str, Any]:
         status, payload = get("prepare_owned_shutdown")()
         return {**payload, "http_status": status}
@@ -418,6 +466,12 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         "artifact_library_v2_detail": lambda artifact_id: artifact_library_v2().detail(artifact_id),
         "media_pipeline_v2_contract": lambda: media_pipeline_v2().contract(),
         "media_pipeline_v2_preflight": lambda payload: media_pipeline_v2().preflight(payload),
+        "provider_adapters_v2_snapshot": lambda: provider_adapters_v2().snapshot(),
+        "provider_adapters_v2_detail": lambda adapter_id: provider_adapters_v2().discover(adapter_id),
+        "provider_adapters_v2_preflight": lambda adapter_id, payload: provider_adapters_v2().preflight(adapter_id, payload),
+        "external_integrations_v2_snapshot": lambda: external_integrations_v2().snapshot(),
+        "external_integrations_v2_detail": lambda integration_id: external_integrations_v2().detail(integration_id),
+        "external_integrations_v2_launch_plan": lambda integration_id: external_integrations_v2().launch_plan(integration_id),
         "tools_payload": lambda: {"status": "completed", "tools": get("tool_catalog")(get("component_statuses")())},
         "component_statuses": get("component_statuses"), "component_snapshot": component_api.snapshot,
         "component_detail": component_api.detail, "component_plan_lookup": component_api.lookup_plan,

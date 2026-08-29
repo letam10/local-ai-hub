@@ -52,6 +52,7 @@ import {
   getLifecycle,
   getModels,
   getComponents,
+  getApplications,
   createComponentPlan,
   confirmComponentPlan,
   createComponentImportPlan,
@@ -118,6 +119,7 @@ import {
   planComponentUpdate,
   confirmComponentUpdate,
   rollbackComponentUpdate,
+  getExternalIntegrationsV2,
 } from "./api.js";
 // The compatibility resumeDurableJob endpoint remains available for older
 // clients; this UI deliberately uses retryDurableJob so V8 says "new record,
@@ -135,7 +137,7 @@ globalThis.__localAiHubFrontendStarted = true;
 
 const state = {
   health: {}, capabilities: {}, productization: {}, components: [], componentManager: {}, componentPlans: {}, tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", jobQuery: "", jobTypeFilter: "all", jobSort: "newest", jobPage: 1, apiStatus: "loading", apiError: "",
-  creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, projectWorkspaceV2: {}, artifactLibraryV2: {}, mediaPipelineV2: {}, mediaPipelinePreflight: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
+  creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, projectWorkspaceV2: {}, artifactLibraryV2: {}, mediaPipelineV2: {}, mediaPipelinePreflight: null, externalIntegrationsV2: {}, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
   workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa khả dụng.", action: "Tiếp tục local draft; kiểm tra endpoint typed trước khi đồng bộ." },
   storageScan: { status: "idle", progress: 0, exact: false },
@@ -1022,6 +1024,20 @@ const loadRouteData = async ({ scan = false } = {}) => {
       render();
     }).catch((error) => {
       showToast(error.message || "Không thể tải Component Manager.", "error");
+    }).finally(() => { routeLoad = null; });
+    return routeLoad;
+  }
+  if (route === "airi") {
+    if (routeLoad) return routeLoad;
+    // The legacy bootstrap is kept for fast paint and the existing
+    // server-owned launch action.  M3 integration state is loaded explicitly
+    // here; the browser never probes AIRI, reads a path/key, or embeds it.
+    routeLoad = Promise.allSettled([getExternalIntegrationsV2(), getApplications()]).then((results) => {
+      if (results[0].status === "fulfilled") state.externalIntegrationsV2 = results[0].value || {};
+      if (results[1].status === "fulfilled") state.applications = results[1].value?.applications || state.applications;
+      render();
+    }).catch((error) => {
+      if (routeId() === "airi") showToast(error.message || "Không thể tải trạng thái tích hợp AIRI.", "error");
     }).finally(() => { routeLoad = null; });
     return routeLoad;
   }

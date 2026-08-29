@@ -81,6 +81,14 @@ domains:
     owner: [src/services/durable_job_engine_v2/]
     depends_on: [resource_scheduler, platform.paths, shared]
     forbidden: [ui, raw-public-paths, browser-worker-claim, worker-launch, provider-execution, artifact-delete]
+  provider_adapters_v2:
+    owner: [src/services/provider_adapters_v2/]
+    depends_on: [capability_graph, resource_scheduler, runtime_registry, shared]
+    forbidden: [ui, raw-public-paths, dynamic-module-import, worker-launch, provider-execution, model-load, gpu-probe]
+  external_integrations_v2:
+    owner: [src/services/provider_adapters_v2/external.py]
+    depends_on: [runtime_registry, shared]
+    forbidden: [ui, raw-public-paths, credential-read, endpoint-probe, webview-embed, external-process-launch]
   sam2:
     owner: [src/modules/sam2/]
     depends_on: [artifact_store, job_manager]
@@ -100,7 +108,7 @@ domains:
 filesystem:
   source: APP_ROOT
   mutable: [DATA_ROOT, Config, Models, Environments, runtime, Output, Cache, Temp, Logs, Reports]
-  forbidden_source_contents: [*.safetensors, *.ckpt, *.pt, *.pth, *.onnx, *.gguf]
+  forbidden_source_contents: ["*.safetensors", "*.ckpt", "*.pt", "*.pth", "*.onnx", "*.gguf"]
 ui_features:
   owner: src/ui/features/
   facade: [src/ui/app.js, src/ui/pages.js]
