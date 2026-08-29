@@ -84,6 +84,10 @@ class InstalledStartupHotfixTests(unittest.TestCase):
         self.assertIs(selected, process)
         resolver.assert_not_called()
         self.assertEqual(spawn.call_args.args[0][0], str(bundled))
+        self.assertEqual(spawn.call_args.args[0][1], "-c")
+        self.assertIn("sys.path.insert(0", spawn.call_args.args[0][2])
+        self.assertIn(json.dumps(str(payload)), spawn.call_args.args[0][2])
+        self.assertIn("src.services.api.api_server", spawn.call_args.args[0][2])
         self.assertEqual(spawn.call_args.kwargs["cwd"], payload)
         child_env = spawn.call_args.kwargs["env"]
         self.assertEqual(child_env["LOCALAIHUB_INSTALL_ROOT"], str(install))

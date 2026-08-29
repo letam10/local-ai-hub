@@ -32,6 +32,7 @@ from src.shared.runtime_identity import APP_USER_MODEL_ID, API_PROTOCOL_VERSION,
 from src.shared.version import PRODUCT_VERSION
 
 from .desktop_lifecycle import DesktopCloseController
+from .payload_bootstrap import api_server_command
 from .readiness import event_seen, load_state, record_event as record_readiness_event
 from .stable_shell import StableShellError, resolve_launch_plan
 from .tray import WindowsTray
@@ -389,7 +390,7 @@ def ensure_api(timeout_seconds: float = 20.0) -> subprocess.Popen[object] | None
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with log_path.open("a", encoding="utf-8") as log:
                 process = popen_hidden(
-                    [python, "-m", "src.services.api.api_server"],
+                    [python, *api_server_command(Path(cwd))],
                     cwd=cwd,
                     env=child_env,
                     stdout=log,
