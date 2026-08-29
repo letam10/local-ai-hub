@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import time
 from types import SimpleNamespace
@@ -170,7 +171,7 @@ class ResourceSchedulerTests(unittest.TestCase):
 
     def test_gpu_exclusivity_is_enforced_for_both_existing_and_new_reservations(self) -> None:
         common = {
-            "estimated_vram_mb": 1024, "estimated_ram_mb": 256, "gpu_required": True,
+            "resource_requirement": "gpu.vision", "execution_class": "gpu", "estimated_vram_mb": 1024, "estimated_ram_mb": 256, "gpu_required": True,
             "cpu_fallback": False, "priority": 50, "interruptible": True, "batchable": True,
             "cpu_slots": 1, "disk_mb": 64, "runtime_slot": None, "provider_slot": None,
         }
@@ -178,11 +179,11 @@ class ResourceSchedulerTests(unittest.TestCase):
             "shared_gpu": {"profile_id": "shared_gpu", "exclusive": False, **common},
             "exclusive_gpu": {"profile_id": "exclusive_gpu", "exclusive": True, **common},
         }
-        forward = ResourceScheduler(hardware_snapshot=_hardware(), profiles=profiles)
+        forward = ResourceScheduler(hardware_snapshot=_hardware(), profiles=profiles, max_heavy_gpu_jobs=2)
         self.assertEqual(forward.submit(_job("1"), "worker:ffmpeg", "shared_gpu")["state"], "PREPARING")
         blocked_new = forward.submit(_job("2"), "worker:whisper", "exclusive_gpu")
         self.assertEqual(blocked_new["reason_code"], "gpu_exclusive_conflict")
-        reverse = ResourceScheduler(hardware_snapshot=_hardware(), profiles=profiles)
+        reverse = ResourceScheduler(hardware_snapshot=_hardware(), profiles=profiles, max_heavy_gpu_jobs=2)
         self.assertEqual(reverse.submit(_job("3"), "worker:ffmpeg", "exclusive_gpu")["state"], "PREPARING")
         blocked_existing = reverse.submit(_job("4"), "worker:whisper", "shared_gpu")
         self.assertEqual(blocked_existing["reason_code"], "gpu_exclusive_conflict")
@@ -191,7 +192,7 @@ class ResourceSchedulerTests(unittest.TestCase):
         hardware = _hardware(vram_mb=8192)
         hardware["gpu_safety_margin_mb"] = 512
         hardware["gpus"][0]["free_vram_mb"] = 2600
-        hardware["gpus"][0]["observed_at"] = "2026-08-28T00:00:00+00:00"
+        hardware["gpus"][0]["observed_at"] = datetime.now(timezone.utc).isoformat()
         hardware["gpus"][0]["source_fingerprint"] = "a" * 64
         scheduler = ResourceScheduler(hardware_snapshot=hardware)
         allowed = scheduler.submit(_job("5"), "worker:whisper", "whisper_gpu_2gb")

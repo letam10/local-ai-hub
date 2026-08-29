@@ -61,15 +61,15 @@ class ProviderAdapterContractTests(unittest.TestCase):
         required = ("component:sam2", "worker:sam2", "runtime:sam2", "model:sam2.1-hiera-small")
         registry = ProviderAdapterRegistry(
             capability_snapshot=lambda: capability_snapshot(*required),
-            resource_snapshot=lambda: {"profiles": [{"profile_id": "vision_gpu_plan"}]},
+            resource_snapshot=lambda: {"profiles": [{"profile_id": "vision_gpu_plan", "resource_requirement": "gpu.vision", "estimated_vram_mb": 2048}]},
         )
         detail = registry.discover("vision.sam2")
         self.assertEqual(detail["availability"]["state"], "READY_FOR_BINDING")
-        self.assertEqual(detail["resource_estimate"], {
-            "profile_id": "vision_gpu_plan", "state": "declared",
-            "reason": "Resource requirements are server-owned declared profile metadata; no reservation or hardware probe was made.",
-            "reservation": "not_reserved",
-        })
+        self.assertEqual(detail["resource_estimate"]["requirement_id"], "gpu.vision")
+        self.assertEqual(detail["resource_estimate"]["profile_id"], "vision_gpu_plan")
+        self.assertEqual(detail["resource_estimate"]["state"], "resolved")
+        self.assertTrue(detail["resource_estimate"]["dispatchable"])
+        self.assertEqual(detail["resource_estimate"]["reservation"], "not_reserved")
         ready = registry.preflight("vision.sam2", {"input_types": ["IMAGE", "MASK"]})
         self.assertEqual(ready["status"], "completed")
         self.assertEqual(ready["dispatch"]["status"], "unavailable")

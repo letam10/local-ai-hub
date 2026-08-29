@@ -450,9 +450,10 @@ const showDesktopClosePrompt = (detail = {}) => {
 
 window.addEventListener("local-ai-hub:close-request", (event) => showDesktopClosePrompt(event.detail || {}));
 
+const isRoutableRoute = (value) => NAVIGATION.flatMap((group) => group.items).some(([id]) => id === value);
 const routeId = () => {
   const value = window.location.hash.replace(/^#\/?/, "").split("/")[0];
-  return NAVIGATION.flatMap((group) => group.items).some(([id]) => id === value) ? value : "dashboard";
+  return isRoutableRoute(value) ? value : "dashboard";
 };
 
 const safeDisplayMessage = (value, fallback) => typeof value === "string" && value.trim() ? value : fallback;
@@ -663,7 +664,7 @@ const renderNavigation = () => {
 const renderGlobalSearch = () => {
   if (!globalSearchResults) return;
   const search = state.globalSearch && typeof state.globalSearch === "object" ? state.globalSearch : {};
-  const results = Array.isArray(search.results) ? search.results : [];
+  const results = Array.isArray(search.results) ? search.results.filter((item) => item && isRoutableRoute(item.route)) : [];
   if (!search.query) { globalSearchResults.hidden = true; globalSearchResults.replaceChildren(); return; }
   globalSearchResults.hidden = false;
   globalSearchResults.innerHTML = `<div class="global-search-results__panel"><strong>Kết quả tìm Hub</strong><span class="small">${escapeHtml(String(search.query).slice(0, 80))}</span>${results.length ? `<div class="global-search-results__rows">${results.map((item) => `<button class="button button--compact" type="button" data-route="${escapeHtml(item.route || "dashboard")}"><strong>${escapeHtml(item.label || item.id || "Workspace")}</strong><span class="row-meta">${escapeHtml(item.description || "")}</span></button>`).join("")}</div>` : `<p class="small">Không có workspace phù hợp trong catalog Hub.</p>`}</div>`;
@@ -1828,6 +1829,10 @@ document.addEventListener("click", async (event) => {
   const route = event.target.closest("[data-route], [data-readiness-route]");
   if (route) {
     const nextRoute = route.dataset.route || route.dataset.readinessRoute;
+    if (!isRoutableRoute(nextRoute)) {
+      showToast("Điểm đến Hub không hợp lệ; không điều hướng.", "error");
+      return;
+    }
     if (route.dataset.recoveryFocus === "attention") state.jobFilter = "attention";
     if (route.dataset.recoveryFocus === "all") state.jobFilter = "all";
     closeMobileSidebar(); window.location.hash = `#/${nextRoute}`; return;

@@ -19,6 +19,19 @@ _MAX_QUERY_LENGTH = 80
 _MAX_RESULTS = 8
 _UNSAFE_PUBLIC_TEXT = re.compile(r"(?i)(?:[A-Z]:[\\/]|\\\\|/(?:users|home|tmp|var)/|https?://|api[_-]?key|token|password|secret|credential|private[_-]?key)")
 
+# This is the single server-owned category-to-frontend route contract.  Live
+# metadata and static catalog records both consume it; UI tests compare it to
+# the actual NAVIGATION/renderPage surface set instead of relying on labels.
+SEARCH_CATEGORY_ROUTES = {
+    "models": "models",
+    "tools": "vision",
+    "projects": "projects",
+    "workflows": "projects",
+    "jobs": "jobs",
+    "artifacts": "projects",
+    "settings": "settings",
+}
+
 _SURFACES: tuple[dict[str, str], ...] = (
     {"id": "dashboard", "label": "Bảng điều khiển", "route": "dashboard", "api": "/api/product-experience/v2", "kind": "dashboard", "description": "Tóm tắt trạng thái Hub, điều hướng và bước tiếp theo."},
     {"id": "image", "label": "Hình ảnh AI", "route": "image", "api": "/api/lifecycle", "kind": "workspace", "description": "Mở không gian ảnh và Image & Mask Studio."},
@@ -109,12 +122,12 @@ def _live_records(sources: Mapping[str, Any] | None) -> list[dict[str, str]]:
         return []
     records: list[dict[str, str]] = []
     specs = (
-        ("models", "models", "models", "model_id", "display_name", "purpose"),
-        ("tools", "tools", "tools", "name", "display_name", "description"),
-        ("projects", "projects", "projects", "id", "title", "description"),
-        ("workflows", "workflows", "workflows", "id", "title", "description"),
-        ("jobs", "jobs", "jobs", "id", "title", "tool"),
-        ("artifacts", "artifacts", "artifacts", "id", "name", "media_type"),
+        ("models", SEARCH_CATEGORY_ROUTES["models"], "models", "model_id", "display_name", "purpose"),
+        ("tools", SEARCH_CATEGORY_ROUTES["tools"], "tools", "name", "display_name", "description"),
+        ("projects", SEARCH_CATEGORY_ROUTES["projects"], "projects", "id", "title", "description"),
+        ("workflows", SEARCH_CATEGORY_ROUTES["workflows"], "workflows", "id", "title", "description"),
+        ("jobs", SEARCH_CATEGORY_ROUTES["jobs"], "jobs", "id", "title", "tool"),
+        ("artifacts", SEARCH_CATEGORY_ROUTES["artifacts"], "artifacts", "id", "name", "media_type"),
     )
     for category, route, source_name, id_key, label_key, description_key in specs:
         values = sources.get(source_name, [])
@@ -131,7 +144,7 @@ def _live_records(sources: Mapping[str, Any] | None) -> list[dict[str, str]]:
             item = _record(category, identifier, label, description, route)
             if item is not None:
                 records.append(item)
-    settings_item = _record("settings", "settings", "Cài đặt", "Ngôn ngữ, theme, cửa sổ và chính sách job.", "settings")
+    settings_item = _record("settings", "settings", "Cài đặt", "Ngôn ngữ, theme, cửa sổ và chính sách job.", SEARCH_CATEGORY_ROUTES["settings"])
     if settings_item is not None:
         records.append(settings_item)
     return records
@@ -156,19 +169,20 @@ def search(query: object, *, sources: Mapping[str, Any] | None = None) -> dict[s
     if not normalized:
         priority = ("dashboard", "models", "tools", "projects", "workflows", "jobs", "artifacts", "settings")
         priority_items = [item for wanted in priority for item in catalog if item.get("id") == wanted]
-        matches = priority_items[:_MAX_RESULTS]
+        all_matches = priority_items
     else:
         terms = tuple(normalized.split(" "))
-        matches = [
+        all_matches = [
             item for item in catalog
             if all(term in " ".join((item["id"], item["label"], item["route"], item["description"])).casefold() for term in terms)
-        ][: _MAX_RESULTS]
+        ]
+    matches = all_matches[:_MAX_RESULTS]
     return {
         "schema_version": PRODUCT_EXPERIENCE_V2_SCHEMA,
         "status": "completed",
         "query": normalized,
         "results": [_search_projection(item) for item in matches],
-        "truncated": len(matches) >= _MAX_RESULTS,
+        "truncated": len(all_matches) > _MAX_RESULTS,
         "execution": "not_run",
         "dry_run": True,
         "reason": "Search uses only the finite server-owned product surface catalog and bounded metadata projections; it never exposes paths, secrets, artifact bytes or external application data.",
@@ -176,4 +190,4 @@ def search(query: object, *, sources: Mapping[str, Any] | None = None) -> dict[s
     }
 
 
-__all__ = ["PRODUCT_EXPERIENCE_V2_SCHEMA", "onboarding", "search", "snapshot"]
+__all__ = ["PRODUCT_EXPERIENCE_V2_SCHEMA", "SEARCH_CATEGORY_ROUTES", "onboarding", "search", "snapshot"]

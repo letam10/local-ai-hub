@@ -20,6 +20,8 @@ import threading
 import time
 from typing import Any
 
+from .taxonomy import requirement as taxonomy_requirement
+
 
 RESOURCE_SCHEDULER_SCHEMA_VERSION = "resource-scheduler.v3"
 RESOURCE_SCHEDULER_STATES = (
@@ -50,6 +52,7 @@ _HEAVY_VRAM_MB = 2048
 _MAX_JOBS = 512
 _MAX_TERMINAL_JOBS = 128
 _DEFAULT_GPU_SAFETY_MARGIN_MB = 512
+_INVENTORY_FRESHNESS_SECONDS = 300
 
 
 class ResourceSchedulerError(ValueError):
@@ -78,6 +81,21 @@ def _timestamp_after(seconds: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
 
 
+def _freshness(observed_at: object) -> str:
+    """Classify a server-owned inventory timestamp without probing hardware."""
+
+    if not isinstance(observed_at, str):
+        return "unknown"
+    try:
+        parsed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return "unknown"
+        age = (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+    except ValueError:
+        return "unknown"
+    return "current" if 0 <= age <= _INVENTORY_FRESHNESS_SECONDS else "stale"
+
+
 def _bounded_int(value: object, *, minimum: int = 0, maximum: int = _MAX_INT) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= maximum else None
 
@@ -89,6 +107,8 @@ def _safe_id(value: object, pattern: re.Pattern[str]) -> str | None:
 def _copy_profile(value: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "profile_id": value["profile_id"],
+        "resource_requirement": value["resource_requirement"],
+        "execution_class": value["execution_class"],
         "estimated_vram_mb": value["estimated_vram_mb"],
         "estimated_ram_mb": value["estimated_ram_mb"],
         "gpu_required": value["gpu_required"],
@@ -108,13 +128,16 @@ def _profile(value: object) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
         return None
     allowed = {
-        "profile_id", "estimated_vram_mb", "estimated_ram_mb", "gpu_required", "cpu_fallback",
+        "profile_id", "resource_requirement", "execution_class", "estimated_vram_mb", "estimated_ram_mb", "gpu_required", "cpu_fallback",
         "exclusive", "priority", "interruptible", "batchable", "cpu_slots", "disk_mb",
         "runtime_slot", "provider_slot",
     }
     if set(value) != allowed:
         return None
     profile_id = _safe_id(value.get("profile_id"), _PROFILE_ID)
+    requirement_id = value.get("resource_requirement")
+    requirement = taxonomy_requirement(requirement_id)
+    execution_class = value.get("execution_class")
     runtime_slot = value.get("runtime_slot")
     provider_slot = value.get("provider_slot")
     numbers = {
@@ -126,16 +149,20 @@ def _profile(value: object) -> dict[str, Any] | None:
     }
     if (
         profile_id is None
-        or any(item is None for item in numbers.values())
+            or requirement is None
+            or execution_class not in {"cpu", "gpu"}
+            or any(item is None for item in numbers.values())
         or not all(type(value.get(name)) is bool for name in ("gpu_required", "cpu_fallback", "exclusive", "interruptible", "batchable"))
         or (runtime_slot is not None and _safe_id(runtime_slot, _SLOT_ID) is None)
         or (provider_slot is not None and _safe_id(provider_slot, _SLOT_ID) is None)
-        or (value["gpu_required"] is False and numbers["estimated_vram_mb"] != 0)
-        or (value["gpu_required"] is True and numbers["estimated_vram_mb"] < 1)
+            or (value["gpu_required"] is False and (numbers["estimated_vram_mb"] != 0 or execution_class != "cpu" or requirement["requires_gpu"] is True))
+            or (value["gpu_required"] is True and (numbers["estimated_vram_mb"] < 1 or execution_class != "gpu" or requirement["requires_gpu"] is not True))
     ):
         return None
     return {
         "profile_id": profile_id,
+        "resource_requirement": str(requirement_id),
+        "execution_class": execution_class,
         **{key: int(item) for key, item in numbers.items()},
         "gpu_required": value["gpu_required"],
         "cpu_fallback": value["cpu_fallback"],
@@ -155,11 +182,11 @@ def server_owned_resource_profiles() -> dict[str, dict[str, Any]]:
     """
 
     profiles = [
-        {"profile_id": "cpu_light", "estimated_vram_mb": 0, "estimated_ram_mb": 512, "gpu_required": False, "cpu_fallback": True, "exclusive": False, "priority": 50, "interruptible": True, "batchable": True, "cpu_slots": 1, "disk_mb": 128, "runtime_slot": None, "provider_slot": None},
-        {"profile_id": "ffmpeg_probe", "estimated_vram_mb": 0, "estimated_ram_mb": 256, "gpu_required": False, "cpu_fallback": True, "exclusive": False, "priority": 60, "interruptible": True, "batchable": True, "cpu_slots": 1, "disk_mb": 64, "runtime_slot": "ffmpeg", "provider_slot": None},
-        {"profile_id": "vision_gpu_2gb", "estimated_vram_mb": 2048, "estimated_ram_mb": 2048, "gpu_required": True, "cpu_fallback": False, "exclusive": True, "priority": 70, "interruptible": False, "batchable": False, "cpu_slots": 2, "disk_mb": 256, "runtime_slot": "vision", "provider_slot": "vision"},
-        {"profile_id": "whisper_gpu_2gb", "estimated_vram_mb": 2048, "estimated_ram_mb": 2048, "gpu_required": True, "cpu_fallback": False, "exclusive": True, "priority": 70, "interruptible": False, "batchable": False, "cpu_slots": 2, "disk_mb": 256, "runtime_slot": "faster-whisper", "provider_slot": "whisper"},
-        {"profile_id": "video_gpu_4gb", "estimated_vram_mb": 4096, "estimated_ram_mb": 4096, "gpu_required": True, "cpu_fallback": False, "exclusive": True, "priority": 65, "interruptible": False, "batchable": False, "cpu_slots": 2, "disk_mb": 1024, "runtime_slot": "animesr", "provider_slot": "video"},
+        {"profile_id": "cpu_light", "resource_requirement": "cpu.light", "execution_class": "cpu", "estimated_vram_mb": 0, "estimated_ram_mb": 512, "gpu_required": False, "cpu_fallback": True, "exclusive": False, "priority": 50, "interruptible": True, "batchable": True, "cpu_slots": 1, "disk_mb": 128, "runtime_slot": None, "provider_slot": None},
+        {"profile_id": "ffmpeg_probe", "resource_requirement": "media.ffmpeg", "execution_class": "cpu", "estimated_vram_mb": 0, "estimated_ram_mb": 256, "gpu_required": False, "cpu_fallback": True, "exclusive": False, "priority": 60, "interruptible": True, "batchable": True, "cpu_slots": 1, "disk_mb": 64, "runtime_slot": "ffmpeg", "provider_slot": None},
+        {"profile_id": "vision_gpu_2gb", "resource_requirement": "gpu.vision", "execution_class": "gpu", "estimated_vram_mb": 2048, "estimated_ram_mb": 2048, "gpu_required": True, "cpu_fallback": False, "exclusive": True, "priority": 70, "interruptible": False, "batchable": False, "cpu_slots": 2, "disk_mb": 256, "runtime_slot": "vision", "provider_slot": "vision"},
+        {"profile_id": "whisper_gpu_2gb", "resource_requirement": "gpu.speech", "execution_class": "gpu", "estimated_vram_mb": 2048, "estimated_ram_mb": 2048, "gpu_required": True, "cpu_fallback": False, "exclusive": True, "priority": 70, "interruptible": False, "batchable": False, "cpu_slots": 2, "disk_mb": 256, "runtime_slot": "faster-whisper", "provider_slot": "whisper"},
+        {"profile_id": "video_gpu_4gb", "resource_requirement": "gpu.video", "execution_class": "gpu", "estimated_vram_mb": 4096, "estimated_ram_mb": 4096, "gpu_required": True, "cpu_fallback": False, "exclusive": True, "priority": 65, "interruptible": False, "batchable": False, "cpu_slots": 2, "disk_mb": 1024, "runtime_slot": "animesr", "provider_slot": "video"},
     ]
     result: dict[str, dict[str, Any]] = {}
     for raw in profiles:
@@ -191,6 +218,7 @@ def _inventory(value: object) -> dict[str, Any]:
             "gpu_safety_margin_mb": _DEFAULT_GPU_SAFETY_MARGIN_MB,
             "observed_at": None,
             "source_fingerprint": None,
+            "freshness": "unknown",
         }
     if not isinstance(value, Mapping) or set(value) - {
         "cpu_slots", "cpu_cores", "ram_mb", "disk_mb", "gpus", "runtime_slots", "provider_slots",
@@ -251,6 +279,10 @@ def _inventory(value: object) -> dict[str, Any]:
     margin = _bounded_int(value.get("gpu_safety_margin_mb", _DEFAULT_GPU_SAFETY_MARGIN_MB), minimum=0, maximum=32768)
     if margin is None or (value.get("observed_at") is not None and (not isinstance(value.get("observed_at"), str) or not 1 <= len(str(value.get("observed_at"))) <= 64)) or (value.get("source_fingerprint") is not None and (not isinstance(value.get("source_fingerprint"), str) or not 1 <= len(str(value.get("source_fingerprint"))) <= 128)):
         raise ResourceSchedulerError("resource_inventory_invalid")
+    observed_at = value.get("observed_at")
+    if observed_at is None:
+        gpu_timestamps = [item.get("observed_at") for item in gpus if isinstance(item.get("observed_at"), str)]
+        observed_at = max(gpu_timestamps) if gpu_timestamps else None
     return {
         "status": "available",
         "cpu_slots": normalized_cpu,
@@ -260,8 +292,9 @@ def _inventory(value: object) -> dict[str, Any]:
         "runtime_slots": slots("runtime_slots"),
         "provider_slots": slots("provider_slots"),
         "gpu_safety_margin_mb": int(margin),
-        "observed_at": value.get("observed_at"),
+        "observed_at": observed_at,
         "source_fingerprint": value.get("source_fingerprint"),
+        "freshness": _freshness(observed_at),
     }
 
 
@@ -459,14 +492,14 @@ class ResourceScheduler:
     def _heavy(profile: Mapping[str, Any]) -> bool:
         return profile["gpu_required"] is True and (profile["exclusive"] is True or int(profile["estimated_vram_mb"]) >= _HEAVY_VRAM_MB)
 
-    def _gpu_conflict(self, profile: Mapping[str, Any]) -> bool:
-        """Apply GPU exclusivity in both directions, not only for heavy jobs."""
+    def _gpu_conflict(self, profile: Mapping[str, Any], candidate_gpu_id: str) -> bool:
+        """Apply exclusivity to one candidate GPU, never implicitly globally."""
 
         if profile["gpu_required"] is not True:
             return False
         for reservation in self._reservations.values():
             job = self._jobs.get(str(reservation["job_id"]))
-            if job is None or job["state"] not in _ACTIVE_STATES or reservation.get("gpu_id") is None:
+            if job is None or job["state"] not in _ACTIVE_STATES or reservation.get("gpu_id") != candidate_gpu_id:
                 continue
             if profile["exclusive"] is True or job["profile"]["exclusive"] is True:
                 return True
@@ -494,7 +527,7 @@ class ResourceScheduler:
         required = int(profile["estimated_vram_mb"])
         candidates = sorted(self._inventory["gpus"], key=lambda item: (self._gpu_capacity_mb(item), item["id"]), reverse=True)
         for gpu in candidates:
-            if self._gpu_capacity_mb(gpu) >= required:
+            if self._gpu_capacity_mb(gpu) >= required and not self._gpu_conflict(profile, str(gpu["id"])):
                 return str(gpu["id"])
         return None
 
@@ -509,13 +542,16 @@ class ResourceScheduler:
         if self._inventory["disk_mb"] is not None and usage["disk_mb"] + int(profile["disk_mb"]) > int(self._inventory["disk_mb"]):
             return "disk_unavailable", "Free or reserve sufficient managed disk capacity before preparing this job."
         if profile["gpu_required"] is True:
+            if any(gpu.get("free_vram_mb") is not None for gpu in self._inventory["gpus"]) and self._inventory["freshness"] != "current":
+                return "resource_inventory_stale", "The free-VRAM snapshot is stale or unverified; refresh the server-owned inventory before a future GPU admission."
             heavy_active = sum(1 for item in self._active_jobs() if self._heavy(item["profile"]))
             if self._heavy(profile) and heavy_active >= self._max_heavy_gpu_jobs:
                 return "heavy_gpu_limit", "Wait for the existing heavy GPU reservation to release; maximum heavy GPU jobs is one."
-            if self._gpu_conflict(profile):
-                return "gpu_exclusive_conflict", "An existing GPU reservation is exclusive, or this profile requires exclusive GPU ownership."
             if not self._inventory["gpus"]:
                 return "gpu_inventory_unavailable", "Publish a server-owned GPU inventory before scheduling this GPU-required job."
+            candidates = [gpu for gpu in self._inventory["gpus"] if self._gpu_capacity_mb(gpu) >= int(profile["estimated_vram_mb"])]
+            if candidates and all(self._gpu_conflict(profile, str(gpu["id"])) for gpu in candidates):
+                return "gpu_exclusive_conflict", "Every compatible candidate GPU has an exclusive Hub reservation; a reservation on another GPU does not conflict."
             if self._available_gpu(profile) is None:
                 return "vram_unavailable", "Wait for compatible GPU VRAM to become available or choose a separately approved lower requirement."
         for field, slots_name in (("runtime_slot", "runtime_slots"), ("provider_slot", "provider_slots")):
@@ -779,6 +815,14 @@ class ResourceScheduler:
             "job_id": value["job_id"],
             "worker_id": value["worker_id"],
             "profile_id": profile["profile_id"],
+            "resource_profile": {
+                "profile_id": profile["profile_id"],
+                "resource_requirement": profile["resource_requirement"],
+                "execution_class": profile["execution_class"],
+                "gpu_required": profile["gpu_required"],
+                "exclusive_gpu": profile["exclusive"],
+                "estimated_vram_mb": profile["estimated_vram_mb"],
+            },
             "state": value["state"],
             "revision": value["revision"],
             "scheduler_epoch": self._epoch,
@@ -863,6 +907,8 @@ class ResourceScheduler:
                 "disk_reserved_mb": usage["disk_mb"],
                 "observed_at": self._inventory.get("observed_at"),
                 "source_fingerprint": self._inventory.get("source_fingerprint"),
+                "freshness": self._inventory.get("freshness"),
+                "fit_state": "current" if self._inventory.get("freshness") == "current" else "stale" if self._inventory.get("freshness") == "stale" else "unknown",
                 "gpus": gpus,
                 "runtime_slots": {
                     key: {"capacity": amount, "reserved": self._reserved(key=key, slot_kind="runtime")}
@@ -878,6 +924,7 @@ class ResourceScheduler:
                 "reservation_ttl_seconds": self._reservation_ttl,
                 "lease_ttl_seconds": self._lease_ttl,
                 "gpu_safety_margin_mb": self._inventory["gpu_safety_margin_mb"],
+                "inventory_freshness_seconds": _INVENTORY_FRESHNESS_SECONDS,
                 "terminal_history_limit": _MAX_TERMINAL_JOBS,
             },
             "profiles": [_copy_profile(self._profiles[key]) for key in sorted(self._profiles)],

@@ -18,6 +18,9 @@ PLATFORM_EXTENSIBILITY_V2_SCHEMA = "platform-extensibility.v2"
 _PLUGIN_SDK = {
     "id": "plugin_sdk",
     "status": "PLAN_ONLY",
+    "contract_state": "READY",
+    "runtime_state": "NOT_IMPLEMENTED",
+    "execution_state": "not_run",
     "manifest_schema": "extension-manifest.v1",
     "permissions": [
         "read_extension_metadata",
@@ -37,6 +40,9 @@ _PLUGIN_SDK = {
 _API_VERSIONING = {
     "id": "api_versioning",
     "status": "READ_ONLY",
+    "contract_state": "READY",
+    "runtime_state": "READ_ONLY",
+    "execution_state": "not_run",
     "current_protocol": "v8-api.v1",
     "public_contract_line": "v2",
     "supported_contracts": ["v1", "v2"],
@@ -49,6 +55,9 @@ _API_VERSIONING = {
 _REMOTE_WORKER = {
     "id": "remote_worker",
     "status": "NOT_CONFIGURED",
+    "contract_state": "READY",
+    "runtime_state": "NOT_CONFIGURED",
+    "execution_state": "not_run",
     "transport": "none",
     "connection_state": "NOT_CONFIGURED",
     "endpoint": "not_exposed",
@@ -66,6 +75,8 @@ def snapshot() -> dict[str, Any]:
     return {
         "schema_version": PLATFORM_EXTENSIBILITY_V2_SCHEMA,
         "status": "completed",
+        "contract_state": "READY",
+        "runtime_state": "READ_ONLY",
         "plugin_sdk": deepcopy(_PLUGIN_SDK),
         "api_versioning": deepcopy(_API_VERSIONING),
         "remote_worker": deepcopy(_REMOTE_WORKER),

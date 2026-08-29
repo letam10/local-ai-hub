@@ -88,7 +88,7 @@ class WorkflowRuntimeV2Tests(unittest.TestCase):
                 "inventory": {"status": "available"},
                 "policy": {"max_heavy_gpu_jobs": 1},
                 "jobs": [],
-                "profiles": [{"profile_id": "video_gpu_plan", "gpu_required": True, "exclusive": True, "runtime_slot": "animesr", "provider_slot": "video"}],
+                "profiles": [{"profile_id": "video_gpu_plan", "resource_requirement": "gpu.video", "gpu_required": True, "exclusive": True, "runtime_slot": "animesr", "provider_slot": "video"}],
             },
         )
         value = runtime.preflight({"graph": graph(
@@ -114,8 +114,8 @@ class WorkflowRuntimeV2Tests(unittest.TestCase):
             resource_snapshot=lambda: {
                 "inventory": {"status": "available"},
                 "policy": {"max_heavy_gpu_jobs": 1},
-                "jobs": [{"state": "RUNNING", "profile": {"gpu_required": True, "exclusive": True}}],
-                "profiles": [{"profile_id": "video_gpu_plan", "gpu_required": True, "exclusive": True, "runtime_slot": "animesr", "provider_slot": "video"}],
+                "jobs": [{"state": "RUNNING", "resource_profile": {"gpu_required": True, "exclusive_gpu": True}}],
+                "profiles": [{"profile_id": "video_gpu_plan", "resource_requirement": "gpu.video", "gpu_required": True, "exclusive": True, "runtime_slot": "animesr", "provider_slot": "video"}],
             },
         )
         value = runtime.preflight({"graph": graph(

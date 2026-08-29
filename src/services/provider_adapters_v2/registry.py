@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
+from src.services.resource_scheduler.taxonomy import resolve_requirement
 
 PROVIDER_ADAPTERS_V2_SCHEMA_VERSION = "provider-adapters.v2"
 EXECUTION_NOT_RUN = "not_run"
@@ -37,25 +38,25 @@ class ProviderAdapterSpec:
     input_types: tuple[str, ...]
     output_types: tuple[str, ...]
     capability_ids: tuple[str, ...]
-    resource_profile_id: str
+    resource_requirement: str
 
 
 # Keep the set explicit.  A plugin/discovered Python module must never appear
 # here merely because it is present on the machine or in a configuration file.
 _SPECS: tuple[ProviderAdapterSpec, ...] = (
-    ProviderAdapterSpec("vision.sam2", "SAM 2", "first_party", "sam2", "vision", ("IMAGE", "MASK", "METADATA"), ("MASK", "METADATA"), ("component:sam2", "worker:sam2", "runtime:sam2", "model:sam2.1-hiera-small"), "vision_gpu_plan"),
-    ProviderAdapterSpec("vision.omniparser", "OmniParser", "first_party", "vision", "vision", ("IMAGE",), ("METADATA",), ("component:vision", "worker:vision", "runtime:omniparser", "model:omniparser-v2"), "vision_gpu_plan"),
-    ProviderAdapterSpec("vision.rfdetr", "RF-DETR", "first_party", "vision", "vision", ("IMAGE", "VIDEO"), ("METADATA",), ("component:vision", "worker:vision", "runtime:rfdetr", "model:rfdetr-base"), "vision_gpu_plan"),
-    ProviderAdapterSpec("vision.grounding_dino", "Grounding DINO", "first_party", "vision", "vision", ("IMAGE", "TEXT"), ("METADATA",), ("component:vision", "worker:vision", "runtime:grounding-dino", "model:grounding-dino-base"), "vision_gpu_plan"),
-    ProviderAdapterSpec("vision.ocr", "PaddleOCR", "first_party", "ocr", "vision", ("IMAGE", "VIDEO"), ("TEXT", "METADATA"), ("component:ocr", "worker:ocr", "runtime:paddleocr-vl", "model:paddleocr-vl-0.9b"), "vision_gpu_plan"),
-    ProviderAdapterSpec("audio.whisper", "Faster-Whisper", "first_party", "whisper", "audio", ("AUDIO", "VIDEO"), ("TEXT", "METADATA"), ("component:whisper", "worker:whisper", "runtime:faster-whisper", "model:faster-whisper-large-v3"), "audio_gpu_plan"),
-    ProviderAdapterSpec("audio.qwen3_tts", "Qwen3-TTS", "first_party", "voice", "audio", ("TEXT",), ("AUDIO", "METADATA"), ("component:voice", "worker:voice", "runtime:qwen3-tts", "model:qwen3-tts-1.7b"), "audio_gpu_plan"),
-    ProviderAdapterSpec("audio.seed_vc", "Seed-VC", "first_party", "voice", "audio", ("AUDIO", "TEXT"), ("AUDIO", "METADATA"), ("component:voice", "worker:voice", "runtime:seed-vc", "model:seed-vc-1"), "audio_gpu_plan"),
-    ProviderAdapterSpec("image.comfyui", "ComfyUI", "first_party", "image_generation", "image", ("IMAGE", "TEXT", "MODEL"), ("IMAGE", "METADATA"), ("component:image_generation", "worker:image_generation", "runtime:comfyui"), "image_gpu_plan"),
-    ProviderAdapterSpec("image.flux", "FLUX", "first_party", "image_generation", "image", ("TEXT", "IMAGE"), ("IMAGE", "METADATA"), ("component:image_generation", "worker:image_generation", "runtime:comfyui", "model:flux-2-klein-base-4b-fp8"), "image_gpu_plan"),
-    ProviderAdapterSpec("image.qwen_image", "Qwen Image", "first_party", "image_generation", "image", ("TEXT", "IMAGE"), ("IMAGE", "METADATA"), ("component:image_generation", "worker:image_generation", "runtime:comfyui", "model:qwen-image-2512-fp8"), "image_gpu_plan"),
-    ProviderAdapterSpec("video.animesr", "AnimeSR", "first_party", "animesr", "video", ("VIDEO", "IMAGE"), ("VIDEO", "IMAGE", "METADATA"), ("component:animesr", "worker:animesr", "runtime:animesr", "model:animesr-v2"), "video_gpu_plan"),
-    ProviderAdapterSpec("media.ffmpeg", "FFmpeg helper", "first_party", "media_editor", "media", ("IMAGE", "VIDEO", "AUDIO", "TEXT"), ("IMAGE", "VIDEO", "AUDIO", "METADATA"), ("component:media_editor", "worker:media_editor", "runtime:ffmpeg"), "media_cpu_plan"),
+    ProviderAdapterSpec("vision.sam2", "SAM 2", "first_party", "sam2", "vision", ("IMAGE", "MASK", "METADATA"), ("MASK", "METADATA"), ("component:sam2", "worker:sam2", "runtime:sam2", "model:sam2.1-hiera-small"), "gpu.vision"),
+    ProviderAdapterSpec("vision.omniparser", "OmniParser", "first_party", "vision", "vision", ("IMAGE",), ("METADATA",), ("component:vision", "worker:vision", "runtime:omniparser", "model:omniparser-v2"), "gpu.vision"),
+    ProviderAdapterSpec("vision.rfdetr", "RF-DETR", "first_party", "vision", "vision", ("IMAGE", "VIDEO"), ("METADATA",), ("component:vision", "worker:vision", "runtime:rfdetr", "model:rfdetr-base"), "gpu.vision"),
+    ProviderAdapterSpec("vision.grounding_dino", "Grounding DINO", "first_party", "vision", "vision", ("IMAGE", "TEXT"), ("METADATA",), ("component:vision", "worker:vision", "runtime:grounding-dino", "model:grounding-dino-base"), "gpu.vision"),
+    ProviderAdapterSpec("vision.ocr", "PaddleOCR", "first_party", "ocr", "vision", ("IMAGE", "VIDEO"), ("TEXT", "METADATA"), ("component:ocr", "worker:ocr", "runtime:paddleocr-vl", "model:paddleocr-vl-0.9b"), "gpu.vision"),
+    ProviderAdapterSpec("audio.whisper", "Faster-Whisper", "first_party", "whisper", "audio", ("AUDIO", "VIDEO"), ("TEXT", "METADATA"), ("component:whisper", "worker:whisper", "runtime:faster-whisper", "model:faster-whisper-large-v3"), "gpu.speech"),
+    ProviderAdapterSpec("audio.qwen3_tts", "Qwen3-TTS", "first_party", "voice", "audio", ("TEXT",), ("AUDIO", "METADATA"), ("component:voice", "worker:voice", "runtime:qwen3-tts", "model:qwen3-tts-1.7b"), "gpu.voice"),
+    ProviderAdapterSpec("audio.seed_vc", "Seed-VC", "first_party", "voice", "audio", ("AUDIO", "TEXT"), ("AUDIO", "METADATA"), ("component:voice", "worker:voice", "runtime:seed-vc", "model:seed-vc-1"), "gpu.voice"),
+    ProviderAdapterSpec("image.comfyui", "ComfyUI", "first_party", "image_generation", "image", ("IMAGE", "TEXT", "MODEL"), ("IMAGE", "METADATA"), ("component:image_generation", "worker:image_generation", "runtime:comfyui"), "gpu.image_generation"),
+    ProviderAdapterSpec("image.flux", "FLUX", "first_party", "image_generation", "image", ("TEXT", "IMAGE"), ("IMAGE", "METADATA"), ("component:image_generation", "worker:image_generation", "runtime:comfyui", "model:flux-2-klein-base-4b-fp8"), "gpu.image_generation"),
+    ProviderAdapterSpec("image.qwen_image", "Qwen Image", "first_party", "image_generation", "image", ("TEXT", "IMAGE"), ("IMAGE", "METADATA"), ("component:image_generation", "worker:image_generation", "runtime:comfyui", "model:qwen-image-2512-fp8"), "gpu.image_generation"),
+    ProviderAdapterSpec("video.animesr", "AnimeSR", "first_party", "animesr", "video", ("VIDEO", "IMAGE"), ("VIDEO", "IMAGE", "METADATA"), ("component:animesr", "worker:animesr", "runtime:animesr", "model:animesr-v2"), "gpu.video"),
+    ProviderAdapterSpec("media.ffmpeg", "FFmpeg helper", "first_party", "media_editor", "media", ("IMAGE", "VIDEO", "AUDIO", "TEXT"), ("IMAGE", "VIDEO", "AUDIO", "METADATA"), ("component:media_editor", "worker:media_editor", "runtime:ffmpeg"), "media.ffmpeg"),
 )
 _BY_ID = {item.adapter_id: item for item in _SPECS}
 
@@ -79,16 +80,12 @@ def _capability_index(snapshot: object) -> dict[str, Mapping[str, Any]]:
     return result
 
 
-def _resource_profiles(snapshot: object) -> set[str]:
+def _resource_profiles(snapshot: object) -> list[Mapping[str, Any]]:
     source = snapshot if isinstance(snapshot, Mapping) else {}
     rows = source.get("profiles")
     if not isinstance(rows, list):
-        return set()
-    return {
-        str(row.get("profile_id"))
-        for row in rows
-        if isinstance(row, Mapping) and _safe_id(row.get("profile_id")) is not None
-    }
+        return []
+    return [row for row in rows if isinstance(row, Mapping) and _safe_id(row.get("profile_id")) is not None]
 
 
 class ProviderAdapterRegistry:
@@ -137,13 +134,8 @@ class ProviderAdapterRegistry:
         return {"state": state, "requirements": rows}
 
     def _resource_estimate(self, spec: ProviderAdapterSpec) -> dict[str, Any]:
-        known = spec.resource_profile_id in _resource_profiles(self._resource_snapshot())
-        return {
-            "profile_id": spec.resource_profile_id,
-            "state": "declared" if known else "not_published",
-            "reason": "Resource requirements are server-owned declared profile metadata; no reservation or hardware probe was made.",
-            "reservation": "not_reserved",
-        }
+        value = resolve_requirement(spec.resource_requirement, _resource_profiles(self._resource_snapshot()))
+        return {**value, "reservation": "not_reserved"}
 
     def _detail(self, spec: ProviderAdapterSpec) -> dict[str, Any]:
         dependencies = self._dependencies(spec)
@@ -154,6 +146,9 @@ class ProviderAdapterRegistry:
             "provider": spec.provider,
             "component": spec.component,
             "category": spec.category,
+            "contract_state": "READY",
+            "runtime_state": "UNBOUND",
+            "execution_state": EXECUTION_NOT_RUN,
             "contract": {
                 "methods": ["discover", "availability", "dependencies", "start", "stop", "health", "estimate_resources", "validate_input", "execute", "cancel", "collect_artifacts"],
                 "input_types": list(spec.input_types),

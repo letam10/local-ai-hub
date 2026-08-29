@@ -18,6 +18,7 @@ from typing import Any
 
 from src.services.node_studio.registry import NodeDefinition, get_definition
 from src.services.node_studio.schema import validate_graph
+from src.services.resource_scheduler.taxonomy import resolve_requirement
 
 from .migration import WORKFLOW_GRAPH_V2_SCHEMA_VERSION, migrate_graph
 
@@ -36,43 +37,21 @@ _MAX_UNKNOWN_NODES = 32
 
 # The mapping is deliberately finite and lives on the server.  It is used
 # only to explain preflight blockers; it is not an execution adapter lookup.
-_RUNNER_CAPABILITIES: dict[str, tuple[str, ...]] = {
-    "media": ("engine:ffmpeg",),
-    "image_upscale": ("engine:ffmpeg",),
-    "frame_interpolate": ("engine:ffmpeg",),
-    "video_transform": ("engine:ffmpeg",),
-    "video_grade": ("engine:ffmpeg",),
-    "logo_overlay": ("engine:ffmpeg",),
-    "audio_loudness": ("engine:ffmpeg",),
-    "video_upscale": ("engine:ffmpeg",),
-    "encode": ("engine:ffmpeg",),
-    "probe": ("engine:ffmpeg",),
-    "probe_audio": ("engine:ffmpeg",),
-    "animesr": ("runtime:animesr", "model:animesr-v2", "resource:gpu"),
-    "sam2_segment": ("runtime:sam2", "resource:gpu"),
-    "sam2_track": ("runtime:sam2", "resource:gpu"),
-    "grounding": ("runtime:grounding-dino", "resource:gpu"),
-    "rfdetr": ("runtime:rf-detr", "resource:gpu"),
-    "flux": ("runtime:comfyui", "resource:gpu"),
-    "qwen": ("runtime:comfyui", "resource:gpu"),
+_RUNNER_CONTRACTS: dict[str, dict[str, Any]] = {
+    **{runner: {"required_capabilities": ("engine:ffmpeg",), "resource_requirement": "media.ffmpeg", "execution_owner_class": "owner_required", "reason": "FFmpeg operation remains plan-only until its existing execution owner is explicitly bound."} for runner in ("media", "image_upscale", "frame_interpolate", "video_transform", "video_grade", "logo_overlay", "audio_loudness", "video_upscale", "encode", "probe", "probe_audio")},
+    "animesr": {"required_capabilities": ("runtime:animesr", "model:animesr-v2", "resource:gpu"), "resource_requirement": "gpu.video", "execution_owner_class": "owner_required", "reason": "AnimeSR is a GPU-video plan and has no V2 execution owner."},
+    "sam2_segment": {"required_capabilities": ("runtime:sam2", "resource:gpu"), "resource_requirement": "gpu.vision", "execution_owner_class": "owner_required", "reason": "SAM2 execution remains separately owned."},
+    "sam2_track": {"required_capabilities": ("runtime:sam2", "resource:gpu"), "resource_requirement": "gpu.vision", "execution_owner_class": "owner_required", "reason": "SAM2 execution remains separately owned."},
+    "grounding": {"required_capabilities": ("runtime:grounding-dino", "resource:gpu"), "resource_requirement": "gpu.vision", "execution_owner_class": "owner_required", "reason": "Grounding execution remains separately owned."},
+    "rfdetr": {"required_capabilities": ("runtime:rf-detr", "resource:gpu"), "resource_requirement": "gpu.vision", "execution_owner_class": "owner_required", "reason": "RF-DETR execution remains separately owned."},
+    "flux": {"required_capabilities": ("runtime:comfyui", "resource:gpu"), "resource_requirement": "gpu.image_generation", "execution_owner_class": "owner_required", "reason": "FLUX requires model-catalog VRAM evidence; it is never assumed to fit the vision 2 GiB profile."},
+    "qwen": {"required_capabilities": ("runtime:comfyui", "resource:gpu"), "resource_requirement": "gpu.image_generation", "execution_owner_class": "owner_required", "reason": "Qwen Image requires model-catalog VRAM evidence; it is never assumed to fit the vision 2 GiB profile."},
+    "comfyui_workflow": {"required_capabilities": ("runtime:comfyui", "resource:gpu"), "resource_requirement": "gpu.image_generation", "execution_owner_class": "owner_required", "reason": "ComfyUI workflow dispatch requires explicit model VRAM evidence and an execution owner."},
+    "video_generate": {"required_capabilities": ("resource:gpu",), "resource_requirement": "gpu.video", "execution_owner_class": "not_implemented", "reason": "Video generation has no V2 execution implementation or owner."},
+    "text_overlay": {"required_capabilities": ("engine:ffmpeg",), "resource_requirement": "media.ffmpeg", "execution_owner_class": "not_implemented", "reason": "Text overlay lacks a reviewed server-owned font and escaping execution contract."},
+    "realesrgan": {"required_capabilities": ("resource:gpu",), "resource_requirement": "gpu.image_generation", "execution_owner_class": "owner_required", "reason": "Image upscaling needs explicit model VRAM evidence and a separately bound owner."},
 }
-
-# Profiles remain server-owned Resource Scheduler declarations. This mapping
-# selects a declared runtime/provider slot; it never carries client estimates
-# or a VRAM quantity.
-_RUNNER_RESOURCE_SLOTS: dict[str, tuple[str, ...]] = {
-    "animesr": ("animesr", "video"),
-    "video_upscale": ("animesr", "video"),
-    "frame_interpolate": ("animesr", "video"),
-    "encode": ("animesr", "video"),
-    "grounding": ("vision",),
-    "rfdetr": ("vision",),
-    "sam2_segment": ("vision",),
-    "sam2_track": ("vision",),
-    "flux": ("vision",),
-    "qwen": ("vision",),
-    "comfyui_workflow": ("vision",),
-}
+_RUNNER_CAPABILITIES: dict[str, tuple[str, ...]] = {runner: tuple(value["required_capabilities"]) for runner, value in _RUNNER_CONTRACTS.items()}
 
 _SAFE_ERROR_CONTEXT = frozenset({
     "code", "node_id", "edge_id", "node_index", "edge_index", "port",
@@ -158,16 +137,26 @@ def _capability_states(snapshot: object) -> dict[str, dict[str, str]]:
 
 
 def _public_node_contract(definition: NodeDefinition) -> dict[str, Any]:
+    runner_contract = _RUNNER_CONTRACTS.get(definition.runner)
     requirements = _RUNNER_CAPABILITIES.get(definition.runner, ())
+    resource_requirement = runner_contract["resource_requirement"] if runner_contract is not None else None
     return {
         "node_type": definition.type,
         "node_version": definition.version,
         "runner": definition.runner,
         "capability_requirements": list(requirements),
         "resource_requirements": {
-            "requires_gpu": bool(definition.heavy),
-            "exclusive_gpu": bool(definition.heavy),
-            "execution_class": "heavy" if definition.heavy else "lightweight",
+            "requirement_id": resource_requirement,
+            "requires_gpu": isinstance(resource_requirement, str) and resource_requirement.startswith("gpu."),
+            "exclusive_gpu": bool(definition.heavy and isinstance(resource_requirement, str) and resource_requirement.startswith("gpu.")),
+            "execution_class": "gpu" if isinstance(resource_requirement, str) and resource_requirement.startswith("gpu.") else "none",
+        },
+        "runner_contract": {
+            "runner_id": definition.runner,
+            "required_capabilities": list(requirements),
+            "resource_requirement": resource_requirement,
+            "execution_owner_class": runner_contract["execution_owner_class"] if runner_contract is not None else "plan_only",
+            "reason": runner_contract["reason"] if runner_contract is not None else "This runner has no V2 execution owner and is represented as a CPU-light plan only.",
         },
         "availability": {
             "status": definition.status,
@@ -472,9 +461,6 @@ class WorkflowRuntimeV2:
         return {"status": "ready" if not blockers else "blocked", "requirements": rows, "blockers": blockers}
 
     def _resource_plan(self, node_contracts: list[dict[str, Any]]) -> dict[str, Any]:
-        heavy = [item for item in node_contracts if isinstance(item.get("resource_requirements"), Mapping) and item["resource_requirements"].get("requires_gpu") is True]
-        if not heavy:
-            return {"status": "ready", "reservations": [], "blockers": [], "policy": "No heavy GPU node is present in this graph; future lightweight dispatch still requires a server-owned owner."}
         try:
             snapshot = self._resource_snapshot()
         except Exception:
@@ -482,6 +468,16 @@ class WorkflowRuntimeV2:
         policy = snapshot.get("policy") if isinstance(snapshot, Mapping) else {}
         inventory = snapshot.get("inventory") if isinstance(snapshot, Mapping) else {}
         profiles = snapshot.get("profiles") if isinstance(snapshot, Mapping) else []
+        available_profiles = [item for item in profiles if isinstance(item, Mapping)] if isinstance(profiles, list) else []
+        requested: dict[str, list[str]] = {}
+        for item in node_contracts:
+            node_id = item.get("node_id")
+            resource = item.get("resource_requirements")
+            requirement_id = resource.get("requirement_id") if isinstance(resource, Mapping) else None
+            if isinstance(node_id, str) and isinstance(requirement_id, str):
+                requested.setdefault(requirement_id, []).append(node_id)
+        resolutions = [resolve_requirement(requirement_id, available_profiles) | {"node_ids": list(node_ids)} for requirement_id, node_ids in sorted(requested.items())]
+        gpu_resolutions = [item for item in resolutions if str(item.get("requirement_id")).startswith("gpu.")]
         max_heavy = policy.get("max_heavy_gpu_jobs") if isinstance(policy, Mapping) else None
         active_heavy = self._active_heavy(snapshot)
         valid_policy = isinstance(max_heavy, int) and not isinstance(max_heavy, bool) and max_heavy >= 1
@@ -489,48 +485,60 @@ class WorkflowRuntimeV2:
         available = max(0, max_heavy - active_heavy) if valid_policy and valid_active else 0
         blockers: list[dict[str, str]] = []
         inventory_ready = isinstance(inventory, Mapping) and inventory.get("status") == "available"
-        if not valid_policy or not valid_active or not inventory_ready:
+        if gpu_resolutions and (not valid_policy or not valid_active or not inventory_ready):
             blockers.append({
                 "kind": "resource",
                 "code": "resource_snapshot_unavailable",
                 "reason": "The server-owned scheduler has no current bounded heavy-GPU capacity projection.",
                 "next_action": "Refresh the server-owned resource inventory before a future dispatch request.",
             })
-        elif available < 1:
+        elif gpu_resolutions and available < 1:
             blockers.append({
                 "kind": "resource",
                 "code": "heavy_gpu_slot_unavailable",
                 "reason": "The scheduler policy has no available exclusive heavy-GPU slot.",
                 "next_action": "Wait for an existing reservation to complete or cancel through its owner.",
             })
+        if gpu_resolutions and isinstance(inventory, Mapping) and inventory.get("fit_state") == "stale":
+            blockers.append({
+                "kind": "resource",
+                "code": "resource_inventory_stale",
+                "reason": "The server-owned free-VRAM snapshot is stale, so future GPU fit remains unknown.",
+                "next_action": "Refresh the bounded server-owned resource inventory before requesting dispatch.",
+            })
         reservations: list[dict[str, Any]] = []
-        available_profiles = [item for item in profiles if isinstance(item, Mapping)] if isinstance(profiles, list) else []
-        for item in heavy:
-            node_id = item.get("node_id")
-            runner = item.get("runner")
-            if not isinstance(node_id, str) or not isinstance(runner, str):
-                continue
-            profile = self._profile_for_runner(available_profiles, runner)
-            if profile is None:
+        for resolution in resolutions:
+            if resolution["state"] != "resolved":
                 blockers.append({
                     "kind": "resource",
-                    "node_id": node_id,
-                    "code": "resource_profile_unavailable",
-                    "reason": "No server-owned exclusive GPU profile matches this node's declared runtime/provider slot.",
-                    "next_action": "Register a reviewed scheduler profile before requesting workflow dispatch.",
+                    "node_id": resolution["node_ids"][0],
+                    "code": str(resolution["code"]),
+                    "reason": str(resolution["reason"]),
+                    "next_action": "Publish reviewed resource evidence or a compatible server-owned scheduler profile before requesting workflow dispatch.",
                 })
                 continue
             reservations.append({
-                "kind": "gpu",
-                "mode": "exclusive",
-                "node_ids": [node_id],
-                "profile_id": profile["profile_id"],
+                "kind": "gpu" if str(resolution["requirement_id"]).startswith("gpu.") else "cpu",
+                "mode": "exclusive" if str(resolution["requirement_id"]).startswith("gpu.") else "shared",
+                "node_ids": resolution["node_ids"],
+                "requirement_id": resolution["requirement_id"],
+                "profile_id": resolution["profile_id"],
                 "state": "not_reserved",
                 "max_concurrent": 1,
+            })
+        resolved_requirements = {item["requirement_id"] for item in resolutions if item["state"] == "resolved"}
+        if len(resolved_requirements) > 1:
+            blockers.append({
+                "kind": "resource",
+                "code": "workflow_multi_profile_coordinator_required",
+                "reason": "The workflow has multiple logical resource requirements; V2 will not collapse them into one reservation or reserve them all at once.",
+                "next_action": "Bind a reviewed phased resource coordinator before requesting durable workflow dispatch.",
             })
         return {
             "status": "ready" if not blockers else "blocked",
             "reservations": reservations,
+            "resolutions": resolutions,
+            "phased_resource_plan": len(resolved_requirements) > 1,
             "available_heavy_slots": available if valid_policy and valid_active else None,
             "blockers": blockers,
             "policy": "This is a dry-run reservation plan; it does not probe a device or reserve VRAM.",
@@ -548,24 +556,10 @@ class WorkflowRuntimeV2:
         for item in jobs:
             if not isinstance(item, Mapping) or item.get("state") not in active_states:
                 continue
-            profile = item.get("profile")
-            if isinstance(profile, Mapping) and profile.get("gpu_required") is True and profile.get("exclusive") is True:
+            profile = item.get("resource_profile")
+            if isinstance(profile, Mapping) and profile.get("gpu_required") is True and profile.get("exclusive_gpu") is True:
                 total += 1
         return total
-
-    @staticmethod
-    def _profile_for_runner(profiles: list[Mapping[str, Any]], runner: str) -> dict[str, str] | None:
-        desired_slots = _RUNNER_RESOURCE_SLOTS.get(runner, ())
-        for desired in desired_slots:
-            for profile in profiles:
-                if profile.get("gpu_required") is not True or profile.get("exclusive") is not True:
-                    continue
-                if profile.get("runtime_slot") != desired and profile.get("provider_slot") != desired:
-                    continue
-                profile_id = profile.get("profile_id")
-                if isinstance(profile_id, str) and _PROFILE_ID.fullmatch(profile_id):
-                    return {"profile_id": profile_id}
-        return None
 
     def _artifact_plan(self, requests: list[tuple[str, str, str]]) -> dict[str, Any]:
         rows: list[dict[str, Any]] = []

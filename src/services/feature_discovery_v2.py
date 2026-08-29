@@ -200,7 +200,7 @@ _FEATURES: tuple[dict[str, Any], ...] = (
             _route("product_experience.v2_onboarding", "GET", "/api/product-experience/v2/onboarding", execution_mode="read_only"),
             _route("product_experience.v2_search", "GET", "/api/product-experience/v2/search", execution_mode="read_only"),
         ],
-        "reason": "Publishes a finite dashboard/onboarding/search route catalog; it neither reads user content nor saves preferences.",
+        "reason": "Publishes a finite dashboard/onboarding/search catalog plus bounded server-owned model, tool, project, workflow, job and artifact metadata; it never performs arbitrary filesystem search, returns raw artifact bytes, exposes paths/secrets, or saves preferences.",
         "next_action": "Choose a listed route and inspect its server-owned state.",
     },
     {
