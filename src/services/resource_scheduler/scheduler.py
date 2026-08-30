@@ -55,6 +55,14 @@ _DEFAULT_GPU_SAFETY_MARGIN_MB = 512
 _INVENTORY_FRESHNESS_SECONDS = 300
 
 
+def _heavy_gpu_profile(profile: Mapping[str, Any]) -> bool:
+    """Return the single Scheduler-owned heavy-GPU classification."""
+
+    return profile["gpu_required"] is True and (
+        profile["exclusive"] is True or int(profile["estimated_vram_mb"]) >= _HEAVY_VRAM_MB
+    )
+
+
 class ResourceSchedulerError(ValueError):
     """Fixed error when a scheduler contract is malformed."""
 
@@ -112,6 +120,7 @@ def _copy_profile(value: Mapping[str, Any]) -> dict[str, Any]:
         "estimated_vram_mb": value["estimated_vram_mb"],
         "estimated_ram_mb": value["estimated_ram_mb"],
         "gpu_required": value["gpu_required"],
+        "heavy_gpu": _heavy_gpu_profile(value),
         "cpu_fallback": value["cpu_fallback"],
         "exclusive": value["exclusive"],
         "priority": value["priority"],
@@ -490,7 +499,7 @@ class ResourceScheduler:
 
     @staticmethod
     def _heavy(profile: Mapping[str, Any]) -> bool:
-        return profile["gpu_required"] is True and (profile["exclusive"] is True or int(profile["estimated_vram_mb"]) >= _HEAVY_VRAM_MB)
+        return _heavy_gpu_profile(profile)
 
     def _gpu_conflict(self, profile: Mapping[str, Any], candidate_gpu_id: str) -> bool:
         """Apply exclusivity to one candidate GPU, never implicitly globally."""
@@ -505,14 +514,22 @@ class ResourceScheduler:
                 return True
         return False
 
-    def _gpu_capacity_mb(self, gpu: Mapping[str, Any]) -> int:
-        """Return conservatively available bytes for *new* Hub reservations.
+    def _gpu_free_vram_evidence_state(self, gpu: Mapping[str, Any]) -> str:
+        """Classify admission evidence for one GPU without probing it."""
 
-        A server-owned current-free observation is preferable.  The fallback
-        is explicit and therefore only useful for declarative/preflight state;
-        the public snapshot exposes that no process-free observation was
-        available rather than fabricating one.
-        """
+        if not isinstance(gpu.get("free_vram_mb"), int) or isinstance(gpu.get("free_vram_mb"), bool):
+            return "unknown"
+        observed_at = gpu.get("observed_at") or self._inventory.get("observed_at")
+        source_fingerprint = gpu.get("source_fingerprint") or self._inventory.get("source_fingerprint")
+        freshness = _freshness(observed_at)
+        if freshness != "current":
+            return freshness
+        if not isinstance(source_fingerprint, str) or not source_fingerprint:
+            return "unknown"
+        return "current"
+
+    def _gpu_theoretical_capacity_mb(self, gpu: Mapping[str, Any]) -> int:
+        """Return capacity useful only for display/theoretical planning."""
 
         reserved = self._reserved(gpu_id=str(gpu["id"]))
         observed_free = gpu.get("free_vram_mb")
@@ -523,11 +540,23 @@ class ResourceScheduler:
             return max(0, int(observed_free) - reserved - int(self._inventory["gpu_safety_margin_mb"]))
         return max(0, int(gpu["vram_mb"]) - reserved - int(self._inventory["gpu_safety_margin_mb"]))
 
+    def _gpu_capacity_mb(self, gpu: Mapping[str, Any]) -> int | None:
+        """Return admission capacity only when free-VRAM evidence is current."""
+
+        if self._gpu_free_vram_evidence_state(gpu) != "current":
+            return None
+        return self._gpu_theoretical_capacity_mb(gpu)
+
     def _available_gpu(self, profile: Mapping[str, Any]) -> str | None:
         required = int(profile["estimated_vram_mb"])
-        candidates = sorted(self._inventory["gpus"], key=lambda item: (self._gpu_capacity_mb(item), item["id"]), reverse=True)
-        for gpu in candidates:
-            if self._gpu_capacity_mb(gpu) >= required and not self._gpu_conflict(profile, str(gpu["id"])):
+        candidates = [
+            (gpu, capacity)
+            for gpu in self._inventory["gpus"]
+            if (capacity := self._gpu_capacity_mb(gpu)) is not None
+        ]
+        candidates.sort(key=lambda item: (int(item[1]), str(item[0]["id"])), reverse=True)
+        for gpu, capacity in candidates:
+            if capacity >= required and not self._gpu_conflict(profile, str(gpu["id"])):
                 return str(gpu["id"])
         return None
 
@@ -542,14 +571,20 @@ class ResourceScheduler:
         if self._inventory["disk_mb"] is not None and usage["disk_mb"] + int(profile["disk_mb"]) > int(self._inventory["disk_mb"]):
             return "disk_unavailable", "Free or reserve sufficient managed disk capacity before preparing this job."
         if profile["gpu_required"] is True:
-            if any(gpu.get("free_vram_mb") is not None for gpu in self._inventory["gpus"]) and self._inventory["freshness"] != "current":
-                return "resource_inventory_stale", "The free-VRAM snapshot is stale or unverified; refresh the server-owned inventory before a future GPU admission."
+            if not self._inventory["gpus"]:
+                return "gpu_inventory_unavailable", "Publish a server-owned GPU inventory before scheduling this GPU-required job."
+            evidence_states = [self._gpu_free_vram_evidence_state(gpu) for gpu in self._inventory["gpus"]]
+            if "current" not in evidence_states:
+                if "stale" in evidence_states:
+                    return "resource_inventory_refresh_required", "The free-VRAM evidence is stale; refresh the server-owned inventory before a future GPU admission."
+                return "gpu_free_vram_evidence_required", "Current server-owned free-VRAM evidence with timestamp and fingerprint is required before a GPU reservation can be prepared."
             heavy_active = sum(1 for item in self._active_jobs() if self._heavy(item["profile"]))
             if self._heavy(profile) and heavy_active >= self._max_heavy_gpu_jobs:
                 return "heavy_gpu_limit", "Wait for the existing heavy GPU reservation to release; maximum heavy GPU jobs is one."
-            if not self._inventory["gpus"]:
-                return "gpu_inventory_unavailable", "Publish a server-owned GPU inventory before scheduling this GPU-required job."
-            candidates = [gpu for gpu in self._inventory["gpus"] if self._gpu_capacity_mb(gpu) >= int(profile["estimated_vram_mb"])]
+            candidates = [
+                gpu for gpu in self._inventory["gpus"]
+                if (capacity := self._gpu_capacity_mb(gpu)) is not None and capacity >= int(profile["estimated_vram_mb"])
+            ]
             if candidates and all(self._gpu_conflict(profile, str(gpu["id"])) for gpu in candidates):
                 return "gpu_exclusive_conflict", "Every compatible candidate GPU has an exclusive Hub reservation; a reservation on another GPU does not conflict."
             if self._available_gpu(profile) is None:
@@ -820,6 +855,7 @@ class ResourceScheduler:
                 "resource_requirement": profile["resource_requirement"],
                 "execution_class": profile["execution_class"],
                 "gpu_required": profile["gpu_required"],
+                "heavy_gpu": self._heavy(profile),
                 "exclusive_gpu": profile["exclusive"],
                 "estimated_vram_mb": profile["estimated_vram_mb"],
             },
@@ -878,6 +914,7 @@ class ResourceScheduler:
         for gpu in self._inventory["gpus"]:
             reserved = self._reserved(gpu_id=gpu["id"])
             observed_free = gpu.get("free_vram_mb")
+            evidence_state = self._gpu_free_vram_evidence_state(gpu)
             gpus.append({
                 "gpu_id": gpu["id"],
                 "vendor": gpu["vendor"],
@@ -886,14 +923,17 @@ class ResourceScheduler:
                 "vram_total_mb": gpu["vram_mb"],
                 "vram_reserved_mb": reserved,
                 "vram_available_for_reservation_mb": self._gpu_capacity_mb(gpu),
+                "vram_theoretical_available_mb": self._gpu_theoretical_capacity_mb(gpu),
                 "vram_free_observed_mb": observed_free,
                 "vram_used_by_processes_mb": (max(0, int(gpu["vram_mb"]) - int(observed_free)) if isinstance(observed_free, int) else None),
                 "observed_at": gpu.get("observed_at") or self._inventory.get("observed_at"),
                 "source_fingerprint": gpu.get("source_fingerprint") or self._inventory.get("source_fingerprint"),
+                "free_vram_evidence_state": evidence_state,
             })
         jobs = [self._public_job(value) for value in sorted(self._jobs.values(), key=lambda item: (item["created_at"], item["job_id"]))]
         counts = {state: sum(1 for item in jobs if item["state"] == state) for state in RESOURCE_SCHEDULER_STATES}
         waiting = [item for item in jobs if item["state"] in {"QUEUED", "WAITING_RESOURCE"}]
+        gpu_fit_state = "current" if any(item["free_vram_evidence_state"] == "current" for item in gpus) else "stale" if any(item["free_vram_evidence_state"] == "stale" for item in gpus) else "unknown"
         return {
             "schema_version": RESOURCE_SCHEDULER_SCHEMA_VERSION,
             "status": "available" if self._inventory["status"] == "available" else "unavailable",
@@ -908,7 +948,8 @@ class ResourceScheduler:
                 "observed_at": self._inventory.get("observed_at"),
                 "source_fingerprint": self._inventory.get("source_fingerprint"),
                 "freshness": self._inventory.get("freshness"),
-                "fit_state": "current" if self._inventory.get("freshness") == "current" else "stale" if self._inventory.get("freshness") == "stale" else "unknown",
+                "fit_state": gpu_fit_state,
+                "gpu_free_vram_evidence_state": gpu_fit_state,
                 "gpus": gpus,
                 "runtime_slots": {
                     key: {"capacity": amount, "reserved": self._reserved(key=key, slot_kind="runtime")}

@@ -122,7 +122,7 @@ Tạo local/untracked bundle:
     runtime_smoke.json
 ```
 
-`evidence.json` schema `v8-local-acceptance-evidence.v1`, class `local_windows`, platform `windows-x64`, exact source commit và đủ 12 gate IDs.
+`evidence.json` schema `v8-local-acceptance-evidence.v2`, class `local_windows`, platform `windows-x64`, exact source commit, đủ 12 gate IDs và provenance cho từng gate. Report exact-head dùng `RERUN_EXACT_HEAD`; report được tái sử dụng chỉ hợp lệ với `REUSED_UNAFFECTED_EVIDENCE`, originating commit thực và diff-impact scope không chạm gate.
 
 Mỗi PASS report phải là bounded JSON schema `v8-local-gate-report.v1` với exact `gate_id`, `status=PASS`, `platform=windows-x64`, exact `source_commit`, non-empty finite `checks` và mọi check = true. `scripts/v8_acceptance_gate.py` tự hash actual report bytes; digest phải bằng `report_sha256` trong evidence. Không được chỉ điền digest giả.
 

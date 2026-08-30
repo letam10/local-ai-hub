@@ -59,9 +59,11 @@ def resolve_requirement(requirement_id: object, profiles: object) -> dict[str, A
             "requirement_id": str(requirement_id or ""),
             "state": "unavailable",
             "code": "resource_requirement_unknown",
+            "profile_resolved": False,
             "profile_id": None,
             "estimated_vram_mb": None,
             "estimate_source": "not_available",
+            "hardware_fit": "unknown",
             "dispatchable": False,
             "reason": "The logical resource requirement is not recognized by the server-owned taxonomy.",
         }
@@ -89,20 +91,24 @@ def resolve_requirement(requirement_id: object, profiles: object) -> dict[str, A
             "requirement_id": requirement_id,
             "state": "resolved",
             "code": "resource_profile_resolved",
+            "profile_resolved": True,
             "profile_id": profile["profile_id"],
             "estimated_vram_mb": estimate if isinstance(estimate, int) and not isinstance(estimate, bool) else None,
             "estimate_source": "scheduler_profile_declaration",
-            "dispatchable": True,
-            "reason": "A server-owned scheduler profile declares this logical requirement; no reservation or hardware probe was made.",
+            "hardware_fit": "unknown" if declared["requires_gpu"] is True else "not_required",
+            "dispatchable": False,
+            "reason": "A server-owned scheduler profile declares this logical requirement. Profile resolution is not current hardware fit, reservation, execution ownership, or dispatch authority.",
         }
     code = "model_vram_evidence_required" if requirement_id == "gpu.image_generation" else "resource_profile_not_published"
     return {
         "requirement_id": requirement_id,
         "state": "unavailable",
         "code": code,
+        "profile_resolved": False,
         "profile_id": None,
         "estimated_vram_mb": None,
         "estimate_source": "not_available",
+        "hardware_fit": "unknown" if declared["requires_gpu"] is True else "not_required",
         "dispatchable": False,
         "reason": "Image-generation dispatch needs model-catalog VRAM evidence before a concrete scheduler profile can be selected." if code == "model_vram_evidence_required" else "No compatible server-owned scheduler profile is published for this logical requirement.",
     }

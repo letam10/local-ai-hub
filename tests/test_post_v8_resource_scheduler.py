@@ -30,11 +30,12 @@ def _numbered_job(value: int) -> str:
 
 
 def _hardware(*, vram_mb: int = 8192) -> dict[str, object]:
+    observed_at = datetime.now(timezone.utc).isoformat()
     return {
         "cpu_slots": 8,
         "ram_mb": 16384,
         "disk_mb": 32768,
-        "gpus": [{"id": "gpu-rtx4060", "vendor": "nvidia", "device_class": "discrete", "model": "RTX-4060", "vram_mb": vram_mb}],
+        "gpus": [{"id": "gpu-rtx4060", "vendor": "nvidia", "device_class": "discrete", "model": "RTX-4060", "vram_mb": vram_mb, "free_vram_mb": max(0, vram_mb - 512), "observed_at": observed_at, "source_fingerprint": "f" * 64}],
         "runtime_slots": {"faster-whisper": 1, "vision": 1, "animesr": 1, "comfyui": 1, "ffmpeg": 2},
         "provider_slots": {"whisper": 1, "vision": 1, "video": 1, "image": 1},
     }
@@ -54,7 +55,7 @@ class ResourceSchedulerTests(unittest.TestCase):
         snapshot = self.scheduler.snapshot()
         self.assertEqual(snapshot["policy"]["max_heavy_gpu_jobs"], 1)
         self.assertEqual(snapshot["inventory"]["gpus"][0]["vram_reserved_mb"], 2048)
-        self.assertIsNone(snapshot["inventory"]["gpus"][0]["vram_used_by_processes_mb"])
+        self.assertEqual(snapshot["inventory"]["gpus"][0]["vram_used_by_processes_mb"], 512)
 
     def test_lightweight_cpu_profile_can_be_prepared_in_parallel(self) -> None:
         heavy = self.scheduler.submit(_job("a"), "worker:whisper", "whisper_gpu_2gb")
@@ -124,6 +125,35 @@ class ResourceSchedulerTests(unittest.TestCase):
         snapshot = scheduler.snapshot()
         self.assertEqual(snapshot["status"], "unavailable")
         self.assertEqual(snapshot["queue"]["estimated_next_start"], None)
+
+    def test_missing_or_stale_free_vram_evidence_never_prepares_gpu_job(self) -> None:
+        missing = _hardware()
+        missing["gpus"][0].pop("free_vram_mb")
+        missing_result = ResourceScheduler(hardware_snapshot=missing).submit(_job("6"), "worker:whisper", "whisper_gpu_2gb")
+        self.assertEqual(missing_result["state"], "WAITING_RESOURCE")
+        self.assertEqual(missing_result["reason_code"], "gpu_free_vram_evidence_required")
+
+        stale = _hardware()
+        stale["gpus"][0]["observed_at"] = "2000-01-01T00:00:00+00:00"
+        stale_result = ResourceScheduler(hardware_snapshot=stale).submit(_job("7"), "worker:whisper", "whisper_gpu_2gb")
+        self.assertEqual(stale_result["state"], "WAITING_RESOURCE")
+        self.assertEqual(stale_result["reason_code"], "resource_inventory_refresh_required")
+
+    def test_public_heavy_gpu_field_is_scheduler_authoritative(self) -> None:
+        common = {
+            "resource_requirement": "gpu.vision", "execution_class": "gpu", "estimated_ram_mb": 256, "gpu_required": True,
+            "cpu_fallback": False, "priority": 50, "interruptible": True, "batchable": True,
+            "cpu_slots": 1, "disk_mb": 64, "runtime_slot": None, "provider_slot": None,
+        }
+        profiles = {
+            "exclusive_2gb": {"profile_id": "exclusive_2gb", "estimated_vram_mb": 2048, "exclusive": True, **common},
+            "shared_2gb": {"profile_id": "shared_2gb", "estimated_vram_mb": 2048, "exclusive": False, **common},
+            "shared_1gb": {"profile_id": "shared_1gb", "estimated_vram_mb": 1024, "exclusive": False, **common},
+        }
+        scheduler = ResourceScheduler(hardware_snapshot=_hardware(), profiles=profiles, max_heavy_gpu_jobs=3)
+        self.assertTrue(scheduler.submit(_job("8"), "worker:exclusive", "exclusive_2gb")["resource_profile"]["heavy_gpu"])
+        self.assertTrue(scheduler.submit(_job("9"), "worker:shared", "shared_2gb")["resource_profile"]["heavy_gpu"])
+        self.assertFalse(scheduler.submit(_job("a"), "worker:light", "shared_1gb")["resource_profile"]["heavy_gpu"])
 
     def test_snapshot_is_path_free_and_restricts_state_vocabulary(self) -> None:
         self.scheduler.submit(_job("2"), "worker:ffmpeg", "ffmpeg_probe")
@@ -237,7 +267,7 @@ class ResourceSchedulerApiTests(unittest.TestCase):
         snapshot = context.call("resource_scheduler_v2_snapshot")
         self.assertEqual(snapshot["schema_version"], RESOURCE_SCHEDULER_SCHEMA_VERSION)
         self.assertEqual(snapshot["inventory"]["gpus"][0]["gpu_id"], "gpu-rtx4060")
-        self.assertIsNone(snapshot["inventory"]["gpus"][0]["vram_used_by_processes_mb"])
+        self.assertEqual(snapshot["inventory"]["gpus"][0]["vram_used_by_processes_mb"], 512)
 
 
 class ResourceSchedulerArchitectureTests(unittest.TestCase):

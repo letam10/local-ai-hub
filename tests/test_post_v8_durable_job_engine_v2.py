@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
 import threading
@@ -32,11 +33,12 @@ def _artifact(char: str) -> str:
 
 
 def _hardware() -> dict[str, object]:
+    observed_at = datetime.now(timezone.utc).isoformat()
     return {
         "cpu_slots": 8,
         "ram_mb": 16384,
         "disk_mb": 32768,
-        "gpus": [{"id": "gpu-rtx4060", "vendor": "nvidia", "device_class": "discrete", "model": "RTX-4060", "vram_mb": 8192}],
+        "gpus": [{"id": "gpu-rtx4060", "vendor": "nvidia", "device_class": "discrete", "model": "RTX-4060", "vram_mb": 8192, "free_vram_mb": 7168, "observed_at": observed_at, "source_fingerprint": "d" * 64}],
         "runtime_slots": {"ffmpeg": 2, "faster-whisper": 1},
         "provider_slots": {"whisper": 1},
     }

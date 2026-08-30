@@ -42,7 +42,14 @@ Cấu trúc local:
     ...
 ```
 
-`evidence.json` dùng schema `v8-local-acceptance-evidence.v1`, class `local_windows`, platform `windows-x64`, bind exact `source_commit`, chứa đúng toàn bộ required gate IDs.
+`evidence.json` dùng schema `v8-local-acceptance-evidence.v2`, class `local_windows`, platform `windows-x64`, bind exact `source_commit`, chứa đúng toàn bộ required gate IDs.
+
+Mỗi gate phải có provenance machine-local, không chỉ một SHA đã đổi tên:
+
+- `RERUN_EXACT_HEAD`: report được chạy lại trên exact `source_commit`; report và provenance cùng bind commit đó.
+- `REUSED_UNAFFECTED_EVIDENCE`: report giữ `origin_source_commit` thực tế; provenance nêu finite impact scope và verifier so sánh source diff. Nếu source đã thay đổi trong scope của gate, packet bị từ chối thay vì tự PASS.
+
+Packet thiếu provenance, report nói rerun nhưng bind commit khác, hoặc reuse một gate bị source diff ảnh hưởng đều fail-closed. Provenance chỉ dùng finite scope/reason code; không chứa path, credential hay raw machine data.
 
 Mỗi gate `PASS` phải có `report_sha256` và file deterministic `reports/<gate_id>.json`.
 

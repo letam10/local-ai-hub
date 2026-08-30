@@ -85,10 +85,10 @@ class WorkflowRuntimeV2Tests(unittest.TestCase):
             artifact_describer=records.get,
             capability_snapshot=lambda: capability_snapshot("runtime:animesr", "model:animesr-v2", "resource:gpu"),
             resource_snapshot=lambda: {
-                "inventory": {"status": "available"},
+                "inventory": {"status": "available", "fit_state": "current", "gpus": [{"free_vram_evidence_state": "current", "vram_available_for_reservation_mb": 6144}]},
                 "policy": {"max_heavy_gpu_jobs": 1},
                 "jobs": [],
-                "profiles": [{"profile_id": "video_gpu_plan", "resource_requirement": "gpu.video", "gpu_required": True, "exclusive": True, "runtime_slot": "animesr", "provider_slot": "video"}],
+                "profiles": [{"profile_id": "video_gpu_plan", "resource_requirement": "gpu.video", "gpu_required": True, "estimated_vram_mb": 4096, "exclusive": True, "runtime_slot": "animesr", "provider_slot": "video"}],
             },
         )
         value = runtime.preflight({"graph": graph(
@@ -112,10 +112,10 @@ class WorkflowRuntimeV2Tests(unittest.TestCase):
             artifact_describer=lambda _id: {"id": ARTIFACT_VIDEO, "media_type": "video/mp4"},
             capability_snapshot=lambda: capability_snapshot("runtime:animesr", "model:animesr-v2", "resource:gpu"),
             resource_snapshot=lambda: {
-                "inventory": {"status": "available"},
+                "inventory": {"status": "available", "fit_state": "current", "gpus": [{"free_vram_evidence_state": "current", "vram_available_for_reservation_mb": 6144}]},
                 "policy": {"max_heavy_gpu_jobs": 1},
-                "jobs": [{"state": "RUNNING", "resource_profile": {"gpu_required": True, "exclusive_gpu": True}}],
-                "profiles": [{"profile_id": "video_gpu_plan", "resource_requirement": "gpu.video", "gpu_required": True, "exclusive": True, "runtime_slot": "animesr", "provider_slot": "video"}],
+                "jobs": [{"state": "RUNNING", "resource_profile": {"gpu_required": True, "heavy_gpu": True, "exclusive_gpu": True}}],
+                "profiles": [{"profile_id": "video_gpu_plan", "resource_requirement": "gpu.video", "gpu_required": True, "estimated_vram_mb": 4096, "exclusive": True, "runtime_slot": "animesr", "provider_slot": "video"}],
             },
         )
         value = runtime.preflight({"graph": graph(

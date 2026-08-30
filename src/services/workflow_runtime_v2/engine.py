@@ -476,7 +476,26 @@ class WorkflowRuntimeV2:
             requirement_id = resource.get("requirement_id") if isinstance(resource, Mapping) else None
             if isinstance(node_id, str) and isinstance(requirement_id, str):
                 requested.setdefault(requirement_id, []).append(node_id)
-        resolutions = [resolve_requirement(requirement_id, available_profiles) | {"node_ids": list(node_ids)} for requirement_id, node_ids in sorted(requested.items())]
+        scheduler_fit_state = inventory.get("fit_state") if isinstance(inventory, Mapping) else "unknown"
+        resolutions = []
+        for requirement_id, node_ids in sorted(requested.items()):
+            resolution = resolve_requirement(requirement_id, available_profiles) | {"node_ids": list(node_ids)}
+            if requirement_id.startswith("gpu."):
+                estimate = resolution.get("estimated_vram_mb")
+                gpu_rows = inventory.get("gpus") if isinstance(inventory, Mapping) else []
+                if scheduler_fit_state == "current" and isinstance(estimate, int) and not isinstance(estimate, bool) and isinstance(gpu_rows, list):
+                    current_candidates = [
+                        item for item in gpu_rows
+                        if isinstance(item, Mapping)
+                        and item.get("free_vram_evidence_state") == "current"
+                        and isinstance(item.get("vram_available_for_reservation_mb"), int)
+                        and not isinstance(item.get("vram_available_for_reservation_mb"), bool)
+                        and int(item["vram_available_for_reservation_mb"]) >= estimate
+                    ]
+                    resolution["hardware_fit"] = "current" if current_candidates else "blocked"
+                else:
+                    resolution["hardware_fit"] = "unknown"
+            resolutions.append(resolution)
         gpu_resolutions = [item for item in resolutions if str(item.get("requirement_id")).startswith("gpu.")]
         max_heavy = policy.get("max_heavy_gpu_jobs") if isinstance(policy, Mapping) else None
         active_heavy = self._active_heavy(snapshot)
@@ -485,6 +504,7 @@ class WorkflowRuntimeV2:
         available = max(0, max_heavy - active_heavy) if valid_policy and valid_active else 0
         blockers: list[dict[str, str]] = []
         inventory_ready = isinstance(inventory, Mapping) and inventory.get("status") == "available"
+        inventory_fit_current = isinstance(inventory, Mapping) and inventory.get("fit_state") == "current"
         if gpu_resolutions and (not valid_policy or not valid_active or not inventory_ready):
             blockers.append({
                 "kind": "resource",
@@ -499,21 +519,32 @@ class WorkflowRuntimeV2:
                 "reason": "The scheduler policy has no available exclusive heavy-GPU slot.",
                 "next_action": "Wait for an existing reservation to complete or cancel through its owner.",
             })
-        if gpu_resolutions and isinstance(inventory, Mapping) and inventory.get("fit_state") == "stale":
+        if gpu_resolutions and not inventory_fit_current:
             blockers.append({
                 "kind": "resource",
-                "code": "resource_inventory_stale",
-                "reason": "The server-owned free-VRAM snapshot is stale, so future GPU fit remains unknown.",
+                "code": "resource_inventory_stale" if scheduler_fit_state == "stale" else "gpu_free_vram_evidence_required",
+                "reason": "The server-owned free-VRAM snapshot is stale, so future GPU fit remains unknown." if scheduler_fit_state == "stale" else "Current server-owned free-VRAM evidence is required before a GPU resource fit can be reported as ready.",
                 "next_action": "Refresh the bounded server-owned resource inventory before requesting dispatch.",
             })
-        reservations: list[dict[str, Any]] = []
-        for resolution in resolutions:
-            if resolution["state"] != "resolved":
+        for resolution in gpu_resolutions:
+            if resolution.get("state") == "resolved" and resolution.get("hardware_fit") == "blocked":
                 blockers.append({
                     "kind": "resource",
                     "node_id": resolution["node_ids"][0],
-                    "code": str(resolution["code"]),
-                    "reason": str(resolution["reason"]),
+                    "code": "gpu_vram_unavailable",
+                    "reason": "Current server-owned free-VRAM evidence does not fit the resolved GPU profile.",
+                    "next_action": "Refresh capacity evidence or choose a separately reviewed compatible profile before future dispatch.",
+                })
+        reservations: list[dict[str, Any]] = []
+        for resolution in resolutions:
+            if resolution.get("hardware_fit") == "blocked":
+                continue
+            if resolution["state"] != "resolved" or resolution.get("hardware_fit") == "unknown":
+                blockers.append({
+                    "kind": "resource",
+                    "node_id": resolution["node_ids"][0],
+                    "code": "gpu_free_vram_evidence_required" if resolution.get("hardware_fit") == "unknown" and str(resolution.get("requirement_id")).startswith("gpu.") else str(resolution["code"]),
+                    "reason": "Current server-owned free-VRAM evidence is required before a GPU reservation plan can be reported." if resolution.get("hardware_fit") == "unknown" and str(resolution.get("requirement_id")).startswith("gpu.") else str(resolution["reason"]),
                     "next_action": "Publish reviewed resource evidence or a compatible server-owned scheduler profile before requesting workflow dispatch.",
                 })
                 continue
@@ -557,7 +588,13 @@ class WorkflowRuntimeV2:
             if not isinstance(item, Mapping) or item.get("state") not in active_states:
                 continue
             profile = item.get("resource_profile")
-            if isinstance(profile, Mapping) and profile.get("gpu_required") is True and profile.get("exclusive_gpu") is True:
+            if not isinstance(profile, Mapping) or profile.get("gpu_required") is not True:
+                continue
+            heavy = profile.get("heavy_gpu")
+            # Older scheduler projections may lack the additive field. Count
+            # those active GPU records conservatively rather than freeing a
+            # heavy slot on an ambiguous legacy payload.
+            if heavy is not False:
                 total += 1
         return total
 

@@ -12,6 +12,7 @@ from src.services.feature_discovery_v2 import snapshot as feature_snapshot
 from src.services.product_experience_v2 import SEARCH_CATEGORY_ROUTES, search
 from src.services.provider_adapters_v2.registry import ProviderAdapterRegistry
 from src.services.resource_scheduler import ResourceScheduler, server_owned_resource_profiles
+from src.services.resource_scheduler.taxonomy import resolve_requirement
 from src.services.workflow_runtime_v2 import WorkflowRuntimeV2
 
 
@@ -24,12 +25,13 @@ def job(char: str) -> str:
 
 
 def inventory(*, gpus: int = 1) -> dict[str, object]:
+    observed_at = datetime.now(timezone.utc).isoformat()
     return {
         "cpu_slots": 8,
         "ram_mb": 16384,
         "disk_mb": 32768,
         "gpus": [
-            {"id": f"gpu-{index}", "vendor": "nvidia", "device_class": "discrete", "model": "fixture", "vram_mb": 8192}
+            {"id": f"gpu-{index}", "vendor": "nvidia", "device_class": "discrete", "model": "fixture", "vram_mb": 8192, "free_vram_mb": 7168, "observed_at": observed_at, "source_fingerprint": "a" * 64}
             for index in range(gpus)
         ],
         "runtime_slots": {"vision": 2, "faster-whisper": 2, "animesr": 2, "ffmpeg": 2},
@@ -63,7 +65,7 @@ class ResourceContractIntegrationTests(unittest.TestCase):
         self.assertEqual(submitted["state"], "PREPARING")
         self.assertEqual(submitted["resource_profile"], {
             "profile_id": "vision_gpu_2gb", "resource_requirement": "gpu.vision", "execution_class": "gpu",
-            "gpu_required": True, "exclusive_gpu": True, "estimated_vram_mb": 2048,
+            "gpu_required": True, "heavy_gpu": True, "exclusive_gpu": True, "estimated_vram_mb": 2048,
         })
         runtime = WorkflowRuntimeV2(
             artifact_describer=lambda _id: {"id": ARTIFACT, "media_type": "video/mp4"},
@@ -110,8 +112,41 @@ class ResourceContractIntegrationTests(unittest.TestCase):
         scheduler = ResourceScheduler(hardware_snapshot=value)
         result = scheduler.submit(job("f"), "worker:vision", "vision_gpu_2gb")
         self.assertEqual(result["state"], "WAITING_RESOURCE")
-        self.assertEqual(result["reason_code"], "resource_inventory_stale")
+        self.assertEqual(result["reason_code"], "resource_inventory_refresh_required")
         self.assertEqual(scheduler.snapshot()["inventory"]["fit_state"], "stale")
+
+    def test_workflow_reads_scheduler_heavy_gpu_field_and_legacy_is_conservative(self) -> None:
+        snapshot = {
+            "jobs": [
+                {"state": "PREPARING", "resource_profile": {"gpu_required": True, "heavy_gpu": True, "exclusive_gpu": False}},
+                {"state": "RUNNING", "resource_profile": {"gpu_required": True, "heavy_gpu": True, "exclusive_gpu": False}},
+                {"state": "PAUSED", "resource_profile": {"gpu_required": True, "heavy_gpu": False, "exclusive_gpu": True}},
+                {"state": "CANCELLING", "resource_profile": {"gpu_required": True, "exclusive_gpu": False}},
+                {"state": "WAITING_RESOURCE", "resource_profile": {"gpu_required": True, "heavy_gpu": True, "exclusive_gpu": True}},
+            ],
+        }
+        self.assertEqual(WorkflowRuntimeV2._active_heavy(snapshot), 3)
+
+    def test_workflow_gpu_plan_requires_current_free_vram_fit(self) -> None:
+        profiles = [{
+            "profile_id": "vision_gpu_2gb", "resource_requirement": "gpu.vision", "estimated_vram_mb": 2048,
+            "gpu_required": True, "exclusive": True,
+        }]
+        blocked = WorkflowRuntimeV2(resource_snapshot=lambda: {
+            "inventory": {"status": "available", "fit_state": "current", "gpus": [{"free_vram_evidence_state": "current", "vram_available_for_reservation_mb": 1024}]},
+            "policy": {"max_heavy_gpu_jobs": 1}, "jobs": [], "profiles": profiles,
+        })._resource_plan([{"node_id": "vision", "resource_requirements": {"requirement_id": "gpu.vision"}}])
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["resolutions"][0]["hardware_fit"], "blocked")
+        self.assertFalse(blocked["reservations"])
+        self.assertIn("gpu_vram_unavailable", {item["code"] for item in blocked["blockers"]})
+
+        unknown = WorkflowRuntimeV2(resource_snapshot=lambda: {
+            "inventory": {"status": "available", "fit_state": "unknown", "gpus": []},
+            "policy": {"max_heavy_gpu_jobs": 1}, "jobs": [], "profiles": profiles,
+        })._resource_plan([{"node_id": "vision", "resource_requirements": {"requirement_id": "gpu.vision"}}])
+        self.assertEqual(unknown["resolutions"][0]["hardware_fit"], "unknown")
+        self.assertIn("gpu_free_vram_evidence_required", {item["code"] for item in unknown["blockers"]})
 
 
 class ProviderAndWorkflowTaxonomyTests(unittest.TestCase):
@@ -128,6 +163,13 @@ class ProviderAndWorkflowTaxonomyTests(unittest.TestCase):
             self.assertEqual(estimate["estimated_vram_mb"], None)
             self.assertFalse(estimate["dispatchable"])
 
+    def test_taxonomy_resolution_is_not_hardware_fit_or_dispatch_authority(self) -> None:
+        resolution = resolve_requirement("gpu.vision", list(server_owned_resource_profiles().values()))
+        self.assertTrue(resolution["profile_resolved"])
+        self.assertEqual(resolution["profile_id"], "vision_gpu_2gb")
+        self.assertEqual(resolution["hardware_fit"], "unknown")
+        self.assertFalse(resolution["dispatchable"])
+
     def test_multi_profile_workflow_does_not_collapse_to_one_profile(self) -> None:
         runtime = WorkflowRuntimeV2(resource_snapshot=lambda: {"inventory": {"status": "available"}, "policy": {"max_heavy_gpu_jobs": 1}, "jobs": [], "profiles": list(server_owned_resource_profiles().values())})
         plan = runtime._resource_plan([
@@ -139,6 +181,13 @@ class ProviderAndWorkflowTaxonomyTests(unittest.TestCase):
 
 
 class ProductTruthfulnessIntegrationTests(unittest.TestCase):
+    def test_pr_ci_covers_post_v8_and_all_ui_javascript(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn('test_v8_*.py', workflow)
+        self.assertIn('test_post_v8_*.py', workflow)
+        self.assertIn('src/ui/**/*.js', workflow)
+        self.assertIn('Checked ${#files[@]} UI JavaScript files.', workflow)
+
     def test_search_categories_have_one_routable_target_and_correct_truncation(self) -> None:
         frontend = (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
         for route in set(SEARCH_CATEGORY_ROUTES.values()):
