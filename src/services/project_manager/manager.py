@@ -129,9 +129,20 @@ def _file_signature(stat_result: os.stat_result) -> tuple[int, ...]:
 
 
 def _same_file_identity(left: tuple[int, ...] | None, right: tuple[int, ...] | None) -> bool:
+    """Compare the immutable identity/safety shape of one ordinary leaf.
+
+    ``_file_signature`` deliberately includes size and timestamps for a
+    point-in-time read check.  It is also captured immediately after creating
+    a private atomic-write temporary, however, and writing that temporary is
+    expected to update its size, mtime and ctime on POSIX.  Those mutable
+    fields must not make the writer mistake its own file for a swap.  Device
+    and inode, plus regular-file/reparse-relevant mode and attributes, remain
+    the replacement-safety identity used before cleanup or ``os.replace``.
+    """
+
     if left is None or right is None:
         return left is right
-    return left[0:2] == right[0:2] and left[4:] == right[4:]
+    return left[0:2] == right[0:2] and left[5:] == right[5:]
 
 
 def _directory_chain(path: Path, root: Path) -> tuple[tuple[int, ...], ...]:

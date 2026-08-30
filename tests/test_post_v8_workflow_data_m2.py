@@ -11,7 +11,7 @@ from src.services.api.context import ApiContext, build_default_context
 from src.services.api.router import ApiRequest
 from src.services.api.router_registry import build_router
 from src.services.workflow_runtime_v2 import ArtifactLibraryV2, MediaPipelineV2, ProjectWorkspaceV2, WorkflowRuntimeV2
-from src.services.project_manager.manager import CreativeProjectManager
+from src.services.project_manager.manager import CreativeProjectManager, _same_file_identity
 
 
 ARTIFACT_VIDEO = "artifact_" + "a" * 32
@@ -170,6 +170,17 @@ class WorkflowRuntimeV2Tests(unittest.TestCase):
 
 
 class WorkflowDataProjectionTests(unittest.TestCase):
+    def test_atomic_write_identity_ignores_its_own_mutable_timestamp_changes(self) -> None:
+        """POSIX writes update ctime; that is not a temp-file replacement."""
+
+        initial = (10, 20, 0, 100, 200, 0o100600, 0)
+        after_write = (10, 20, 128, 300, 400, 0o100600, 0)
+        replacement = (10, 21, 128, 300, 400, 0o100600, 0)
+        reparse = (10, 20, 128, 300, 400, 0o100600, 0x400)
+        self.assertTrue(_same_file_identity(after_write, initial))
+        self.assertFalse(_same_file_identity(replacement, initial))
+        self.assertFalse(_same_file_identity(reparse, initial))
+
     def test_default_context_resolves_the_existing_library_owner_not_its_factory(self) -> None:
         from src.services.workflow_library import WorkflowLibraryStore
 
