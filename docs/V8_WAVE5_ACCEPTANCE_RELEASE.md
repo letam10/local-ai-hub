@@ -51,6 +51,11 @@ Mỗi gate phải có provenance machine-local, không chỉ một SHA đã đ�
 
 Packet thiếu provenance, report nói rerun nhưng bind commit khác, hoặc reuse một gate bị source diff ảnh hưởng đều fail-closed. Provenance chỉ dùng finite scope/reason code; không chứa path, credential hay raw machine data.
 
+Các path mới trong vùng rủi ro cao (`src/app/`, `src/services/`, `src/shared/`,
+`src/ui/`, `scripts/`, `architecture/`) mà chưa có mapper sẽ được đánh dấu
+`unclassified_acceptance_relevant`; verifier không cho reuse PASS evidence khi
+sentinel này xuất hiện. Path docs/test ngoài các vùng trên không tự động block.
+
 Mỗi gate `PASS` phải có `report_sha256` và file deterministic `reports/<gate_id>.json`.
 
 Mỗi gate trong `architecture/v8_acceptance_gates.json` cũng khai báo

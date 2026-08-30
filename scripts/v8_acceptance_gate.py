@@ -94,6 +94,22 @@ _GATE_IMPACT_SCOPES: dict[str, frozenset[str]] = {
     "runtime_smoke": frozenset({"desktop_startup", "runtime"}),
 }
 
+# A high-risk source tree must never silently disappear from the impact audit
+# merely because a new subsystem was added without a mapper entry.  This is a
+# deliberately finite sentinel (not a wildcard gate scope): reused evidence
+# is refused whenever the sentinel appears until the path is classified or the
+# affected gate is rerun.  Documentation/tests outside these roots remain
+# intentionally unclassified and do not block reuse.
+_UNCLASSIFIED_ACCEPTANCE_RELEVANT = "unclassified_acceptance_relevant"
+_HIGH_RISK_UNCLASSIFIED_PREFIXES = (
+    "src/app/",
+    "src/services/",
+    "src/shared/",
+    "src/ui/",
+    "scripts/",
+    "architecture/",
+)
+
 
 def _path_impact_scope(path: str) -> str | None:
     normalized = path.replace("\\", "/")
@@ -103,6 +119,8 @@ def _path_impact_scope(path: str) -> str | None:
         return "workflow_runtime"
     if normalized.startswith("src/services/provider_adapters_v2/"):
         return "provider_adapters"
+    if normalized.startswith("src/services/project_manager/"):
+        return "filesystem_transaction"
     if normalized.startswith("src/services/product_experience_v2/") or normalized.startswith("src/ui/"):
         return "product_experience"
     if normalized.startswith("src/services/diagnostics/"):
@@ -123,6 +141,8 @@ def _path_impact_scope(path: str) -> str | None:
         return "runtime"
     if normalized.startswith(("scripts/v8_acceptance_gate.py", "architecture/v8_acceptance_gates.json")):
         return "acceptance_contract"
+    if normalized.startswith(_HIGH_RISK_UNCLASSIFIED_PREFIXES):
+        return _UNCLASSIFIED_ACCEPTANCE_RELEVANT
     return None
 
 
@@ -510,7 +530,7 @@ def _verify_pass_reports(evidence: Mapping[str, Any], evidence_path: Path, contr
                 origin_source_commit=report_source_commit,
                 final_source_commit=str(evidence["source_commit"]),
             )
-            if changed_scopes & _GATE_IMPACT_SCOPES[gate_id]:
+            if _UNCLASSIFIED_ACCEPTANCE_RELEVANT in changed_scopes or changed_scopes & _GATE_IMPACT_SCOPES[gate_id]:
                 raise AcceptanceGateError("EVIDENCE_REUSED_GATE_AFFECTED_BY_SOURCE_CHANGE")
         _validate_pass_report(
             reports_dir / f"{gate_id}.json",
