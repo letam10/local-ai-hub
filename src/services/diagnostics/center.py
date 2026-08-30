@@ -89,6 +89,14 @@ _DIAGNOSTIC_INSPECTIONS = {
 }
 
 
+def _hidden_subprocess_kwargs(subprocess_module: Any) -> dict[str, int]:
+    """Keep read-only diagnostics from opening a visible console on Windows."""
+
+    if os.name != "nt":
+        return {}
+    return {"creationflags": int(getattr(subprocess_module, "CREATE_NO_WINDOW", 0))}
+
+
 def _decorate_snapshot(name: str, value: object) -> dict[str, Any]:
     """Attach bounded inspection metadata to one internal diagnostic result.
 
@@ -541,6 +549,7 @@ class DiagnosticsCenter:
                 capture_output=True,
                 text=True,
                 timeout=2.0,
+                **_hidden_subprocess_kwargs(subprocess),
             )
             inside_work_tree = res_worktree.returncode == 0 and res_worktree.stdout.strip() == "true"
         except (subprocess.SubprocessError, OSError):
@@ -553,6 +562,7 @@ class DiagnosticsCenter:
                 capture_output=True,
                 text=True,
                 timeout=2.0,
+                **_hidden_subprocess_kwargs(subprocess),
             )
             if res_head.returncode == 0:
                 head_sha = res_head.stdout.strip()
@@ -566,6 +576,7 @@ class DiagnosticsCenter:
                 capture_output=True,
                 text=True,
                 timeout=2.0,
+                **_hidden_subprocess_kwargs(subprocess),
             )
             if res_branch.returncode == 0:
                 branch = res_branch.stdout.strip()
@@ -579,6 +590,7 @@ class DiagnosticsCenter:
                 capture_output=True,
                 text=True,
                 timeout=2.0,
+                **_hidden_subprocess_kwargs(subprocess),
             )
             if res_origin.returncode == 0:
                 raw_origin = res_origin.stdout.strip()
@@ -966,6 +978,7 @@ class DiagnosticsCenter:
             result = subprocess.run(
                 ["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"],
                 capture_output=True, text=True, timeout=5,
+                **_hidden_subprocess_kwargs(subprocess),
             )
             if result.returncode == 0:
                 gpus = [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
