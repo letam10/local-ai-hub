@@ -129,6 +129,8 @@ def _path_impact_scope(path: str) -> str | None:
         return "desktop_startup"
     if normalized.startswith(("src/services/app_update.py", "src/services/update_transport.py", "src/app/update_")):
         return "updater"
+    if normalized == "scripts/stage_stable_product.py":
+        return "updater"
     if normalized.startswith("src/services/api/"):
         return "loopback_api"
     if normalized.startswith("src/services/component_"):
@@ -141,6 +143,28 @@ def _path_impact_scope(path: str) -> str | None:
         return "runtime"
     if normalized.startswith(("scripts/v8_acceptance_gate.py", "architecture/v8_acceptance_gates.json")):
         return "acceptance_contract"
+    if normalized.startswith("architecture/"):
+        return "acceptance_contract"
+    if normalized.startswith("src/services/capability_graph/"):
+        return "loopback_api"
+    if normalized.startswith("src/services/durable_job_engine_v2/"):
+        return "execution_cancel"
+    if normalized.startswith("src/services/feature_discovery_v2.py"):
+        return "product_experience"
+    if normalized.startswith("src/services/model_manager_v2/"):
+        return "component_lifecycle"
+    if normalized.startswith("src/services/platform_extensibility_v2.py"):
+        return "product_experience"
+    if normalized.startswith("src/services/platform_hardening_v2.py"):
+        return "diagnostics"
+    if normalized.startswith("src/services/product_experience_v2.py"):
+        return "product_experience"
+    if normalized.startswith("src/services/projection_cache.py"):
+        return "product_experience"
+    if normalized.startswith("src/services/workflow_library/"):
+        return "workflow_runtime"
+    if normalized.startswith("src/shared/schemas/workflow_library.py"):
+        return "workflow_runtime"
     if normalized.startswith(_HIGH_RISK_UNCLASSIFIED_PREFIXES):
         return _UNCLASSIFIED_ACCEPTANCE_RELEVANT
     return None
