@@ -1,17 +1,18 @@
 /*
  * Typed UI adapter for the server-owned Workflow Library.
  *
- * There is deliberately no guessed fetch route here.  V5-D may provide a
- * bounded desktop/API bridge later; until then the UI remains partial and
- * continues to protect the local draft without claiming durable sync.
+ * There is deliberately no guessed fetch route here.  The explicit Hub API
+ * contract is preferred when it is present; a desktop bridge may provide the
+ * same named methods.  Local drafts remain independent until the user chooses
+ * a server-owned Library action.
  */
 
 export const WORKFLOW_LIBRARY_ADAPTER_VERSION = "workflow-library-adapter.v1";
 
 const PARTIAL = {
   status: "partial",
-  reason: "Workflow Library server-owned adapter chưa được V5-D wire.",
-  action: "Tiếp tục chỉnh sửa local draft; xác nhận endpoint typed trong V5-D trước khi đồng bộ.",
+  reason: "Workflow Library server-owned adapter chưa khả dụng.",
+  action: "Tiếp tục chỉnh sửa local draft; kiểm tra endpoint typed trước khi đồng bộ.",
 };
 
 const detached = (value) => {
@@ -40,8 +41,11 @@ export function createWorkflowLibraryAdapter(bridge = globalThis.pywebview?.api?
   return {
     version: WORKFLOW_LIBRARY_ADAPTER_VERSION,
     list: () => invoke("list"),
+    get: (id) => invoke("get", { id }),
     save: (entry, expectedRevision) => invoke("save", { entry, expected_revision: expectedRevision }),
     remove: (id, expectedRevision) => invoke("remove", { id, expected_revision: expectedRevision }),
+    setFavorite: (id, favorite, expectedRevision) => invoke("set_favorite", { id, favorite: Boolean(favorite), expected_revision: expectedRevision }),
+    markOpened: (id, expectedRevision) => invoke("mark_opened", { id, expected_revision: expectedRevision }),
     planMigration: (entries) => invoke("plan_migration", { entries }),
     confirmMigration: (entries, expectedRevision) => invoke("confirm_migration", { entries, expected_revision: expectedRevision }),
   };

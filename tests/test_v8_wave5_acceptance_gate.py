@@ -10,8 +10,10 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts.v8_acceptance_gate import (
     EVIDENCE_SCHEMA_VERSION,
@@ -22,7 +24,9 @@ from scripts.v8_acceptance_gate import (
     evaluate,
     load_gate_contract,
     release_provenance_snapshot,
+    source_change_scopes,
     source_preflight,
+    _path_impact_scope,
 )
 
 
@@ -80,7 +84,16 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
                 digest = hashlib.sha256(raw).hexdigest()
                 if tamper_digest:
                     digest = ("0" if digest[0] != "0" else "1") + digest[1:]
-            gates[gate_id] = {"status": status, "report_sha256": digest}
+            gates[gate_id] = {
+                "status": status,
+                "report_sha256": digest,
+                "provenance": {
+                    "schema_version": "v8-local-gate-provenance.v1",
+                    "kind": "RERUN_EXACT_HEAD",
+                    "origin_source_commit": source,
+                    "reason_code": "rerun_exact_head",
+                },
+            }
         evidence = {
             "schema_version": EVIDENCE_SCHEMA_VERSION,
             "evidence_class": contract["required_evidence_class"],
@@ -173,6 +186,151 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
         self.assertFalse(result["local_evidence"]["valid"])
         self.assertIn("EVIDENCE_ROOT_INVALID", result["blockers"])
         self.assertNotIn("raw_path", json.dumps(result, sort_keys=True))
+
+    def test_evidence_requires_per_gate_provenance(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            evidence_path = self._write_bundle(repo, root)
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence["gates"]["windows_filesystem"].pop("provenance")
+            evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+            result = evaluate(evidence_path=evidence_path, repo_root=repo)
+        self.assertFalse(result["local_evidence"]["valid"])
+        self.assertIn("EVIDENCE_GATE_INVALID", result["blockers"])
+
+    def test_rerun_provenance_rejects_a_report_from_another_commit(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            evidence_path = self._write_bundle(repo, root)
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            report_path = root / "reports" / "windows_filesystem.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["source_commit"] = "f" * 40
+            raw = json.dumps(report, sort_keys=True).encode("utf-8")
+            report_path.write_bytes(raw)
+            evidence["gates"]["windows_filesystem"]["report_sha256"] = hashlib.sha256(raw).hexdigest()
+            evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+            result = evaluate(evidence_path=evidence_path, repo_root=repo)
+        self.assertFalse(result["local_evidence"]["valid"])
+        self.assertIn("EVIDENCE_REPORT_BINDING_INVALID", result["blockers"])
+
+    def test_reused_evidence_requires_unaffected_changed_scope(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        origin = "e" * 40
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            evidence_path = self._write_bundle(repo, root)
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            report_path = root / "reports" / "windows_filesystem.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["source_commit"] = origin
+            raw = json.dumps(report, sort_keys=True).encode("utf-8")
+            report_path.write_bytes(raw)
+            gate = evidence["gates"]["windows_filesystem"]
+            gate["report_sha256"] = hashlib.sha256(raw).hexdigest()
+            gate["provenance"] = {
+                "schema_version": "v8-local-gate-provenance.v1",
+                "kind": "REUSED_UNAFFECTED_EVIDENCE",
+                "origin_source_commit": origin,
+                "reason_code": "source_change_scope_unaffected",
+                "unaffected_scopes": ["filesystem_transaction"],
+            }
+            evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+            with patch("scripts.v8_acceptance_gate.source_change_scopes", return_value=set()):
+                valid = evaluate(evidence_path=evidence_path, repo_root=repo)
+            with patch("scripts.v8_acceptance_gate.source_change_scopes", return_value={"filesystem_transaction"}):
+                blocked = evaluate(evidence_path=evidence_path, repo_root=repo)
+        self.assertTrue(valid["local_evidence"]["valid"])
+        self.assertTrue(valid["merge_ready"])
+        self.assertFalse(blocked["local_evidence"]["valid"])
+        self.assertIn("EVIDENCE_REUSED_GATE_AFFECTED_BY_SOURCE_CHANGE", blocked["blockers"])
+
+    def test_project_manager_atomic_write_is_a_filesystem_transaction_scope(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        self.assertEqual(_path_impact_scope("src/services/project_manager/manager.py"), "filesystem_transaction")
+        self.assertEqual(
+            source_change_scopes(
+                repo,
+                origin_source_commit="afc40e6dcdfdcb2fdb4ea822f1dd8da5cb0c8ab1",
+                final_source_commit="a5e59b9a7dcc68a0e15694da21dcd369b242a723",
+            ),
+            {"filesystem_transaction"},
+        )
+
+    def test_project_manager_change_rejects_reused_windows_filesystem_evidence(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        origin = "afc40e6dcdfdcb2fdb4ea822f1dd8da5cb0c8ab1"
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            evidence_path = self._write_bundle(repo, root)
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            report_path = root / "reports" / "windows_filesystem.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["source_commit"] = origin
+            raw = json.dumps(report, sort_keys=True).encode("utf-8")
+            report_path.write_bytes(raw)
+            evidence["gates"]["windows_filesystem"] = {
+                "status": "PASS",
+                "report_sha256": hashlib.sha256(raw).hexdigest(),
+                "provenance": {
+                    "schema_version": "v8-local-gate-provenance.v1",
+                    "kind": "REUSED_UNAFFECTED_EVIDENCE",
+                    "origin_source_commit": origin,
+                    "reason_code": "source_change_scope_unaffected",
+                    "unaffected_scopes": ["filesystem_transaction"],
+                },
+            }
+            evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+            result = evaluate(evidence_path=evidence_path, repo_root=repo)
+        self.assertFalse(result["local_evidence"]["valid"])
+        self.assertIn("EVIDENCE_REUSED_GATE_AFFECTED_BY_SOURCE_CHANGE", result["blockers"])
+
+    def test_project_manager_scope_does_not_invalidate_unrelated_reuse(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        origin = "afc40e6dcdfdcb2fdb4ea822f1dd8da5cb0c8ab1"
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            evidence_path = self._write_bundle(repo, root)
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence["gates"]["windows_filesystem"]["status"] = "NOT_RUN"
+            report_path = root / "reports" / "runtime_smoke.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["source_commit"] = origin
+            raw = json.dumps(report, sort_keys=True).encode("utf-8")
+            report_path.write_bytes(raw)
+            evidence["gates"]["runtime_smoke"] = {
+                "status": "PASS",
+                "report_sha256": hashlib.sha256(raw).hexdigest(),
+                "provenance": {
+                    "schema_version": "v8-local-gate-provenance.v1",
+                    "kind": "REUSED_UNAFFECTED_EVIDENCE",
+                    "origin_source_commit": origin,
+                    "reason_code": "source_change_scope_unaffected",
+                    "unaffected_scopes": ["desktop_startup", "runtime"],
+                },
+            }
+            evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+            result = evaluate(evidence_path=evidence_path, repo_root=repo)
+        self.assertTrue(result["local_evidence"]["reports_verified"])
+        self.assertIn("LOCAL_WINDOWS_GATES_INCOMPLETE", result["blockers"])
+        self.assertNotIn("EVIDENCE_REUSED_GATE_AFFECTED_BY_SOURCE_CHANGE", result["blockers"])
+
+    def test_unknown_high_risk_source_path_is_not_silently_unclassified(self) -> None:
+        self.assertEqual(_path_impact_scope("src/services/new_persistence_authority/store.py"), "unclassified_acceptance_relevant")
+        self.assertEqual(_path_impact_scope("docs/operations/review-note.md"), None)
+
+    def test_source_change_scopes_propagates_unknown_high_risk_sentinel(self) -> None:
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[bytes]:
+            if "merge-base" in command:
+                return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+            return subprocess.CompletedProcess(command, 0, stdout=b"src/services/new_persistence_authority/store.py\n", stderr=b"")
+
+        repo = Path(__file__).resolve().parents[1]
+        with patch("scripts.v8_acceptance_gate.subprocess.run", side_effect=fake_run):
+            scopes = source_change_scopes(repo, origin_source_commit="a" * 40, final_source_commit="b" * 40)
+        self.assertEqual(scopes, {"unclassified_acceptance_relevant"})
 
     def test_gate_contract_is_strict_and_user_controlled_for_release_mutations(self) -> None:
         repo = Path(__file__).resolve().parents[1]

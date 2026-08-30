@@ -174,6 +174,44 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "artifact_library.v2_snapshot",
+      "method": "GET",
+      "path": "/api/artifact-library/v2",
+      "domain": "artifacts",
+      "owner": "src/services/api/routes/artifact_library_v2.py",
+      "service": "artifacts",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "artifact_library.v2_detail",
+      "method": "GET",
+      "path": "/api/artifact-library/v2/{artifact_id}",
+      "domain": "artifacts",
+      "owner": "src/services/api/routes/artifact_library_v2.py",
+      "service": "artifacts",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "artifacts.get",
       "method": "GET",
       "path": "/api/artifacts/{artifact_id}",
@@ -326,6 +364,120 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "capabilities.v2_snapshot",
+      "method": "GET",
+      "path": "/api/capabilities/v2",
+      "domain": "capabilities",
+      "owner": "src/services/api/routes/capability_graph.py",
+      "service": "capabilities",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "capabilities.v2_detail",
+      "method": "GET",
+      "path": "/api/capabilities/v2/{capability_id}",
+      "domain": "capabilities",
+      "owner": "src/services/api/routes/capability_graph.py",
+      "service": "capabilities",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "capabilities.v2_blockers",
+      "method": "GET",
+      "path": "/api/capabilities/v2/{capability_id}/blockers",
+      "domain": "capabilities",
+      "owner": "src/services/api/routes/capability_graph.py",
+      "service": "capabilities",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "capabilities.v2_dependency_tree",
+      "method": "GET",
+      "path": "/api/capabilities/v2/{capability_id}/dependency-tree",
+      "domain": "capabilities",
+      "owner": "src/services/api/routes/capability_graph.py",
+      "service": "capabilities",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "capabilities.v2_safe_actions",
+      "method": "GET",
+      "path": "/api/capabilities/v2/{capability_id}/safe-actions",
+      "domain": "capabilities",
+      "owner": "src/services/api/routes/capability_graph.py",
+      "service": "capabilities",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "capabilities.v2_verification_evidence",
+      "method": "GET",
+      "path": "/api/capabilities/v2/{capability_id}/verification-evidence",
+      "domain": "capabilities",
+      "owner": "src/services/api/routes/capability_graph.py",
+      "service": "capabilities",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "creative.collections",
       "method": "GET",
       "path": "/api/collections",
@@ -400,6 +552,44 @@
       ],
       "transport": "router",
       "transport_class": "SPECIAL_PROTOCOL"
+    },
+    {
+      "route_id": "component_lifecycle.v2_snapshot",
+      "method": "GET",
+      "path": "/api/component-lifecycle/v2",
+      "domain": "components",
+      "owner": "src/services/api/routes/component_lifecycle_v2.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "component_lifecycle.v2_detail",
+      "method": "GET",
+      "path": "/api/component-lifecycle/v2/{capability_id}",
+      "domain": "components",
+      "owner": "src/services/api/routes/component_lifecycle_v2.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
     },
     {
       "route_id": "components.snapshot",
@@ -687,12 +877,164 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "durable_job_engine.v2_snapshot",
+      "method": "GET",
+      "path": "/api/durable-job-engine/v2",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/durable_job_engine_v2.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "durable_job_engine.v2_detail",
+      "method": "GET",
+      "path": "/api/durable-job-engine/v2/{job_id}",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/durable_job_engine_v2.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "jobs.durable_list",
       "method": "GET",
       "path": "/api/durable-jobs",
       "domain": "jobs",
       "owner": "src/services/api/routes/jobs.py",
       "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "extensibility.v2_snapshot",
+      "method": "GET",
+      "path": "/api/extensibility/v2",
+      "domain": "extensibility",
+      "owner": "src/services/api/routes/platform_extensibility_v2.py",
+      "service": "extensibility",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "extensibility.v2_detail",
+      "method": "GET",
+      "path": "/api/extensibility/v2/{area_id}",
+      "domain": "extensibility",
+      "owner": "src/services/api/routes/platform_extensibility_v2.py",
+      "service": "extensibility",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "external_integrations.v2_snapshot",
+      "method": "GET",
+      "path": "/api/external-integrations/v2",
+      "domain": "integrations",
+      "owner": "src/services/api/routes/external_integrations_v2.py",
+      "service": "integrations",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "external_integrations.v2_detail",
+      "method": "GET",
+      "path": "/api/external-integrations/v2/{integration_id}",
+      "domain": "integrations",
+      "owner": "src/services/api/routes/external_integrations_v2.py",
+      "service": "integrations",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "feature_discovery.v2_snapshot",
+      "method": "GET",
+      "path": "/api/features/v2",
+      "domain": "capabilities",
+      "owner": "src/services/api/routes/feature_discovery_v2.py",
+      "service": "capabilities",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "feature_discovery.v2_detail",
+      "method": "GET",
+      "path": "/api/features/v2/{feature_id}",
+      "domain": "capabilities",
+      "owner": "src/services/api/routes/feature_discovery_v2.py",
+      "service": "capabilities",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -845,6 +1187,82 @@
       "domain": "lifecycle",
       "owner": "src/services/api/routes/health.py",
       "service": "lifecycle",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "media_pipeline.v2_contract",
+      "method": "GET",
+      "path": "/api/media-pipeline/v2",
+      "domain": "media",
+      "owner": "src/services/api/routes/media_pipeline_v2.py",
+      "service": "media",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "model_manager.v2_snapshot",
+      "method": "GET",
+      "path": "/api/model-manager/v2",
+      "domain": "models",
+      "owner": "src/services/api/routes/model_manager_v2.py",
+      "service": "models",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "model_manager.v2_detail",
+      "method": "GET",
+      "path": "/api/model-manager/v2/{model_id}",
+      "domain": "models",
+      "owner": "src/services/api/routes/model_manager_v2.py",
+      "service": "models",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "model_manager.v2_preflight",
+      "method": "GET",
+      "path": "/api/model-manager/v2/{model_id}/preflight",
+      "domain": "models",
+      "owner": "src/services/api/routes/model_manager_v2.py",
+      "service": "models",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -1048,6 +1466,101 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "platform_hardening.v2_snapshot",
+      "method": "GET",
+      "path": "/api/platform-hardening/v2",
+      "domain": "platform_hardening",
+      "owner": "src/services/api/routes/platform_hardening_v2.py",
+      "service": "platform_hardening",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "platform_hardening.v2_detail",
+      "method": "GET",
+      "path": "/api/platform-hardening/v2/{area_id}",
+      "domain": "platform_hardening",
+      "owner": "src/services/api/routes/platform_hardening_v2.py",
+      "service": "platform_hardening",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "product_experience.v2_snapshot",
+      "method": "GET",
+      "path": "/api/product-experience/v2",
+      "domain": "product_experience",
+      "owner": "src/services/api/routes/product_experience_v2.py",
+      "service": "product_experience",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "product_experience.v2_onboarding",
+      "method": "GET",
+      "path": "/api/product-experience/v2/onboarding",
+      "domain": "product_experience",
+      "owner": "src/services/api/routes/product_experience_v2.py",
+      "service": "product_experience",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "product_experience.v2_search",
+      "method": "GET",
+      "path": "/api/product-experience/v2/search",
+      "domain": "product_experience",
+      "owner": "src/services/api/routes/product_experience_v2.py",
+      "service": "product_experience",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "productization.catalog",
       "method": "GET",
       "path": "/api/productization/catalog",
@@ -1092,6 +1605,63 @@
       "domain": "productization",
       "owner": "src/services/api/routes/productization.py",
       "service": "productization",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "project_workspace.v2_snapshot",
+      "method": "GET",
+      "path": "/api/project-workspace/v2",
+      "domain": "projects",
+      "owner": "src/services/api/routes/project_workspace_v2.py",
+      "service": "projects",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "project_workspace.v2_detail",
+      "method": "GET",
+      "path": "/api/project-workspace/v2/{project_id}",
+      "domain": "projects",
+      "owner": "src/services/api/routes/project_workspace_v2.py",
+      "service": "projects",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "project_workspace.v2_export_manifest",
+      "method": "GET",
+      "path": "/api/project-workspace/v2/{project_id}/manifest",
+      "domain": "projects",
+      "owner": "src/services/api/routes/project_workspace_v2.py",
+      "service": "projects",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -1219,6 +1789,44 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "provider_adapters.v2_snapshot",
+      "method": "GET",
+      "path": "/api/provider-adapters/v2",
+      "domain": "providers",
+      "owner": "src/services/api/routes/provider_adapters_v2.py",
+      "service": "providers",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "provider_adapters.v2_detail",
+      "method": "GET",
+      "path": "/api/provider-adapters/v2/{adapter_id}",
+      "domain": "providers",
+      "owner": "src/services/api/routes/provider_adapters_v2.py",
+      "service": "providers",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "creative.recipes",
       "method": "GET",
       "path": "/api/recipes",
@@ -1263,6 +1871,63 @@
       "domain": "creative",
       "owner": "src/services/api/routes/creative.py",
       "service": "creative",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "resource_scheduler.v2_snapshot",
+      "method": "GET",
+      "path": "/api/resource-scheduler/v2",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/resource_scheduler_v2.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "resource_scheduler.v2_job",
+      "method": "GET",
+      "path": "/api/resource-scheduler/v2/jobs/{job_id}",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/resource_scheduler_v2.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "resource_scheduler.v2_profiles",
+      "method": "GET",
+      "path": "/api/resource-scheduler/v2/profiles",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/resource_scheduler_v2.py",
+      "service": "jobs",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -1471,6 +2136,25 @@
       "path": "/api/workflow-library/{workflow_id}",
       "domain": "workflows",
       "owner": "src/services/api/routes/workflows.py",
+      "service": "workflows",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "workflow_runtime.v2_contract",
+      "method": "GET",
+      "path": "/api/workflow-runtime/v2",
+      "domain": "workflows",
+      "owner": "src/services/api/routes/workflow_runtime_v2.py",
       "service": "workflows",
       "streaming": false,
       "body_limit": "json_default",
@@ -1941,6 +2625,25 @@
       "transport_class": "SPECIAL_PROTOCOL"
     },
     {
+      "route_id": "component_lifecycle.v2_plan",
+      "method": "POST",
+      "path": "/api/component-lifecycle/v2/{capability_id}/plans",
+      "domain": "components",
+      "owner": "src/services/api/routes/component_lifecycle_v2.py",
+      "service": "components",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "components.bundle_plan",
       "method": "POST",
       "path": "/api/components/bundles/plan",
@@ -2359,6 +3062,101 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "durable_job_engine.v2_admit",
+      "method": "POST",
+      "path": "/api/durable-job-engine/v2",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/durable_job_engine_v2.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "durable_job_engine.v2_history_delete",
+      "method": "POST",
+      "path": "/api/durable-job-engine/v2/history/delete",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/durable_job_engine_v2.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "durable_job_engine.v2_archive",
+      "method": "POST",
+      "path": "/api/durable-job-engine/v2/{job_id}/archive",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/durable_job_engine_v2.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "durable_job_engine.v2_cancel",
+      "method": "POST",
+      "path": "/api/durable-job-engine/v2/{job_id}/cancel",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/durable_job_engine_v2.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "durable_job_engine.v2_retry",
+      "method": "POST",
+      "path": "/api/durable-job-engine/v2/{job_id}/retry",
+      "domain": "jobs",
+      "owner": "src/services/api/routes/durable_job_engine_v2.py",
+      "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "jobs.durable_admit",
       "method": "POST",
       "path": "/api/durable-jobs",
@@ -2403,6 +3201,25 @@
       "domain": "jobs",
       "owner": "src/services/api/routes/jobs.py",
       "service": "jobs",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "external_integrations.v2_launch_plan",
+      "method": "POST",
+      "path": "/api/external-integrations/v2/{integration_id}/launch-plan",
+      "domain": "integrations",
+      "owner": "src/services/api/routes/external_integrations_v2.py",
+      "service": "integrations",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2663,12 +3480,50 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "media_pipeline.v2_preflight",
+      "method": "POST",
+      "path": "/api/media-pipeline/v2/preflight",
+      "domain": "media",
+      "owner": "src/services/api/routes/media_pipeline_v2.py",
+      "service": "media",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "media.run",
       "method": "POST",
       "path": "/api/media/run",
       "domain": "media",
       "owner": "src/services/api/routes/media.py",
       "service": "media",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "model_manager.v2_plan",
+      "method": "POST",
+      "path": "/api/model-manager/v2/{model_id}/plans",
+      "domain": "models",
+      "owner": "src/services/api/routes/model_manager_v2.py",
+      "service": "models",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -2815,6 +3670,44 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "project_workspace.v2_attach_job",
+      "method": "POST",
+      "path": "/api/project-workspace/v2/{project_id}/jobs",
+      "domain": "projects",
+      "owner": "src/services/api/routes/project_workspace_v2.py",
+      "service": "projects",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "project_workspace.v2_attach_workflow",
+      "method": "POST",
+      "path": "/api/project-workspace/v2/{project_id}/workflows",
+      "domain": "projects",
+      "owner": "src/services/api/routes/project_workspace_v2.py",
+      "service": "projects",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "projects.create",
       "method": "POST",
       "path": "/api/projects",
@@ -2916,6 +3809,25 @@
       "domain": "projects",
       "owner": "src/services/api/routes/projects.py",
       "service": "projects",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "provider_adapters.v2_preflight",
+      "method": "POST",
+      "path": "/api/provider-adapters/v2/{adapter_id}/preflight",
+      "domain": "providers",
+      "owner": "src/services/api/routes/provider_adapters_v2.py",
+      "service": "providers",
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
@@ -3257,6 +4169,82 @@
       "path": "/api/workflow-library/migration/plan",
       "domain": "workflows",
       "owner": "src/services/api/routes/workflows.py",
+      "service": "workflows",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "workflows.favorite",
+      "method": "POST",
+      "path": "/api/workflow-library/{workflow_id}/favorite",
+      "domain": "workflows",
+      "owner": "src/services/api/routes/workflows.py",
+      "service": "workflows",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "workflows.opened",
+      "method": "POST",
+      "path": "/api/workflow-library/{workflow_id}/opened",
+      "domain": "workflows",
+      "owner": "src/services/api/routes/workflows.py",
+      "service": "workflows",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "workflow_runtime.v2_dispatch",
+      "method": "POST",
+      "path": "/api/workflow-runtime/v2/dispatch",
+      "domain": "workflows",
+      "owner": "src/services/api/routes/workflow_runtime_v2.py",
+      "service": "workflows",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
+      "route_id": "workflow_runtime.v2_preflight",
+      "method": "POST",
+      "path": "/api/workflow-runtime/v2/preflight",
+      "domain": "workflows",
+      "owner": "src/services/api/routes/workflow_runtime_v2.py",
       "service": "workflows",
       "streaming": false,
       "body_limit": "json_default",

@@ -1,0 +1,631 @@
+"""Plan-only Workflow Runtime V2 contract.
+
+This module is deliberately a preflight boundary, not a second graph runner.
+It reuses the existing typed Node Studio validator and emits only bounded,
+path-free plans.  A future server-owned execution owner may consume a READY
+plan, but no browser request through this service can launch a worker, media
+tool, provider, model, or GPU workload.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from copy import deepcopy
+import hashlib
+import json
+import re
+from typing import Any
+
+from src.services.node_studio.registry import NodeDefinition, get_definition
+from src.services.node_studio.schema import validate_graph
+from src.services.resource_scheduler.taxonomy import resolve_requirement
+
+from .migration import WORKFLOW_GRAPH_V2_SCHEMA_VERSION, migrate_graph
+
+
+WORKFLOW_RUNTIME_V2_SCHEMA_VERSION = "workflow-runtime.v2"
+WORKFLOW_RUNTIME_V2_EXECUTION_MODE = "plan_only"
+WORKFLOW_STATES = ("DRAFT", "VALIDATED", "READY", "RUNNING", "FAILED", "COMPLETED")
+_ARTIFACT_ID = re.compile(r"^artifact_[a-f0-9]{32}$")
+_PROJECT_ID = re.compile(r"^project_[a-f0-9]{32}$")
+_WORKFLOW_ID = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+){0,11}$")
+_PROFILE_ID = re.compile(r"^[a-z][a-z0-9._-]{1,63}$")
+_SAFE_NODE_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,79}$")
+_MAX_GRAPH_BYTES = 512 * 1024
+_MAX_UNKNOWN_NODES = 32
+
+
+# The mapping is deliberately finite and lives on the server.  It is used
+# only to explain preflight blockers; it is not an execution adapter lookup.
+_RUNNER_CONTRACTS: dict[str, dict[str, Any]] = {
+    **{runner: {"required_capabilities": ("engine:ffmpeg",), "resource_requirement": "media.ffmpeg", "execution_owner_class": "owner_required", "reason": "FFmpeg operation remains plan-only until its existing execution owner is explicitly bound."} for runner in ("media", "image_upscale", "frame_interpolate", "video_transform", "video_grade", "logo_overlay", "audio_loudness", "video_upscale", "encode", "probe", "probe_audio")},
+    "animesr": {"required_capabilities": ("runtime:animesr", "model:animesr-v2", "resource:gpu"), "resource_requirement": "gpu.video", "execution_owner_class": "owner_required", "reason": "AnimeSR is a GPU-video plan and has no V2 execution owner."},
+    "sam2_segment": {"required_capabilities": ("runtime:sam2", "resource:gpu"), "resource_requirement": "gpu.vision", "execution_owner_class": "owner_required", "reason": "SAM2 execution remains separately owned."},
+    "sam2_track": {"required_capabilities": ("runtime:sam2", "resource:gpu"), "resource_requirement": "gpu.vision", "execution_owner_class": "owner_required", "reason": "SAM2 execution remains separately owned."},
+    "grounding": {"required_capabilities": ("runtime:grounding-dino", "resource:gpu"), "resource_requirement": "gpu.vision", "execution_owner_class": "owner_required", "reason": "Grounding execution remains separately owned."},
+    "rfdetr": {"required_capabilities": ("runtime:rf-detr", "resource:gpu"), "resource_requirement": "gpu.vision", "execution_owner_class": "owner_required", "reason": "RF-DETR execution remains separately owned."},
+    "flux": {"required_capabilities": ("runtime:comfyui", "resource:gpu"), "resource_requirement": "gpu.image_generation", "execution_owner_class": "owner_required", "reason": "FLUX requires model-catalog VRAM evidence; it is never assumed to fit the vision 2 GiB profile."},
+    "qwen": {"required_capabilities": ("runtime:comfyui", "resource:gpu"), "resource_requirement": "gpu.image_generation", "execution_owner_class": "owner_required", "reason": "Qwen Image requires model-catalog VRAM evidence; it is never assumed to fit the vision 2 GiB profile."},
+    "comfyui_workflow": {"required_capabilities": ("runtime:comfyui", "resource:gpu"), "resource_requirement": "gpu.image_generation", "execution_owner_class": "owner_required", "reason": "ComfyUI workflow dispatch requires explicit model VRAM evidence and an execution owner."},
+    "video_generate": {"required_capabilities": ("resource:gpu",), "resource_requirement": "gpu.video", "execution_owner_class": "not_implemented", "reason": "Video generation has no V2 execution implementation or owner."},
+    "text_overlay": {"required_capabilities": ("engine:ffmpeg",), "resource_requirement": "media.ffmpeg", "execution_owner_class": "not_implemented", "reason": "Text overlay lacks a reviewed server-owned font and escaping execution contract."},
+    "realesrgan": {"required_capabilities": ("resource:gpu",), "resource_requirement": "gpu.image_generation", "execution_owner_class": "owner_required", "reason": "Image upscaling needs explicit model VRAM evidence and a separately bound owner."},
+}
+_RUNNER_CAPABILITIES: dict[str, tuple[str, ...]] = {runner: tuple(value["required_capabilities"]) for runner, value in _RUNNER_CONTRACTS.items()}
+
+_SAFE_ERROR_CONTEXT = frozenset({
+    "code", "node_id", "edge_id", "node_index", "edge_index", "port",
+    "property", "source_type", "target_type", "nodes",
+})
+
+
+def _copy(value: Any) -> Any:
+    return deepcopy(value)
+
+
+def _canonical_bytes(value: object) -> bytes | None:
+    try:
+        raw = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return raw if len(raw) <= _MAX_GRAPH_BYTES else None
+
+
+def _safe_validation_errors(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in value[:64]:
+        if not isinstance(item, Mapping):
+            continue
+        row: dict[str, Any] = {}
+        for key in _SAFE_ERROR_CONTEXT:
+            candidate = item.get(key)
+            if key == "code" and isinstance(candidate, str) and re.fullmatch(r"[a-z0-9_:-]{1,80}", candidate):
+                row[key] = candidate
+            elif key in {"node_id", "edge_id", "port", "property"} and isinstance(candidate, str) and len(candidate) <= 100 and "\\" not in candidate and "/" not in candidate:
+                row[key] = candidate
+            elif key in {"node_index", "edge_index"} and isinstance(candidate, int) and not isinstance(candidate, bool) and 0 <= candidate <= 10_000:
+                row[key] = candidate
+            elif key in {"source_type", "target_type"} and isinstance(candidate, str) and re.fullmatch(r"[A-Z_]{1,32}", candidate):
+                row[key] = candidate
+            elif key == "nodes" and isinstance(candidate, list):
+                row[key] = [node for node in candidate[:32] if isinstance(node, str) and _SAFE_NODE_ID.fullmatch(node)]
+        if row:
+            result.append(row)
+    return result
+
+
+def _unknown_nodes(graph: object) -> list[dict[str, str]]:
+    if not isinstance(graph, Mapping) or not isinstance(graph.get("nodes"), list):
+        return []
+    preserved: list[dict[str, str]] = []
+    for node in graph["nodes"][:256]:
+        if not isinstance(node, Mapping):
+            continue
+        node_id = node.get("id")
+        node_type = node.get("type")
+        if not isinstance(node_id, str) or not _SAFE_NODE_ID.fullmatch(node_id):
+            continue
+        if not isinstance(node_type, str) or not node_type or len(node_type) > 100:
+            continue
+        if get_definition(node_type) is None:
+            preserved.append({"node_id": node_id, "node_type": node_type, "state": "preserved_unexecutable"})
+        if len(preserved) >= _MAX_UNKNOWN_NODES:
+            break
+    return preserved
+
+
+def _capability_states(snapshot: object) -> dict[str, dict[str, str]]:
+    result: dict[str, dict[str, str]] = {}
+    values = snapshot.get("capabilities") if isinstance(snapshot, Mapping) else None
+    if not isinstance(values, list):
+        return result
+    for item in values[:2_000]:
+        if not isinstance(item, Mapping):
+            continue
+        capability_id = item.get("capability_id")
+        if not isinstance(capability_id, str) or len(capability_id) > 160:
+            continue
+        state = item.get("operational_state")
+        result[capability_id] = {
+            "operational_state": state if isinstance(state, str) and len(state) <= 48 else "UNKNOWN",
+            "reason": item.get("reason") if isinstance(item.get("reason"), str) and len(item["reason"]) <= 320 else "",
+            "next_action": item.get("next_action") if isinstance(item.get("next_action"), str) and len(item["next_action"]) <= 320 else "",
+        }
+    return result
+
+
+def _public_node_contract(definition: NodeDefinition) -> dict[str, Any]:
+    runner_contract = _RUNNER_CONTRACTS.get(definition.runner)
+    requirements = _RUNNER_CAPABILITIES.get(definition.runner, ())
+    resource_requirement = runner_contract["resource_requirement"] if runner_contract is not None else None
+    return {
+        "node_type": definition.type,
+        "node_version": definition.version,
+        "runner": definition.runner,
+        "capability_requirements": list(requirements),
+        "resource_requirements": {
+            "requirement_id": resource_requirement,
+            "requires_gpu": isinstance(resource_requirement, str) and resource_requirement.startswith("gpu."),
+            "exclusive_gpu": bool(definition.heavy and isinstance(resource_requirement, str) and resource_requirement.startswith("gpu.")),
+            "execution_class": "gpu" if isinstance(resource_requirement, str) and resource_requirement.startswith("gpu.") else "none",
+        },
+        "runner_contract": {
+            "runner_id": definition.runner,
+            "required_capabilities": list(requirements),
+            "resource_requirement": resource_requirement,
+            "execution_owner_class": runner_contract["execution_owner_class"] if runner_contract is not None else "plan_only",
+            "reason": runner_contract["reason"] if runner_contract is not None else "This runner has no V2 execution owner and is represented as a CPU-light plan only.",
+        },
+        "availability": {
+            "status": definition.status,
+            "reason": definition.status_reason or ("Node is registered for plan-only preflight." if definition.status == "operational" else "Node adapter is not operational."),
+            "next_action": definition.status_action or ("Inspect capability preflight before dispatch." if definition.status == "operational" else "Review the declared adapter limitation."),
+        },
+    }
+
+
+def _artifact_media_type(record: Mapping[str, Any]) -> str | None:
+    value = record.get("media_type") or record.get("type")
+    if not isinstance(value, str) or len(value) > 120:
+        return None
+    lowered = value.casefold()
+    if lowered.startswith("image/"):
+        return "IMAGE"
+    if lowered.startswith("video/"):
+        return "VIDEO"
+    if lowered.startswith("audio/"):
+        return "AUDIO"
+    if lowered in {"application/json", "application/x-local-ai-hub-metadata"}:
+        return "METADATA"
+    return None
+
+
+class WorkflowRuntimeV2:
+    """Build deterministic graph/capability/resource/artifact preflight plans."""
+
+    def __init__(
+        self,
+        *,
+        capability_snapshot: Callable[[], Mapping[str, Any]] | None = None,
+        resource_snapshot: Callable[[], Mapping[str, Any]] | None = None,
+        artifact_describer: Callable[[str], Mapping[str, Any] | None] | None = None,
+        durable_admit: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        dispatch_binding: Mapping[str, Any] | None = None,
+    ) -> None:
+        self._capability_snapshot = capability_snapshot or (lambda: {})
+        self._resource_snapshot = resource_snapshot or (lambda: {})
+        self._artifact_describer = artifact_describer or (lambda _artifact_id: None)
+        self._durable_admit = durable_admit
+        self._dispatch_binding = self._validated_dispatch_binding(dispatch_binding)
+
+    def contract(self) -> dict[str, Any]:
+        return {
+            "schema_version": WORKFLOW_RUNTIME_V2_SCHEMA_VERSION,
+            "status": "partial",
+            "workflow_states": list(WORKFLOW_STATES),
+            "graph_schema_versions": [1, WORKFLOW_GRAPH_V2_SCHEMA_VERSION],
+            "execution_mode": WORKFLOW_RUNTIME_V2_EXECUTION_MODE,
+            "execution": "not_run",
+            "dry_run": True,
+            "reason": "Workflow Runtime V2 currently creates only server-owned preflight plans; no execution owner is registered by this surface.",
+            "next_action": "Validate a graph and review its capability, resource and artifact plan before separately requesting dispatch authority.",
+        }
+
+    def preflight(self, payload: object) -> dict[str, Any]:
+        """Validate a graph without persisting, reserving, or executing it."""
+
+        if isinstance(payload, Mapping) and "graph" in payload:
+            if set(payload) - {"graph", "project_id", "workflow_id"}:
+                return self._invalid("workflow_runtime_payload_invalid")
+            graph = payload.get("graph")
+            project_id = payload.get("project_id")
+            workflow_reference = payload.get("workflow_id")
+        else:
+            graph = payload
+            project_id = None
+            workflow_reference = None
+        if project_id is not None and (not isinstance(project_id, str) or not _PROJECT_ID.fullmatch(project_id)):
+            return self._invalid("workflow_runtime_project_invalid")
+        if workflow_reference is not None and (not isinstance(workflow_reference, str) or not _WORKFLOW_ID.fullmatch(workflow_reference)):
+            return self._invalid("workflow_runtime_reference_invalid")
+        migration_view = migrate_graph(graph)
+        if migration_view.get("accepted") is not True:
+            return self._invalid(str(migration_view.get("code") or "workflow_runtime_graph_invalid"))
+        runtime_graph = migration_view["runtime_graph"]
+        encoded = _canonical_bytes(migration_view["v2_graph"])
+        if encoded is None:
+            return self._invalid("workflow_runtime_graph_bounds")
+
+        unknown = _unknown_nodes(runtime_graph)
+        validation = validate_graph(runtime_graph, require_runnable=True)
+        graph_value = validation.get("graph") if isinstance(validation, Mapping) else {}
+        errors = _safe_validation_errors(validation.get("errors") if isinstance(validation, Mapping) else None)
+        workflow_fingerprint = hashlib.sha256(encoded).hexdigest()
+        workflow_id = workflow_reference or f"workflow_{workflow_fingerprint[:32]}"
+        migration = {
+            "status": "compatible" if not unknown and isinstance(graph_value, Mapping) and graph_value.get("schema_version") == 1 else "manual_review" if unknown else "unsupported",
+            "source_schema_version": migration_view["source_schema_version"],
+            "target_schema_version": WORKFLOW_GRAPH_V2_SCHEMA_VERSION,
+            "runtime_schema_version": 1,
+            "actions": list(migration_view["actions"]),
+            "unknown_nodes": unknown,
+            "preservation": "unknown nodes remain in the original draft/library record and are never discarded by preflight.",
+        }
+        if not validation.get("valid"):
+            return {
+                "schema_version": WORKFLOW_RUNTIME_V2_SCHEMA_VERSION,
+                "status": "completed",
+                "workflow_id": workflow_id,
+                "project_id": project_id,
+                "workflow_state": "DRAFT",
+                "valid": False,
+                "validation": {"errors": errors},
+                "migration": migration,
+                "node_contracts": [],
+                "capability_plan": {"status": "not_run", "requirements": [], "blockers": []},
+                "resource_plan": {"status": "not_run", "reservations": [], "reason": "Graph validation must pass before resource planning."},
+                "artifact_plan": {"status": "not_run", "artifacts": [], "missing": []},
+                "dispatch": self._dispatch_unavailable(),
+                "execution": "not_run",
+                "dry_run": True,
+                "reason": "Workflow remains a draft because its graph is invalid or contains unsupported nodes.",
+                "next_action": "Fix the typed graph validation errors; unknown nodes are preserved but cannot execute.",
+            }
+
+        nodes = graph_value.get("nodes") if isinstance(graph_value, Mapping) else []
+        node_contracts: list[dict[str, Any]] = []
+        requirements: set[str] = set()
+        artifact_requests: list[tuple[str, str, str]] = []
+        if isinstance(nodes, list):
+            for node in nodes:
+                if not isinstance(node, Mapping):
+                    continue
+                node_id = node.get("id")
+                definition = get_definition(str(node.get("type") or ""))
+                if not isinstance(node_id, str) or definition is None:
+                    continue
+                contract = _public_node_contract(definition)
+                contract["node_id"] = node_id
+                node_contracts.append(contract)
+                requirements.update(contract["capability_requirements"])
+                data = node.get("data")
+                if definition.runner == "load_artifact" and isinstance(data, Mapping):
+                    artifact_id = data.get("asset_id")
+                    if isinstance(artifact_id, str) and _ARTIFACT_ID.fullmatch(artifact_id) and definition.outputs:
+                        artifact_requests.append((node_id, artifact_id, definition.outputs[0].type))
+
+        capability_plan = self._capability_plan(sorted(requirements))
+        resource_plan = self._resource_plan(node_contracts)
+        artifact_plan = self._artifact_plan(artifact_requests)
+        blockers = capability_plan["blockers"] + resource_plan["blockers"] + artifact_plan["blockers"]
+        state = "READY" if not blockers else "VALIDATED"
+        return {
+            "schema_version": WORKFLOW_RUNTIME_V2_SCHEMA_VERSION,
+            "status": "completed",
+            "workflow_id": workflow_id,
+            "project_id": project_id,
+            "workflow_state": state,
+            "valid": True,
+            "validation": {"errors": []},
+            "migration": migration,
+            "node_contracts": node_contracts,
+            "capability_plan": capability_plan,
+            "resource_plan": resource_plan,
+            "artifact_plan": artifact_plan,
+            "dispatch": self._dispatch_unavailable(),
+            "execution": "not_run",
+            "dry_run": True,
+            "reason": "Workflow preflight is complete; it has not reserved resources, written a job, or executed a node.",
+            "next_action": "Review blockers and obtain a separately registered server-owned workflow execution owner before any dispatch.",
+        }
+
+    def dispatch(self, payload: object) -> dict[str, Any]:
+        """Request durable admission only through a server-owned binding.
+
+        This method never starts a worker. It creates no record unless a
+        separately supplied owner binding, a READY preflight, and the existing
+        Durable Job Engine admission contract all agree. The browser cannot
+        choose owner, worker, resource profile, command or runtime.
+        """
+
+        preflight = self.preflight(payload)
+        if preflight.get("status") != "completed" or preflight.get("workflow_state") != "READY":
+            return {
+                "status": "unavailable",
+                "code": "workflow_runtime_preflight_not_ready",
+                "preflight": preflight,
+                "execution": "not_run",
+                "dry_run": True,
+                "reason": "Workflow dispatch is refused until graph, capability, resource and artifact preflight are READY.",
+                "next_action": "Resolve every preflight blocker before requesting a server-owned workflow admission.",
+            }
+        binding = self._dispatch_binding
+        if binding is None or self._durable_admit is None:
+            return {
+                "status": "unavailable",
+                "code": "workflow_runtime_execution_owner_unavailable",
+                "preflight": preflight,
+                "execution": "not_run",
+                "dry_run": True,
+                "reason": "No server-owned Workflow Runtime V2 execution owner is registered, so no durable job was created.",
+                "next_action": "Register and verify a trusted owner separately; do not treat this preflight as an executed workflow.",
+            }
+        profile_id = self._dispatch_profile(preflight, binding)
+        if profile_id is None:
+            return {
+                "status": "unavailable",
+                "code": "workflow_runtime_profile_unavailable",
+                "preflight": preflight,
+                "execution": "not_run",
+                "dry_run": True,
+                "reason": "The READY graph needs more than one incompatible scheduler profile or no server-owned profile binding exists.",
+                "next_action": "Implement a trusted phased reservation coordinator or bind one reviewed profile before dispatch.",
+            }
+        artifacts = preflight.get("artifact_plan", {}).get("artifacts", []) if isinstance(preflight.get("artifact_plan"), Mapping) else []
+        input_artifact_ids = [item.get("artifact_id") for item in artifacts if isinstance(item, Mapping) and isinstance(item.get("artifact_id"), str) and _ARTIFACT_ID.fullmatch(item["artifact_id"])]
+        request = {
+            "workflow_id": preflight["workflow_id"],
+            "input_artifact_ids": input_artifact_ids,
+            "artifact_refs": [],
+            "execution_owner": binding["execution_owner"],
+            "worker_id": binding["worker_id"],
+            "resource_profile_id": profile_id,
+        }
+        try:
+            result = self._durable_admit(request)
+        except Exception:
+            result = None
+        if not isinstance(result, Mapping):
+            return {
+                "status": "unavailable",
+                "code": "workflow_runtime_durable_admission_unavailable",
+                "preflight": preflight,
+                "execution": "not_run",
+                "dry_run": True,
+                "reason": "The server-owned Durable Job Engine did not return an admission result.",
+                "next_action": "Inspect the trusted execution-owner and durable-job boundary before retrying.",
+            }
+        return {
+            "status": result.get("status") if isinstance(result.get("status"), str) else "unavailable",
+            "preflight": preflight,
+            "job": result.get("job") if isinstance(result.get("job"), Mapping) else None,
+            "execution": result.get("execution") if isinstance(result.get("execution"), str) else "not_run",
+            "dry_run": result.get("dry_run") is not False,
+            "reason": "A durable admission was requested through a server-owned owner; a worker has not been started by Workflow Runtime V2." if result.get("status") == "accepted" else "Durable admission was not accepted; no workflow execution was started.",
+            "next_action": "The trusted owner must claim the exact reservation before any workflow can be reported as running." if result.get("status") == "accepted" else "Inspect the durable admission result and preflight before trying again.",
+        }
+
+    @staticmethod
+    def _invalid(code: str) -> dict[str, Any]:
+        return {
+            "schema_version": WORKFLOW_RUNTIME_V2_SCHEMA_VERSION,
+            "status": "invalid",
+            "workflow_state": "DRAFT",
+            "error": code,
+            "execution": "not_run",
+            "dry_run": True,
+        }
+
+    @staticmethod
+    def _validated_dispatch_binding(value: object) -> dict[str, str] | None:
+        if not isinstance(value, Mapping) or set(value) != {"execution_owner", "worker_id", "light_profile_id"}:
+            return None
+        owner = value.get("execution_owner")
+        worker = value.get("worker_id")
+        profile = value.get("light_profile_id")
+        owner_pattern = re.compile(r"^[a-z][a-z0-9._:-]{1,95}$")
+        worker_pattern = re.compile(r"^[a-z][a-z0-9._:-]{1,95}$")
+        return {"execution_owner": owner, "worker_id": worker, "light_profile_id": profile} if isinstance(owner, str) and owner_pattern.fullmatch(owner) and isinstance(worker, str) and worker_pattern.fullmatch(worker) and isinstance(profile, str) and _PROFILE_ID.fullmatch(profile) else None
+
+    @staticmethod
+    def _dispatch_profile(preflight: Mapping[str, Any], binding: Mapping[str, str]) -> str | None:
+        resource_plan = preflight.get("resource_plan")
+        reservations = resource_plan.get("reservations") if isinstance(resource_plan, Mapping) else []
+        profile_ids = {item.get("profile_id") for item in reservations if isinstance(item, Mapping) and isinstance(item.get("profile_id"), str) and _PROFILE_ID.fullmatch(item["profile_id"])} if isinstance(reservations, list) else set()
+        if not profile_ids:
+            return binding["light_profile_id"]
+        return next(iter(profile_ids)) if len(profile_ids) == 1 else None
+
+    @staticmethod
+    def _dispatch_unavailable() -> dict[str, str]:
+        return {
+            "status": "unavailable",
+            "reason": "No server-owned Workflow Runtime V2 execution owner is registered.",
+            "next_action": "Keep this preflight as a plan until a trusted execution owner has been separately implemented and verified.",
+        }
+
+    def _capability_plan(self, requirements: list[str]) -> dict[str, Any]:
+        try:
+            snapshot = self._capability_snapshot()
+        except Exception:
+            snapshot = {}
+        states = _capability_states(snapshot)
+        rows: list[dict[str, str]] = []
+        blockers: list[dict[str, str]] = []
+        for capability_id in requirements:
+            record = states.get(capability_id)
+            operational_state = record.get("operational_state") if record else "NOT_REGISTERED"
+            ready = operational_state == "OPERATIONAL"
+            row = {"capability_id": capability_id, "operational_state": operational_state, "state": "ready" if ready else "blocked"}
+            rows.append(row)
+            if not ready:
+                blockers.append({
+                    "kind": "capability",
+                    "capability_id": capability_id,
+                    "code": "capability_not_operational",
+                    "reason": record.get("reason") if record and record.get("reason") else "Capability has no current operational evidence.",
+                    "next_action": record.get("next_action") if record and record.get("next_action") else "Verify the exact capability before requesting workflow dispatch.",
+                })
+        return {"status": "ready" if not blockers else "blocked", "requirements": rows, "blockers": blockers}
+
+    def _resource_plan(self, node_contracts: list[dict[str, Any]]) -> dict[str, Any]:
+        try:
+            snapshot = self._resource_snapshot()
+        except Exception:
+            snapshot = {}
+        policy = snapshot.get("policy") if isinstance(snapshot, Mapping) else {}
+        inventory = snapshot.get("inventory") if isinstance(snapshot, Mapping) else {}
+        profiles = snapshot.get("profiles") if isinstance(snapshot, Mapping) else []
+        available_profiles = [item for item in profiles if isinstance(item, Mapping)] if isinstance(profiles, list) else []
+        requested: dict[str, list[str]] = {}
+        for item in node_contracts:
+            node_id = item.get("node_id")
+            resource = item.get("resource_requirements")
+            requirement_id = resource.get("requirement_id") if isinstance(resource, Mapping) else None
+            if isinstance(node_id, str) and isinstance(requirement_id, str):
+                requested.setdefault(requirement_id, []).append(node_id)
+        scheduler_fit_state = inventory.get("fit_state") if isinstance(inventory, Mapping) else "unknown"
+        resolutions = []
+        for requirement_id, node_ids in sorted(requested.items()):
+            resolution = resolve_requirement(requirement_id, available_profiles) | {"node_ids": list(node_ids)}
+            if requirement_id.startswith("gpu."):
+                estimate = resolution.get("estimated_vram_mb")
+                gpu_rows = inventory.get("gpus") if isinstance(inventory, Mapping) else []
+                if scheduler_fit_state == "current" and isinstance(estimate, int) and not isinstance(estimate, bool) and isinstance(gpu_rows, list):
+                    current_candidates = [
+                        item for item in gpu_rows
+                        if isinstance(item, Mapping)
+                        and item.get("free_vram_evidence_state") == "current"
+                        and isinstance(item.get("vram_available_for_reservation_mb"), int)
+                        and not isinstance(item.get("vram_available_for_reservation_mb"), bool)
+                        and int(item["vram_available_for_reservation_mb"]) >= estimate
+                    ]
+                    resolution["hardware_fit"] = "current" if current_candidates else "blocked"
+                else:
+                    resolution["hardware_fit"] = "unknown"
+            resolutions.append(resolution)
+        gpu_resolutions = [item for item in resolutions if str(item.get("requirement_id")).startswith("gpu.")]
+        max_heavy = policy.get("max_heavy_gpu_jobs") if isinstance(policy, Mapping) else None
+        active_heavy = self._active_heavy(snapshot)
+        valid_policy = isinstance(max_heavy, int) and not isinstance(max_heavy, bool) and max_heavy >= 1
+        valid_active = isinstance(active_heavy, int) and not isinstance(active_heavy, bool) and active_heavy >= 0
+        available = max(0, max_heavy - active_heavy) if valid_policy and valid_active else 0
+        blockers: list[dict[str, str]] = []
+        inventory_ready = isinstance(inventory, Mapping) and inventory.get("status") == "available"
+        inventory_fit_current = isinstance(inventory, Mapping) and inventory.get("fit_state") == "current"
+        if gpu_resolutions and (not valid_policy or not valid_active or not inventory_ready):
+            blockers.append({
+                "kind": "resource",
+                "code": "resource_snapshot_unavailable",
+                "reason": "The server-owned scheduler has no current bounded heavy-GPU capacity projection.",
+                "next_action": "Refresh the server-owned resource inventory before a future dispatch request.",
+            })
+        elif gpu_resolutions and available < 1:
+            blockers.append({
+                "kind": "resource",
+                "code": "heavy_gpu_slot_unavailable",
+                "reason": "The scheduler policy has no available exclusive heavy-GPU slot.",
+                "next_action": "Wait for an existing reservation to complete or cancel through its owner.",
+            })
+        if gpu_resolutions and not inventory_fit_current:
+            blockers.append({
+                "kind": "resource",
+                "code": "resource_inventory_stale" if scheduler_fit_state == "stale" else "gpu_free_vram_evidence_required",
+                "reason": "The server-owned free-VRAM snapshot is stale, so future GPU fit remains unknown." if scheduler_fit_state == "stale" else "Current server-owned free-VRAM evidence is required before a GPU resource fit can be reported as ready.",
+                "next_action": "Refresh the bounded server-owned resource inventory before requesting dispatch.",
+            })
+        for resolution in gpu_resolutions:
+            if resolution.get("state") == "resolved" and resolution.get("hardware_fit") == "blocked":
+                blockers.append({
+                    "kind": "resource",
+                    "node_id": resolution["node_ids"][0],
+                    "code": "gpu_vram_unavailable",
+                    "reason": "Current server-owned free-VRAM evidence does not fit the resolved GPU profile.",
+                    "next_action": "Refresh capacity evidence or choose a separately reviewed compatible profile before future dispatch.",
+                })
+        reservations: list[dict[str, Any]] = []
+        for resolution in resolutions:
+            if resolution.get("hardware_fit") == "blocked":
+                continue
+            if resolution["state"] != "resolved" or resolution.get("hardware_fit") == "unknown":
+                blockers.append({
+                    "kind": "resource",
+                    "node_id": resolution["node_ids"][0],
+                    "code": "gpu_free_vram_evidence_required" if resolution.get("hardware_fit") == "unknown" and str(resolution.get("requirement_id")).startswith("gpu.") else str(resolution["code"]),
+                    "reason": "Current server-owned free-VRAM evidence is required before a GPU reservation plan can be reported." if resolution.get("hardware_fit") == "unknown" and str(resolution.get("requirement_id")).startswith("gpu.") else str(resolution["reason"]),
+                    "next_action": "Publish reviewed resource evidence or a compatible server-owned scheduler profile before requesting workflow dispatch.",
+                })
+                continue
+            reservations.append({
+                "kind": "gpu" if str(resolution["requirement_id"]).startswith("gpu.") else "cpu",
+                "mode": "exclusive" if str(resolution["requirement_id"]).startswith("gpu.") else "shared",
+                "node_ids": resolution["node_ids"],
+                "requirement_id": resolution["requirement_id"],
+                "profile_id": resolution["profile_id"],
+                "state": "not_reserved",
+                "max_concurrent": 1,
+            })
+        resolved_requirements = {item["requirement_id"] for item in resolutions if item["state"] == "resolved"}
+        if len(resolved_requirements) > 1:
+            blockers.append({
+                "kind": "resource",
+                "code": "workflow_multi_profile_coordinator_required",
+                "reason": "The workflow has multiple logical resource requirements; V2 will not collapse them into one reservation or reserve them all at once.",
+                "next_action": "Bind a reviewed phased resource coordinator before requesting durable workflow dispatch.",
+            })
+        return {
+            "status": "ready" if not blockers else "blocked",
+            "reservations": reservations,
+            "resolutions": resolutions,
+            "phased_resource_plan": len(resolved_requirements) > 1,
+            "available_heavy_slots": available if valid_policy and valid_active else None,
+            "blockers": blockers,
+            "policy": "This is a dry-run reservation plan; it does not probe a device or reserve VRAM.",
+        }
+
+    @staticmethod
+    def _active_heavy(snapshot: object) -> int | None:
+        if not isinstance(snapshot, Mapping):
+            return None
+        jobs = snapshot.get("jobs")
+        if not isinstance(jobs, list):
+            return None
+        active_states = {"PREPARING", "RUNNING", "PAUSED", "CANCELLING"}
+        total = 0
+        for item in jobs:
+            if not isinstance(item, Mapping) or item.get("state") not in active_states:
+                continue
+            profile = item.get("resource_profile")
+            if not isinstance(profile, Mapping) or profile.get("gpu_required") is not True:
+                continue
+            heavy = profile.get("heavy_gpu")
+            # Older scheduler projections may lack the additive field. Count
+            # those active GPU records conservatively rather than freeing a
+            # heavy slot on an ambiguous legacy payload.
+            if heavy is not False:
+                total += 1
+        return total
+
+    def _artifact_plan(self, requests: list[tuple[str, str, str]]) -> dict[str, Any]:
+        rows: list[dict[str, Any]] = []
+        blockers: list[dict[str, str]] = []
+        for node_id, artifact_id, expected_type in requests:
+            try:
+                record = self._artifact_describer(artifact_id)
+            except Exception:
+                record = None
+            media_type = _artifact_media_type(record) if isinstance(record, Mapping) else None
+            found = isinstance(record, Mapping)
+            compatible = found and (media_type == expected_type or expected_type == "METADATA")
+            rows.append({
+                "node_id": node_id,
+                "artifact_id": artifact_id,
+                "expected_type": expected_type,
+                "media_type": media_type,
+                "state": "ready" if compatible else "missing" if not found else "type_mismatch",
+            })
+            if not compatible:
+                blockers.append({
+                    "kind": "artifact",
+                    "artifact_id": artifact_id,
+                    "node_id": node_id,
+                    "code": "artifact_not_found" if not found else "artifact_type_mismatch",
+                    "reason": "The opaque artifact is not available with the type required by this node.",
+                    "next_action": "Select an existing Hub artifact with the required typed socket media.",
+                })
+        return {"status": "ready" if not blockers else "blocked", "artifacts": rows, "missing": [item["artifact_id"] for item in rows if item["state"] == "missing"], "blockers": blockers}
+
+
+__all__ = ["WORKFLOW_RUNTIME_V2_EXECUTION_MODE", "WORKFLOW_RUNTIME_V2_SCHEMA_VERSION", "WORKFLOW_STATES", "WorkflowRuntimeV2"]

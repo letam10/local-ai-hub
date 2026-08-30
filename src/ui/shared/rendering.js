@@ -684,8 +684,8 @@ const workspaceState = (label, item = {}, fallbackAction = "Kiểm tra backend r
 };
 const workflowLibraryState = (item = {}) => {
   const status = String(item.status || "partial");
-  const reason = String(item.reason || "Workflow Library server-owned adapter chưa được V5-D wire.");
-  const action = String(item.action || "Tiếp tục local draft; xác nhận endpoint typed trước khi đồng bộ.");
+  const reason = String(item.reason || "Workflow Library server-owned adapter chưa khả dụng.");
+  const action = String(item.action || "Tiếp tục local draft; kiểm tra endpoint typed trước khi đồng bộ.");
   return '<section class="workflow-library-state card card--flat" data-status="' + escapeHtml(status) + '" aria-labelledby="workflow-library-title"><div class="card-title-row"><div><span class="eyebrow" data-i18n="WORKFLOW LIBRARY">' + uiTextHtml("WORKFLOW LIBRARY") + '</span><h2 id="workflow-library-title" data-i18n="Workflow bền vững, local-first">' + uiTextHtml("Workflow bền vững, local-first") + '</h2></div>' + statusPill(status) + '</div><p>' + escapeHtml(reason) + '</p><div class="workspace-state__action"><strong data-i18n="Bước tiếp theo">' + uiTextHtml("Bước tiếp theo") + '</strong><span>' + escapeHtml(action) + '</span></div><small class="small" data-i18n="Graph chỉ là declarative metadata; không tự chạy node hoặc GPU khi chỉnh sửa.">' + uiTextHtml("Graph chỉ là declarative metadata; không tự chạy node hoặc GPU khi chỉnh sửa.") + '</small></section>';
 };
 const activeTab = (state, module) => state.workspaceTabs?.[module] || "quick";

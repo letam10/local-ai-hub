@@ -145,7 +145,10 @@ class V8P0StartupRecoveryTests(unittest.TestCase):
             self.assertEqual(result["status"], "passed")
             command = popen.call_args.args[0]
             environment = popen.call_args.kwargs["env"]
-            self.assertEqual(command[-2:], ["-m", "src.services.api.api_server"])
+            self.assertEqual(command[1], "-c")
+            self.assertIn("sys.path.insert(0", command[2])
+            self.assertIn(json.dumps(str(app)), command[2])
+            self.assertIn("src.services.api.api_server", command[2])
             self.assertNotEqual(environment["LOCALAIHUB_PORT"], "8765")
             self.assertEqual(environment["LOCALAIHUB_BUILD_SHA"], source)
             self.assertEqual(child.returncode, 0)

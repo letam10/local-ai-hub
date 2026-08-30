@@ -42,3 +42,31 @@ rules:
     text: Existing install reuse may write only a catalog-bound receipt after exact leaf/reparse validation; it never copies, redownloads or overwrites bytes.
   - id: update-delta-preservation
     text: Update activation preserves unchanged component files and a rollback slot; only the reviewed candidate leaf is replaced.
+  - id: capability-graph-read-only
+    text: Capability Graph V2 composes only server-owned snapshots and fresh fingerprinted evidence; it cannot launch, download, import, or promote an unverified or stale capability to operational.
+  - id: feature-discovery-v2-protocol-only
+    text: Feature Discovery V2 advertises only finite contracts confirmed by the active Router. It cannot infer runtime readiness, probe hardware, expose local paths, or imply that a discoverable endpoint can execute work.
+  - id: component-lifecycle-v2-authority
+    text: Component Lifecycle Engine V2 may create only existing V8 server-owned plans; confirmation and execution remain with the durable V8 coordinator, while unregistered lifecycle adapters stay blocked.
+  - id: model-manager-v2-bounded-inventory
+    text: Model Manager V2 uses bounded catalog observations and opaque locations only; it blocks duplicate downloads, never scans all Models at page load, and delegates any import/reuse/verify/remove action to an existing V8 plan.
+  - id: resource-scheduler-server-owned
+    text: Resource Scheduler V2 accepts only a server-owned inventory/profile and exact internal job-worker lease identity; it reserves capacity without probing GPU or launching a worker, while browsers can inspect only read-only projections.
+  - id: durable-job-engine-v2-truthful-execution
+    text: Durable Job Engine V2 persists only opaque metadata with revision CAS and compensated scheduler bindings. Browser routes cannot claim or drive a worker; stale pre-start records require trusted readmission, queued/reconstruct-only records are never presented as executing, and history deletion never deletes artifacts.
+  - id: workflow-runtime-v2-plan-only
+    text: Workflow Runtime V2 validates typed graphs and creates only bounded capability/resource/artifact preflight plans. It cannot persist a workflow, reserve a scheduler slot, claim a worker, run a node, expose a local path or infer execution authority from a READY plan.
+  - id: workflow-data-v2-existing-owner
+    text: Project Workspace V2 and Artifact Library V2 are read-only path-free projections over existing server-owned stores. They cannot create a second metadata owner, generate a thumbnail, delete an artifact, mutate a project or broaden preview access.
+  - id: media-pipeline-v2-closed-preflight
+    text: Media Pipeline V2 accepts only opaque artifacts and finite allowlisted operations/backends. Its preflight never invokes FFmpeg, AnimeSR, RIFE, a provider or GPU workload, and FFmpeg fallbacks are never labelled as AI operations.
+  - id: provider-adapters-v2-server-owned
+    text: Provider Adapters V2 is a finite first-party typed preflight catalog. It consumes only Capability Graph and Scheduler projections; it cannot import a dynamic module, accept a path/URL/command/provider body, probe GPU, load a model, start a worker or execute a provider without a separately reviewed server-owned owner.
+  - id: external-integrations-v2-path-free
+    text: External Integrations V2 projects only sanitized allowlisted application state and trusted enum observations. It never exposes a path, endpoint or credential, embeds an external WebView, guesses an API, launches an application from its V2 launch-plan route or relocates installer-managed software.
+  - id: product-experience-v2-finite-catalog
+    text: Product Experience V2 exposes only a finite server-owned navigation/onboarding/search catalog. It never searches user data, reads files, persists browser completion, saves settings, starts a provider or executes a workflow.
+  - id: platform-hardening-v2-read-only-contract
+    text: Platform Hardening V2 exposes only the existing updater, backup/recovery, process ownership, security and performance boundaries. Its projection never runs an update, restore, process action, benchmark or machine probe.
+  - id: platform-extensibility-v2-owner-required
+    text: Platform Extensibility V2 exposes only declarative Plugin SDK, API versioning and future remote-worker contracts. It cannot import plugin code, read credentials, open an endpoint, dispatch a remote worker or silently change an API version.

@@ -24,13 +24,15 @@ RECIPE_PACK_CONTRACT = "creative-recipe-pack.v1"
 COMPARE_CONTRACT = "creative-compare.v1"
 
 # Schema version — increment when project/recipe manifest structure changes.
-PROJECT_SCHEMA_VERSION = 2
+PROJECT_SCHEMA_VERSION = 3
 
 ARTIFACT_ID_RE = re.compile(r"^artifact_[a-f0-9]{32}$")
 PROJECT_ID_RE = re.compile(r"^project_[a-f0-9]{32}$")
 RECIPE_ID_RE = re.compile(r"^recipe_[a-f0-9]{32}$")
 COLLECTION_ID_RE = re.compile(r"^collection_[a-f0-9]{32}$")
 COMPARE_ID_RE = re.compile(r"^compare_[a-f0-9]{32}$")
+WORKFLOW_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+){0,11}$")
+JOB_ID_RE = re.compile(r"^(?:jobv2_[a-f0-9]{32}|jobv5_[a-f0-9]{32}|job_[0-9]{8}_[0-9]{6}_[a-f0-9]{8})$")
 PRESET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 VARIABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,39}$")
 LOCAL_PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\)")
@@ -43,6 +45,8 @@ MAX_ASSETS_PER_PROJECT = 240
 MAX_COMPARE_ITEMS = 8
 MAX_COLLECTIONS = 80
 MAX_TAGS = 16
+MAX_WORKFLOWS_PER_PROJECT = 128
+MAX_JOBS_PER_PROJECT = 256
 
 _FORBIDDEN_KEYS = {
     "api_key",
@@ -203,6 +207,12 @@ def normalize_project(value: object, *, allow_id: bool = False) -> dict[str, Any
     recipe_ids = value.get("recipe_ids", [])
     if not isinstance(recipe_ids, list) or len(recipe_ids) > MAX_RECIPES or not all(isinstance(item, str) and RECIPE_ID_RE.fullmatch(item) for item in recipe_ids):
         raise ValueError("recipe_ids không hợp lệ.")
+    workflow_ids = value.get("workflow_ids", [])
+    if not isinstance(workflow_ids, list) or len(workflow_ids) > MAX_WORKFLOWS_PER_PROJECT or not all(isinstance(item, str) and WORKFLOW_ID_RE.fullmatch(item) for item in workflow_ids):
+        raise ValueError("workflow_ids không hợp lệ.")
+    job_ids = value.get("job_ids", [])
+    if not isinstance(job_ids, list) or len(job_ids) > MAX_JOBS_PER_PROJECT or not all(isinstance(item, str) and JOB_ID_RE.fullmatch(item) for item in job_ids):
+        raise ValueError("job_ids không hợp lệ.")
     result = {
         "contract_version": PROJECT_CONTRACT,
         "title": title,
@@ -211,6 +221,8 @@ def normalize_project(value: object, *, allow_id: bool = False) -> dict[str, Any
         "tags": normalize_tags(value.get("tags", [])),
         "asset_ids": list(dict.fromkeys(asset_ids)),
         "recipe_ids": list(dict.fromkeys(recipe_ids)),
+        "workflow_ids": list(dict.fromkeys(workflow_ids)),
+        "job_ids": list(dict.fromkeys(job_ids)),
         "selected_asset_id": value.get("selected_asset_id") if is_artifact_id(value.get("selected_asset_id")) else None,
         "selected_recipe_id": value.get("selected_recipe_id") if isinstance(value.get("selected_recipe_id"), str) and RECIPE_ID_RE.fullmatch(value["selected_recipe_id"]) else None,
         "workflow_preset": value.get("workflow_preset") if isinstance(value.get("workflow_preset"), str) and PRESET_ID_RE.fullmatch(value["workflow_preset"]) else None,

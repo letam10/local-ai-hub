@@ -28,7 +28,7 @@ if str(ROOT) not in sys.path:
 from scripts.v8_release_provenance import ReleasePolicyError, release_policy_snapshot
 
 GATES_PATH = ROOT / "architecture" / "v8_acceptance_gates.json"
-EVIDENCE_SCHEMA_VERSION = "v8-local-acceptance-evidence.v1"
+EVIDENCE_SCHEMA_VERSION = "v8-local-acceptance-evidence.v2"
 REPORT_SCHEMA_VERSION = "v8-local-gate-report.v1"
 WEBVIEW_CAPABILITY_REPORT_SCHEMA_VERSION = "v8-local-gate-report.v2"
 REPORTS_DIR_NAME = "reports"
@@ -39,6 +39,8 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 GATE_ID = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
 CHECK_ID = re.compile(r"^[a-z][a-z0-9_.-]{1,95}$")
 EVIDENCE_STATUSES = frozenset({"PASS", "FAIL", "BLOCKED", "NOT_RUN"})
+PROVENANCE_SCHEMA_VERSION = "v8-local-gate-provenance.v1"
+PROVENANCE_KINDS = frozenset({"RERUN_EXACT_HEAD", "REUSED_UNAFFECTED_EVIDENCE"})
 _WEBVIEW_CAPABILITY_SCHEMA = "v8-webview-dpi-evidence.v1"
 _WEBVIEW_NATIVE_STATUSES = frozenset({"PASS", "NOT_AVAILABLE_ON_TEST_HOST"})
 REQUIRED_SOURCE_FILES = (
@@ -73,6 +75,99 @@ REQUIRED_SOURCE_FILES = (
     "tests/test_v8_update_transaction.py",
     "tests/test_v8_update_transport.py",
 )
+
+# These are bounded source domains, deliberately not filesystem paths in any
+# evidence packet.  A reused report is valid only if the source diff from its
+# originating commit does not touch the gate's relevant domain.
+_GATE_IMPACT_SCOPES: dict[str, frozenset[str]] = {
+    "windows_filesystem": frozenset({"filesystem_transaction"}),
+    "artifact_callsite_inventory": frozenset({"artifact_callsite"}),
+    "native_picker_restart": frozenset({"native_picker"}),
+    "executing_operation_cancel": frozenset({"execution_cancel", "resource_scheduler"}),
+    "bundle_atomic_rollback": frozenset({"bundle_atomic"}),
+    "real_component_lifecycle": frozenset({"component_lifecycle"}),
+    "loopback_api": frozenset({"loopback_api", "desktop_startup"}),
+    "webview2_product_ux": frozenset({"desktop_startup", "product_experience", "diagnostics"}),
+    "sqlite_backup_restore": frozenset({"sqlite_backup"}),
+    "packaging_upgrade": frozenset({"desktop_startup", "updater"}),
+    "crash_recovery": frozenset({"desktop_startup", "updater"}),
+    "runtime_smoke": frozenset({"desktop_startup", "runtime"}),
+}
+
+# A high-risk source tree must never silently disappear from the impact audit
+# merely because a new subsystem was added without a mapper entry.  This is a
+# deliberately finite sentinel (not a wildcard gate scope): reused evidence
+# is refused whenever the sentinel appears until the path is classified or the
+# affected gate is rerun.  Documentation/tests outside these roots remain
+# intentionally unclassified and do not block reuse.
+_UNCLASSIFIED_ACCEPTANCE_RELEVANT = "unclassified_acceptance_relevant"
+_HIGH_RISK_UNCLASSIFIED_PREFIXES = (
+    "src/app/",
+    "src/services/",
+    "src/shared/",
+    "src/ui/",
+    "scripts/",
+    "architecture/",
+)
+
+
+def _path_impact_scope(path: str) -> str | None:
+    normalized = path.replace("\\", "/")
+    if normalized.startswith("src/services/resource_scheduler/"):
+        return "resource_scheduler"
+    if normalized.startswith("src/services/workflow_runtime_v2/"):
+        return "workflow_runtime"
+    if normalized.startswith("src/services/provider_adapters_v2/"):
+        return "provider_adapters"
+    if normalized.startswith("src/services/project_manager/"):
+        return "filesystem_transaction"
+    if normalized.startswith("src/services/product_experience_v2/") or normalized.startswith("src/ui/"):
+        return "product_experience"
+    if normalized.startswith("src/services/diagnostics/"):
+        return "diagnostics"
+    if normalized.startswith(("src/app/main.py", "src/app/payload_bootstrap.py", "src/app/desktop_lifecycle.py")):
+        return "desktop_startup"
+    if normalized.startswith(("src/services/app_update.py", "src/services/update_transport.py", "src/app/update_")):
+        return "updater"
+    if normalized == "scripts/stage_stable_product.py":
+        return "updater"
+    if normalized.startswith("src/services/api/"):
+        return "loopback_api"
+    if normalized.startswith("src/services/component_"):
+        return "component_lifecycle"
+    if normalized.startswith("src/services/backup") or normalized.startswith("src/services/restore"):
+        return "sqlite_backup"
+    if normalized.startswith("src/services/artifact"):
+        return "artifact_callsite"
+    if normalized.startswith("src/services/runtime"):
+        return "runtime"
+    if normalized.startswith(("scripts/v8_acceptance_gate.py", "architecture/v8_acceptance_gates.json")):
+        return "acceptance_contract"
+    if normalized.startswith("architecture/"):
+        return "acceptance_contract"
+    if normalized.startswith("src/services/capability_graph/"):
+        return "loopback_api"
+    if normalized.startswith("src/services/durable_job_engine_v2/"):
+        return "execution_cancel"
+    if normalized.startswith("src/services/feature_discovery_v2.py"):
+        return "product_experience"
+    if normalized.startswith("src/services/model_manager_v2/"):
+        return "component_lifecycle"
+    if normalized.startswith("src/services/platform_extensibility_v2.py"):
+        return "product_experience"
+    if normalized.startswith("src/services/platform_hardening_v2.py"):
+        return "diagnostics"
+    if normalized.startswith("src/services/product_experience_v2.py"):
+        return "product_experience"
+    if normalized.startswith("src/services/projection_cache.py"):
+        return "product_experience"
+    if normalized.startswith("src/services/workflow_library/"):
+        return "workflow_runtime"
+    if normalized.startswith("src/shared/schemas/workflow_library.py"):
+        return "workflow_runtime"
+    if normalized.startswith(_HIGH_RISK_UNCLASSIFIED_PREFIXES):
+        return _UNCLASSIFIED_ACCEPTANCE_RELEVANT
+    return None
 
 
 class AcceptanceGateError(ValueError):
@@ -246,6 +341,68 @@ def source_preflight(
     }
 
 
+def _validate_gate_provenance(value: Any, *, gate_id: str, evidence_source_commit: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise AcceptanceGateError("EVIDENCE_PROVENANCE_REQUIRED")
+    kind = value.get("kind")
+    expected_fields = {"schema_version", "kind", "origin_source_commit", "reason_code"}
+    if kind == "REUSED_UNAFFECTED_EVIDENCE":
+        expected_fields.add("unaffected_scopes")
+    if set(value) != expected_fields or value.get("schema_version") != PROVENANCE_SCHEMA_VERSION:
+        raise AcceptanceGateError("EVIDENCE_PROVENANCE_INVALID")
+    origin = value.get("origin_source_commit")
+    if kind not in PROVENANCE_KINDS or not isinstance(origin, str) or OID.fullmatch(origin) is None:
+        raise AcceptanceGateError("EVIDENCE_PROVENANCE_INVALID")
+    if kind == "RERUN_EXACT_HEAD":
+        if origin != evidence_source_commit or value.get("reason_code") != "rerun_exact_head":
+            raise AcceptanceGateError("EVIDENCE_PROVENANCE_RERUN_BINDING_INVALID")
+        return {"kind": kind, "origin_source_commit": origin, "reason_code": "rerun_exact_head"}
+    scopes = value.get("unaffected_scopes")
+    expected_scopes = sorted(_GATE_IMPACT_SCOPES.get(gate_id, frozenset()))
+    if (
+        value.get("reason_code") != "source_change_scope_unaffected"
+        or origin == evidence_source_commit
+        or not isinstance(scopes, list)
+        or scopes != expected_scopes
+    ):
+        raise AcceptanceGateError("EVIDENCE_PROVENANCE_REUSE_INVALID")
+    return {
+        "kind": kind,
+        "origin_source_commit": origin,
+        "reason_code": "source_change_scope_unaffected",
+        "unaffected_scopes": list(scopes),
+    }
+
+
+def source_change_scopes(repo_root: Path, *, origin_source_commit: str, final_source_commit: str) -> set[str]:
+    """Return bounded semantic source scopes changed between two commits."""
+
+    try:
+        ancestry = subprocess.run(
+            ["git", "-C", str(repo_root), "merge-base", "--is-ancestor", origin_source_commit, final_source_commit],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+        if ancestry.returncode != 0:
+            raise AcceptanceGateError("EVIDENCE_PROVENANCE_ORIGIN_NOT_ANCESTOR")
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "diff", "--name-only", f"{origin_source_commit}..{final_source_commit}"],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise AcceptanceGateError("EVIDENCE_PROVENANCE_SCOPE_UNAVAILABLE") from None
+    if result.returncode != 0:
+        raise AcceptanceGateError("EVIDENCE_PROVENANCE_SCOPE_UNAVAILABLE")
+    try:
+        paths = result.stdout.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        raise AcceptanceGateError("EVIDENCE_PROVENANCE_SCOPE_UNAVAILABLE") from None
+    return {scope for path in paths if (scope := _path_impact_scope(path)) is not None}
+
+
 def _validate_evidence(value: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {"schema_version", "evidence_class", "platform", "source_commit", "gates"}:
         raise AcceptanceGateError("EVIDENCE_ROOT_INVALID")
@@ -264,7 +421,7 @@ def _validate_evidence(value: Any, contract: Mapping[str, Any]) -> dict[str, Any
     normalized: dict[str, dict[str, Any]] = {}
     for gate_id in required_ids:
         item = gates.get(gate_id)
-        if not isinstance(item, dict) or set(item) != {"status", "report_sha256"}:
+        if not isinstance(item, dict) or set(item) != {"status", "report_sha256", "provenance"}:
             raise AcceptanceGateError("EVIDENCE_GATE_INVALID")
         status = item.get("status")
         report_sha256 = item.get("report_sha256")
@@ -274,7 +431,11 @@ def _validate_evidence(value: Any, contract: Mapping[str, Any]) -> dict[str, Any
             raise AcceptanceGateError("EVIDENCE_REPORT_DIGEST_INVALID")
         if status == "PASS" and not isinstance(report_sha256, str):
             raise AcceptanceGateError("EVIDENCE_PASS_WITHOUT_REPORT")
-        normalized[gate_id] = {"status": status, "report_sha256": report_sha256}
+        normalized[gate_id] = {
+            "status": status,
+            "report_sha256": report_sha256,
+            "provenance": _validate_gate_provenance(item.get("provenance"), gate_id=gate_id, evidence_source_commit=source_commit),
+        }
     return {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "evidence_class": value["evidence_class"],
@@ -375,7 +536,7 @@ def _validate_webview_capabilities(value: Any, contract: Mapping[str, Any]) -> N
             raise AcceptanceGateError("EVIDENCE_WEBVIEW_LAYOUT_FAILED")
 
 
-def _verify_pass_reports(evidence: Mapping[str, Any], evidence_path: Path, contract: Mapping[str, Any]) -> None:
+def _verify_pass_reports(evidence: Mapping[str, Any], evidence_path: Path, contract: Mapping[str, Any], *, repo_root: Path) -> None:
     reports_dir = evidence_path.parent / REPORTS_DIR_NAME
     required_by_gate = {
         str(item["gate_id"]): item
@@ -385,10 +546,20 @@ def _verify_pass_reports(evidence: Mapping[str, Any], evidence_path: Path, contr
     for gate_id, item in evidence["gates"].items():
         if item["status"] != "PASS":
             continue
+        provenance = item["provenance"]
+        report_source_commit = str(provenance["origin_source_commit"])
+        if provenance["kind"] == "REUSED_UNAFFECTED_EVIDENCE":
+            changed_scopes = source_change_scopes(
+                repo_root,
+                origin_source_commit=report_source_commit,
+                final_source_commit=str(evidence["source_commit"]),
+            )
+            if _UNCLASSIFIED_ACCEPTANCE_RELEVANT in changed_scopes or changed_scopes & _GATE_IMPACT_SCOPES[gate_id]:
+                raise AcceptanceGateError("EVIDENCE_REUSED_GATE_AFFECTED_BY_SOURCE_CHANGE")
         _validate_pass_report(
             reports_dir / f"{gate_id}.json",
             gate_id=gate_id,
-            source_commit=str(evidence["source_commit"]),
+            source_commit=report_source_commit,
             platform=str(evidence["platform"]),
             expected_sha256=str(item["report_sha256"]),
             required_checks=[str(check) for check in required_by_gate[gate_id]["required_checks"]],
@@ -435,7 +606,7 @@ def evaluate(
     else:
         try:
             evidence = _validate_evidence(_load_json(evidence_path), contract)
-            _verify_pass_reports(evidence, evidence_path, contract)
+            _verify_pass_reports(evidence, evidence_path, contract, repo_root=repo_root)
             pending = [gate_id for gate_id, item in evidence["gates"].items() if item["status"] != "PASS"]
             source_matches = evidence["source_commit"] == head
             evidence_summary.update({

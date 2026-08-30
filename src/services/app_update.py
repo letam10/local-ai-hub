@@ -37,6 +37,7 @@ from src.app.stable_shell import (
     load_current_pointer,
     resolve_launch_plan,
 )
+from src.app.payload_bootstrap import api_server_command
 from src.shared.runtime_identity import API_PROTOCOL_VERSION, api_identity
 from src.shared.version import PRODUCT_VERSION
 from src.services.process_manager.managed import terminate_owned_process
@@ -859,7 +860,7 @@ class AppUpdateService:
             with log_path.open("ab") as log:
                 try:
                     child = subprocess.Popen(
-                        [str(runtime_pythonw), "-m", "src.services.api.api_server"],
+                        [str(runtime_pythonw), *api_server_command(app_root)],
                         cwd=str(app_root),
                         env=environment,
                         stdin=subprocess.DEVNULL,

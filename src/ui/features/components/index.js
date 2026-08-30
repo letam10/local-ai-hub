@@ -16,6 +16,7 @@ export const componentsFeature = Object.freeze({
     "maintenance-plan",
     "component-operation-journal",
     "component-source-acceptance",
+    "capability-graph-v2",
   ],
   actionLabel: "componentActionLabel",
 });

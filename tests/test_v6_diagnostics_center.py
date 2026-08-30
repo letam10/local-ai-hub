@@ -168,10 +168,21 @@ class TestDiagnosticsGpu(unittest.TestCase):
         mock = MagicMock()
         mock.returncode = 0
         mock.stdout = 'NVIDIA RTX 4090, 24564 MiB, 535.86.10\n'
-        with patch('subprocess.run', return_value=mock):
+        with patch('subprocess.run', return_value=mock) as run:
             result = dc.gpu_detection()
             self.assertEqual(result['status'], HEALTHY)
             self.assertEqual(len(result['gpus']), 1)
+            if os.name == 'nt':
+                self.assertEqual(run.call_args.kwargs['creationflags'], getattr(__import__('subprocess'), 'CREATE_NO_WINDOW', 0))
+
+    def test_diagnostics_subprocesses_are_hidden_on_windows(self):
+        dc = DiagnosticsCenter()
+        mock = MagicMock(returncode=0, stdout='true\n')
+        with patch('subprocess.run', return_value=mock) as run:
+            dc.git_integrity_state()
+        if os.name == 'nt':
+            self.assertGreaterEqual(run.call_count, 1)
+            self.assertTrue(all(call.kwargs.get('creationflags') == getattr(__import__('subprocess'), 'CREATE_NO_WINDOW', 0) for call in run.call_args_list))
 
 
 class TestDiagnosticsExportBundle(unittest.TestCase):

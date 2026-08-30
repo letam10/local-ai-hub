@@ -274,6 +274,7 @@ def _api_context() -> ApiContext:
             "health": health,
             "bootstrap_payload": _bootstrap_payload,
             "capability_control_plane": capability_control_plane,
+            "resource_scheduler_hardware": lambda: __import__("src.services.api.config", fromlist=["module_manager_config"]).module_manager_config().get("hardware_snapshot"),
             "lifecycle_payload": _lifecycle_payload,
             "component_statuses": component_statuses,
             "component_manager": component_api,
@@ -711,6 +712,10 @@ def main() -> int:
         reconcile_durable_jobs()
     except Exception:
         LOG.warning("V5 durable recovery is unavailable; preserving the existing state.")
+    try:
+        _api_context().call("durable_job_v2_reconcile_startup")
+    except Exception:
+        LOG.warning("V2 durable recovery is unavailable; preserving the existing metadata for Diagnostics.")
     reconcile_startup()
     LOG.info("Local AI Hub listening on %s:%s", host, port)
     try:

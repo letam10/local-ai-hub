@@ -60,6 +60,39 @@ to-video nhưng trả `unavailable` có hướng dẫn vì chưa có adapter gen
 local đã smoke. Chi tiết template và ma trận backend nằm ở
 [Video Creative Workflow Milestone 2](VIDEO_CREATIVE_WORKFLOW_MILESTONE_2.md).
 
+Post-V8 M2 bắt đầu bằng lớp `workflow-runtime.v2` preflight và các projection
+`project-workspace.v2`, `artifact-library.v2`, `media-pipeline.v2`. Các lớp này
+không thay thế owner persistence V7/V8, không reserve GPU/job, không chạy media
+và chỉ dùng opaque artifact ID. Chi tiết hợp đồng xem
+[Post-V8 Workflow & Data M2](architecture/POST_V8_WORKFLOW_DATA_M2.md).
+
+Post-V8 M3 thêm `provider-adapters.v2` và `external-integrations.v2`: catalog
+finite cho các first-party adapter với typed preflight, dependency và declared
+resource profile; cùng projection AIRI/ứng dụng ngoài không có path, endpoint
+hay credential. M3 không import adapter legacy, không khởi chạy worker/provider
+hoặc external app, không embed WebView ngoài và không biến dependency đủ thành
+quyền thực thi. Chi tiết xem
+[Post-V8 Provider Adapters & External Integrations M3](architecture/POST_V8_PROVIDER_ADAPTERS_M3.md).
+
+Post-V8 M4 thêm Product Experience V2: catalog Dashboard/onboarding/tìm kiếm
+global hữu hạn do Hub API sở hữu. Catalog chỉ dẫn đến các route sản phẩm hiện
+có; không tìm user data, không ghi Settings và không thực thi workflow. Theme
+và ngôn ngữ vẫn chỉ áp dụng sau **Áp dụng & lưu**. Chi tiết xem
+[Post-V8 Product Experience M4](architecture/POST_V8_PRODUCT_EXPERIENCE_M4.md).
+
+Post-V8 M5 thêm Platform Hardening V2: một projection hữu hạn cho Updater V3,
+Backup/Recovery, Process Supervisor, Security và Performance. Bản này mô tả
+owner, state, failure và recovery của các service hiện hữu; mọi thao tác update,
+restore, process hoặc benchmark vẫn ở API owner/confirmation riêng và không
+được báo như đã thực thi. Chi tiết xem
+[Post-V8 Platform Hardening M5](architecture/POST_V8_PLATFORM_HARDENING_M5.md).
+
+Post-V8 M6 hoàn thiện lớp Extensibility V2: Plugin SDK khai báo quyền
+metadata-only, API versioning có identity/deprecation rõ ràng và remote-worker
+abstraction tương lai ở trạng thái `NOT_CONFIGURED`. Contract không import
+plugin, mở endpoint, đọc credential hay dispatch remote worker. Chi tiết xem
+[Post-V8 Platform Extensibility M6](architecture/POST_V8_PLATFORM_EXTENSIBILITY_M6.md).
+
 ## API và kiểm thử
 
 Các route Node Studio chính:

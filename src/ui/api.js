@@ -60,6 +60,13 @@ export const planComponentUpdate = (componentId) => request("/api/updates/plan",
 export const confirmComponentUpdate = (planId, confirmed = false) => request(`/api/updates/plans/${encodeURIComponent(planId)}/confirm`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: Boolean(confirmed) }) });
 export const rollbackComponentUpdate = (componentId) => request("/api/updates/rollback", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ component_id: String(componentId) }) });
 export const getApplications = () => request("/api/applications");
+export const getExternalIntegrationsV2 = () => request("/api/external-integrations/v2");
+export const getProductExperienceV2 = () => request("/api/product-experience/v2");
+export const searchProductExperienceV2 = (query = "") => request(`/api/product-experience/v2/search?${new URLSearchParams({ q: String(query || "").slice(0, 80) })}`);
+export const getPlatformHardeningV2 = () => request("/api/platform-hardening/v2");
+export const getPlatformHardeningAreaV2 = (areaId) => request(`/api/platform-hardening/v2/${encodeURIComponent(areaId)}`);
+export const getPlatformExtensibilityV2 = () => request("/api/extensibility/v2");
+export const getPlatformExtensibilityAreaV2 = (areaId) => request(`/api/extensibility/v2/${encodeURIComponent(areaId)}`);
 export const getSettings = () => request("/api/settings");
 export const getSettingsSchema = () => request("/api/settings/schema");
 export const patchSettings = (patch, expectedRevision) => request("/api/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...patch, expected_revision: expectedRevision }) });
@@ -76,6 +83,8 @@ export const getWorkflowLibrary = () => request("/api/workflow-library");
 export const getWorkflowLibraryEntry = (id) => request(`/api/workflow-library/${encodeURIComponent(id)}`);
 export const saveWorkflowLibrary = (workflow, expectedRevision) => request("/api/workflow-library", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workflow, expected_revision: expectedRevision }) });
 export const deleteWorkflowLibrary = (id, expectedRevision) => request(`/api/workflow-library/${encodeURIComponent(id)}`, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expected_revision: expectedRevision }) });
+export const setWorkflowLibraryFavorite = (id, favorite, expectedRevision) => request(`/api/workflow-library/${encodeURIComponent(id)}/favorite`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(expectedRevision === undefined ? { favorite: Boolean(favorite) } : { favorite: Boolean(favorite), expected_revision: expectedRevision }) });
+export const markWorkflowLibraryOpened = (id, expectedRevision) => request(`/api/workflow-library/${encodeURIComponent(id)}/opened`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(expectedRevision === undefined ? {} : { expected_revision: expectedRevision }) });
 export const planWorkflowLibraryMigration = (entries) => request("/api/workflow-library/migration/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ entries }) });
 export const confirmWorkflowLibraryMigration = (entries, expectedRevision) => request("/api/workflow-library/migration/confirm", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ entries, expected_revision: expectedRevision }) });
 
@@ -136,6 +145,22 @@ export const validateNodeGraph = (graph, requireRunnable = false) => request("/a
 export const getDirtyNodes = (graph, changedNodeIds) => request("/api/node-studio/dirty", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ graph, changed_node_ids: changedNodeIds }) });
 export const runNodeGraph = (graph, draft = false) => request("/api/node-studio/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ graph, draft }) });
 export const getNodeRun = (jobId) => request(`/api/node-studio/runs/${encodeURIComponent(jobId)}`);
+
+// Post-V8 Milestone 2: preflight and projections are deliberately separate
+// from Run Graph. They return only plan/read-only metadata and never start a
+// worker, provider, model, GPU or media process.
+export const getWorkflowRuntimeV2 = () => request("/api/workflow-runtime/v2");
+export const preflightWorkflowRuntimeV2 = (payload) => request("/api/workflow-runtime/v2/preflight", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const dispatchWorkflowRuntimeV2 = (payload) => request("/api/workflow-runtime/v2/dispatch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+export const getProjectWorkspaceV2 = () => request("/api/project-workspace/v2");
+export const getProjectWorkspaceV2Entry = (id) => request(`/api/project-workspace/v2/${encodeURIComponent(id)}`);
+export const getProjectWorkspaceV2Manifest = (id) => request(`/api/project-workspace/v2/${encodeURIComponent(id)}/manifest`);
+export const attachProjectWorkflowV2 = (projectId, workflowId) => request(`/api/project-workspace/v2/${encodeURIComponent(projectId)}/workflows`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workflow_id: workflowId }) });
+export const attachProjectJobV2 = (projectId, jobId) => request(`/api/project-workspace/v2/${encodeURIComponent(projectId)}/jobs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ job_id: jobId }) });
+export const getArtifactLibraryV2 = (limit = 120) => request(`/api/artifact-library/v2?limit=${encodeURIComponent(Math.max(1, Math.min(240, Number(limit) || 120)))}`);
+export const getArtifactLibraryV2Entry = (id) => request(`/api/artifact-library/v2/${encodeURIComponent(id)}`);
+export const getMediaPipelineV2 = () => request("/api/media-pipeline/v2");
+export const preflightMediaPipelineV2 = (payload) => request("/api/media-pipeline/v2/preflight", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
 
 // Milestone 4A creative workspace: all records are local metadata and opaque
 // artifact IDs.  The client never receives filesystem paths or secret fields.

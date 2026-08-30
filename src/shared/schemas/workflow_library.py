@@ -127,6 +127,8 @@ _WORKFLOW_SCHEMA = _object_schema(
         "status": {"type": "string", "enum": list(STATUS_VALUES)},
         "source": {"type": "string", "enum": list(SOURCE_VALUES)},
         "tags": {"type": "array", "maxItems": MAX_TAGS, "items": {"type": "string", "maxLength": 64}},
+        "favorite": {"type": "boolean"},
+        "last_opened_at": {"type": "string", "maxLength": 80},
         "created_at": {"type": "string", "maxLength": 80},
         "updated_at": {"type": "string", "maxLength": 80},
     },
@@ -283,6 +285,8 @@ def _normalize_workflow(raw: Mapping[str, Any]) -> dict[str, Any]:
         "status": str(raw.get("status", "draft")),
         "source": str(raw.get("source", "local")),
         "tags": sorted(dict.fromkeys(str(item) for item in raw.get("tags", []))),
+        "favorite": bool(raw.get("favorite", False)),
+        "last_opened_at": str(raw.get("last_opened_at", "")),
         "created_at": str(raw.get("created_at", "")),
         "updated_at": str(raw.get("updated_at", "")),
     }
@@ -308,6 +312,13 @@ def validate_workflow_entry(raw: object) -> dict[str, Any]:
     if raw.get("status") not in STATUS_VALUES or raw.get("source") not in SOURCE_VALUES:
         return {"valid": False, "workflow": None, "errors": [_issue("invalid_workflow")]}
     if not isinstance(raw.get("tags"), list) or len(raw["tags"]) > MAX_TAGS or not all(isinstance(item, str) and 0 < len(item) <= 64 for item in raw["tags"]):
+        return {"valid": False, "workflow": None, "errors": [_issue("bounds")]}
+    # These M2 metadata fields remain optional for V1 compatibility, but a
+    # caller that supplies them must not rely on Python truthiness coercion.
+    # In particular, a string such as "false" must never become favorite=True.
+    if "favorite" in raw and type(raw["favorite"]) is not bool:
+        return {"valid": False, "workflow": None, "errors": [_issue("invalid_workflow")]}
+    if "last_opened_at" in raw and (not isinstance(raw["last_opened_at"], str) or len(raw["last_opened_at"]) > 80):
         return {"valid": False, "workflow": None, "errors": [_issue("bounds")]}
     graph = raw.get("graph")
     if not isinstance(graph, Mapping):

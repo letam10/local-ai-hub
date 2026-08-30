@@ -28,6 +28,10 @@ import {
   getComfyBridgeWorkflow,
   getComfyBridgeWorkflows,
   getCreativeOverview,
+  getProjectWorkspaceV2,
+  getArtifactLibraryV2,
+  getMediaPipelineV2,
+  preflightMediaPipelineV2,
   getImageMaskCompare,
   getImageMaskSession,
   getImageMaskStudioOverview,
@@ -38,13 +42,17 @@ import {
   getDurableJobs,
   retryDurableJob,
   getWorkflowLibrary,
+  getWorkflowLibraryEntry,
   saveWorkflowLibrary,
   deleteWorkflowLibrary,
+  setWorkflowLibraryFavorite,
+  markWorkflowLibraryOpened,
   planWorkflowLibraryMigration,
   confirmWorkflowLibraryMigration,
   getLifecycle,
   getModels,
   getComponents,
+  getApplications,
   createComponentPlan,
   confirmComponentPlan,
   createComponentImportPlan,
@@ -58,6 +66,7 @@ import {
   getStorage,
   getStorageScan,
   getProject,
+  attachProjectWorkflowV2,
   getSettings,
   patchSettings,
   resetSettingsSection,
@@ -110,6 +119,11 @@ import {
   planComponentUpdate,
   confirmComponentUpdate,
   rollbackComponentUpdate,
+  getExternalIntegrationsV2,
+  getProductExperienceV2,
+  searchProductExperienceV2,
+  getPlatformHardeningV2,
+  getPlatformExtensibilityV2,
 } from "./api.js";
 // The compatibility resumeDurableJob endpoint remains available for older
 // clients; this UI deliberately uses retryDurableJob so V8 says "new record,
@@ -127,9 +141,9 @@ globalThis.__localAiHubFrontendStarted = true;
 
 const state = {
   health: {}, capabilities: {}, productization: {}, components: [], componentManager: {}, componentPlans: {}, tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", jobQuery: "", jobTypeFilter: "all", jobSort: "newest", jobPage: 1, apiStatus: "loading", apiError: "",
-  creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
+  creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, projectWorkspaceV2: {}, artifactLibraryV2: {}, mediaPipelineV2: {}, mediaPipelinePreflight: null, externalIntegrationsV2: {}, productExperienceV2: {}, platformHardeningV2: {}, platformExtensibilityV2: {}, onboardingDismissed: false, commandPaletteOpen: false, globalSearch: { query: "", results: [] }, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
-  workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa được V5-D wire.", action: "Tiếp tục local draft; xác nhận endpoint typed trong V5-D trước khi đồng bộ." },
+  workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa khả dụng.", action: "Tiếp tục local draft; kiểm tra endpoint typed trước khi đồng bộ." },
   storageScan: { status: "idle", progress: 0, exact: false },
   productionCatalog: { status: "partial", models: [], runtimes: [] }, updateCenter: { settings: { policy: "manual" }, records: [] }, modelFilters: { query: "", category: "", installed: "all" }, modelActionStatus: "", settingsActionStatus: "", settingsDirty: false,
   featureRegistry: FEATURE_REGISTRY,
@@ -137,6 +151,8 @@ const state = {
 const view = document.querySelector("#module-view");
 const nav = document.querySelector("#sidebar-nav");
 const topStatus = document.querySelector("#top-status");
+const globalSearchResults = document.querySelector("#global-search-results");
+const commandPalette = document.querySelector("#command-palette");
 const recordLoopbackFrontendEvent = async (event, route = null) => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 2000);
@@ -197,8 +213,11 @@ const artifactPreviewLayer = document.querySelector("#artifact-preview-layer");
 const mainContent = document.querySelector("#main-content");
 const workflowLibraryAdapter = createWorkflowLibraryAdapter(null, {
   list: getWorkflowLibrary,
+  get: ({ id }) => getWorkflowLibraryEntry(id),
   save: ({ entry, expected_revision }) => saveWorkflowLibrary(entry, expected_revision),
   remove: ({ id, expected_revision }) => deleteWorkflowLibrary(id, expected_revision),
+  set_favorite: ({ id, favorite, expected_revision }) => setWorkflowLibraryFavorite(id, favorite, expected_revision),
+  mark_opened: ({ id, expected_revision }) => markWorkflowLibraryOpened(id, expected_revision),
   plan_migration: ({ entries }) => planWorkflowLibraryMigration(entries),
   confirm_migration: ({ entries, expected_revision }) => confirmWorkflowLibraryMigration(entries, expected_revision),
 });
@@ -431,9 +450,10 @@ const showDesktopClosePrompt = (detail = {}) => {
 
 window.addEventListener("local-ai-hub:close-request", (event) => showDesktopClosePrompt(event.detail || {}));
 
+const isRoutableRoute = (value) => NAVIGATION.flatMap((group) => group.items).some(([id]) => id === value);
 const routeId = () => {
   const value = window.location.hash.replace(/^#\/?/, "").split("/")[0];
-  return NAVIGATION.flatMap((group) => group.items).some(([id]) => id === value) ? value : "dashboard";
+  return isRoutableRoute(value) ? value : "dashboard";
 };
 
 const safeDisplayMessage = (value, fallback) => typeof value === "string" && value.trim() ? value : fallback;
@@ -641,6 +661,31 @@ const renderNavigation = () => {
   });
 };
 
+const renderGlobalSearch = () => {
+  if (!globalSearchResults) return;
+  const search = state.globalSearch && typeof state.globalSearch === "object" ? state.globalSearch : {};
+  const results = Array.isArray(search.results) ? search.results.filter((item) => item && isRoutableRoute(item.route)) : [];
+  if (!search.query) { globalSearchResults.hidden = true; globalSearchResults.replaceChildren(); return; }
+  globalSearchResults.hidden = false;
+  globalSearchResults.innerHTML = `<div class="global-search-results__panel"><strong>Kết quả tìm Hub</strong><span class="small">${escapeHtml(String(search.query).slice(0, 80))}</span>${results.length ? `<div class="global-search-results__rows">${results.map((item) => `<button class="button button--compact" type="button" data-route="${escapeHtml(item.route || "dashboard")}"><strong>${escapeHtml(item.label || item.id || "Workspace")}</strong><span class="row-meta">${escapeHtml(item.description || "")}</span></button>`).join("")}</div>` : `<p class="small">Không có workspace phù hợp trong catalog Hub.</p>`}</div>`;
+};
+
+const COMMANDS = Object.freeze([
+  { id: "open-models", label: "Mở Models", detail: "Xem model catalog và storage", route: "models" },
+  { id: "open-diagnostics", label: "Mở Diagnostics", detail: "Xem chẩn đoán sanitized", route: "diagnostics" },
+  { id: "new-workflow", label: "New Workflow", detail: "Mở workspace dự án; chưa tạo dữ liệu", route: "projects" },
+  { id: "check-update", label: "Check Update", detail: "Mở nơi kiểm tra update thủ công", route: "models" },
+  { id: "scan-storage", label: "Scan Storage", detail: "Mở Storage; bạn tự bấm Quét lại", route: "models" },
+  { id: "search-artifact", label: "Search Artifact", detail: "Tìm artifact trong metadata Hub", route: "" },
+]);
+
+const renderCommandPalette = () => {
+  if (!commandPalette) return;
+  if (state.commandPaletteOpen !== true) { commandPalette.hidden = true; commandPalette.replaceChildren(); return; }
+  commandPalette.hidden = false;
+  commandPalette.innerHTML = `<div class="command-palette__panel"><div class="card-title-row"><div><span class="eyebrow">COMMAND PALETTE</span><h2 id="command-palette-title">Bảng lệnh Hub</h2><p class="small">Ctrl+K · Escape để đóng. Lệnh chỉ điều hướng hoặc tìm metadata; không tự chạy thao tác nguy hiểm.</p></div><button class="button button--compact" type="button" data-command-close>Đóng</button></div><div class="command-palette__rows">${COMMANDS.map((command) => `<button class="button button--compact" type="button" data-command-action="${escapeHtml(command.id)}"${command.route ? ` data-command-route="${escapeHtml(command.route)}"` : ""}><strong>${escapeHtml(command.label)}</strong><span class="row-meta">${escapeHtml(command.detail)}</span></button>`).join("")}</div></div>`;
+};
+
 const renderApiState = () => {
   if (state.apiStatus === "error") return `<section class="global-state global-state--error" role="alert"><strong>API Hub chưa sẵn sàng</strong><span>${state.apiError || "Kiểm tra listener loopback rồi thử lại."}</span><button class="button button--compact" type="button" data-refresh-api>Thử lại</button></section>`;
   if (state.apiStatus === "loading") return `<section class="global-state global-state--loading" role="status"><strong>Đang tải workspace</strong><span>Đang lấy health, capability và queue snapshot…</span></section>`;
@@ -703,6 +748,8 @@ const render = ({ background = false, focus = "" } = {}) => {
   disposeNodeStudios();
   disposeImageMaskCanvases();
   renderNavigation();
+  renderGlobalSearch();
+  renderCommandPalette();
   syncSidebarState();
   view.innerHTML = `${renderApiState()}${renderPage(routeId(), state)}`;
   applyToolActionGates();
@@ -802,8 +849,15 @@ const refreshFast = async ({ quiet = false, renderView = true } = {}) => {
 const refreshCreative = async ({ renderView = true } = {}) => {
   state.creativeLoading = true;
   try {
-    const creative = await getCreativeOverview();
-    state.creative = creative || {};
+    const [creativeResult, workspaceResult, artifactsResult] = await Promise.allSettled([
+      getCreativeOverview(),
+      getProjectWorkspaceV2(),
+      getArtifactLibraryV2(120),
+    ]);
+    if (creativeResult.status !== "fulfilled") throw creativeResult.reason;
+    state.creative = creativeResult.value || {};
+    if (workspaceResult.status === "fulfilled") state.projectWorkspaceV2 = workspaceResult.value || {};
+    if (artifactsResult.status === "fulfilled") state.artifactLibraryV2 = artifactsResult.value || {};
     const projects = state.creative.projects || [];
     const selected = state.selectedProjectId && projects.some((item) => item.id === state.selectedProjectId)
       ? state.selectedProjectId
@@ -980,6 +1034,17 @@ const pollStorageScan = (scanId = "") => storageScanPoller.start(scanId);
 
 const loadRouteData = async ({ scan = false } = {}) => {
   const route = routeId();
+  if (route === "dashboard") {
+    if (routeLoad) return routeLoad;
+    routeLoad = getProductExperienceV2().then((value) => {
+      state.productExperienceV2 = value || {};
+      if (routeId() === "dashboard") render();
+    }).catch(() => {
+      state.productExperienceV2 = { status: "unavailable", execution: "not_run", dry_run: true };
+      if (routeId() === "dashboard") render();
+    }).finally(() => { routeLoad = null; });
+    return routeLoad;
+  }
   if (route === "models") {
     if (routeLoad) return routeLoad;
     routeLoad = Promise.allSettled([getModels(), scan ? scanStorage() : getStorage(), getProductionCatalog(), getUpdateSettings()]).then((results) => {
@@ -1007,6 +1072,20 @@ const loadRouteData = async ({ scan = false } = {}) => {
     }).finally(() => { routeLoad = null; });
     return routeLoad;
   }
+  if (route === "airi") {
+    if (routeLoad) return routeLoad;
+    // The legacy bootstrap is kept for fast paint and the existing
+    // server-owned launch action.  M3 integration state is loaded explicitly
+    // here; the browser never probes AIRI, reads a path/key, or embeds it.
+    routeLoad = Promise.allSettled([getExternalIntegrationsV2(), getApplications()]).then((results) => {
+      if (results[0].status === "fulfilled") state.externalIntegrationsV2 = results[0].value || {};
+      if (results[1].status === "fulfilled") state.applications = results[1].value?.applications || state.applications;
+      render();
+    }).catch((error) => {
+      if (routeId() === "airi") showToast(error.message || "Không thể tải trạng thái tích hợp AIRI.", "error");
+    }).finally(() => { routeLoad = null; });
+    return routeLoad;
+  }
   if (route === "image") {
     const results = await Promise.allSettled([getLifecycle(), getComfyAdvanced(), getComfyBridgeWorkflows()]);
     if (results[0].status === "fulfilled") state.lifecycle = results[0].value;
@@ -1019,10 +1098,39 @@ const loadRouteData = async ({ scan = false } = {}) => {
     }
     render();
   }
+  if (route === "media" || route === "video" || route === "animesr") {
+    if (routeLoad) return routeLoad;
+    routeLoad = Promise.allSettled([getMediaPipelineV2(), getArtifactLibraryV2(120)]).then((results) => {
+      if (results[0].status === "fulfilled") state.mediaPipelineV2 = results[0].value || {};
+      else state.mediaPipelineV2 = { status: "unavailable", execution: "not_run", dry_run: true };
+      if (results[1].status === "fulfilled") state.artifactLibraryV2 = results[1].value || state.artifactLibraryV2;
+      render();
+    }).catch(() => {
+      state.mediaPipelineV2 = { status: "unavailable", execution: "not_run", dry_run: true };
+      render();
+    }).finally(() => { routeLoad = null; });
+    return routeLoad;
+  }
+  if (route === "projects") {
+    if (routeLoad) return routeLoad;
+    // The bootstrap contains the legacy Creative overview for a fast first
+    // paint, but M2 project/artifact projections are route data.  Fetch them
+    // when Projects is selected rather than rendering a false unavailable
+    // fallback until the user happens to press the manual refresh button.
+    routeLoad = refreshCreative({ renderView: false }).then(() => {
+      if (routeId() === "projects") render();
+    }).catch((error) => {
+      if (routeId() === "projects") showToast(error.message || "Không thể tải Creative Workspace.", "error");
+    }).finally(() => { routeLoad = null; });
+    return routeLoad;
+  }
   if (route === "diagnostics") {
     if (routeLoad) return routeLoad;
-    routeLoad = getDiagnosticsSnapshot().then((res) => {
+    routeLoad = Promise.allSettled([getDiagnosticsSnapshot(), getPlatformHardeningV2(), getPlatformExtensibilityV2()]).then(([diagnosticsResult, hardeningResult, extensibilityResult]) => {
+      const res = diagnosticsResult.status === "fulfilled" ? diagnosticsResult.value : { status: "unavailable", snapshot: {} };
       state.diagnostics = res;
+      state.platformHardeningV2 = hardeningResult.status === "fulfilled" ? hardeningResult.value : { status: "unavailable", areas: [], execution: "not_run", dry_run: true };
+      state.platformExtensibilityV2 = extensibilityResult.status === "fulfilled" ? extensibilityResult.value : { status: "unavailable", execution: "not_run", dry_run: true };
       render();
     }).catch((err) => {
       showToast(err.message || "Không thể tải Diagnostics snapshot.", "error");
@@ -1222,6 +1330,10 @@ const handleCreativeForm = async (form) => {
   } else if (kind === "import-project") {
     result = await importProject({ manifest: JSON.parse(String(values.manifest || "{}")), conflict: values.conflict || "copy" });
     state.selectedProjectId = result.project?.id || state.selectedProjectId;
+  } else if (kind === "attach-workflow-v2") {
+    const projectId = form.dataset.projectId || state.selectedProjectId;
+    if (!projectId || !values.workflow_id) throw new Error("Chọn project và workflow hợp lệ trước khi liên kết.");
+    result = await attachProjectWorkflowV2(projectId, values.workflow_id);
   } else if (kind === "asset-tags") {
     result = await updateAsset(form.dataset.assetId, { tags: splitTags(values.tags) });
   } else if (kind === "asset-collection") {
@@ -1412,6 +1524,53 @@ document.addEventListener("input", (event) => {
 });
 
 document.addEventListener("submit", async (event) => {
+  const form = event.target.closest("[data-global-search-form]");
+  if (!form) return;
+  event.preventDefault();
+  const input = form.querySelector("[data-global-search-input]");
+  const query = String(input?.value || "").slice(0, 80);
+  try {
+    const result = await searchProductExperienceV2(query);
+    state.globalSearch = { query: result.query || query, results: result.results || [] };
+  } catch (error) {
+    state.globalSearch = { query, results: [] };
+    showToast(error.message || "Không thể tìm catalog Hub.", "error");
+  }
+  renderGlobalSearch();
+});
+
+document.addEventListener("submit", async (event) => {
+  const mediaPreflightForm = event.target.closest("form[data-media-preflight-form]");
+  if (mediaPreflightForm) {
+    event.preventDefault();
+    const submit = mediaPreflightForm.querySelector("button[type=submit]"); if (submit) submit.disabled = true;
+    inlineResult(mediaPreflightForm, "Đang lập kế hoạch media từ artifact opaque…");
+    try {
+      const values = Object.fromEntries(new FormData(mediaPreflightForm).entries());
+      const operation = String(values.operation || "");
+      const options = operation === "trim"
+        ? { start_seconds: numberOr(values.start_seconds, 0), end_seconds: numberOr(values.end_seconds, 0) }
+        : operation === "resize"
+          ? { width: Math.trunc(numberOr(values.width, 0)), height: Math.trunc(numberOr(values.height, 0)) }
+          : operation === "fps" || operation === "frame_interpolation"
+            ? { fps: numberOr(values.fps, 0) }
+            : operation === "video_upscale"
+              ? { scale: Math.trunc(numberOr(values.scale, 0)) }
+              : {};
+      const payload = { artifact_id: String(values.artifact_id || ""), operation, options };
+      if (values.backend) payload.backend = String(values.backend);
+      const result = await preflightMediaPipelineV2(payload);
+      state.mediaPipelinePreflight = result || null;
+      const resultText = result?.status === "partial"
+        ? `Đã lập preflight ${result.operation || operation} bằng ${result.backend || "backend"}. Chưa thực thi.`
+        : result?.reason || result?.error || "Preflight media chưa khả dụng.";
+      inlineResult(mediaPreflightForm, resultText, result?.status === "partial" ? "success" : "warning");
+      showToast(resultText, result?.status === "partial" ? "success" : "warning");
+      render({ focus: "main" });
+    } catch (error) { inlineResult(mediaPreflightForm, error.message, "error"); showToast(error.message, "error"); }
+    finally { if (submit) submit.disabled = false; }
+    return;
+  }
   const imageMaskForm = event.target.closest("form[data-image-mask-form]");
   if (imageMaskForm) {
     event.preventDefault();
@@ -1451,6 +1610,42 @@ document.addEventListener("submit", async (event) => {
 });
 
 document.addEventListener("click", async (event) => {
+  if (event.target.closest("[data-command-close]")) {
+    state.commandPaletteOpen = false;
+    renderCommandPalette();
+    return;
+  }
+  const commandAction = event.target.closest("[data-command-action]");
+  if (commandAction) {
+    const commandId = commandAction.dataset.commandAction || "";
+    state.commandPaletteOpen = false;
+    renderCommandPalette();
+    if (commandId === "search-artifact") {
+      const input = document.querySelector("[data-global-search-input]");
+      if (input) input.value = "artifact";
+      try {
+        const result = await searchProductExperienceV2("artifact");
+        state.globalSearch = { query: result.query || "artifact", results: result.results || [] };
+      } catch (error) { showToast(error.message || "Không thể tìm artifact metadata.", "error"); }
+      renderGlobalSearch();
+      return;
+    }
+    const route = commandAction.dataset.commandRoute;
+    if (route) window.location.hash = `#/${route}`;
+    return;
+  }
+  const skipOnboarding = event.target.closest("[data-onboarding-skip]");
+  if (skipOnboarding) {
+    state.onboardingDismissed = true;
+    render();
+    return;
+  }
+  const showOnboarding = event.target.closest("[data-onboarding-show]");
+  if (showOnboarding) {
+    state.onboardingDismissed = false;
+    render();
+    return;
+  }
   if (event.target.closest("#sidebar-toggle")) {
     toggleSidebar();
     return;
@@ -1634,6 +1829,10 @@ document.addEventListener("click", async (event) => {
   const route = event.target.closest("[data-route], [data-readiness-route]");
   if (route) {
     const nextRoute = route.dataset.route || route.dataset.readinessRoute;
+    if (!isRoutableRoute(nextRoute)) {
+      showToast("Điểm đến Hub không hợp lệ; không điều hướng.", "error");
+      return;
+    }
     if (route.dataset.recoveryFocus === "attention") state.jobFilter = "attention";
     if (route.dataset.recoveryFocus === "all") state.jobFilter = "all";
     closeMobileSidebar(); window.location.hash = `#/${nextRoute}`; return;
@@ -2362,7 +2561,19 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("keydown", async (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    state.commandPaletteOpen = state.commandPaletteOpen !== true;
+    renderCommandPalette();
+    return;
+  }
   if (event.key === "Escape") {
+    if (state.commandPaletteOpen === true) {
+      event.preventDefault();
+      state.commandPaletteOpen = false;
+      renderCommandPalette();
+      return;
+    }
     if (artifactPreviewLayer && !artifactPreviewLayer.matches(":empty")) {
       event.preventDefault();
       closeArtifactPreview();

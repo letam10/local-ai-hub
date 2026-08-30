@@ -88,3 +88,56 @@ contracts and legacy imports remain unchanged. Existing `src/shared/paths` is a
 compatibility facade over the new platform registry. `Services/Whisper/` is a
 first-party backend implementation; `src/modules/whisper/` is the Hub adapter
 and contract boundary.
+
+## Post-V8 foundation hardening
+
+Post-V8 V2 surfaces add a typed capability graph, lifecycle planning facade,
+model manager, resource scheduler, durable job engine and Router-bound feature
+discovery without replacing the V7 productization path. The authoritative M1.1
+ownership, SQLite/scheduler saga, lease, restart-readmission, digest, evidence
+freshness and cache contract is
+[`POST_V8_FOUNDATION_HARDENING_M1_1.md`](POST_V8_FOUNDATION_HARDENING_M1_1.md).
+These additions are metadata/planning contracts only: they do not turn a
+provider, model or GPU workload operational without separately authorized
+runtime evidence and execution ownership.
+
+## Post-V8 provider and external-integration contracts
+
+`src/services/provider_adapters_v2/` is the M3 finite, typed first-party
+adapter registry.  It derives dependency readiness from Capability Graph V2
+and declared profiles from Resource Scheduler V2, but it never imports a
+legacy module, loads a model, reserves GPU, starts/cancels a worker or executes
+a provider.  Its default execution-owner state is `UNBOUND`.
+
+The same package owns External Integrations V2: a path-free and
+credential-free projection of existing sanitized allowlisted application
+records.  AIRI remains `UNSUPPORTED_API` until an official reviewed API/IPC
+adapter is explicitly registered; Hub does not guess an endpoint, scrape a key
+or embed AIRI.  The contract is documented in
+[`POST_V8_PROVIDER_ADAPTERS_M3.md`](POST_V8_PROVIDER_ADAPTERS_M3.md).
+
+## Product Experience V2
+
+`src/services/product_experience_v2.py` owns a finite server-side catalog for
+Dashboard V2, reusable onboarding, global search, Settings wording and
+Diagnostics navigation. The UI consumes `/api/product-experience/v2` and its
+bounded onboarding/search routes, but the service never searches user data,
+reads paths, persists browser completion, saves settings or executes a
+provider/job. See [`POST_V8_PRODUCT_EXPERIENCE_M4.md`](POST_V8_PRODUCT_EXPERIENCE_M4.md).
+
+## Platform Hardening V2
+
+`src/services/platform_hardening_v2.py` projects the existing updater,
+backup/recovery, process-supervision, security and performance boundaries as a
+finite read-only contract. It records the owning persistent state, API,
+failure modes and recovery path without probing the machine, applying an
+update/restore, controlling a process or running a benchmark. See
+[`POST_V8_PLATFORM_HARDENING_M5.md`](POST_V8_PLATFORM_HARDENING_M5.md).
+
+## Platform Extensibility V2
+
+`src/services/platform_extensibility_v2.py` owns a finite declarative boundary
+for the Plugin SDK, API version identity/deprecation and a future remote
+worker. Plugin code, credentials, endpoints and workers remain unavailable;
+the Router only exposes read-only projections. See
+[`POST_V8_PLATFORM_EXTENSIBILITY_M6.md`](POST_V8_PLATFORM_EXTENSIBILITY_M6.md).
