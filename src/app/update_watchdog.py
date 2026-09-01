@@ -27,7 +27,7 @@ from src.app.stable_shell import (
     resolve_launch_plan,
 )
 from src.services.process_manager.managed import terminate_owned_process
-from src.services.app_update import _update_serialization_lock
+from src.services.app_update import _try_write_update_state, _update_serialization_lock, reason_code_for
 from src.shared.runtime_identity import API_PROTOCOL_VERSION, api_identity
 from src.shared.version import PRODUCT_VERSION
 
@@ -36,6 +36,7 @@ WATCHDOG_TIMEOUT_SECONDS = 30.0
 RESTART_SESSION_SCHEMA = "local-ai-hub-restart-session.v1"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PAYLOAD_RE = re.compile(r"^main-[0-9a-f]{12}$")
+_TRANSACTION_RE = re.compile(r"^txn-[0-9a-f]{32}$")
 
 
 def _json(path: Path, *, limit: int = 64 * 1024) -> dict[str, object]:
@@ -120,6 +121,9 @@ def _session_snapshot() -> dict[str, object] | None:
     except (OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
         return None
     if value.get("schema_version") != RESTART_SESSION_SCHEMA or value.get("nonce") != nonce:
+        return None
+    transaction_id = value.get("transaction_id")
+    if transaction_id is not None and (not isinstance(transaction_id, str) or _TRANSACTION_RE.fullmatch(transaction_id) is None):
         return None
     port = value.get("api_port")
     api_pid = value.get("api_pid")
@@ -211,6 +215,11 @@ def _rollback_previous(app_root: Path, *, reason: str) -> bool:
             previous = _json(history)
             if set(previous) != {"schema_version", "version", "payload_relative", "manifest_sha256"} or previous.get("schema_version") != POINTER_SCHEMA:
                 return False
+            pending: dict[str, object] = {}
+            try:
+                pending = _json(marker) if marker.is_file() and not marker.is_symlink() else {}
+            except (OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                pending = {}
             pointer = atomic_activate_pointer(app_root, version=str(previous["version"]), manifest_sha256=str(previous["manifest_sha256"]))
             _atomic_json(app_root / "update-state" / "last-rollback.json", {
                 "schema_version": "local-ai-hub-pending-health.v1",
@@ -228,8 +237,26 @@ def _rollback_previous(app_root: Path, *, reason: str) -> bool:
                     session.unlink()
                 except FileNotFoundError:
                     pass
+            _try_write_update_state(
+                app_root,
+                phase="rolled_back",
+                progress=100,
+                transaction_id=pending.get("transaction_id") if isinstance(pending.get("transaction_id"), str) else None,
+                current_payload_id=pointer.get("version"),
+                candidate_payload_id=pending.get("payload_id") if isinstance(pending.get("payload_id"), str) else None,
+                rollback_payload_id=pointer.get("version"),
+                reason_code=reason_code_for(reason),
+                last_error_code=reason if re.fullmatch(r"[A-Z][A-Z0-9_]{2,95}", reason) else "WATCHDOG_ROLLBACK_FAILED",
+            )
             return True
     except (OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError, StableShellError):
+        _try_write_update_state(
+            app_root,
+            phase="error",
+            progress=0,
+            reason_code="watchdog_rollback_failed",
+            last_error_code="WATCHDOG_ROLLBACK_FAILED",
+        )
         return False
 
 
@@ -305,11 +332,20 @@ def run(*, app_root: Path, wait_pid: int, timeout_seconds: float = WATCHDOG_TIME
         return {"status": "rolled_back" if rolled_back else "failed", "code": "WATCHDOG_LAUNCH_FAILED_ROLLBACK" if rolled_back else "WATCHDOG_LAUNCH_FAILED", "detail": type(exc).__name__}
     if _wait_for_target_health(app_root, version=target_version, source_commit=target_commit, expected=target_identity, deadline=deadline, process=child):
         session = _session_path()
+        session_value = _session_snapshot()
         if session is not None:
             try:
                 session.unlink()
             except FileNotFoundError:
                 pass
+        _try_write_update_state(
+            app_root,
+            phase="succeeded",
+            progress=100,
+            transaction_id=session_value.get("transaction_id") if isinstance(session_value, dict) and isinstance(session_value.get("transaction_id"), str) else None,
+            current_payload_id=target_version,
+            candidate_payload_id=target_version,
+        )
         return {"status": "healthy", "payload_id": target_version, "source_commit": target_commit}
     try:
         terminate_owned_process(child)
@@ -326,10 +362,26 @@ def run(*, app_root: Path, wait_pid: int, timeout_seconds: float = WATCHDOG_TIME
         version, commit, identity = _target_identity(app_root, require_build=False)
         fallback_deadline = time.monotonic() + max(5.0, min(60.0, float(timeout_seconds)))
         if _wait_for_target_health(app_root, version=version, source_commit=commit, expected=identity, deadline=fallback_deadline, process=fallback):
+            _try_write_update_state(
+                app_root,
+                phase="rolled_back",
+                progress=100,
+                current_payload_id=version,
+                rollback_payload_id=version,
+                reason_code="previous_payload_relaunch_failed",
+                last_error_code="WATCHDOG_POST_RESTART_HEALTH_FAILED",
+            )
             return {"status": "rolled_back", "payload_id": version, "source_commit": commit}
         terminate_owned_process(fallback)
     except (OSError, StableShellError, ValueError, TypeError, json.JSONDecodeError):
         pass
+    _try_write_update_state(
+        app_root,
+        phase="error",
+        progress=0,
+        reason_code="previous_payload_relaunch_failed",
+        last_error_code="WATCHDOG_RECOVERY_FAILED",
+    )
     return {"status": "failed", "code": "WATCHDOG_RECOVERY_FAILED"}
 
 
