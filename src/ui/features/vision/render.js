@@ -44,7 +44,7 @@ const renderProgress = (job, { escapeHtml, formatStatus, statusPill }) => {
     <div class="progress-track" role="progressbar" aria-label="Tiến trình tác vụ" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}"><div class="progress-bar" data-workspace-job-progress style="width:${progress}%"></div></div>
     ${message ? `<p class="small" data-workspace-job-message>${escapeHtml(message)}</p>` : ""}
     ${error ? `<div class="callout callout--danger" data-workspace-job-error><strong>${escapeHtml(error)}</strong>${action ? `<span>${escapeHtml(action)}</span>` : ""}</div>` : action && !active ? `<p class="small" data-workspace-job-action>${escapeHtml(action)}</p>` : ""}
-    <div class="workspace-job__actions">${active ? `<button class="button button--danger button--compact" type="button" data-cancel-workspace-job="${escapeHtml(job.id || "")}">Hủy tác vụ</button>` : ""}${result && (result.annotation || result.selection) ? `<button class="button button--compact" type="button" data-workspace-download-json="${escapeHtml(job.tool || "vision")}">Tải JSON kết quả</button>` : ""}</div>
+    <div class="workspace-job__actions">${active ? `<button class="button button--danger button--compact" type="button" data-cancel-workspace-job="${escapeHtml(job.id || "")}">Hủy tác vụ</button>` : ""}${result && (result.annotation || result.selection || result.ocr_result || result.transcript || result.whisper_transcript) ? `<button class="button button--compact" type="button" data-workspace-download-json="${escapeHtml(job.tool || "vision")}">Tải JSON kết quả</button>` : ""}</div>
   </div>`;
 };
 

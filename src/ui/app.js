@@ -131,6 +131,7 @@ import {
 // not executed" truthfully.
 import { disposeNodeStudios, mountNodeStudios } from "./features/node_studio/studio.js";
 import { ensureM3State, mountM3InteractiveWorkspaces, rememberM3FileSelection, selectionToPayload, setM3UploadedArtifact, syncM3WorkspaceDom } from "./features/vision/interactive.js";
+import { ensureM4State, mountM4InteractiveWorkspaces, rememberM4FileSelection, setM4UploadedArtifact, syncM4WorkspaceDom } from "./features/ocr_whisper/interactive.js";
 import { createStorageScanPoller, STORAGE_SCAN_ACTIVE_STATES } from "./storage_scan_polling.js";
 import { mountImageMaskCanvases } from "./image_mask_studio.js";
 import { createWorkflowLibraryAdapter } from "./workflow_library.js";
@@ -152,6 +153,10 @@ const state = {
   m3: {
     vision: { activeTool: "omniparser", thresholds: {}, selectedDetectionIndex: -1, sourceFile: null, sourceArtifact: null, localPreviewUrl: "", job: null },
     sam2: { mode: "points", intent: "positive", selection: { points: [], box: null }, selectionHistory: [], selectionHistoryIndex: -1, selectedPointIndex: -1, frameIndex: 0, resultTab: "original", maskOpacity: 0.68, zoom: 1, panX: 0, panY: 0, sourceFile: null, sourceArtifact: null, localPreviewUrl: "", job: null },
+  },
+  m4: {
+    ocr: { resultTab: "text", pdfPage: 1, pdfPageCount: 0, region: null, sourceFile: null, sourceArtifact: null, localPreviewUrl: "", job: null },
+    whisper: { resultTab: "transcript", currentTime: 0, duration: 0, start: 0, end: 10, sourceFile: null, sourceArtifact: null, localPreviewUrl: "", job: null },
   },
 };
 const view = document.querySelector("#module-view");
@@ -232,6 +237,7 @@ let desktopCloseLayer = null;
 let artifactPreviewOpener = null;
 let disposeImageMaskCanvases = () => {};
 let disposeM3Workspaces = () => {};
+let disposeM4Workspaces = () => {};
 
 const SIDEBAR_PREFERENCE_KEY = "local-ai-hub-sidebar-v1";
 const SIDEBAR_PREFERENCE_VERSION = 1;
@@ -757,9 +763,11 @@ const render = ({ background = false, focus = "" } = {}) => {
     return false;
   }
   ensureM3State(state);
+  ensureM4State(state);
   disposeNodeStudios();
   disposeImageMaskCanvases();
   disposeM3Workspaces();
+  disposeM4Workspaces();
   renderNavigation();
   renderGlobalSearch();
   renderCommandPalette();
@@ -767,6 +775,9 @@ const render = ({ background = false, focus = "" } = {}) => {
   view.innerHTML = `${renderApiState()}${renderPage(routeId(), state)}`;
   applyToolActionGates();
   disposeM3Workspaces = mountM3InteractiveWorkspaces(view, state, {
+    onStateChange: () => applyToolActionGates(),
+  });
+  disposeM4Workspaces = mountM4InteractiveWorkspaces(view, state, {
     onStateChange: () => applyToolActionGates(),
   });
   restoreScrollContinuity(continuity.scroll);
@@ -1238,23 +1249,25 @@ const toPayload = async (form) => {
     const artifacts = await Promise.all([...fileInput.files].map((selected) => uploadFile(selected)));
     payload[fileInput.dataset.assetKey] = fileInput.multiple ? artifacts.map((artifact) => artifact.id) : artifacts[0].id;
   }
-  const workspace = form.closest("[data-m3-workspace]");
+  const workspace = form.closest("[data-m3-workspace], [data-m4-workspace]");
   if (workspace) {
-    ensureM3State(state);
-    const workspaceKey = workspace.dataset.m3Workspace;
-    const workspaceState = state.m3[workspaceKey] || {};
+    const isM4 = Boolean(workspace.dataset.m4Workspace);
+    const workspaceKey = isM4 ? workspace.dataset.m4Workspace : workspace.dataset.m3Workspace;
+    const workspaceState = isM4 ? (ensureM4State(state)[workspaceKey] || {}) : (ensureM3State(state)[workspaceKey] || {});
     const sourceInput = workspace.querySelector("input[type=file][data-asset-key]");
     let sourceArtifactId = sourceInput?.dataset?.uploadedArtifactId || workspaceState.sourceArtifact?.id || "";
     if (!sourceArtifactId) {
       const selected = sourceInput?.files?.[0] || workspaceState.sourceFile;
       if (!selected) throw new Error("Chọn tệp nguồn trước khi tạo job.");
       const artifact = await uploadFile(selected);
-      setM3UploadedArtifact(workspace, state, artifact);
+      if (isM4) setM4UploadedArtifact(workspace, state, artifact);
+      else setM3UploadedArtifact(workspace, state, artifact);
       sourceArtifactId = artifact?.id || "";
     }
     if (!sourceArtifactId) throw new Error("Upload không trả artifact ID opaque.");
     payload.source_artifact_id = sourceArtifactId;
-    if (workspaceKey === "sam2") Object.assign(payload, selectionToPayload(workspaceState));
+    if (!isM4 && workspaceKey === "sam2") Object.assign(payload, selectionToPayload(workspaceState));
+    if (isM4 && workspaceKey === "ocr" && Array.isArray(workspaceState.region)) payload.normalized_box = workspaceState.region;
   }
   if (payload.points_text) {
     payload.points = payload.points_text.split(";").map((token) => token.trim()).filter(Boolean).map((token) => {
@@ -1290,6 +1303,12 @@ const M3_JOB_POLL_INTERVAL_MS = 1000;
 const M3_JOB_POLL_MAX_MS = 30 * 60 * 1000;
 const m3JobPollers = new Map();
 
+const workspaceForKey = (workspaceKey) => view.querySelector(`[data-m3-workspace="${workspaceKey}"], [data-m4-workspace="${workspaceKey}"]`);
+const workspaceModelForKey = (workspaceKey) => {
+  if (workspaceKey === "ocr" || workspaceKey === "whisper") return ensureM4State(state)[workspaceKey];
+  return ensureM3State(state)[workspaceKey];
+};
+
 const stopM3JobPoll = (workspaceKey) => {
   const entry = m3JobPollers.get(workspaceKey);
   if (!entry) return;
@@ -1298,7 +1317,7 @@ const stopM3JobPoll = (workspaceKey) => {
 };
 
 const updateM3JobDom = (workspaceKey, job) => {
-  const workspace = view.querySelector(`[data-m3-workspace="${workspaceKey}"]`);
+  const workspace = workspaceForKey(workspaceKey);
   if (!workspace || !job) return;
   const status = String(job.status || "unknown");
   const progressValue = Number(job.progress);
@@ -1333,8 +1352,7 @@ const startM3JobPoll = (workspaceKey, jobId) => {
       const payload = await getJob(jobId);
       const job = payload?.job && typeof payload.job === "object" ? payload.job : payload;
       if (!job || typeof job !== "object") throw new Error("JOB_SNAPSHOT_INVALID");
-      ensureM3State(state);
-      state.m3[workspaceKey].job = job;
+      workspaceModelForKey(workspaceKey).job = job;
       updateM3JobDom(workspaceKey, job);
       if (M3_TERMINAL_JOB_STATUSES.has(String(job.status || ""))) {
         stopM3JobPoll(workspaceKey);
@@ -1346,7 +1364,7 @@ const startM3JobPoll = (workspaceKey, jobId) => {
       // failed.  Keep the last truthful snapshot and retry until the bounded
       // observation window expires.
       if (Date.now() - startedAt >= M3_JOB_POLL_MAX_MS) {
-        const model = state.m3?.[workspaceKey];
+        const model = (workspaceKey === "ocr" || workspaceKey === "whisper" ? state.m4?.[workspaceKey] : state.m3?.[workspaceKey]);
         if (model?.job) {
           model.job = { ...model.job, message: "Không thể lấy snapshot job trong thời hạn theo dõi; job vẫn thuộc Jobs.", next_action: error?.message || "Mở Jobs để kiểm tra snapshot canonical." };
           updateM3JobDom(workspaceKey, model.job);
@@ -1592,6 +1610,7 @@ document.addEventListener("change", (event) => {
   if (input) {
     renderFilePreview(input);
     if (input.closest("[data-m3-workspace]")) rememberM3FileSelection(input, state);
+    if (input.closest("[data-m4-workspace]")) rememberM4FileSelection(input, state);
   }
   const projectSelect = event.target.closest("[data-project-select]");
   if (projectSelect) {
@@ -1711,11 +1730,11 @@ document.addEventListener("submit", async (event) => {
   inlineResult(form, "Đang tải input và tạo job…");
   try {
     const payload = await toPayload(form); const tool = toolForForm(form, payload); const result = await submitJob(tool, payload);
-    const workspace = form.closest("[data-m3-workspace]");
+    const workspace = form.closest("[data-m3-workspace], [data-m4-workspace]");
     if (workspace) {
-      const workspaceKey = workspace.dataset.m3Workspace;
-      ensureM3State(state);
-      state.m3[workspaceKey].job = result.job || null;
+      const isM4 = Boolean(workspace.dataset.m4Workspace);
+      const workspaceKey = isM4 ? workspace.dataset.m4Workspace : workspace.dataset.m3Workspace;
+      workspaceModelForKey(workspaceKey).job = result.job || null;
       inlineResult(form, `Đã tạo ${result.job?.id || "job"}. Đang theo dõi ngay trong workspace.`, "success");
       showToast(`Đã thêm ${tool} vào hàng đợi Hub.`);
       render({ focus: "main" });
@@ -2608,14 +2627,13 @@ document.addEventListener("click", async (event) => {
   const workspaceCancel = event.target.closest("[data-cancel-workspace-job]");
   if (workspaceCancel) {
     workspaceCancel.disabled = true;
-    const workspace = workspaceCancel.closest("[data-m3-workspace]");
-    const workspaceKey = workspace?.dataset.m3Workspace || "";
+    const workspace = workspaceCancel.closest("[data-m3-workspace], [data-m4-workspace]");
+    const workspaceKey = workspace?.dataset.m3Workspace || workspace?.dataset.m4Workspace || "";
     try {
       const result = await cancelJob(workspaceCancel.dataset.cancelWorkspaceJob || "");
       const job = result?.job && typeof result.job === "object" ? result.job : null;
       if (workspaceKey && job) {
-        ensureM3State(state);
-        state.m3[workspaceKey].job = job;
+        workspaceModelForKey(workspaceKey).job = job;
         updateM3JobDom(workspaceKey, job);
       }
       showToast(result?.message || "Đang hủy tác vụ Hub-owned.", "success");
@@ -2626,10 +2644,11 @@ document.addEventListener("click", async (event) => {
   }
   const workspaceJson = event.target.closest("[data-workspace-download-json]");
   if (workspaceJson) {
-    const workspaceKey = workspaceJson.dataset.workspaceDownloadJson || "vision";
-    const job = state.m3?.[workspaceKey]?.job;
+    const workspace = workspaceJson.closest("[data-m3-workspace], [data-m4-workspace]");
+    const workspaceKey = workspace?.dataset.m3Workspace || workspace?.dataset.m4Workspace || workspaceJson.dataset.workspaceDownloadJson || "vision";
+    const job = workspaceModelForKey(workspaceKey)?.job;
     if (!job?.result) { showToast("Chưa có result contract để tải.", "warning"); return; }
-    downloadJson(`${workspaceKey}-${job.id || "result"}.json`, job.result.annotation || job.result.selection || job.result);
+    downloadJson(`${workspaceKey}-${job.id || "result"}.json`, job.result.annotation || job.result.selection || job.result.ocr_result || job.result.transcript || job.result);
     showToast("Đã tạo JSON từ result contract opaque.", "success");
     return;
   }
