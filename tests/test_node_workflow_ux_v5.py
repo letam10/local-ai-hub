@@ -195,6 +195,62 @@ assert.equal(normalized.pickerSearch, "typed");
         self.assertIn("number_above_maximum", {item["code"] for item in errors})
         self.assertIn("invalid_asset_id", {item["code"] for item in errors})
 
+    def test_node_data_validation_rejects_every_closed_property_violation(self) -> None:
+        from src.services.node_studio.registry import validate_node_data
+
+        invalid_graph = {
+            "nodes": [
+                {"id": "resolution", "type": "resolution", "data": {"width": 257}},
+                {"id": "steps", "type": "sampler_settings", "data": {"steps": 1.5}},
+                {"id": "unknown", "type": "resolution", "data": {"unexpected": "hostile"}},
+                {"id": "unsafe", "type": "encode", "data": {"filter": "do not echo this"}},
+                {"id": "color", "type": "group", "data": {"color": "blue"}},
+                {"id": "boolean", "type": "encode", "data": {"prefer_gpu": "false"}},
+                {"id": "asset", "type": "load_image", "data": {"asset_id": "C:/private/source.png"}},
+                {"id": "node_kind", "type": "number", "data": {"value": 1}},
+                {"id": "unknown_type", "type": "not_a_hub_node", "data": {}},
+            ]
+        }
+        errors = validate_node_data(invalid_graph)
+        codes = {item["code"] for item in errors}
+        self.assertTrue({
+            "number_step_invalid",
+            "number_integer_required",
+            "unknown_node_property",
+            "unsafe_node_property",
+            "invalid_color",
+            "invalid_boolean",
+            "invalid_asset_id",
+            "unknown_node_type",
+        }.issubset(codes))
+        encoded = json.dumps(errors, ensure_ascii=False)
+        self.assertNotIn("do not echo this", encoded)
+        self.assertNotIn("C:/private/source.png", encoded)
+
+    def test_node_data_validation_keeps_exact_number_and_enum_contracts(self) -> None:
+        from src.services.node_studio.registry import validate_node_data
+
+        valid = {
+            "nodes": [
+                {"id": "resolution", "type": "resolution", "data": {"width": 320, "height": 512}},
+                {"id": "group", "type": "group", "data": {"color": "#AABBCCDD"}},
+                {"id": "rotate", "type": "video_rotate", "data": {"degrees": 90}},
+                {"id": "encode", "type": "encode", "data": {"prefer_gpu": True, "codec": "auto"}},
+            ]
+        }
+        self.assertEqual(validate_node_data(valid), [])
+        invalid = {
+            "nodes": [
+                {"id": "rotate", "type": "video_rotate", "data": {"degrees": "90"}},
+                {"id": "group", "type": "group", "data": {"color": "#abc"}},
+                {"id": "encode", "type": "encode", "data": {"codec": "not-published"}},
+            ]
+        }
+        self.assertEqual(
+            {item["code"] for item in validate_node_data(invalid)},
+            {"invalid_option", "invalid_color", "invalid_option"},
+        )
+
     def test_closed_media_public_boundary_rejects_paths_and_unsafe_fields_before_execution(self) -> None:
         from src.modules.media_editor.backend import adapter
 

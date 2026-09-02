@@ -45,6 +45,7 @@ const isMediaScope = (scope) => scope === "media" || scope === "video";
 const NODE_COPY = Object.freeze({
   utility: "Tiện ích", image: "Hình ảnh", vision: "Thị giác", media: "Media", video: "Video", annotation: "Chú thích",
   "Load Image": "Tải ảnh", "Load Video": "Tải video", "Load Audio": "Tải âm thanh", "Load Subtitle": "Tải phụ đề", "Prompt / Text": "Prompt / Văn bản", Number: "Số", Boolean: "Đúng / Sai", "Point Input": "Điểm đầu vào", "Box Input": "Hộp đầu vào", "Preview Image": "Xem trước ảnh", "Preview Video": "Xem trước video", "Save Image": "Lưu ảnh", "Save Video": "Lưu video", "Export Mask": "Xuất mask", "Export Video": "Xuất video", Comment: "Ghi chú", Group: "Nhóm", Resolution: "Độ phân giải", Seed: "Seed", "Steps / Sampler": "Steps / Bộ lấy mẫu", "FLUX Generate": "Tạo ảnh FLUX", "Qwen Image Generate": "Tạo ảnh Qwen", "Image Edit / Image-to-Image": "Sửa ảnh / Ảnh sang ảnh", "AnimeSR Upscale": "Nâng cấp AnimeSR", "Real-ESRGAN": "Real-ESRGAN", "Frame Interpolation": "Nội suy khung hình", Encode: "Mã hóa", "Subtitle Burn": "Ghi phụ đề", "Extract Frames": "Tách khung hình", Rotate: "Xoay", FPS: "FPS", "Extract Audio": "Tách âm thanh", "Replace Audio": "Thay âm thanh", Resize: "Đổi kích thước", "ComfyUI Workflow": "Workflow ComfyUI", "Video Generate (backend partial)": "Tạo video (backend một phần)", "Video Transform": "Biến đổi video", "Video Upscale (AnimeSR / FFmpeg)": "Nâng cấp video (AnimeSR / FFmpeg)", "Video Grade": "Hiệu chỉnh video", "Logo / Image Overlay": "Phủ logo / ảnh", "Video Generate": "Tạo video", "Video Transform": "Biến đổi video", "Text Overlay (unavailable)": "Phủ chữ (chưa khả dụng)", "Trim / Cut": "Cắt", Concat: "Nối", Crop: "Cắt khung", Flip: "Lật", "Audio Loudness": "Độ lớn âm thanh", "Color / Levels": "Màu / mức sáng", "Image Compare A/B": "So sánh ảnh A/B", "Mask Apply": "Áp dụng mask", "Mask Composite": "Ghép mask", "Mask Preview": "Xem trước mask", "Probe Audio": "Đọc metadata âm thanh", "Probe Video": "Đọc metadata video", "Grounding DINO": "Grounding DINO", "Grounding Prompt": "Prompt Grounding", "RF-DETR Detect": "Phát hiện RF-DETR", "SAM2 Segment": "Phân vùng SAM2", "SAM2 Track": "Theo dõi SAM2", "Upscale Image (FFmpeg fallback)": "Nâng cấp ảnh (FFmpeg dự phòng)",
+  "Connect": "Kết nối", socket: "cổng", "Compatible node ports": "Cổng node tương thích", "Search compatible nodes": "Tìm node tương thích", "Rejected candidates": "Ứng viên bị loại", "Close connection picker": "Đóng bộ chọn kết nối", "Only explicitly compatible typed ports are shown.": "Chỉ hiển thị các cổng typed tương thích rõ ràng.", "Auto-connected": "Đã tự kết nối", "Input is already connected; disconnect it before adding another edge.": "Đầu vào đã được kết nối; hãy ngắt kết nối trước khi thêm cạnh khác.", "Incompatible typed socket": "Cổng typed không tương thích", "Compatible socket could not be connected safely; no node was added.": "Không thể nối cổng tương thích an toàn; không thêm node.", "Typed socket mismatch": "Cổng typed không tương thích", "Input is already connected and is not multi.": "Đầu vào đã được kết nối và không hỗ trợ đa kết nối.", "Compatible typed socket.": "Cổng typed tương thích.",
   "Node Guide": "Hướng dẫn Node",
   "Node Guide · Hướng dẫn toàn diện Hub Nodes & Typed Workflow": "Hướng dẫn Node · Hướng dẫn toàn diện Hub Nodes & Typed Workflow",
   "Status truthful": "Trạng thái thực thi",
@@ -184,6 +185,13 @@ const MAX_ARTIFACT_NAME_LENGTH = 160;
 const MEDIA_OPERATION_SCOPE_IDS = Object.freeze(["video_grade", "logo_overlay", "encode"]);
 const MEDIA_OPERATION_SCOPE_LABELS = Object.freeze({ video_grade: "Video grade", logo_overlay: "Logo overlay", encode: "Encode" });
 const MEDIA_OPERATION_SCOPE_FALLBACK = Object.freeze({ status: "unavailable", execution: "not_run", evidenceVerified: false, availableOperations: [], operationStatus: { video_grade: "partial", logo_overlay: "partial", encode: "partial" }, reason: "No completed exact media evidence is available in this server snapshot.", nextAction: "Keep these operations partial until separately evidenced." });
+const SAFE_JOB_ID = /^job[A-Za-z0-9._:@-]{1,119}$/;
+const SAFE_GRAPH_NODE_ID = /^[A-Za-z][A-Za-z0-9_-]{0,79}$/;
+const PERSISTED_RUN_STATE_VERSION = 1;
+const MAX_PERSISTED_NODE_STATES = 128;
+const MAX_PERSISTED_ARTIFACTS = 32;
+const RUN_STATUS_VALUES = Object.freeze(["not_run", "queued", "starting", "running", "cancelling", "completed", "failed", "error", "cancelled", "interrupted", "unavailable"]);
+const ACTIVE_RUN_STATUS_VALUES = Object.freeze(["queued", "starting", "running", "cancelling"]);
 const unsafeOperationScopeText = /(?:[a-z]:[\\/]|\\\\|(?:file|data|https?):|(?:api[_-]?key|password|secret|token)\s*[:=]|\b(?:cmd|powershell|bash|ffmpeg|python|callable|manifest|command)\b)/i;
 const safeOperationScopeText = (value, fallback = "") => {
   if (typeof value !== "string") return fallback;
@@ -255,12 +263,12 @@ export function connectionPortDecision(sourcePort, targetPort, occupied = false)
   const sourceType = String(sourcePort?.type || "");
   const targetType = String(targetPort?.type || "");
   if (!sourceType || !targetType || sourceType !== targetType) {
-    return { compatible: false, reason: `Typed socket mismatch: ${sourceType || "unknown"} -> ${targetType || "unknown"}.` };
+    return { compatible: false, reason: `${nodeText("Typed socket mismatch")}: ${sourceType || "unknown"} -> ${targetType || "unknown"}.` };
   }
   if (occupied && !targetPort?.multi) {
-    return { compatible: false, reason: "Input is already connected and is not multi." };
+    return { compatible: false, reason: nodeText("Input is already connected and is not multi.") };
   }
-  return { compatible: true, reason: "Compatible typed socket." };
+  return { compatible: true, reason: nodeText("Compatible typed socket.") };
 }
 
 export function getConnectionPortCandidates(definitions, { direction = "input", type = "", occupied = [] } = {}) {
@@ -859,7 +867,137 @@ function graphFingerprint(graph) {
   return JSON.stringify(graph);
 }
 
-function propertyControl(node, property) {
+const graphNodeMap = (graph) => new Map(
+  (Array.isArray(graph?.nodes) ? graph.nodes : [])
+    .filter((node) => node && typeof node === "object" && typeof node.id === "string")
+    .map((node) => [node.id, node]),
+);
+
+const graphEdgeKey = (edge) => {
+  if (!edge || typeof edge !== "object") return "";
+  const source = edge.source && typeof edge.source === "object" ? edge.source : {};
+  const target = edge.target && typeof edge.target === "object" ? edge.target : {};
+  return `${String(edge.id || "")}|${String(source.node || "")}:${String(source.port || "")}->${String(target.node || "")}:${String(target.port || "")}`;
+};
+
+/** Return only current node IDs changed by a graph edit, including topology endpoints. */
+export function changedGraphNodeIds(before, after) {
+  const previousNodes = graphNodeMap(before);
+  const nextNodes = graphNodeMap(after);
+  const changed = new Set();
+  const nodeIds = new Set([...previousNodes.keys(), ...nextNodes.keys()]);
+  for (const id of nodeIds) {
+    const previous = previousNodes.get(id);
+    const next = nextNodes.get(id);
+    if (!previous || !next || JSON.stringify(previous) !== JSON.stringify(next)) changed.add(id);
+  }
+  const previousEdges = new Map((Array.isArray(before?.edges) ? before.edges : []).map((edge) => [graphEdgeKey(edge), edge]));
+  const nextEdges = new Map((Array.isArray(after?.edges) ? after.edges : []).map((edge) => [graphEdgeKey(edge), edge]));
+  const edgeKeys = new Set([...previousEdges.keys(), ...nextEdges.keys()]);
+  for (const key of edgeKeys) {
+    if (previousEdges.has(key) && nextEdges.has(key)) continue;
+    const edge = nextEdges.get(key) || previousEdges.get(key);
+    const source = edge?.source?.node;
+    const target = edge?.target?.node;
+    if (typeof source === "string") changed.add(source);
+    if (typeof target === "string") changed.add(target);
+  }
+  return [...changed].filter((id) => nextNodes.has(id)).sort((left, right) => left.localeCompare(right));
+}
+
+/** Compute changed nodes plus only their reachable downstream dependants. */
+export function downstreamDirtyNodeIds(graph, changedIds = []) {
+  const nodes = graphNodeMap(graph);
+  const dirty = new Set((Array.isArray(changedIds) ? changedIds : []).filter((id) => typeof id === "string" && nodes.has(id)));
+  const adjacency = new Map([...nodes.keys()].map((id) => [id, new Set()]));
+  for (const edge of Array.isArray(graph?.edges) ? graph.edges : []) {
+    const source = edge?.source?.node;
+    const target = edge?.target?.node;
+    if (adjacency.has(source) && adjacency.has(target)) adjacency.get(source).add(target);
+  }
+  const queue = [...dirty].sort((left, right) => left.localeCompare(right));
+  while (queue.length) {
+    const current = queue.shift();
+    for (const child of [...(adjacency.get(current) || [])].sort((left, right) => left.localeCompare(right))) {
+      if (dirty.has(child)) continue;
+      dirty.add(child);
+      queue.push(child);
+    }
+  }
+  return [...dirty].sort((left, right) => left.localeCompare(right));
+}
+
+const safePersistedJobId = (value) => {
+  const candidate = typeof value === "string" ? value.trim() : "";
+  return SAFE_JOB_ID.test(candidate) ? candidate : null;
+};
+
+const safePersistedStatus = (value) => RUN_STATUS_VALUES.includes(String(value || "")) ? String(value) : "not_run";
+
+const safePersistedArtifact = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const id = typeof value.id === "string" ? value.id : typeof value.artifact_id === "string" ? value.artifact_id : "";
+  if (!OPAQUE_ARTIFACT_ID.test(id)) return null;
+  const name = typeof value.name === "string" && !UNSAFE_ARTIFACT_TEXT.test(value.name)
+    ? value.name.replace(/[\\/\r\n]+/g, " ").replace(/\s+/g, " ").trim().slice(0, MAX_ARTIFACT_NAME_LENGTH) || "Artifact"
+    : "Artifact";
+  const mediaType = typeof value.media_type === "string" && SAFE_MEDIA_TYPE.test(value.media_type.split(";", 1)[0].trim().toLocaleLowerCase())
+    ? value.media_type.split(";", 1)[0].trim().toLocaleLowerCase()
+    : "application/octet-stream";
+  const size = value.size_bytes;
+  return {
+    id,
+    name,
+    media_type: mediaType,
+    size_bytes: size === null || size === undefined ? null : Number.isSafeInteger(size) && size >= 0 ? size : null,
+    mask: value.mask === true || value.is_mask === true || value.artifact_kind === "mask",
+  };
+};
+
+/** Persist only a bounded opaque run reference and server-shaped projections. */
+export function buildPersistedRunProjection(run = {}, nodeIds = []) {
+  const allowedNodeIds = new Set((Array.isArray(nodeIds) ? nodeIds : []).filter((id) => typeof id === "string" && SAFE_GRAPH_NODE_ID.test(id)));
+  const rawNodes = Array.isArray(run?.nodes) ? run.nodes : [];
+  const nodes = rawNodes.map((state) => {
+    if (!state || typeof state !== "object" || typeof state.id !== "string" || !SAFE_GRAPH_NODE_ID.test(state.id) || (allowedNodeIds.size && !allowedNodeIds.has(state.id))) return null;
+    const progress = Number(state.progress);
+    return {
+      id: state.id,
+      status: safePersistedStatus(state.status),
+      progress: Number.isFinite(progress) ? Math.max(0, Math.min(100, Math.round(progress))) : 0,
+      cache_hit: typeof state.cache_hit === "boolean" ? state.cache_hit : null,
+    };
+  }).filter(Boolean).slice(0, MAX_PERSISTED_NODE_STATES);
+  const artifacts = [];
+  const seen = new Set();
+  for (const value of Array.isArray(run?.provenance) ? run.provenance : []) {
+    const artifact = safePersistedArtifact(value);
+    if (!artifact || seen.has(artifact.id)) continue;
+    seen.add(artifact.id);
+    artifacts.push(artifact);
+    if (artifacts.length >= MAX_PERSISTED_ARTIFACTS) break;
+  }
+  return {
+    version: PERSISTED_RUN_STATE_VERSION,
+    job_id: safePersistedJobId(run?.job_id || run?.id),
+    status: safePersistedStatus(run?.status),
+    nodes,
+    artifacts,
+  };
+}
+
+export function normalizePersistedRunProjection(value, nodeIds = []) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== PERSISTED_RUN_STATE_VERSION) return null;
+  const jobId = value.job_id === null ? null : safePersistedJobId(value.job_id);
+  if (value.job_id !== null && !jobId) return null;
+  const normalized = buildPersistedRunProjection({ job_id: jobId, status: value.status, nodes: value.nodes, provenance: value.artifacts }, nodeIds);
+  if (normalized.job_id !== jobId || !Array.isArray(value.nodes) || !Array.isArray(value.artifacts)) return null;
+  return normalized;
+}
+
+export const persistedRunProjection = buildPersistedRunProjection;
+
+export function propertyControl(node, property) {
   const control = inlineControlMetadata(property);
   const value = node.properties?.[property.name] ?? property.default ?? "";
   const target = `${node.id}:${property.name}`;
@@ -885,7 +1023,11 @@ function propertyControl(node, property) {
     return `<label class="graph-property"><span>${label}${unit}</span><textarea data-graph-property="${escapeHtml(target)}"${maxLength}${control.placeholder ? ` placeholder="${escapeHtml(control.placeholder)}"` : ""}>${escapeHtml(value)}</textarea></label>`;
   }
   if (control.control === "slider") {
-    return `<label class="graph-property graph-property--slider"><span>${label}${unit}</span><input type="range" data-graph-property="${escapeHtml(target)}" value="${escapeHtml(value)}"${min}${max}${step} /><output>${escapeHtml(value)}</output></label>`;
+    if (control.minimum === undefined || control.maximum === undefined || !Number.isFinite(Number(control.minimum)) || !Number.isFinite(Number(control.maximum))) {
+      return `<div class="graph-property graph-property--unavailable" data-control-state="unavailable"><span>${label}</span><small>${escapeHtml(nodeText("Control unavailable; server metadata is not recognized."))}</small></div>`;
+    }
+    const numberStep = step || " step=\"any\"";
+    return `<div class="graph-property graph-property--slider" data-graph-property-group="${escapeHtml(target)}"><span>${label}${unit}</span><div class="graph-property__slider-row"><input type="range" data-graph-property="${escapeHtml(target)}" data-graph-property-role="range" value="${escapeHtml(value)}"${min}${max}${numberStep} aria-label="${label}" /><input type="number" data-graph-property="${escapeHtml(target)}" data-graph-property-role="number" value="${escapeHtml(value)}"${min}${max}${numberStep} aria-label="${label} numeric value" /><output data-graph-property-value>${escapeHtml(value)}</output></div></div>`;
   }
   if (control.control === "color") {
     return `<label class="graph-property graph-property--color"><span>${label}${unit}</span><span class="graph-property__color-row"><input type="color" data-graph-property="${escapeHtml(target)}" value="${escapeHtml(value || "#4d7dff")}" /><code>${escapeHtml(value || "#4d7dff")}</code></span></label>`;
@@ -903,6 +1045,104 @@ function inlineWidgetType(control) {
   if (["integer", "number", "size"].includes(control.control)) return "number";
   if (["text", "prompt", "textarea", "artifact"].includes(control.control)) return "text";
   return null;
+}
+
+function createSliderWidget(node, property, control) {
+  const minimum = Number(control.minimum);
+  const maximum = Number(control.maximum);
+  const step = Number(control.step) > 0 ? Number(control.step) : (control.control === "integer" ? 1 : 0.01);
+  const decimals = Math.min(6, Math.max(0, String(step).split(".")[1]?.length || 0));
+  const snap = (raw) => {
+    const value = Math.max(minimum, Math.min(maximum, Number(raw)));
+    const snapped = minimum + Math.round((value - minimum) / step) * step;
+    return Number(Math.max(minimum, Math.min(maximum, snapped)).toFixed(decimals));
+  };
+  const widget = {
+    type: "hub-slider",
+    name: property.name,
+    value: snap(node.properties?.[property.name] ?? property.default ?? minimum),
+    options: { property: property.name, min: minimum, max: maximum, step },
+    _dragging: false,
+    computeSize: () => [230, 42],
+    draw(ctx, _owner, width, y, height) {
+      const value = snap(this.value);
+      const ratio = maximum === minimum ? 0 : (value - minimum) / (maximum - minimum);
+      const left = 16;
+      const numberWidth = 66;
+      const right = Math.max(left + 18, width - numberWidth - 18);
+      const trackY = y + height * 0.63;
+      ctx.save();
+      ctx.font = "11px sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "alphabetic";
+      ctx.fillStyle = "#dce7ff";
+      ctx.fillText(control.label || property.name, left, y + 13);
+      ctx.strokeStyle = "#55698f";
+      ctx.lineWidth = 4;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(left, trackY);
+      ctx.lineTo(right, trackY);
+      ctx.stroke();
+      ctx.strokeStyle = "#78a8ff";
+      ctx.beginPath();
+      ctx.moveTo(left, trackY);
+      ctx.lineTo(left + (right - left) * ratio, trackY);
+      ctx.stroke();
+      ctx.fillStyle = "#edf4ff";
+      ctx.beginPath();
+      ctx.arc(left + (right - left) * ratio, trackY, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#18223b";
+      ctx.strokeStyle = "#8aa8d9";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(width - numberWidth - 8, y + 4, numberWidth, height - 8, 4);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#edf4ff";
+      ctx.textAlign = "center";
+      ctx.fillText(String(value), width - numberWidth / 2 - 8, y + height * 0.68);
+      ctx.restore();
+    },
+    mouse(event, position) {
+      const editor = node._hubEditor;
+      if (!editor || !["mousedown", "pointerdown", "mousemove", "pointermove", "mouseup", "pointerup"].includes(event?.type)) return false;
+      const width = Number(node.size?.[0] || 230);
+      const numberStart = width - 82;
+      const x = Number(position?.[0] || 0);
+      const updateFromPointer = () => {
+        const left = 16;
+        const right = Math.max(left + 18, width - 84);
+        const ratio = Math.max(0, Math.min(1, (x - left) / Math.max(1, right - left)));
+        this.value = snap(minimum + (maximum - minimum) * ratio);
+        editor.stageWidgetValue(node, property, this.value);
+      };
+      if (event.type.endsWith("down")) {
+        editor.captureWidgetBeforeChange(node, property.name);
+        if (x >= numberStart) {
+          this._dragging = false;
+          editor.liteCanvas?.prompt(control.label || property.name, String(this.value), (value) => editor.changeWidgetValue(node, property, value), event, false);
+        } else {
+          this._dragging = true;
+          updateFromPointer();
+        }
+        return true;
+      }
+      if (event.type.endsWith("move") && this._dragging) {
+        updateFromPointer();
+        return true;
+      }
+      if (event.type.endsWith("up") && this._dragging) {
+        updateFromPointer();
+        this._dragging = false;
+        editor.commitWidgetGesture(node, property.name);
+        return true;
+      }
+      return Boolean(this._dragging);
+    },
+  };
+  return widget;
 }
 
 function createColorWidget(node, property, control) {
@@ -947,6 +1187,7 @@ class HubGraphEditor {
     this.root = root;
     this.scope = root.dataset.scope || "image";
     this.showToast = showToast;
+    this.destroyed = false;
     this.recipeApplication = recipeApplication;
     this.initialPresetId = initialPresetId;
     this.onRecipeApplied = onRecipeApplied;
@@ -972,13 +1213,18 @@ class HubGraphEditor {
     this.hydrating = false;
     this.beforeChange = null;
     this.widgetBeforeChange = null;
+    this.propertyGesture = null;
     this.pollTimer = null;
+    this.pollGeneration = 0;
+    this.pollInFlight = false;
     this.autoTimer = null;
     this.resizeObserver = null;
     this.abort = new AbortController();
     this.minimapBounds = null;
     this.minimapFrame = null;
     this.minimapLoopActive = false;
+    this.minimapDirty = false;
+    this.minimapScheduler = null;
     this.minimapLastFingerprint = "";
     this.minimapDragging = null;
     this.contextMenu = null;
@@ -990,6 +1236,8 @@ class HubGraphEditor {
     this.unsaved = false;
     this.recovered = false;
     this.autosavedAt = null;
+    this.persistedRun = null;
+    this.lastRunSnapshotFingerprint = "";
     this.panelState = this.readPanelState();
     this.connectionPicker = null;
     this.pendingConnection = null;
@@ -1033,12 +1281,16 @@ class HubGraphEditor {
       this.presets = (presetPayload.presets || []).filter((item) => item.scope === this.scope || (this.scope === "video" && item.scope === "media"));
       this.workflowIndex = readWorkflowIndex(this.scope);
       this.configureLiteGraph();
-      const saved = this.readLocalGraph();
+      const savedState = this.readLocalState();
       if (this.initialPresetId) {
         await this.loadPreset(this.initialPresetId, { quiet: true, render: false });
         this.recovered = false;
         this.onPresetApplied(this.initialPresetId);
-      } else if (saved) { this.graphData = saved; this.recovered = true; }
+      } else if (savedState) {
+        this.graphData = savedState.graph;
+        this.persistedRun = savedState.run;
+        this.recovered = true;
+      }
       else await this.loadPreset(PRESET_BY_SCOPE[this.scope], { quiet: true, render: false });
       await this.refreshWorkflowLibrary();
       if (this.recipeApplication && this.scope === "image") {
@@ -1058,6 +1310,7 @@ class HubGraphEditor {
       this.hydrateLiteGraph(this.graphData);
       this.renderWorkflowStatus();
       if (this.recovered) this.showToast("Đã khôi phục bản autosave local của workflow.");
+      if (this.persistedRun) await this.restorePersistedRun(this.persistedRun);
     } catch (error) {
       this.root.innerHTML = `<div class="callout callout--warning">Không thể nạp graph editor: ${escapeHtml(error.message)}</div>`;
     }
@@ -1104,8 +1357,9 @@ class HubGraphEditor {
   currentMinimapFingerprint() {
     if (!this.liteGraph || !this.liteCanvas) return "";
     const nodes = this.liteGraph._nodes || [];
+    const nodeById = new Map(nodes.map((node) => [node.id, node]));
     const links = Object.values(this.liteGraph.links || {}).map((link) => {
-      const source = nodes.find((node) => node.id === link.origin_id);
+      const source = nodeById.get(link.origin_id);
       return {
         id: link.id,
         origin_id: link.origin_id,
@@ -1127,35 +1381,37 @@ class HubGraphEditor {
   }
 
   scheduleMinimapUpdate() {
-    // The route-scoped rAF loop coalesces all pan/zoom/drag/resize/layout and
-    // import notifications.  No caller can cause more than one redraw/frame.
     this.minimapDirty = true;
+    this.minimapScheduler?.invalidate();
   }
 
   startMinimapLoop() {
-    if (this.minimapLoopActive) return;
+    if (this.minimapScheduler?.active) return;
     const view = this.canvasElement?.ownerDocument?.defaultView || globalThis;
     this._requestMinimapFrame = view.requestAnimationFrame?.bind(view) || globalThis.requestAnimationFrame?.bind(globalThis) || ((callback) => setTimeout(callback, 16));
     this._cancelMinimapFrame = view.cancelAnimationFrame?.bind(view) || globalThis.cancelAnimationFrame?.bind(globalThis) || ((handle) => clearTimeout(handle));
-    this.minimapLoopActive = true;
-    const tick = () => {
-      this.minimapFrame = null;
-      if (!this.minimapLoopActive || !this.root?.isConnected) {
-        this.stopMinimapLoop();
-        return;
-      }
-      const fingerprint = this.currentMinimapFingerprint();
-      if (fingerprint && fingerprint !== this.minimapLastFingerprint) {
+    this.minimapScheduler = createMinimapScheduler({
+      requestFrame: (callback) => this._requestMinimapFrame(callback),
+      cancelFrame: (handle) => this._cancelMinimapFrame(handle),
+      fingerprint: () => {
+        if (!this.minimapDirty || !this.root?.isConnected) return "";
+        return this.currentMinimapFingerprint();
+      },
+      redraw: (fingerprint) => {
+        if (!this.root?.isConnected) return;
         this.minimapLastFingerprint = fingerprint;
+        this.minimapDirty = false;
         this.drawMinimap();
-      }
-      this.minimapFrame = this._requestMinimapFrame(tick);
-    };
-    this.minimapFrame = this._requestMinimapFrame(tick);
+      },
+    });
+    this.minimapLoopActive = true;
+    this.minimapScheduler.start();
   }
 
   stopMinimapLoop() {
     this.minimapLoopActive = false;
+    this.minimapScheduler?.stop();
+    this.minimapScheduler = null;
     if (this.minimapFrame !== null && this._cancelMinimapFrame) this._cancelMinimapFrame(this.minimapFrame);
     this.minimapFrame = null;
     this._requestMinimapFrame = null;
@@ -1422,26 +1678,149 @@ class HubGraphEditor {
 
   destroy() {
     this.abort.abort();
+    this.destroyed = true;
     this.closeConnectionPicker(false);
     this.closeContextMenu(false);
     this.stopMinimapDrag();
     this.stopMinimapLoop();
-    if (this.pollTimer) clearInterval(this.pollTimer);
+    this.stopPoll();
     if (this.autoTimer) clearTimeout(this.autoTimer);
+    this.autoTimer = null;
+    this.beforeChange = null;
+    this.widgetBeforeChange = null;
+    this.propertyGesture = null;
     this.resizeObserver?.disconnect();
     this.liteCanvas?.stopRendering?.();
     this.liteCanvas?.setCanvas?.(null);
     this.liteCanvas?.setGraph?.(null);
   }
 
-  readLocalGraph() {
+  readLocalState() {
     for (const storageKey of [keyFor(this.scope), legacyKeyFor(this.scope)]) {
       try {
         const value = JSON.parse(localStorage.getItem(storageKey) || "null");
-        if (value?.schema_version === 1 && Array.isArray(value.nodes) && Array.isArray(value.edges)) return value;
+        if (value?.schema_version === 1 && Array.isArray(value.nodes) && Array.isArray(value.edges)) {
+          const graph = { ...value };
+          delete graph.node_studio_state;
+          return {
+            graph,
+            run: normalizePersistedRunProjection(value.node_studio_state, graph.nodes.map((node) => node?.id).filter(Boolean)),
+          };
+        }
       } catch { /* ignore a malformed private WebView value */ }
     }
     return null;
+  }
+
+  readLocalGraph() {
+    return this.readLocalState()?.graph || null;
+  }
+
+  resetRunState(status = "idle") {
+    this.stopPoll();
+    this.activeJobId = null;
+    this.nodeStates.clear();
+    this.liteGraph?._nodes?.forEach((node) => { node.hubStatus = "not_run"; });
+    this.runProvenance = [];
+    this.persistedRun = null;
+    this.lastRunSnapshotFingerprint = "";
+    this.runStatus = status;
+  }
+
+  stopPoll() {
+    this.pollGeneration += 1;
+    if (this.pollTimer) clearTimeout(this.pollTimer);
+    this.pollTimer = null;
+    this.pollInFlight = false;
+  }
+
+  runSnapshotFingerprint(run) {
+    return JSON.stringify({
+      job_id: run?.job_id || run?.id || null,
+      status: run?.status || "not_run",
+      nodes: Array.isArray(run?.nodes) ? run.nodes : [],
+      provenance: Array.isArray(run?.provenance) ? run.provenance : [],
+    });
+  }
+
+  applyRunSnapshot(run, { generation = null, syncDraft = false } = {}) {
+    if (this.destroyed || !run || typeof run !== "object") return false;
+    if (generation !== null && generation !== this.pollGeneration) return false;
+    const jobId = safePersistedJobId(run.job_id || run.id || this.activeJobId);
+    if (!jobId || (this.activeJobId && jobId !== this.activeJobId)) return false;
+    const snapshotFingerprint = this.runSnapshotFingerprint(run);
+    const changed = snapshotFingerprint !== this.lastRunSnapshotFingerprint;
+    this.lastRunSnapshotFingerprint = snapshotFingerprint;
+    this.runStatus = safePersistedStatus(run.status);
+    this.activeJobId = jobId;
+    this.nodeStates.clear();
+    for (const state of Array.isArray(run.nodes) ? run.nodes.slice(0, MAX_PERSISTED_NODE_STATES) : []) {
+      if (!state || typeof state !== "object" || typeof state.id !== "string" || !SAFE_GRAPH_NODE_ID.test(state.id)) continue;
+      this.nodeStates.set(state.id, state);
+      const node = this.liteGraph?._nodes?.find((candidate) => candidate.hubId === state.id);
+      if (node) node.hubStatus = state.status || "not_run";
+    }
+    this.runProvenance = Array.isArray(run.provenance) ? run.provenance.slice(0, MAX_PERSISTED_ARTIFACTS) : [];
+    this.persistedRun = buildPersistedRunProjection(run, this.toHubGraph().nodes.map((node) => node.id));
+    const terminal = !ACTIVE_RUN_STATUS_VALUES.includes(this.runStatus);
+    if (terminal) {
+      this.activeJobId = null;
+      this.stopPoll();
+      if (this.runStatus === "completed") this.dirty.clear();
+    }
+    if (changed) {
+      this.persist({ source: "run", syncDraft });
+      this.renderInspector();
+      this.renderGraphStatus();
+    }
+    return true;
+  }
+
+  markRunUnavailable(jobId = null) {
+    if (this.destroyed) return;
+    this.stopPoll();
+    this.activeJobId = null;
+    this.runStatus = "unavailable";
+    this.nodeStates = new Map(this.toHubGraph().nodes.map((node) => [node.id, {
+      id: node.id,
+      status: "unavailable",
+      progress: 0,
+      message: "Job snapshot không còn khả dụng; không khẳng định kết quả đã hoàn tất.",
+    }]));
+    this.liteGraph?._nodes?.forEach((node) => { node.hubStatus = "unavailable"; });
+    this.runProvenance = [];
+    this.persistedRun = buildPersistedRunProjection({ job_id: jobId, status: "unavailable", nodes: [...this.nodeStates.values()], provenance: [] }, this.toHubGraph().nodes.map((node) => node.id));
+    this.persist({ source: "run-unavailable", syncDraft: false });
+    this.renderInspector();
+    this.renderGraphStatus();
+  }
+
+  async restorePersistedRun(value) {
+    if (this.destroyed) return;
+    const projection = normalizePersistedRunProjection(value, this.toHubGraph().nodes.map((node) => node.id));
+    const jobId = projection?.job_id;
+    if (!jobId) return;
+    this.persistedRun = projection;
+    this.activeJobId = jobId;
+    this.runStatus = "starting";
+    this.renderGraphStatus();
+    try {
+      const response = await getNodeRun(jobId);
+      if (this.destroyed || this.activeJobId !== jobId) return;
+      if (!response?.run || typeof response.run !== "object") throw new Error("NODE_RUN_SNAPSHOT_INVALID");
+      this.applyRunSnapshot(response.run);
+      if (this.activeJobId) this.startPoll();
+    } catch (error) {
+      if (this.destroyed || this.activeJobId !== jobId) return;
+      if (error?.status === 404 || error?.payload?.error === "node_run_not_found") this.markRunUnavailable(jobId);
+      else {
+        // A transient read failure never promotes the stored terminal label to
+        // a result. Keep the opaque reference and retry through the poller.
+        this.runStatus = "starting";
+        this.renderGraphStatus();
+        this.startPoll();
+      }
+    }
   }
 
   isUnsaved() {
@@ -1464,22 +1843,30 @@ class HubGraphEditor {
     return record;
   }
 
-  persist({ source = "autosave", saved = false } = {}) {
+  persist({ source = "autosave", saved = false, syncDraft = true } = {}) {
     const graph = this.toHubGraph();
     graph.id = safeWorkflowId(graph.id, `local-${this.scope}`);
     graph.title = String(graph.title || `Workflow ${this.scope}`).slice(0, 160);
+    const run = buildPersistedRunProjection({
+      job_id: this.activeJobId || this.persistedRun?.job_id,
+      status: this.runStatus,
+      nodes: [...this.nodeStates.values()],
+      provenance: this.runProvenance,
+    }, graph.nodes.map((node) => node.id));
+    this.persistedRun = run;
+    const persistedGraph = { ...graph, node_studio_state: run };
     this.graphData = { ...this.graphData, id: graph.id, title: graph.title };
-    localStorage.setItem(keyFor(this.scope), JSON.stringify(graph));
+    localStorage.setItem(keyFor(this.scope), JSON.stringify(persistedGraph));
     localStorage.setItem(`${keyFor(this.scope)}:auto`, String(this.autoPreview));
     localStorage.setItem(`${keyFor(this.scope)}:draft`, String(this.draft));
     this.autosavedAt = nowIso();
-    this.rememberWorkflow(graph, { source, saved });
+    this.rememberWorkflow(persistedGraph, { source, saved });
     if (saved) {
       this.savedFingerprint = graphFingerprint(graph);
       this.unsaved = false;
-      clearNodeDraft(this.scope).catch(() => {});
-    } else {
-      saveNodeDraft(this.scope, graph).catch(() => {});
+      if (syncDraft) clearNodeDraft(this.scope).catch(() => {});
+    } else if (syncDraft) {
+      saveNodeDraft(this.scope, persistedGraph).catch(() => {});
     }
     this.renderWorkflowStatus();
   }
@@ -1586,19 +1973,23 @@ class HubGraphEditor {
     try {
       const stored = localStorage.getItem(workflowGraphKey(this.scope, id));
       if (!stored) throw new Error("Không tìm thấy workflow local này.");
-      const result = await validateNodeGraph(JSON.parse(stored), false);
+      const storedValue = JSON.parse(stored);
+      const storedGraph = { ...storedValue };
+      delete storedGraph.node_studio_state;
+      const result = await validateNodeGraph(storedGraph, false);
       if (!result.validation?.valid) throw new Error(result.validation?.errors?.[0]?.message || "Workflow local không còn hợp lệ.");
       this.history = [];
       this.future = [];
-      this.nodeStates.clear();
-      this.runProvenance = [];
+      this.resetRunState();
       this.hydrateLiteGraph(result.validation.graph);
       this.savedFingerprint = graphFingerprint(result.validation.graph);
       this.unsaved = false;
-      this.dirty = new Set(result.validation.graph.nodes.map((node) => node.id));
+      this.dirty = new Set();
       this.recovered = true;
+      this.persistedRun = normalizePersistedRunProjection(storedValue.node_studio_state, result.validation.graph.nodes.map((node) => node.id));
       this.persist({ source: "recent", saved: true });
       this.showToast("Đã mở workflow trong Recent.");
+      if (this.persistedRun) await this.restorePersistedRun(this.persistedRun);
     } catch (error) { this.showToast(error.message, "error"); }
   }
 
@@ -1612,8 +2003,7 @@ class HubGraphEditor {
       if (!validation.validation?.valid) throw new Error(validation.validation?.errors?.[0]?.message || "Workflow Library không còn hợp lệ.");
       this.history = [];
       this.future = [];
-      this.nodeStates.clear();
-      this.runProvenance = [];
+      this.resetRunState();
       this.hydrateLiteGraph(validation.validation.graph);
       this.savedFingerprint = graphFingerprint(validation.validation.graph);
       this.unsaved = false;
@@ -1663,8 +2053,7 @@ class HubGraphEditor {
     copy.title = `${copy.title || "Workflow"} (bản sao)`;
     this.history = [];
     this.future = [];
-    this.nodeStates.clear();
-    this.runProvenance = [];
+    this.resetRunState();
     this.hydrateLiteGraph(copy);
     this.savedFingerprint = "";
     this.unsaved = true;
@@ -1717,6 +2106,15 @@ class HubGraphEditor {
           if (control.control === "color") {
             const widget = createColorWidget(this, property, control);
             this.addCustomWidget(widget);
+            this._hubInlineControls.set(property.name, widget);
+            continue;
+          }
+          if (control.control === "slider") {
+            if (control.minimum === undefined || control.maximum === undefined || !Number.isFinite(Number(control.minimum)) || !Number.isFinite(Number(control.maximum))) continue;
+            const widget = createSliderWidget(this, property, control);
+            this.addCustomWidget(widget);
+            widget.hubControl = control.control;
+            widget.hubProperty = property.name;
             this._hubInlineControls.set(property.name, widget);
             continue;
           }
@@ -1783,7 +2181,7 @@ class HubGraphEditor {
       HubLiteNode.prototype.onConnectInput = function guardOccupiedInput(slot) {
         const input = this.inputs?.[slot];
         if (input?.link != null && !input.multi) {
-          this._hubEditor?.showConnectionNotice("Input is already connected; disconnect it before adding another edge.");
+          this._hubEditor?.showConnectionNotice(nodeText("Input is already connected; disconnect it before adding another edge."));
           return false;
         }
         return true;
@@ -1791,7 +2189,7 @@ class HubGraphEditor {
       HubLiteNode.prototype.onConnectOutput = function guardOutputType(slot, type) {
         const output = this.outputs?.[slot];
         if (output && type && output.type !== type) {
-          this._hubEditor?.showConnectionNotice(`Incompatible typed socket: ${output.type} -> ${type}.`);
+          this._hubEditor?.showConnectionNotice(`${nodeText("Incompatible typed socket")}: ${output.type} -> ${type}.`);
           return false;
         }
         return true;
@@ -1954,6 +2352,7 @@ class HubGraphEditor {
     this.root.addEventListener("input", (event) => {
       if (event.target.matches("[data-graph-search]")) { this.search = event.target.value; this.renderPalette(); }
       if (event.target.matches("[data-graph-title]")) this.renameWorkflow(event.target.value);
+      if (event.target.matches("[data-graph-property][data-graph-property-role]")) this.stageProperty(event.target);
     }, { signal });
     this.root.addEventListener("change", (event) => {
       const option = event.target.dataset.graphOption;
@@ -1962,6 +2361,7 @@ class HubGraphEditor {
       if (event.target.matches("[data-graph-recent]")) { this.loadRecent(event.target.value); return; }
       if (event.target.matches("[data-graph-library]")) { this.loadLibraryWorkflow(event.target.value); return; }
       if (event.target.matches("[data-graph-preset]")) { this.loadPreset(event.target.value); return; }
+      if (event.target.matches("[data-graph-property][data-graph-property-role]")) { this.stageProperty(event.target); this.commitProperty(event.target); return; }
       if (event.target.matches("[data-graph-property]")) { this.changeProperty(event.target); return; }
       if (event.target.matches("[data-graph-asset]")) { this.uploadAsset(event.target); return; }
       if (event.target.matches("[data-graph-import]")) { this.importGraph(event.target.files?.[0]); }
@@ -2017,17 +2417,7 @@ class HubGraphEditor {
     const next = this.toHubGraph();
     const after = graphFingerprint(next);
     const before = this.beforeChange || graphFingerprint(this.graphData);
-    if (before !== after) {
-      this.history.push(before);
-      if (this.history.length > MAX_HISTORY) this.history.shift();
-      this.future = [];
-      this.graphData = next;
-      this.unsaved = true;
-      this.markDirty(next.nodes.map((node) => node.id));
-      this.persist();
-      this.renderInspector();
-      this.renderGraphStatus();
-    }
+    if (before !== after) this.commitGraphChange(before, next);
     this.beforeChange = null;
   }
 
@@ -2116,7 +2506,7 @@ class HubGraphEditor {
     const candidates = getConnectionPortCandidates(this.registry, { direction: pending.direction, type: pending.type });
     const automatic = chooseConnectionCandidate(candidates.compatible);
     if (automatic) {
-      if (this.connectPickerCandidate(automatic)) this.showToast(`Auto-connected ${automatic.definition.title} · ${automatic.port.label || automatic.port.name}.`);
+      if (this.connectPickerCandidate(automatic)) this.showToast(`${nodeText("Auto-connected")} ${nodeText(automatic.definition.title)} · ${automatic.port.label || automatic.port.name}.`);
       return;
     }
     const shell = this.root.querySelector(".graph-canvas-shell");
@@ -2133,7 +2523,7 @@ class HubGraphEditor {
     const top = Number(this.liteCanvas.ds.offset?.[1] || 0) + pending.position.y * scale;
     picker.style.left = `${Math.max(8, Math.min(Math.max(8, shell.clientWidth - 350), left))}px`;
     picker.style.top = `${Math.max(8, Math.min(Math.max(8, shell.clientHeight - 300), top))}px`;
-    picker.innerHTML = `<div class="graph-connection-picker__head"><strong id="graph-picker-title-${escapeHtml(this.scope)}">Connect ${escapeHtml(pending.type)} socket</strong><button class="button button--compact" type="button" data-graph-picker-close aria-label="Close connection picker">Esc</button></div><input type="search" data-graph-picker-search aria-label="Search compatible nodes" placeholder="Search compatible nodes" value="${escapeHtml(this.panelState.pickerSearch)}" /><div data-graph-picker-results role="listbox" aria-label="Compatible node ports"></div><div data-graph-picker-rejected class="graph-empty" role="status"></div>`;
+    picker.innerHTML = `<div class="graph-connection-picker__head"><strong id="graph-picker-title-${escapeHtml(this.scope)}">${escapeHtml(nodeText("Connect"))} ${escapeHtml(pending.type)} ${escapeHtml(nodeText("socket"))}</strong><button class="button button--compact" type="button" data-graph-picker-close aria-label="${escapeHtml(nodeText("Close connection picker"))}">Esc</button></div><input type="search" data-graph-picker-search aria-label="${escapeHtml(nodeText("Search compatible nodes"))}" placeholder="${escapeHtml(nodeText("Search compatible nodes"))}" value="${escapeHtml(this.panelState.pickerSearch)}" /><div data-graph-picker-results role="listbox" aria-label="${escapeHtml(nodeText("Compatible node ports"))}"></div><div data-graph-picker-rejected class="graph-empty" role="status"></div>`;
     shell.appendChild(picker);
     this.connectionPicker = { element: picker, candidates, pending };
     const input = picker.querySelector("[data-graph-picker-search]");
@@ -2172,7 +2562,7 @@ class HubGraphEditor {
     const rejected = state.element.querySelector("[data-graph-picker-rejected]");
     if (rejected) {
       const reasons = state.candidates.rejected.slice(0, 4).map((item) => `${item.definition.title} · ${item.port.label || item.port.name}: ${item.reason}`);
-      rejected.textContent = reasons.length ? `Rejected candidates: ${reasons.join("; ")}` : "Only explicitly compatible typed ports are shown.";
+      rejected.textContent = reasons.length ? `${nodeText("Rejected candidates")}: ${reasons.join("; ")}` : nodeText("Only explicitly compatible typed ports are shown.");
     }
   }
 
@@ -2201,7 +2591,7 @@ class HubGraphEditor {
       }
     });
     if (!connected) {
-      this.showConnectionNotice("Compatible socket could not be connected safely; no node was added.");
+      this.showConnectionNotice(nodeText("Compatible socket could not be connected safely; no node was added."));
       return false;
     }
     this.closeConnectionPicker(false);
@@ -2411,22 +2801,9 @@ class HubGraphEditor {
   captureAfterChange() {
     if (this.hydrating) return;
     const next = this.toHubGraph();
-    const after = graphFingerprint(next);
-    if (this.beforeChange && this.beforeChange !== after) {
-      this.history.push(this.beforeChange);
-      if (this.history.length > MAX_HISTORY) this.history.shift();
-      this.future = [];
-    }
+    const before = this.beforeChange;
     this.beforeChange = null;
-    this.graphData = next;
-    this.runtimePreflightResult = null;
-    this.unsaved = true;
-    this.markDirty(next.nodes.map((node) => node.id));
-    this.persist();
-    this.renderInspector();
-    this.scheduleMinimapUpdate();
-    this.renderGraphStatus();
-    this.scheduleAutoPreview();
+    if (before && before !== graphFingerprint(next)) this.commitGraphChange(before, next);
   }
 
   mutate(callback) {
@@ -2484,7 +2861,22 @@ class HubGraphEditor {
   syncNodeWidgetsFromProperties(node) {
     for (const widget of node?.widgets || []) {
       const name = widget?.options?.property || widget?.hubProperty;
-      if (name && Object.prototype.hasOwnProperty.call(node.properties || {}, name)) widget.value = node.properties[name];
+      if (name && Object.prototype.hasOwnProperty.call(node.properties || {}, name)) {
+        widget.value = node.properties[name];
+        this.syncPropertyPeers(`${node.id}:${name}`, node.properties[name]);
+      }
+    }
+  }
+
+  syncPropertyPeers(target, value) {
+    for (const element of this.root?.querySelectorAll?.("[data-graph-property]") || []) {
+      if (element.dataset.graphProperty !== target) continue;
+      if (element.type === "checkbox") element.checked = value === true;
+      else element.value = String(value ?? "");
+    }
+    for (const output of this.root?.querySelectorAll?.("[data-graph-property-value]") || []) {
+      const group = output.closest("[data-graph-property-group]");
+      if (group?.dataset.graphPropertyGroup === target) output.textContent = String(value ?? "");
     }
   }
 
@@ -2540,24 +2932,51 @@ class HubGraphEditor {
     this.scheduleMinimapUpdate();
   }
 
-  changeProperty(element) {
-    const [liteId, name] = element.dataset.graphProperty.split(":");
-    const node = this.liteGraph.getNodeById(Number(liteId));
+  propertyDescriptor(element) {
+    const token = String(element?.dataset?.graphProperty || "");
+    const separator = token.indexOf(":");
+    if (separator < 1) return null;
+    const liteId = token.slice(0, separator);
+    const name = token.slice(separator + 1);
+    const node = this.liteGraph?.getNodeById?.(Number(liteId));
     const definition = node && this.registry.get(node.hubType);
     const property = definition?.properties?.find((item) => item.name === name);
-    if (!node || !property) return;
+    return node && property ? { node, property, name, target: token } : null;
+  }
+
+  stageProperty(element) {
+    const descriptor = this.propertyDescriptor(element);
+    if (!descriptor) return false;
+    const { node, property, name, target } = descriptor;
+    if (!this.propertyGesture || this.propertyGesture.target !== target) {
+      this.propertyGesture = { target, before: graphFingerprint(this.toHubGraph()) };
+    }
     const rawValue = element.type === "checkbox" ? element.checked : element.value;
     const normalized = normalizeInlineControlValue(property, rawValue);
     if (!normalized.accepted) {
       this.showToast(`Không thể cập nhật ${property.label || name}: ${normalized.reason}.`, "warning");
-      this.renderInspector();
-      return;
+      return false;
     }
-    this.mutate(() => {
-      node.setProperty(name, normalized.value);
-      this.syncNodeWidgetsFromProperties(node);
-      node.setDirtyCanvas(true, true);
-    });
+    node.setProperty(name, normalized.value);
+    this.syncNodeWidgetsFromProperties(node);
+    this.syncPropertyPeers(target, normalized.value);
+    node.setDirtyCanvas?.(true, true);
+    return true;
+  }
+
+  commitProperty(element) {
+    const descriptor = this.propertyDescriptor(element);
+    if (!descriptor) return false;
+    const before = this.propertyGesture?.target === descriptor.target
+      ? this.propertyGesture.before
+      : graphFingerprint(this.toHubGraph());
+    this.propertyGesture = null;
+    return this.commitGraphChange(before);
+  }
+
+  changeProperty(element) {
+    this.stageProperty(element);
+    this.commitProperty(element);
   }
 
   captureWidgetBeforeChange(node, name) {
@@ -2566,19 +2985,35 @@ class HubGraphEditor {
   }
 
   changeWidgetValue(node, property, rawValue) {
+    if (!this.widgetBeforeChange) this.captureWidgetBeforeChange(node, property.name);
+    const changed = this.stageWidgetValue(node, property, rawValue);
+    this.commitWidgetGesture(node, property.name);
+    return changed;
+  }
+
+  stageWidgetValue(node, property, rawValue) {
+    if (this.hydrating || !node || !property) return false;
+    if (!this.widgetBeforeChange) this.captureWidgetBeforeChange(node, property.name);
     const normalized = normalizeInlineControlValue(property, rawValue);
     if (!normalized.accepted) {
       this.showToast(`Không thể cập nhật ${property.label || property.name}: ${normalized.reason}.`, "warning");
       return false;
     }
-    const before = this.widgetBeforeChange || graphFingerprint(this.toHubGraph());
-    this.widgetBeforeChange = null;
-    const previous = node.properties?.[property.name];
-    if (previous === normalized.value) return false;
+    if (node.properties?.[property.name] === normalized.value) {
+      this.syncNodeWidgetsFromProperties(node);
+      return false;
+    }
     node.setProperty(property.name, normalized.value);
-    node.setDirtyCanvas(true, true);
-    this.commitWidgetChange(before);
+    this.syncNodeWidgetsFromProperties(node);
+    node.setDirtyCanvas?.(true, true);
     return true;
+  }
+
+  commitWidgetGesture(_node, _name) {
+    const before = this.widgetBeforeChange;
+    this.widgetBeforeChange = null;
+    if (!before) return false;
+    return this.commitWidgetChange(before);
   }
 
   handleWidgetChange(node, name) {
@@ -2605,25 +3040,37 @@ class HubGraphEditor {
       return;
     }
     node.setProperty(property.name, normalized.value);
-    node.setDirtyCanvas(true, true);
+    this.syncNodeWidgetsFromProperties(node);
+    node.setDirtyCanvas?.(true, true);
     this.commitWidgetChange(before);
   }
 
   commitWidgetChange(before) {
-    const after = this.toHubGraph();
+    return this.commitGraphChange(before);
+  }
+
+  commitGraphChange(before, after = null) {
+    const next = after || this.toHubGraph();
     const beforeValue = typeof before === "string" ? before : graphFingerprint(before);
-    if (beforeValue === graphFingerprint(after)) return;
+    if (beforeValue === graphFingerprint(next)) return false;
+    let previous;
+    try { previous = JSON.parse(beforeValue); } catch { previous = this.graphData; }
+    const changedIds = changedGraphNodeIds(previous, next);
     this.history.push(beforeValue);
     if (this.history.length > MAX_HISTORY) this.history.shift();
     this.future = [];
-    this.graphData = after;
+    this.graphData = next;
     this.runtimePreflightResult = null;
     this.unsaved = true;
-    this.markDirty(after.nodes.map((item) => item.id));
+    // A graph edit invalidates the displayed run projection without cancelling
+    // the server-owned job. The job remains visible in Jobs if it is still live.
+    if (this.activeJobId || this.persistedRun?.job_id) this.resetRunState();
+    this.markDirty(changedIds);
     this.persist();
     this.renderInspector();
     this.scheduleMinimapUpdate();
     this.renderGraphStatus();
+    return true;
   }
 
   async uploadAsset(input) {
@@ -2714,8 +3161,7 @@ class HubGraphEditor {
       if (!result.validation?.valid) throw new Error(result.validation?.errors?.[0]?.message || "Preset không qua schema validation.");
       this.history = [];
       this.future = [];
-      this.nodeStates.clear();
-      this.runProvenance = [];
+      this.resetRunState();
       this.dirty = new Set((result.graph.nodes || []).map((node) => node.id));
       this.graphData = { ...result.graph, scope: this.scope };
       this.savedFingerprint = quiet ? graphFingerprint(result.graph) : "";
@@ -2732,22 +3178,28 @@ class HubGraphEditor {
   undo() {
     const previous = this.history.pop();
     if (!previous) return;
-    this.future.push(graphFingerprint(this.toHubGraph()));
+    const current = this.toHubGraph();
+    this.future.push(graphFingerprint(current));
     const graph = JSON.parse(previous);
+    const changedIds = changedGraphNodeIds(current, graph);
+    this.resetRunState();
     this.hydrateLiteGraph(graph);
     this.unsaved = true;
-    this.dirty = new Set(graph.nodes.map((node) => node.id));
+    this.markDirty(changedIds);
     this.persist();
   }
 
   redo() {
     const next = this.future.pop();
     if (!next) return;
-    this.history.push(graphFingerprint(this.toHubGraph()));
+    const current = this.toHubGraph();
+    this.history.push(graphFingerprint(current));
     const graph = JSON.parse(next);
+    const changedIds = changedGraphNodeIds(current, graph);
+    this.resetRunState();
     this.hydrateLiteGraph(graph);
     this.unsaved = true;
-    this.dirty = new Set(graph.nodes.map((node) => node.id));
+    this.markDirty(changedIds);
     this.persist();
   }
 
@@ -2755,16 +3207,9 @@ class HubGraphEditor {
     const graph = this.toHubGraph();
     const currentIds = new Set(graph.nodes.map((node) => node.id));
     this.dirty.forEach((id) => { if (!currentIds.has(id)) this.dirty.delete(id); });
-    const changed = new Set(changedIds);
-    const pending = [...changed];
-    while (pending.length) {
-      const current = pending.shift();
-      for (const edge of graph.edges) {
-        if (edge.source.node === current && !changed.has(edge.target.node)) { changed.add(edge.target.node); pending.push(edge.target.node); }
-      }
-    }
+    const changed = downstreamDirtyNodeIds(graph, Array.isArray(changedIds) ? changedIds : [...(changedIds || [])]);
     changed.forEach((id) => this.dirty.add(id));
-    getDirtyNodes(graph, [...changed]).then((result) => {
+    getDirtyNodes(graph, changed).then((result) => {
       if (result.valid) result.dirty_nodes.forEach((id) => { if (currentIds.has(id)) this.dirty.add(id); });
     }).catch(() => {});
   }
@@ -2793,6 +3238,8 @@ class HubGraphEditor {
       const result = await runNodeGraph(validation.validation.graph, Boolean(auto && this.draft));
       this.activeJobId = result.job?.id || null;
       this.runStatus = result.job?.status || "queued";
+      this.lastRunSnapshotFingerprint = "";
+      this.persist({ source: "run", syncDraft: false });
       this.updateToolbar();
       this.renderGraphStatus();
       if (this.activeJobId) {
@@ -2813,35 +3260,35 @@ class HubGraphEditor {
   }
 
   startPoll() {
-    if (this.pollTimer) clearInterval(this.pollTimer);
-    const poll = async () => {
-      if (!this.activeJobId) return;
-      try {
-        const response = await getNodeRun(this.activeJobId);
-        const run = response.run || {};
-        this.runStatus = run.status || this.runStatus;
-        this.runProvenance = Array.isArray(run.provenance) ? run.provenance.slice(0, MAX_PREVIEW_ARTIFACTS) : [];
-        for (const state of run.nodes || []) {
-          this.nodeStates.set(state.id, state);
-          const node = this.liteGraph._nodes.find((candidate) => candidate.hubId === state.id);
-          if (node) node.hubStatus = state.status;
-        }
-        this.liteCanvas.setDirty(true, true);
-        this.renderInspector();
-        if (["completed", "failed", "error", "cancelled", "unavailable"].includes(run.status)) {
-          clearInterval(this.pollTimer);
-          this.pollTimer = null;
-          this.activeJobId = null;
-          if (run.status === "completed") this.dirty.clear();
-          this.validation = run.status === "completed" ? { valid: true, errors: [] } : this.validation;
-          this.persist();
-          this.updateToolbar();
-        }
-        this.renderGraphStatus();
-      } catch { /* the background job may still be entering its worker thread */ }
+    const jobId = safePersistedJobId(this.activeJobId);
+    if (!jobId || this.destroyed) return;
+    this.stopPoll();
+    const generation = this.pollGeneration;
+    const schedule = () => {
+      if (generation !== this.pollGeneration || this.activeJobId !== jobId || this.destroyed) return;
+      this.pollTimer = setTimeout(poll, 2000);
     };
-    poll();
-    this.pollTimer = setInterval(poll, 2000);
+    const poll = async () => {
+      if (generation !== this.pollGeneration || this.activeJobId !== jobId || this.destroyed) return;
+      this.pollTimer = null;
+      if (this.pollInFlight) return;
+      this.pollInFlight = true;
+      try {
+        const response = await getNodeRun(jobId);
+        if (generation !== this.pollGeneration || this.activeJobId !== jobId || this.destroyed) return;
+        const run = response?.run;
+        if (!run || typeof run !== "object") throw new Error("NODE_RUN_SNAPSHOT_INVALID");
+        if (!this.applyRunSnapshot(run, { generation })) throw new Error("NODE_RUN_SNAPSHOT_STALE");
+        if (this.activeJobId === jobId && generation === this.pollGeneration) schedule();
+      } catch (error) {
+        if (generation !== this.pollGeneration || this.activeJobId !== jobId || this.destroyed) return;
+        if (error?.status === 404 || error?.payload?.error === "node_run_not_found") this.markRunUnavailable(jobId);
+        else schedule();
+      } finally {
+        if (generation === this.pollGeneration) this.pollInFlight = false;
+      }
+    };
+    void poll();
   }
 
   updateToolbar() {
@@ -2909,6 +3356,7 @@ class HubGraphEditor {
       if (!result.validation?.valid) throw new Error(result.validation?.errors?.[0]?.message || "Workflow JSON không hợp lệ.");
       this.history = [];
       this.future = [];
+      this.resetRunState();
       this.dirty = new Set(result.validation.graph.nodes.map((node) => node.id));
       this.savedFingerprint = "";
       this.recovered = false;
@@ -2953,11 +3401,12 @@ class HubGraphEditor {
     const offsetX = (width - bounds.width * scale) / 2 - bounds.left * scale;
     const offsetY = (height - bounds.height * scale) / 2 - bounds.top * scale;
     const selected = new Set(Object.values(this.liteCanvas.selected_nodes || {}).map((node) => String(node.hubId || node.id)));
+    const nodeById = new Map(nodes.map((node) => [node.id, node]));
 
     // Typed edges are drawn before nodes so the selected node remains legible.
     for (const link of Object.values(this.liteGraph.links || {})) {
-      const source = nodes.find((node) => node.id === link.origin_id);
-      const target = nodes.find((node) => node.id === link.target_id);
+      const source = nodeById.get(link.origin_id);
+      const target = nodeById.get(link.target_id);
       if (!source || !target) continue;
       const sourcePort = source.outputs?.[link.origin_slot];
       const type = sourcePort?.type || "METADATA";

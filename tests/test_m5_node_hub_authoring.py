@@ -34,6 +34,27 @@ const helpers = await import("data:text/javascript;base64," + Buffer.from(module
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def _run_extended_node_helpers(self, body: str) -> None:
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "node is required for M5 state helper contracts")
+        script = r"""
+import { readFileSync } from "node:fs";
+const source = readFileSync("src/ui/features/node_studio/studio.js", "utf8");
+const start = source.indexOf("const NODE_UI_STATE_VERSION");
+const end = source.indexOf("function createSliderWidget", start);
+const escapeHtml = (value) => String(value).replace(/[&<>\"']/g, (item) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[item]));
+const moduleSource = "const LOCAL_PREFIX = 'test';\nconst translateText = (value) => String(value);\nconst currentLanguage = () => 'en';\nconst escapeHtml = " + escapeHtml.toString() + ";\n" + source.slice(start, end);
+const helpers = await import("data:text/javascript;base64," + Buffer.from(moduleSource).toString("base64"));
+""" + body
+        result = subprocess.run(
+            [node, "--input-type=module", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_layout_and_insertion_are_deterministic_and_non_overlapping(self) -> None:
         self._run_node_helpers(
             r"""
@@ -116,6 +137,79 @@ assert.equal(helpers.outputSocketState({ outputs: { image: { artifact_id: "artif
 """,
         )
 
+    def test_dirty_state_and_persisted_run_projection_are_bounded_and_reachable(self) -> None:
+        self._run_extended_node_helpers(
+            r"""
+const assert = await import("node:assert/strict");
+const before = {
+  nodes: [
+    { id: "source", type: "number", data: { value: 1 } },
+    { id: "middle", type: "number", data: { value: 2 } },
+    { id: "sink", type: "number", data: { value: 3 } },
+    { id: "other", type: "number", data: { value: 4 } },
+  ],
+  edges: [
+    { id: "e1", source: { node: "source", port: "number" }, target: { node: "middle", port: "value" } },
+    { id: "e2", source: { node: "middle", port: "number" }, target: { node: "sink", port: "value" } },
+  ],
+};
+const after = JSON.parse(JSON.stringify(before));
+after.nodes[0].data.value = 99;
+assert.deepEqual(helpers.changedGraphNodeIds(before, after), ["source"]);
+assert.deepEqual(helpers.downstreamDirtyNodeIds(after, ["source"]), ["middle", "sink", "source"]);
+assert.ok(!helpers.downstreamDirtyNodeIds(after, ["source"]).includes("other"));
+
+const jobId = "job_20260903_000000_abcdef12";
+const artifactId = "artifact_" + "a".repeat(32);
+const projection = helpers.buildPersistedRunProjection({
+  job_id: jobId,
+  status: "completed",
+  nodes: [
+    { id: "source", status: "completed", progress: 100, output: { path: "C:/private/not-persisted.png" } },
+    { id: "ignored", status: "running", progress: 22 },
+  ],
+  provenance: [{ artifact_id: artifactId, url: "C:/private/not-persisted.png", media_type: "image/png", name: "safe.png" }],
+}, ["source"]);
+assert.equal(projection.version, 1);
+assert.equal(projection.job_id, jobId);
+assert.deepEqual(projection.nodes.map((item) => item.id), ["source"]);
+assert.deepEqual(projection.artifacts.map((item) => item.id), [artifactId]);
+assert.doesNotMatch(JSON.stringify(projection), /C:\\/);
+assert.equal(helpers.normalizePersistedRunProjection(projection, ["source"]).job_id, jobId);
+assert.equal(helpers.normalizePersistedRunProjection({ ...projection, job_id: "C:/private/job" }, ["source"]), null);
+""",
+        )
+
+    def test_slider_has_inspector_range_and_editable_number_peer(self) -> None:
+        self._run_extended_node_helpers(
+            r"""
+const assert = await import("node:assert/strict");
+const node = { id: 7, properties: { opacity: 0.5 } };
+const property = { name: "opacity", label: "Opacity", kind: "number", min: 0, max: 1, step: 0.05, ui: { control: "slider" } };
+const markup = helpers.propertyControl(node, property);
+assert.match(markup, /type="range"/);
+assert.match(markup, /type="number"/);
+assert.match(markup, /data-graph-property-role="range"/);
+assert.match(markup, /data-graph-property-role="number"/);
+assert.match(markup, /min="0"/);
+assert.match(markup, /max="1"/);
+assert.match(markup, /step="0\.05"/);
+""",
+        )
+
+    def test_production_minimap_uses_scheduler_and_linear_node_lookup(self) -> None:
+        source = STUDIO.read_text(encoding="utf-8")
+        start = source.index("  currentMinimapFingerprint()")
+        end = source.index("  recenterFromMinimap(", start)
+        production = source[start:end]
+        self.assertIn("const nodeById = new Map(nodes.map((node) => [node.id, node]));", production)
+        self.assertIn("nodeById.get(link.origin_id)", production)
+        self.assertIn("nodeById.get(link.target_id)", production)
+        self.assertIn("this.minimapScheduler = createMinimapScheduler", production)
+        self.assertNotIn("nodes.find((node) => node.id === link.origin_id)", production)
+        self.assertNotIn("nodes.find((node) => node.id === link.target_id)", production)
+        self.assertIn("this.minimapScheduler?.stop()", production)
+
     def test_registry_publishes_server_owned_control_metadata(self) -> None:
         from src.services.node_studio.registry import registry_payload
 
@@ -136,7 +230,7 @@ assert.equal(helpers.outputSocketState({ outputs: { image: { artifact_id: "artif
     def test_node_studio_registry_has_bounded_acceptance_impact_scope(self) -> None:
         from scripts.v8_acceptance_gate import _path_impact_scope
 
-        self.assertEqual(_path_impact_scope("src/services/node_studio/registry.py"), "workflow_runtime")
+        self.assertEqual(_path_impact_scope("src/services/node_studio/registry.py"), "product_experience")
 
     def test_canvas_contract_keeps_focus_ring_and_removes_only_decorative_frame(self) -> None:
         studio = STUDIO.read_text(encoding="utf-8")
@@ -152,6 +246,36 @@ assert.equal(helpers.outputSocketState({ outputs: { image: { artifact_id: "artif
         self.assertIn('"Preview unavailable in this node snapshot; no safe artifact was published."', i18n)
         self.assertIn("graph-canvas:focus-visible", styles)
         self.assertNotIn("background-image: radial-gradient", styles[styles.index(".graph-canvas-shell .lgraphcanvas"):styles.index(".graph-canvas__actions")])
+
+    def test_picker_copy_is_i18n_bound_and_editor_teardown_is_complete(self) -> None:
+        source = STUDIO.read_text(encoding="utf-8")
+        for key in (
+            'nodeText("Connect")',
+            'nodeText("Search compatible nodes")',
+            'nodeText("Rejected candidates")',
+            'nodeText("Close connection picker")',
+            'nodeText("Only explicitly compatible typed ports are shown.")',
+        ):
+            self.assertIn(key, source)
+        for literal in (
+            'aria-label="Close connection picker"',
+            'aria-label="Search compatible nodes"',
+            '>Rejected candidates:',
+            '>Only explicitly compatible typed ports are shown.<',
+        ):
+            self.assertNotIn(literal, source)
+        for marker in (
+            "this.abort.abort()",
+            "this.stopMinimapLoop()",
+            "this.stopPoll()",
+            "this.resizeObserver?.disconnect()",
+            "this.liteCanvas?.stopRendering?.()",
+            "this.liteCanvas?.setCanvas?.(null)",
+            "this.liteCanvas?.setGraph?.(null)",
+            "restorePersistedRun",
+            "markRunUnavailable",
+        ):
+            self.assertIn(marker, source)
 
 
 if __name__ == "__main__":
