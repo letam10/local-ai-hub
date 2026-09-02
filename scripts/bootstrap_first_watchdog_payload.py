@@ -43,31 +43,38 @@ def run(*, source_root: Path, install_root: Path, expected_commit: str, activate
         raise RuntimeError("SOURCE_COMMIT_MISMATCH")
     if not activate:
         return {"status": "ready_for_explicit_activation", "source_commit": actual_source, "activation": "not_run"}
+    previous_install_root = os.environ.get("LOCALAIHUB_INSTALL_ROOT")
     os.environ["LOCALAIHUB_INSTALL_ROOT"] = str(install_root.absolute())
-    before = load_current_pointer(install_root)
-    service = AppUpdateService()
-    candidate = service._latest_candidate()
-    if candidate is None or candidate.source_commit != expected_commit:
-        raise RuntimeError("EXACT_MAIN_ARTIFACT_UNAVAILABLE")
-    # Freeze the verified candidate selected above so a newer main push cannot
-    # race the exact-commit guard between discovery and prepare().
-    service._latest_candidate = lambda: candidate  # type: ignore[method-assign]
     try:
-        result = service.prepare()
-    except Exception as exc:
-        after = load_current_pointer(install_root)
-        if after != before:
-            raise RuntimeError("BOOTSTRAP_FAILURE_POINTER_CHANGED") from exc
-        raise
-    return {
-        "status": result.get("status"),
-        "source_commit": expected_commit,
-        "payload_id": result.get("payload_id"),
-        "previous_payload": result.get("previous_payload"),
-        "candidate_api_preflight": "passed",
-        "candidate_frontend_preflight": "passed",
-        "activation": "atomic",
-    }
+        before = load_current_pointer(install_root)
+        service = AppUpdateService()
+        candidate = service._latest_candidate()
+        if candidate is None or candidate.source_commit != expected_commit:
+            raise RuntimeError("EXACT_MAIN_ARTIFACT_UNAVAILABLE")
+        # Freeze the verified candidate selected above so a newer main push
+        # cannot race the exact-commit guard between discovery and prepare().
+        service._latest_candidate = lambda: candidate  # type: ignore[method-assign]
+        try:
+            result = service.prepare()
+        except Exception as exc:
+            after = load_current_pointer(install_root)
+            if after != before:
+                raise RuntimeError("BOOTSTRAP_FAILURE_POINTER_CHANGED") from exc
+            raise
+        return {
+            "status": result.get("status"),
+            "source_commit": expected_commit,
+            "payload_id": result.get("payload_id"),
+            "previous_payload": result.get("previous_payload"),
+            "candidate_api_preflight": "passed",
+            "candidate_frontend_preflight": "passed",
+            "activation": "atomic",
+        }
+    finally:
+        if previous_install_root is None:
+            os.environ.pop("LOCALAIHUB_INSTALL_ROOT", None)
+        else:
+            os.environ["LOCALAIHUB_INSTALL_ROOT"] = previous_install_root
 
 
 def main(argv: list[str] | None = None) -> int:

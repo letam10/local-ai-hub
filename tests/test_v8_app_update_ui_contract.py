@@ -41,6 +41,8 @@ class V8AppUpdateUiContractTests(unittest.TestCase):
         self.assertIn('confirmLabel: "Khởi động lại và cập nhật"', module)
         self.assertIn('cancelLabel: "Để sau"', module)
         self.assertIn("if (confirmed) await restart(card);", module)
+        self.assertNotIn("data-app-update-rollback", module)
+        self.assertNotIn("API.rollback", module)
         self.assertNotIn('title: "Xác nhận cập nhật Local AI Hub"', module)
 
     def test_restart_bridge_is_opt_in_and_does_not_replace_close_contract(self) -> None:

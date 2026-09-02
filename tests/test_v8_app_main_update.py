@@ -150,7 +150,7 @@ class V8AppMainUpdateTests(unittest.TestCase):
             self.assertEqual(result["current_build"], "legacy")
             self.assertEqual(result["transport"], "github_cli")
             for field in (
-                "transaction_id", "phase", "progress", "can_prepare", "can_restart", "requires_restart",
+                "transaction_id", "phase", "progress", "can_prepare", "can_restart", "requires_restart", "can_rollback", "rollback_mode",
                 "current_payload_id", "candidate_payload_id", "rollback_payload_id", "reason_code", "last_error_code",
             ):
                 self.assertIn(field, result)

@@ -168,6 +168,7 @@ _ERROR_REASON_CODES = {
     "UPDATE_COMMIT_FAILED": "pointer_commit_failed",
     "UPDATE_STATE_WRITE_FAILED": "pointer_commit_failed",
     "UPDATE_STATE_CLEAR_FAILED": "pointer_commit_failed",
+    "UPDATE_STAGED_UPDATE_PENDING": "update_transaction_busy",
     "UPDATE_STATE_INVALID": "state_unavailable",
     "UPDATE_PENDING_HEALTH_INVALID": "pointer_commit_failed",
     "STAGED_CURRENT_POINTER_CHANGED": "pointer_commit_failed",
@@ -199,6 +200,8 @@ _ERROR_REASON_CODES = {
     "STAGED_PAYLOAD_INVALID": "staged_update_invalid",
     "STAGED_PAYLOAD_UNAVAILABLE": "staged_update_invalid",
     "STAGED_RUNTIME_UNAVAILABLE": "staged_update_invalid",
+    "STAGED_UPDATE_UNAVAILABLE": "staged_update_invalid",
+    "STAGED_BUILD_IDENTITY_MISMATCH": "staged_update_invalid",
     "ROLLBACK_POINTER_UNAVAILABLE": "rollback_unavailable",
     "ROLLBACK_POINTER_INVALID": "rollback_unavailable",
     "INSTALLED_PRODUCT_REQUIRED": "state_unavailable",
@@ -371,6 +374,8 @@ def update_error_projection(
         "current_payload_id": _safe_opaque_id(current_payload_id),
         "candidate_payload_id": _safe_opaque_id(candidate_payload_id),
         "rollback_payload_id": _safe_opaque_id(rollback_payload_id),
+        "can_rollback": False,
+        "rollback_mode": "recovery_only" if _safe_opaque_id(rollback_payload_id) else "unavailable",
         "reason_code": reason_code_for(code),
         "last_error_code": code if re.fullmatch(r"[A-Z][A-Z0-9_]{2,95}", code) else "UPDATE_FAILED",
         "execution": "not_run",
@@ -1099,6 +1104,24 @@ class AppUpdateService:
             can_restart = False
             requires_restart = False
 
+        # Rollback is owned by the post-activation watchdog/recovery surface.
+        # A staged candidate has not changed the current pointer yet, so it
+        # must never advertise a manual rollback action.  The two fields are
+        # deliberately projection-only additions; the on-disk v1 state remains
+        # backward compatible with older payloads.
+        if pending_exists or status in {"restarting", "activated"}:
+            rollback_mode = "automatic_watchdog"
+            can_rollback = rollback_payload is not None
+        elif staged is not None or phase in {"staged", "confirm_restart"}:
+            rollback_mode = "automatic_watchdog"
+            can_rollback = False
+        elif rollback_payload is not None:
+            rollback_mode = "recovery_only"
+            can_rollback = False
+        else:
+            rollback_mode = "unavailable"
+            can_rollback = False
+
         code = value.get("code")
         reason = value.get("reason_code")
         if not isinstance(reason, str) or reason not in STABLE_UPDATE_REASON_CODES:
@@ -1120,6 +1143,8 @@ class AppUpdateService:
             "current_payload_id": current_payload,
             "candidate_payload_id": candidate_payload,
             "rollback_payload_id": rollback_payload,
+            "can_rollback": can_rollback,
+            "rollback_mode": rollback_mode,
             "reason_code": reason,
             "last_error_code": last_error,
         })
@@ -1760,14 +1785,17 @@ class AppUpdateService:
             phase = "blocked" if reason_code_for(exc.code) in {
                 "authentication_required", "active_job_blocks_restart", "external_owner_detected",
                 "port_ownership_unknown", "channel_update_blocked", "channel_relation_unavailable",
-                "update_transaction_busy",
+                "update_transaction_busy", "staged_update_invalid", "pointer_commit_failed",
             } else "error"
             self._remember_update_state(
                 root,
                 phase=phase,
                 progress=0,
                 transaction_id=transaction_id,
-                can_prepare=phase == "error" and candidate_payload_id is None,
+                # A failed download/preflight has no staged record and may be
+                # retried.  The candidate id in the error projection is only
+                # diagnostic; it does not mean a candidate was committed.
+                can_prepare=phase == "error" and staged is None,
                 can_restart=False,
                 requires_restart=False,
                 current_payload_id=current_payload_id if isinstance(current_payload_id, str) else None,
@@ -2018,7 +2046,15 @@ class AppUpdateService:
                     rollback_payload_id=pointer.get("version"),
                     reason_code=None,
                 )
-                return {"status": "rolled_back", "payload_id": pointer["version"], "restart_required": True, "transaction_id": self._transaction_id}
+                return self._public_projection(
+                    {
+                        "status": "rolled_back",
+                        "payload_id": pointer["version"],
+                        "restart_required": True,
+                        "transaction_id": self._transaction_id,
+                    },
+                    root=root,
+                )
 
 
 _SERVICE: AppUpdateService | None = None
