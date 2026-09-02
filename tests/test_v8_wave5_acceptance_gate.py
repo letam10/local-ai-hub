@@ -259,6 +259,15 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
             {"filesystem_transaction"},
         )
 
+    def test_shared_ai_result_contracts_are_artifact_callsite_scope(self) -> None:
+        for path in (
+            "src/shared/schemas/vision.py",
+            "src/shared/schemas/ocr_whisper.py",
+            "src/shared/utils/adapter_common.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(_path_impact_scope(path), "artifact_callsite")
+
     def test_project_manager_change_rejects_reused_windows_filesystem_evidence(self) -> None:
         repo = Path(__file__).resolve().parents[1]
         origin = "afc40e6dcdfdcb2fdb4ea822f1dd8da5cb0c8ab1"

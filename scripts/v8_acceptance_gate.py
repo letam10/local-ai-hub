@@ -180,6 +180,15 @@ def _path_impact_scope(path: str) -> str | None:
         return "workflow_runtime"
     if normalized.startswith("src/shared/schemas/workflow_library.py"):
         return "workflow_runtime"
+    if normalized in {
+        "src/shared/schemas/vision.py",
+        "src/shared/schemas/ocr_whisper.py",
+        "src/shared/utils/adapter_common.py",
+    }:
+        # Vision, OCR and Whisper result contracts plus the shared adapter
+        # result normalizer govern opaque artifact/public projection shape;
+        # they do not change the desktop startup or runtime-smoke protocol.
+        return "artifact_callsite"
     if normalized.startswith(_HIGH_RISK_UNCLASSIFIED_PREFIXES):
         return _UNCLASSIFIED_ACCEPTANCE_RELEVANT
     return None
