@@ -19,6 +19,7 @@ SAM2_SELECTION_SCHEMA = "sam2.selection.v1"
 MAX_SELECTION_POINTS = 32
 MAX_DETECTIONS = 256
 MAX_FRAME_INDEX = 10_000_000
+MAX_FRAME_TIME_SECONDS = 86_400.0
 _ARTIFACT_ID = re.compile(r"artifact_[a-f0-9]{32}\Z")
 
 
@@ -106,6 +107,18 @@ def _frame_index(value: object) -> int:
     return value
 
 
+def _frame_time_seconds(value: object) -> float:
+    if isinstance(value, bool):
+        raise VisionContractError("frame_time_invalid", "Frame time phải là số hữu hạn không âm.")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise VisionContractError("frame_time_invalid", "Frame time phải là số hữu hạn không âm.") from None
+    if not math.isfinite(number) or number < 0 or number > MAX_FRAME_TIME_SECONDS:
+        raise VisionContractError("frame_time_invalid", "Frame time phải là số hữu hạn không âm trong giới hạn.")
+    return round(number, 6)
+
+
 def normalize_tool_payload(tool: str, payload: object) -> tuple[dict[str, Any], str | None]:
     """Normalize M3 request geometry without resolving an artifact to a path.
 
@@ -138,11 +151,18 @@ def normalize_tool_payload(tool: str, payload: object) -> tuple[dict[str, Any], 
         if tool == "segment_from_points" and "box" in result:
             raise VisionContractError("selection_mode_mismatch", "Tool chọn điểm không nhận box.")
         if tool == "track_video_object":
-            result["frame_index"] = _frame_index(result.get("frame_index", 0))
+            if "frame_index" in result and result.get("frame_index") not in (None, ""):
+                result["frame_index"] = _frame_index(result["frame_index"])
+            elif "frame_time_seconds" in result and result.get("frame_time_seconds") not in (None, ""):
+                result["frame_time_seconds"] = _frame_time_seconds(result["frame_time_seconds"])
+            else:
+                result["frame_index"] = 0
             has_points = bool(result.get("points"))
             has_box = result.get("box") is not None
             if not has_points and not has_box:
                 raise VisionContractError("tracking_selection_required", "Theo dõi video cần điểm hoặc box.")
+            if has_points and has_box:
+                raise VisionContractError("selection_mode_mismatch", "Theo dõi video chỉ nhận một kiểu selection: điểm hoặc box.")
         if tool == "segment_from_points" and "points" in result and not result["points"]:
             raise VisionContractError("selection_points_required", "Cần ít nhất một điểm SAM2.")
         for field in ("source_artifact_id", "asset_id"):
@@ -249,6 +269,7 @@ def build_sam2_selection(
     mask_artifact_ids: object = None,
     overlay_artifact_ids: object = None,
     candidate_score: object = None,
+    frame_time_seconds: object = None,
 ) -> dict[str, Any]:
     if not is_opaque_artifact_id(source_artifact_id):
         raise VisionContractError("artifact_id_invalid", "Nguồn SAM2 phải là artifact ID opaque.")
@@ -267,6 +288,8 @@ def build_sam2_selection(
         "mask_artifact_ids": _artifact_ids(mask_artifact_ids, label="mask_artifact_ids"),
         "overlay_artifact_ids": _artifact_ids(overlay_artifact_ids, label="overlay_artifact_ids"),
     }
+    if frame_time_seconds is not None:
+        result["frame_time_seconds"] = _frame_time_seconds(frame_time_seconds)
     if score is not None:
         result["candidate_score"] = score
     return result
@@ -305,6 +328,7 @@ def validate_public_result_contract(value: object, *, key: str) -> dict[str, Any
             mask_artifact_ids=value.get("mask_artifact_ids"),
             overlay_artifact_ids=value.get("overlay_artifact_ids"),
             candidate_score=value.get("candidate_score"),
+            frame_time_seconds=value.get("frame_time_seconds"),
         )
     raise VisionContractError("result_contract_invalid", "Result contract không được allowlist.")
 
@@ -347,6 +371,7 @@ def attach_published_artifacts(contract: Mapping[str, Any], artifacts: object, *
 
 __all__ = [
     "MAX_FRAME_INDEX",
+    "MAX_FRAME_TIME_SECONDS",
     "MAX_SELECTION_POINTS",
     "SAM2_SELECTION_SCHEMA",
     "VISION_ANNOTATION_SCHEMA",

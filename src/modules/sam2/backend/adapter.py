@@ -166,6 +166,7 @@ def _run(operation: str, payload: dict[str, Any], context: ProcessOwner | None =
                 frame_index=payload.get("frame_index", 0),
                 points=payload.get("points"),
                 box=payload.get("box"),
+                frame_time_seconds=payload.get("frame_time_seconds"),
             )
         except ValueError:
             safe["status"] = "error"

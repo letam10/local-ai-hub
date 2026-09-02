@@ -19,7 +19,7 @@ const sourceFor = (model = {}) => {
 const artifactFor = (artifacts, ids, fallbackIndex = 0) => {
   const safe = Array.isArray(artifacts) ? artifacts : [];
   const wanted = Array.isArray(ids) ? ids : [];
-  return wanted.map((id) => safe.find((item) => item?.id === id)).find(Boolean) || safe[fallbackIndex] || null;
+  return wanted.map((id) => safe.find((item) => item?.id === id)).find(Boolean) || (fallbackIndex >= 0 ? safe[fallbackIndex] : null) || null;
 };
 
 const artifactMedia = (artifact, emptyText, escapeHtml) => {
@@ -32,20 +32,33 @@ const artifactMedia = (artifact, emptyText, escapeHtml) => {
   return `<div class="preview-empty compact"><strong>${escape(emptyText)}</strong><span>Loại artifact này chỉ có thể tải từ Artifact Store.</span></div>`;
 };
 
+const renderComposite = (source, mask, model, escapeHtml) => {
+  const escape = typeof escapeHtml === "function" ? escapeHtml : (value) => String(value);
+  const sourceUrl = safeUrl(source?.url);
+  const maskUrl = safeUrl(mask?.url);
+  const sourceType = String(source?.mediaType || "").toLowerCase();
+  const maskType = String(mask?.media_type || "").toLowerCase();
+  if (!sourceUrl || !maskUrl || !sourceType.startsWith("image/") || !maskType.startsWith("image/")) {
+    return `<div class="preview-empty compact" data-sam2-composite-unavailable><strong>Ghép chưa khả dụng</strong><span>Cần ảnh gốc và mask image artifact đã publish; không dựng composite giả từ selection hoặc overlay thiếu.</span></div>`;
+  }
+  const opacity = Math.max(0, Math.min(1, Number(model?.maskOpacity ?? 0.68) || 0));
+  return `<div class="sam2-composite" data-sam2-composite><img class="m3-result-media sam2-composite__original" data-sam2-original-layer src="${escape(sourceUrl)}" alt="Ảnh gốc ${escape(source.name || "")}" /><img class="m3-result-media sam2-composite__mask" data-sam2-mask-layer src="${escape(maskUrl)}" alt="Mask artifact ${escape(mask.name || "")}" style="opacity:${opacity}" /></div>`;
+};
+
 const renderResultTabs = (model, deps) => {
   const { safeJobArtifacts, escapeHtml, artifactList } = deps;
   const result = model.job?.result && typeof model.job.result === "object" ? model.job.result : {};
   const artifacts = safeJobArtifacts(result.artifacts);
   const selection = result.selection || result.sam2_selection || {};
-  const mask = artifactFor(artifacts, selection.mask_artifact_ids, 0);
-  const overlay = artifactFor(artifacts, selection.overlay_artifact_ids, artifacts.length > 1 ? 1 : 0);
+  const mask = artifactFor(artifacts, selection.mask_artifact_ids, -1);
+  const overlay = artifactFor(artifacts, selection.overlay_artifact_ids, -1);
   const source = sourceFor(model);
   const original = source.url
-    ? (source.mediaType.startsWith("video/") ? `<video class="m3-result-media" controls preload="metadata" src="${source.url}" aria-label="Ảnh/video gốc"></video>` : `<img class="m3-result-media" src="${source.url}" alt="Ảnh gốc ${escapeHtml(source.name)}" />`)
+    ? (source.mediaType.startsWith("video/") ? `<video class="m3-result-media" controls preload="metadata" src="${escapeHtml(source.url)}" aria-label="Ảnh/video gốc"></video>` : `<img class="m3-result-media" src="${escapeHtml(source.url)}" alt="Ảnh gốc ${escapeHtml(source.name)}" />`)
     : `<div class="preview-empty compact"><strong>Chưa có ảnh gốc</strong><span>Chọn tệp để xem.</span></div>`;
   return `<section class="sam2-result-view" data-sam2-result-view>
     <div class="m3-result-tabs" role="tablist" aria-label="Kết quả SAM2"><button class="tab ${model.resultTab === "original" ? "is-selected" : ""}" type="button" data-sam2-result-tab="original" role="tab" aria-selected="${model.resultTab === "original"}">Ảnh gốc</button><button class="tab ${model.resultTab === "mask" ? "is-selected" : ""}" type="button" data-sam2-result-tab="mask" role="tab" aria-selected="${model.resultTab === "mask"}">Mask</button><button class="tab ${model.resultTab === "composite" ? "is-selected" : ""}" type="button" data-sam2-result-tab="composite" role="tab" aria-selected="${model.resultTab === "composite"}">Ghép</button></div>
-    <div class="sam2-result-panels"><div data-sam2-result-panel="original">${original}</div><div data-sam2-result-panel="mask">${artifactMedia(mask, "Chưa có mask artifact", escapeHtml)}</div><div data-sam2-result-panel="composite">${artifactMedia(overlay, "Chưa có overlay artifact", escapeHtml)}</div></div>
+    <div class="sam2-result-panels"><div data-sam2-result-panel="original">${original}</div><div data-sam2-result-panel="mask">${artifactMedia(mask, "Chưa có mask artifact", escapeHtml)}</div><div data-sam2-result-panel="composite">${renderComposite(source, mask, model, escapeHtml)}</div></div>
     <label class="field sam2-opacity-control"><span>Độ trong suốt mask <b data-sam2-opacity-value>${Math.round(Number(model.maskOpacity ?? 0.68) * 100)}%</b></span><input type="range" data-sam2-opacity min="0" max="1" step="0.01" value="${Number(model.maskOpacity ?? 0.68)}" /></label>
     ${selection.candidate_score !== undefined && selection.candidate_score !== null ? `<p class="small">Candidate score: ${escapeHtml(String(selection.candidate_score))}</p>` : ""}
     ${artifactList(result)}
@@ -68,9 +81,9 @@ export function createSam2Renderer(deps) {
     const modePanels = `<section class="sam2-mode-panel" data-sam2-mode-panel="points"><div class="sam2-intent-row" role="group" aria-label="Ý nghĩa điểm"><button class="button button--compact ${model.intent !== "negative" ? "is-selected" : ""}" type="button" data-sam2-intent="positive" aria-pressed="${model.intent !== "negative"}">Thêm vùng</button><button class="button button--compact ${model.intent === "negative" ? "is-selected" : ""}" type="button" data-sam2-intent="negative" aria-pressed="${model.intent === "negative"}">Loại vùng</button></div><p class="small">Click trực tiếp trên canvas để thêm điểm xanh lá hoặc đỏ. Kéo điểm để di chuyển; Delete xóa điểm đã chọn.</p></section>
       <section class="sam2-mode-panel" data-sam2-mode-panel="box"><p class="small">Kéo trực tiếp trên canvas để tạo box. Kéo bên trong box để chỉnh lại lựa chọn; không cần nhập x,y.</p></section>
       <section class="sam2-mode-panel" data-sam2-mode-panel="text">${field("Mô tả đối tượng", `<textarea name="prompt" maxlength="300" placeholder="một người cầm túi"></textarea>`)}<p class="small">Grounding DINO sẽ tạo box đầu tiên rồi chuyển tiếp sang SAM2 nếu cả hai capability đã sẵn sàng.</p></section>
-      <section class="sam2-mode-panel" data-sam2-mode-panel="track"><p class="small">Chọn frame trên player trước khi bấm chạy. Việc xem hoặc seek frame không tự nạp model.</p><div class="sam2-frame-readout" data-sam2-frame-value>Frame ${Number.isInteger(model.frameIndex) ? model.frameIndex : 0}</div><input type="range" data-sam2-frame-slider min="0" max="1000000" step="1" value="${Number.isInteger(model.frameIndex) ? model.frameIndex : 0}" aria-label="Frame video"></section>`;
+      <section class="sam2-mode-panel" data-sam2-mode-panel="track"><p class="small">Chọn thời điểm trên player trước khi bấm chạy. Việc xem hoặc seek không tự nạp model.</p><div class="sam2-frame-readout" data-sam2-frame-value>Frame precision unavailable · ${(Number(model.frameTimeSeconds) || 0).toFixed(2)}s</div><p class="small" data-sam2-frame-precision>Frame precision unavailable: cần FPS/frame count đã xác minh; thao tác track dùng thời gian thực tế của player.</p><input type="range" data-sam2-time-slider min="0" max="0" step="0.01" value="${Number(model.frameTimeSeconds) || 0}" aria-label="Thời gian video"><input type="range" data-sam2-frame-slider min="0" max="0" step="1" value="${Number.isInteger(model.frameIndex) ? model.frameIndex : 0}" aria-label="Frame video" disabled></section>`;
     return heading("VISION", "SAM2", "Workspace trực quan cho điểm, hộp, mô tả và theo dõi video; mọi selection dùng tọa độ chuẩn hóa và result đi qua Artifact Store.", statusPill(status, `SAM2 · ${formatStatus(status)}`)) + `
-      <section class="m3-tool-workspace sam2-tool-workspace" data-m3-workspace="sam2" data-m3-workspace-key="sam2" data-active-mode="${escapeHtml(mode)}" data-sam2-fps="24">
+      <section class="m3-tool-workspace sam2-tool-workspace" data-m3-workspace="sam2" data-m3-workspace-key="sam2" data-active-mode="${escapeHtml(mode)}">
         <div class="m3-workspace__inputs">
           ${card("Đầu vào và chế độ", `${file("Ảnh hoặc video", "source_artifact_id", "image/*,video/*")}<div class="m3-tool-tabs sam2-mode-tabs" role="tablist" aria-label="Chế độ SAM2">${modeButtons}</div><form data-job-form data-m3-job-form data-tool="segment_from_points" data-tool-by-field="mode" data-tool-map='{"points":"segment_from_points","box":"segment_from_box","track":"track_video_object","text":"segment_from_text"}' class="stack" data-workspace-form="sam2"><input type="hidden" name="mode" data-sam2-mode-value value="${escapeHtml(mode)}">${modePanels}<div class="sam2-selection-summary"><strong>Lựa chọn hiện tại</strong><span data-sam2-selection-count>${selection.points?.length || 0} điểm · ${selection.box ? "1 box" : "0 box"}</span></div><details class="advanced"><summary>Nâng cao / Gỡ lỗi</summary><p class="small">Tọa độ nội bộ được gửi dưới dạng normalized [0,1]; phần này chỉ để kiểm tra contract, không phải luồng nhập bắt buộc.</p><pre data-sam2-debug-selection>{}</pre></details><p class="small">${escapeHtml(selectedTool.reason || pointTool.reason || "SAM2 chưa có readiness snapshot.")} ${escapeHtml(selectedTool.action || pointTool.action || "Kiểm tra backend rồi thử lại.")}</p><div class="form-actions">${button("Tạo mask / theo dõi", "button--primary")}</div>${formResult("sam2-form-result")}</form>`)}
         </div>

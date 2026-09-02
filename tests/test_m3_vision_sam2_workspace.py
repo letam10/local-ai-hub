@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -26,6 +27,69 @@ ARTIFACT = "artifact_" + "a" * 32
 
 
 class M3VisionSam2WorkspaceTests(unittest.TestCase):
+    def test_sam2_mode_transitions_edit_helpers_and_frame_truth(self) -> None:
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "node is required for M3 interaction contracts")
+        script = r'''
+import assert from "node:assert/strict";
+import {
+  boxHandleAt,
+  createSam2SelectionState,
+  moveNormalizedBox,
+  normalizeBox,
+  resizeNormalizedBox,
+  selectionToPayload,
+  transitionSam2Mode,
+  commitSam2Selection,
+} from "./src/ui/features/vision/interactive.js";
+
+const source = "artifact_" + "a".repeat(32);
+const model = createSam2SelectionState({ mode: "box", selection: { points: [{ x: .1, y: .1, label: 1 }], box: [.2, .2, .8, .8] } });
+assert.deepEqual(model.selection, { points: [], box: [.2, .2, .8, .8] });
+assert.equal(transitionSam2Mode(model, "points"), true);
+assert.deepEqual(model.selection, { points: [], box: null });
+
+const mixedTrack = createSam2SelectionState({ mode: "track", selection: { points: [{ x: .2, y: .2, label: 1 }], box: [.1, .1, .9, .9] } });
+commitSam2Selection(mixedTrack, { points: [{ x: .3, y: .3, label: 1 }], box: [.1, .1, .9, .9] });
+assert.deepEqual(mixedTrack.selection, { points: [], box: [.1, .1, .9, .9] });
+const trackPayload = selectionToPayload({ ...mixedTrack, sourceArtifact: { id: source }, framePrecisionUnavailable: true, duration: 4, frameTimeSeconds: 12 });
+assert.deepEqual(trackPayload.box, [.1, .1, .9, .9]);
+assert.equal("points" in trackPayload, false);
+assert.equal(trackPayload.frame_time_seconds, 4);
+assert.equal("frame_index" in trackPayload, false);
+
+const pointPayload = selectionToPayload({ mode: "points", selection: { points: [{ x: .2, y: .4, label: 1 }], box: [.1, .1, .9, .9] } });
+assert.equal("box" in pointPayload, false);
+assert.equal(pointPayload.points.length, 1);
+const verifiedPayload = selectionToPayload({ mode: "track", selection: { points: [{ x: .2, y: .4, label: 1 }], box: null }, sourceArtifact: { media_metadata: { fps: 30, frame_count: 300, verified: true } }, framePrecisionUnavailable: false, frameIndex: 999, frameTimeSeconds: 9, duration: 10 });
+assert.equal(verifiedPayload.frame_index, 299);
+assert.equal("frame_time_seconds" in verifiedPayload, false);
+const unknownMetadataPayload = selectionToPayload({ mode: "track", selection: { points: [{ x: .2, y: .4, label: 1 }], box: null }, sourceArtifact: { media_metadata: { fps: 30, frame_count: 300, verified: false, vfr: true } }, framePrecisionUnavailable: false, frameIndex: 17, frameTimeSeconds: 6, duration: 5 });
+assert.equal(unknownMetadataPayload.frame_time_seconds, 5);
+assert.equal("frame_index" in unknownMetadataPayload, false);
+
+const box = [.2, .2, .6, .7];
+assert.equal(boxHandleAt(box, { x: .2, y: .2 }), "nw");
+assert.deepEqual(moveNormalizedBox(box, .6, -.5), [.6, 0, 1, .5]);
+assert.deepEqual(resizeNormalizedBox(box, "se", { x: .9, y: .9 }), [.2, .2, .9, .9]);
+assert.deepEqual(normalizeBox([.2, .2, .2, .8]), null);
+'''
+        result = subprocess.run([node, "--input-type=module", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_m3_and_m4_workspace_polling_reattach_is_generation_guarded(self) -> None:
+        app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
+        for workspace in ("vision", "sam2", "ocr", "whisper"):
+            self.assertIn(f"{workspace}: new Set", app)
+        self.assertIn("restoreWorkspaceJobReferences();", app)
+        self.assertIn("resumeVisibleWorkspaceJobPollers();", app)
+        self.assertIn("stopAllM3JobPollers();", app)
+        self.assertIn("current.generation !== entry.generation", app)
+        self.assertIn("afterRead !== entry", app)
+        self.assertIn('if (M3_TERMINAL_JOB_STATUSES.has(String(job.status || "")))', app)
+        self.assertIn("render({ focus: \"main\" });", app)
+        self.assertIn("window.addEventListener(\"hashchange\", async () => {\n  storageScanPoller.stop();\n  stopAllM3JobPollers();", app)
+
     def test_public_geometry_is_normalized_and_bounded(self) -> None:
         normalized, error = normalize_tool_payload(
             "segment_from_points",

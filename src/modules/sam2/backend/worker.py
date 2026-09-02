@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 from datetime import datetime
@@ -137,7 +138,7 @@ def _validate_selection(request: dict[str, Any], operation: str) -> str | None:
         return error
     # The adapter normally supplies this canonical form.  Keeping the worker
     # copy equally strict protects direct invocation and stale callers.
-    request.update({key: value for key, value in normalized.items() if key in {"points", "box", "normalized_box", "frame_index"}})
+    request.update({key: value for key, value in normalized.items() if key in {"points", "box", "normalized_box", "frame_index", "frame_time_seconds"}})
     return None
 
 
@@ -196,14 +197,32 @@ def _save_mask(image, mask, output: Path) -> tuple[Path, Path]:
 def _build_predictor(runtime: Path, checkpoint: Path):
     import torch
 
+    try:
+        device = _verified_cuda_device(torch)
+    except RuntimeError as error:
+        code = str(error) if str(error) in {"sam2_rtx4060_required", "sam2_rtx4060_unverified"} else "sam2_rtx4060_unverified"
+        return {"status": "error", "code": code, "error": "SAM2 yêu cầu NVIDIA GeForce RTX 4060 đã xác minh; không có fallback thiết bị."}
     sys.path.insert(0, str(runtime))
     from sam2.build_sam import build_sam2
     from sam2.sam2_image_predictor import SAM2ImagePredictor
 
     config = "configs/sam2.1/sam2.1_hiera_s.yaml"
-    device = "cuda" if torch.cuda.is_available() and os.environ.get("LOCALAIHUB_FORCE_CPU") != "1" else "cpu"
     model = build_sam2(config, str(checkpoint), device=device)
     return SAM2ImagePredictor(model), device
+
+
+def _verified_cuda_device(torch_module: Any) -> str:
+    """Fail closed unless the explicitly approved discrete GPU is selected."""
+
+    if os.environ.get("LOCALAIHUB_FORCE_CPU") == "1" or not torch_module.cuda.is_available():
+        raise RuntimeError("sam2_rtx4060_required")
+    try:
+        name = str(torch_module.cuda.get_device_name(0) or "").casefold()
+    except (AttributeError, RuntimeError, TypeError):
+        raise RuntimeError("sam2_rtx4060_unverified") from None
+    if "nvidia" not in name or not re.search(r"\brtx[ -]?4060\b", name):
+        raise RuntimeError("sam2_rtx4060_required")
+    return "cuda:0"
 
 
 def _segment(request: dict[str, Any]) -> dict[str, Any]:
@@ -257,6 +276,10 @@ def _track(request: dict[str, Any]) -> dict[str, Any]:
     import cv2
     import numpy as np
     import torch
+    # Verify the selected discrete device before creating a task output or
+    # decoding the clip.  A heavy Hub-launched worker must fail closed before
+    # doing any meaningful work; it may not quietly continue on CPU/iGPU.
+    device = _verified_cuda_device(torch)
     output: Path | None = _task_output_root(hub_root)
     if output is None:
         return {"status": "error", "code": "output_contract_invalid", "error": "SAM2 không thể tạo output Hub an toàn."}
@@ -269,26 +292,62 @@ def _track(request: dict[str, Any]) -> dict[str, Any]:
         frames = output / "frames"
         frames.mkdir()
         capture = cv2.VideoCapture(str(source))
-        fps = capture.get(cv2.CAP_PROP_FPS) or 24.0
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        verified_rate = request.get("verified_frame_rate") is True and request.get("variable_frame_rate") is not True
+        requested_frame = request.get("frame_index")
+        requested_time = request.get("frame_time_seconds")
+        # A verified fixed-rate request may use an index.  If FPS/frame count
+        # was not verified, only the explicit time-based contract is allowed;
+        # the decoder below maps that time to its actual decoded timestamps.
+        if not fps > 0 or (not verified_rate and requested_time is None) or (verified_rate and requested_frame is None and requested_time is None):
+            capture.release()
+            capture = None
+            _discard_task_output(output)
+            return {"status": "error", "code": "video_metadata_unavailable", "error": "SAM2 cần FPS hoặc thời điểm video hợp lệ đã được xác minh; không đoán FPS hoặc frame index."}
+        if not verified_rate:
+            requested_frame = None
+        if requested_frame is None and requested_time is None:
+            requested_frame = 0
+        target_frame = int(requested_frame) if isinstance(requested_frame, int) and not isinstance(requested_frame, bool) else None
+        target_time = float(requested_time) if requested_time is not None else None
+        if target_time is not None and (not target_time >= 0 or not target_time < 86400):
+            capture.release()
+            capture = None
+            _discard_task_output(output)
+            return {"status": "error", "code": "frame_time_invalid", "error": "Thời điểm video không hợp lệ."}
         count = 0
+        nearest_frame = None
+        nearest_distance = float("inf")
+        last_timestamp_seconds = 0.0
         while True:
+            timestamp_ms = float(capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0)
             ok, frame = capture.read()
             if not ok:
                 break
+            if timestamp_ms >= 0:
+                last_timestamp_seconds = max(last_timestamp_seconds, timestamp_ms / 1000.0)
             cv2.imwrite(str(frames / f"{count:06d}.jpg"), frame)
+            if target_time is not None and timestamp_ms >= 0 and abs(timestamp_ms / 1000.0 - target_time) < nearest_distance:
+                nearest_distance = abs(timestamp_ms / 1000.0 - target_time)
+                nearest_frame = count
             count += 1
         capture.release()
         capture = None
         if count == 0 or width <= 0 or height <= 0:
             _discard_task_output(output)
             return {"status": "error", "code": "video_unreadable", "error": "SAM2 không thể trích frame từ video artifact."}
-        frame_index = int(request.get("frame_index", 0))
+        if target_time is not None and target_time > last_timestamp_seconds + max(1.0 / fps, 0.05):
+            _discard_task_output(output)
+            return {"status": "error", "code": "frame_time_invalid", "error": "Thời điểm video vượt thời lượng thực tế của artifact."}
+        frame_index = target_frame if target_frame is not None else nearest_frame
+        if frame_index is None:
+            _discard_task_output(output)
+            return {"status": "error", "code": "frame_time_unavailable", "error": "Decoder không cung cấp timestamp đủ để chọn frame theo thời gian."}
         if frame_index < 0 or frame_index >= count:
             _discard_task_output(output)
             return {"status": "error", "code": "frame_index_invalid", "error": "Frame được chọn không tồn tại trong video artifact."}
-        device = "cuda" if torch.cuda.is_available() and os.environ.get("LOCALAIHUB_FORCE_CPU") != "1" else "cpu"
         predictor = build_sam2_video_predictor("configs/sam2.1/sam2.1_hiera_s.yaml", str(checkpoint), device=device)
         state = predictor.init_state(video_path=str(frames))
         points, labels = _points(request, width, height)
