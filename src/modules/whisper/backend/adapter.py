@@ -12,7 +12,7 @@ from typing import Any
 from src.services.artifact_store import describe, resolve
 from src.services.api.config import models
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
-from src.shared.schemas.ocr_whisper import OcrWhisperContractError, build_whisper_transcript
+from src.shared.schemas.ocr_whisper import OcrWhisperContractError, build_whisper_transcript, normalize_whisper_payload
 from src.shared.utils.adapter_common import configured_path, local_root, unavailable
 
 
@@ -147,6 +147,9 @@ def _invalid_source_artifact() -> dict[str, Any]:
 
 
 def transcribe(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[str, Any]:
+    payload, payload_error = normalize_whisper_payload(payload)
+    if payload_error:
+        return {"status": "error", "component": "whisper", "code": "whisper_payload_invalid", "error": payload_error}
     if not isinstance(payload, dict):
         return _invalid_source_artifact()
     source = _source_artifact(payload)
@@ -175,6 +178,7 @@ def transcribe(payload: dict[str, Any], context: ProcessOwner | None = None) -> 
             "LOCALAIHUB_ROOT": str(root),
             "WHISPER_PYTHON": str(python),
             "WHISPER_MODEL_ID": model_id,
+            "LOCALAIHUB_REQUIRE_RTX4060": "1",
             "PYTHONIOENCODING": "utf-8",
         },
         owner=context,
@@ -209,12 +213,20 @@ def transcribe(payload: dict[str, Any], context: ProcessOwner | None = None) -> 
             "code": "transcript_result_contract_invalid",
             "error": "Faster-Whisper không tạo transcript result contract hợp lệ.",
         }
+    observed_device = result.get("device")
+    requested_device = str(payload.get("device") or "cpu").casefold()
+    if observed_device not in {"cpu", "cuda"} or observed_device != requested_device:
+        return {
+            "status": "error",
+            "code": "device_contract_mismatch",
+            "error": "Whisper worker không xác nhận đúng thiết bị đã yêu cầu; không fallback âm thầm.",
+        }
     return {
         "status": "completed",
         "operation": "transcribe_media",
         "files": [str(transcript), str(srt)],
         "segment_count": int(segment_count) if isinstance(segment_count, int) and segment_count >= 0 else 0,
-        "device": result.get("device") if result.get("device") in {"cpu", "cuda"} else "cpu",
+        "device": observed_device,
         "transcript": transcript_contract,
     }
 

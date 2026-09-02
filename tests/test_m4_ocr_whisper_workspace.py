@@ -33,6 +33,51 @@ def artifact_id(letter: str = "a") -> str:
 
 
 class M4OcrWhisperWorkspaceTests(unittest.TestCase):
+    def test_ocr_adapter_captures_language_region_page_at_helper_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "input.png"
+            output = root / "ocr.json"
+            source.write_bytes(b"image")
+            output.write_bytes(b"json")
+            runtime_python = root / "python.exe"
+            runtime_helper = root / "paddle_cli.py"
+            model = root / "model"
+            for path in (runtime_python, runtime_helper, model):
+                path.write_bytes(b"fixture")
+            source_id = artifact_id()
+            worker_result = {
+                "status": "completed",
+                "files": [str(output)],
+                "pages": [{"page_number": 2, "width": 100, "height": 100, "blocks": [{"normalized_box": [0.1, 0.2, 0.8, 0.9], "text": "hello"}]}],
+            }
+            captured: dict[str, object] = {}
+
+            def run_helper(_command, request, **_kwargs):
+                captured.update(request)
+                return worker_result
+
+            with (
+                patch.object(ocr_adapter, "registered_runtime", return_value=(runtime_python, runtime_helper, root)),
+                patch.object(ocr_adapter, "registered_model", return_value=("ocr-local", model)),
+                patch.object(ocr_adapter, "resolve_artifact_input", return_value=(source, None)),
+                patch.object(ocr_adapter, "describe", return_value={"media_type": "image/png"}),
+                patch.object(ocr_adapter, "run_json_worker", side_effect=run_helper),
+            ):
+                result = ocr_adapter.parse({
+                    "source_artifact_id": source_id,
+                    "language": "VI",
+                    "region": [0.1, 0.2, 0.8, 0.9],
+                    "page_number": 2,
+                    "output_format": "JSON",
+                }, context=object())
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(captured["language"], "vi")
+            self.assertEqual(captured["normalized_box"], [0.1, 0.2, 0.8, 0.9])
+            self.assertEqual(captured["page_number"], 2)
+            self.assertEqual(captured["output_format"], "json")
+            self.assertNotIn("region", captured)
+
     def test_payloads_and_result_contracts_are_bounded_and_opaque(self) -> None:
         ocr_payload, error = normalize_ocr_payload({
             "source_artifact_id": artifact_id(),
@@ -229,10 +274,12 @@ class M4OcrWhisperWorkspaceTests(unittest.TestCase):
             status, _response = core.submit_tool("ocr_document", {"source_artifact_id": source_id, "output_format": "JSON"})
             self.assertEqual(status, 202)
             status, _response = core.submit_tool("transcribe_media", {"source_artifact_id": source_id, "device": "CPU", "start": "0", "end": "2"})
+            self.assertEqual(status, 400)
+            status, _response = core.submit_tool("transcribe_media", {"source_artifact_id": source_id, "start": "0", "end": "2"})
             self.assertEqual(status, 202)
         self.assertEqual(submit.call_count, 2)
         self.assertEqual(submit.call_args_list[0].args[1]["output_format"], "json")
-        self.assertEqual(submit.call_args_list[1].args[1]["device"], "cpu")
+        self.assertEqual(submit.call_args_list[1].args[1]["device"], "cuda")
 
     def test_rendered_m4_workspaces_are_inline_and_button_only(self) -> None:
         script = r"""
@@ -241,7 +288,7 @@ class M4OcrWhisperWorkspaceTests(unittest.TestCase):
           components: [{id:'paddleocr_vl', component_status:'partial'}, {id:'whisper', component_status:'partial'}],
           tools: [
             {name:'ocr_document', tool_status:'partial', reason:'blocked', action:'review'},
-            {name:'transcribe_media', tool_status:'partial', reason:'blocked', action:'review'},
+            {name:'transcribe_media', tool_status:'partial', reason:'blocked', action:'review', supported_options:{devices:['cuda'], hardware:'nvidia_rtx4060'}},
             {name:'create_subtitled_video', tool_status:'partial', reason:'blocked', action:'review'},
           ],
           m4: {
@@ -259,11 +306,23 @@ class M4OcrWhisperWorkspaceTests(unittest.TestCase):
           if (!html.includes('data-file-picker-button') || !html.includes('file-picker__input')) throw new Error('button-only picker missing');
           if (!html.includes('m4-workspace__inputs') || !html.includes('m4-workspace__canvas') || !html.includes('m4-workspace__results')) throw new Error('three-zone workspace missing');
           if ([...html.matchAll(/<form[^>]*data-m4-job-form[\s\S]*?<\/form>/g)].some(match => match[0].includes('type="file"'))) throw new Error('file input nested in M4 job form');
+          if (route === 'whisper' && (html.includes('<option value="cpu">') || !html.includes('RTX 4060 preflight'))) throw new Error('Whisper device allowlist is not server-owned');
         }
         console.log('ok');
         """
         result = subprocess.run(["node", "--input-type=module", "-e", script], cwd=ROOT, capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_m4_media_listener_and_route_reopen_contract_is_complete(self) -> None:
+        interactive = (ROOT / "src" / "ui" / "features" / "ocr_whisper" / "interactive.js").read_text(encoding="utf-8")
+        app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('querySelectorAll("[data-m4-whisper-audio], [data-m4-whisper-video]")', interactive)
+        self.assertIn('["loadedmetadata", "durationchange"]', interactive)
+        self.assertIn('media.addEventListener("timeupdate"', interactive)
+        self.assertIn("activeWhisperMedia(workspace)", interactive)
+        self.assertIn("abort.abort();", interactive)
+        self.assertIn("M3_JOB_POLL_MAX_MS", app)
+        self.assertIn("Không thể lấy snapshot job trong thời hạn theo dõi", app)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,8 @@ _ARTIFACT_ID = re.compile(r"artifact_[a-f0-9]{32}\Z")
 _LANGUAGE = re.compile(r"(?:auto|[a-z]{2,8}(?:-[a-z]{2,8})?)\Z", re.IGNORECASE)
 _LOCAL_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\)")
 _OCR_OUTPUT_FORMATS = frozenset({"all", "text", "markdown", "json", "tables"})
+OCR_SUPPORTED_OUTPUT_FORMATS = ("all", "text", "markdown", "json", "tables")
+OCR_SUPPORTED_LANGUAGES = ("auto", "vi", "en", "ja", "zh")
 _WHISPER_DEVICES = frozenset({"cpu", "cuda"})
 _OCR_BLOCK_TYPES = frozenset({"text", "table", "formula", "image", "header", "footer", "unknown"})
 
@@ -484,6 +486,8 @@ __all__ = [
     "MAX_OCR_BLOCKS_PER_PAGE",
     "MAX_OCR_PAGES",
     "MAX_TRANSCRIPT_SEGMENTS",
+    "OCR_SUPPORTED_LANGUAGES",
+    "OCR_SUPPORTED_OUTPUT_FORMATS",
     "OCR_RESULT_SCHEMA",
     "OcrWhisperContractError",
     "WHISPER_TRANSCRIPT_SCHEMA",

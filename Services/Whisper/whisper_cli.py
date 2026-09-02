@@ -82,6 +82,24 @@ def _request(value: object) -> tuple[dict[str, object] | None, str | None]:
     }, None
 
 
+def _device_allowed(device: str) -> bool:
+    """Require the approved discrete device for Hub-launched heavy work."""
+
+    if os.environ.get("LOCALAIHUB_REQUIRE_RTX4060") != "1":
+        return device in {"cpu", "cuda"}
+    if device != "cuda" or os.environ.get("LOCALAIHUB_FORCE_CPU") == "1":
+        return False
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return False
+        name = str(torch.cuda.get_device_name(0) or "").casefold()
+    except (ImportError, AttributeError, RuntimeError, TypeError):
+        return False
+    return "nvidia" in name and re.search(r"\brtx[ -]?4060\b", name) is not None
+
+
 def srt_time(seconds: float) -> str:
     millis = max(0, round(seconds * 1000))
     hours, millis = divmod(millis, 3_600_000)
@@ -117,6 +135,8 @@ def handle_request(value: object) -> dict[str, object]:
     request, error = _request(value)
     if request is None:
         return _response("error", code=error or "invalid_request")
+    if not _device_allowed(str(request["device"])):
+        return _response("error", code="rtx4060_required")
     root = _local_root()
     python_value = os.environ.get("WHISPER_PYTHON", "")
     model_id = os.environ.get("WHISPER_MODEL_ID", "")
@@ -142,16 +162,6 @@ def handle_request(value: object) -> dict[str, object]:
             check=False,
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
-        if result.returncode != 0 and request["device"] == "cuda" and b"cublas64_12.dll" in result.stderr:
-            command[6] = "cpu"
-            result = subprocess.run(
-                command,
-                cwd=str(worker.parent),
-                capture_output=True,
-                timeout=int(request["timeout"]),
-                check=False,
-                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-            )
     except (OSError, subprocess.SubprocessError):
         return _response("error", code="worker_unavailable")
     if result.returncode != 0 or not transcript.is_file() or transcript.is_symlink() or not _write_srt(transcript, srt):
