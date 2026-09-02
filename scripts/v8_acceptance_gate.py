@@ -133,7 +133,14 @@ def _path_impact_scope(path: str) -> str | None:
         return "diagnostics"
     if normalized.startswith(("src/app/main.py", "src/app/payload_bootstrap.py", "src/app/desktop_lifecycle.py")):
         return "desktop_startup"
-    if normalized.startswith(("src/services/app_update.py", "src/services/update_transport.py", "src/app/update_", "scripts/bootstrap_first_watchdog_payload.py")):
+    if normalized.startswith((
+        "src/services/app_update.py",
+        "src/services/update_transport.py",
+        "src/app/update_",
+        "src/app/stable_launcher.py",
+        "src/app/stable_shell.py",
+        "scripts/bootstrap_first_watchdog_payload.py",
+    )):
         return "updater"
     if normalized == "scripts/generate_api_route_inventory.py":
         return "loopback_api"
