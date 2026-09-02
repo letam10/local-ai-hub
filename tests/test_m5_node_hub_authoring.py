@@ -133,6 +133,11 @@ assert.equal(helpers.outputSocketState({ outputs: { image: { artifact_id: "artif
         self.assertTrue(prompt["ui"]["multiline"])
         self.assertIn(next(item for item in properties if item["name"] == "width")["ui"]["control"], {"size", "number"})
 
+    def test_node_studio_registry_has_bounded_acceptance_impact_scope(self) -> None:
+        from scripts.v8_acceptance_gate import _path_impact_scope
+
+        self.assertEqual(_path_impact_scope("src/services/node_studio/registry.py"), "workflow_runtime")
+
     def test_canvas_contract_keeps_focus_ring_and_removes_only_decorative_frame(self) -> None:
         studio = STUDIO.read_text(encoding="utf-8")
         i18n = I18N.read_text(encoding="utf-8")

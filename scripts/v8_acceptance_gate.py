@@ -123,6 +123,8 @@ def _path_impact_scope(path: str) -> str | None:
         return "resource_scheduler"
     if normalized.startswith("src/services/workflow_runtime_v2/"):
         return "workflow_runtime"
+    if normalized.startswith("src/services/node_studio/"):
+        return "workflow_runtime"
     if normalized.startswith("src/services/provider_adapters_v2/"):
         return "provider_adapters"
     if normalized.startswith("src/services/project_manager/"):
