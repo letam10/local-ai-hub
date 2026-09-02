@@ -2457,6 +2457,21 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const launchButton = event.target.closest("[data-launch]");
+  const refreshApplicationsButton = event.target.closest("[data-refresh-applications]");
+  if (refreshApplicationsButton) {
+    refreshApplicationsButton.disabled = true;
+    try {
+      const results = await Promise.allSettled([getApplications(), getExternalIntegrationsV2()]);
+      if (results[0].status !== "fulfilled") throw results[0].reason;
+      state.applications = results[0].value?.applications || [];
+      if (results[1].status === "fulfilled") state.externalIntegrationsV2 = results[1].value || {};
+      render();
+      showToast("Đã làm mới trạng thái AIRI.", "success");
+    } catch (error) {
+      showToast(error?.message || "Không thể làm mới trạng thái AIRI.", "error");
+    } finally { refreshApplicationsButton.disabled = false; }
+    return;
+  }
   if (launchButton) {
     launchButton.disabled = true;
     try { const result = await launchApplication(launchButton.dataset.launch); showToast(`${result.application || "AIRI"}: đang khởi chạy.`); }

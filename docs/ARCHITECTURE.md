@@ -74,6 +74,11 @@ hoặc external app, không embed WebView ngoài và không biến dependency đ
 quyền thực thi. Chi tiết xem
 [Post-V8 Provider Adapters & External Integrations M3](architecture/POST_V8_PROVIDER_ADAPTERS_M3.md).
 
+Nút `Mở AIRI` thuộc application launch boundary M2, không thuộc route
+`external-integrations.v2/launch-plan`. Route M2 chỉ nhận application ID; service
+`runtime_registry` tự lấy target từ local/Windows registry rồi kiểm tra
+identity, reparse safety và fingerprint trước khi khởi chạy.
+
 Post-V8 M4 thêm Product Experience V2: catalog Dashboard/onboarding/tìm kiếm
 global hữu hạn do Hub API sở hữu. Catalog chỉ dẫn đến các route sản phẩm hiện
 có; không tìm user data, không ghi Settings và không thực thi workflow. Theme

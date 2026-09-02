@@ -16,6 +16,7 @@ machine data. Never infer permission from a filename alone.
 | Whisper | `src/modules/whisper/`, `Services/Whisper/` | speech routes | first-party Whisper contract | Output containment; path-free receipts |
 | Vision/OCR/Voice | `src/modules/vision`, `ocr`, `voice` | typed API routes | adapter contract tests | opaque artifact inputs, no secret/path echo |
 | ComfyUI/FLUX/Qwen | `src/modules/image_generation/` | Image AI feature | Comfy contract | fixed workflow/profile; no downloads at startup |
+| AIRI managed launch | `src/services/runtime_registry.py`, `src/modules/airi/backend/adapter.py` | `/api/applications`, AIRI page | `tests/test_m2_airi_managed_launch.py` + registry compatibility tests | bounded Windows/local-registry discovery; identity/reparse/fingerprint verification; path-free projection; no installer mutation |
 | Module Manager | `src/services/module_manager/` | future modules UI | capability/module tests | manifest allowlist, no arbitrary plugin import |
 | Model Manager | `src/services/model_manager/` | future model UI | catalog/install fixture tests | HTTPS/checksum/staging/receipt; no weights in Git |
 | Runtime Manager | `src/services/runtime_manager/` | diagnostics/modules UI | runtime catalog tests | no driver/CUDA change; no environment overwrite |

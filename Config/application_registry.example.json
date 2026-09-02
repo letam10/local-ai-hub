@@ -68,6 +68,10 @@
       "working_directory": "${AIRI_HOME}",
       "arguments": [],
       "launch": true,
+      "identity": {
+        "product_name": "AIRI",
+        "publisher": "Moeru AI"
+      },
       "notes": "Installer-managed; never relocate manually and never copy credentials."
     },
     {

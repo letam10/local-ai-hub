@@ -103,7 +103,7 @@ ROW_KEYS = {
     }),
     "application_registry.local.json": frozenset({
         "id", "display_name", "category", "classification", "status", "path", "executable", "working_directory",
-        "arguments", "launch", "advanced_only", "notes", "execution", "recovery_state",
+        "arguments", "launch", "advanced_only", "identity", "identity_manifest", "notes", "execution", "recovery_state",
     }),
 }
 TOP_LEVEL_KEYS = {

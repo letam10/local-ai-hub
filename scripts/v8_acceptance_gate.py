@@ -113,6 +113,12 @@ _HIGH_RISK_UNCLASSIFIED_PREFIXES = (
 
 def _path_impact_scope(path: str) -> str | None:
     normalized = path.replace("\\", "/")
+    if normalized in {"src/services/runtime_registry.py", "src/services/local_registry_recovery.py"} or normalized.startswith("src/modules/airi/"):
+        # AIRI's installer-managed application discovery/launch boundary is
+        # distinct from AI runtime execution.  It must not invalidate a
+        # reused runtime_smoke report, while remaining explicitly classified
+        # instead of falling through to the unknown high-risk sentinel.
+        return "application_launch"
     if normalized.startswith("src/services/resource_scheduler/"):
         return "resource_scheduler"
     if normalized.startswith("src/services/workflow_runtime_v2/"):

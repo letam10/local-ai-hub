@@ -14,8 +14,9 @@ backend đang hoạt động.
 ## Ranh giới an toàn
 
 - API chạy tại `127.0.0.1:8765` và chỉ phục vụ asset từ `src/ui`.
-- Launcher nhận một ID có trong `application_registry`; đường dẫn executable,
-  thư mục làm việc và đối số nằm trong registry cục bộ, không do UI cung cấp.
+- Launcher nhận một ID có trong `application_registry`; backend tự discovery và
+  xác minh executable theo allowlist local/Windows, còn UI không cung cấp
+  executable, thư mục làm việc, đối số hoặc command line.
 - AIRI/Ollama là ứng dụng hệ thống bên ngoài. Chúng không bị di chuyển hoặc sao
   chép vào runtime của Hub.
 - FLUX và Qwen Image có thể là hai mục UI, nhưng dùng cùng Local Image Studio,
@@ -40,6 +41,7 @@ quét read-only.
    và `/api/applications`.
 2. Mở desktop shell để xác minh WebView2 cùng URL `/ui/`.
 3. Với ứng dụng đã cài, chỉ chạy kiểm tra khởi động hoặc self-test có giới hạn;
+   AIRI phải vượt qua identity/fingerprint verification trước khi launch, và
    không chạy benchmark hay inference nặng chỉ để kiểm tra UI.
 4. Đóng riêng cây tiến trình được tạo bởi smoke test. Không dừng tiến trình
    người dùng đã tồn tại.

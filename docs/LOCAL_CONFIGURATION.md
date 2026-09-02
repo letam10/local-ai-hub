@@ -34,6 +34,21 @@ hoặc commit; không sửa tay khi Hub đang chạy. Nếu state hỏng, Hub s�
 `recovery_required` hoặc `recovered_partial` chỉ đọc và không tự ghi đè tệp đó.
 
 Dùng biến môi trường hoặc cấu hình local cho path các cài đặt ngoài, ví dụ
-`SAM2_HOME`, `ANIMESR_HOME`, `WHISPER_HOME`, `FFMPEG_PATH`, `FFPROBE_PATH`,
-`AIRI_EXECUTABLE` và `LOCAL_AI_HOME`. Không bao giờ đặt secret hoặc absolute
-personal path trong tệp được track.
+`SAM2_HOME`, `ANIMESR_HOME`, `WHISPER_HOME`, `FFMPEG_PATH`, `FFPROBE_PATH`
+và `LOCAL_AI_HOME`. `AIRI_EXECUTABLE` chỉ còn là trường tương thích trong các
+mẫu cũ; riêng nút M2 không tin một biến môi trường đơn lẻ mà yêu cầu registry
+allowlist cùng identity/fingerprint verification. Không bao giờ đặt secret
+hoặc absolute personal path trong tệp được track.
+
+## AIRI launcher registry
+
+`Config/application_registry.local.json` là cấu hình máy cục bộ tùy chọn, bị
+Git bỏ qua. Tracked `application_registry.example.json` chỉ là mẫu; không dùng
+mẫu đó làm bằng chứng AIRI đã cài.
+
+Entry AIRI có thể khai báo `executable`, `working_directory`, `arguments` và
+identity manifest `{"product_name":"AIRI","publisher":"Moeru AI"}`. Các
+giá trị này chỉ là allowlist đầu vào cho backend; trước khi hiển thị `verified`
+hoặc khởi chạy, backend vẫn phải kiểm tra target `.exe` regular, reparse-safe,
+metadata ProductName/CompanyName và fingerprint. Không đặt command shell,
+secret/API key hoặc dữ liệu xác thực AIRI vào registry.
