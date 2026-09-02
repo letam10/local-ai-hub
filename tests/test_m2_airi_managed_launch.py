@@ -248,6 +248,16 @@ class AiriManagedLaunchTests(unittest.TestCase):
         self.assertIn("Chưa tìm thấy AIRI", renderer)
         self.assertIn("data-launch=\"airi\"", renderer)
 
+    def test_acceptance_impact_classifies_airi_launch_separately_from_ai_runtime(self) -> None:
+        from scripts.v8_acceptance_gate import _path_impact_scope
+
+        for path in (
+            "src/services/runtime_registry.py",
+            "src/services/local_registry_recovery.py",
+            "src/modules/airi/backend/adapter.py",
+        ):
+            self.assertEqual(_path_impact_scope(path), "application_launch")
+
 
 if __name__ == "__main__":
     unittest.main()
