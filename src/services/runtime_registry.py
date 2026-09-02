@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from src.services.api.config import read_local_config
-from src.services.process_manager.windows import popen_hidden, run_hidden
+from src.services.process_manager.windows import popen_hidden
 from src.shared.paths.registry import CONFIG_ROOT
 
 
@@ -43,7 +43,15 @@ _MAX_ARGUMENTS = 16
 _MAX_ARGUMENT_LENGTH = 512
 _MAX_APPLICATIONS = 64
 _MAX_EXECUTABLE_BYTES = 1024 * 1024 * 1024
-_TASKLIST_CACHE_SECONDS = 5.0
+_PROCESS_SNAPSHOT_CACHE_SECONDS = 5.0
+_MAX_PROCESS_ENUMERATION = 4096
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_TH32CS_SNAPPROCESS = 0x00000002
+_ERROR_ACCESS_DENIED = 5
+_ERROR_INVALID_HANDLE = 6
+_ERROR_INVALID_PARAMETER = 87
+_ERROR_NOT_FOUND = 1168
+_PROCESS_IMAGE_PATH_LIMIT = 32_768
 
 AIRI_APPLICATION_ID = "airi"
 AIRI_DISPLAY_NAME = "AIRI"
@@ -57,8 +65,8 @@ LAUNCH_AVAILABLE = "available"
 LAUNCH_AMBIGUOUS = "ambiguous"
 LAUNCH_UNAVAILABLE = "unavailable"
 
-_tasklist_cache: tuple[float, set[str]] | None = None
-_tasklist_lock = threading.RLock()
+_process_snapshot_cache: tuple[float, tuple[frozenset[str], frozenset[str], bool]] | None = None
+_process_snapshot_lock = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -695,42 +703,165 @@ def _discover_application(
     return discovery, provenance, matching_entries[0] if matching_entries else None
 
 
-def _running_executables(*, force: bool = False) -> set[str]:
-    """Return executable names observed by Windows without accepting input."""
-
-    global _tasklist_cache
-    if os.name != "nt":
-        return set()
-    now = time.monotonic()
-    with _tasklist_lock:
-        if not force and _tasklist_cache and now - _tasklist_cache[0] < _TASKLIST_CACHE_SECONDS:
-            return set(_tasklist_cache[1])
+def _normalize_process_path(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
     try:
-        result = run_hidden(
-            ["tasklist", "/FO", "CSV", "/NH"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-            check=False,
-        )
-    except OSError:
-        return set()
-    names: set[str] = set()
-    for line in result.stdout.splitlines():
-        if not line.startswith('"'):
-            continue
-        name = line.split('",', 1)[0].strip('"').casefold()
-        if name:
-            names.add(name)
-    with _tasklist_lock:
-        _tasklist_cache = (now, set(names))
-    return names
+        text = os.path.normpath(os.path.abspath(value.strip().strip('"')))
+    except (OSError, ValueError):
+        return None
+    # QueryFullProcessImageNameW may return an extended-length DOS path while
+    # the registry returns the ordinary spelling of the same file.
+    if text.casefold().startswith("\\\\?\\unc\\"):
+        text = "\\\\" + text[8:]
+    elif text.startswith("\\\\?\\"):
+        text = text[4:]
+    return os.path.normcase(text)
 
 
-def _candidate_running(candidate: _Candidate, *, force: bool = False) -> bool:
-    return candidate.executable.name.casefold() in _running_executables(force=force)
+def _query_process_image_path(kernel32: Any, process_id: int) -> tuple[str | None, bool]:
+    """Return one process image path and whether access was denied."""
+
+    try:
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, int(process_id))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None, True
+    if not handle:
+        error = int(ctypes.get_last_error() or 0)
+        # A process can disappear between the snapshot and OpenProcess.  That
+        # is not evidence that the relevant application is running or hidden.
+        return None, error not in {_ERROR_INVALID_HANDLE, _ERROR_INVALID_PARAMETER, _ERROR_NOT_FOUND}
+    try:
+        buffer = ctypes.create_unicode_buffer(_PROCESS_IMAGE_PATH_LIMIT)
+        length = ctypes.c_uint32(len(buffer))
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(length)):
+            error = int(ctypes.get_last_error() or 0)
+            return None, error not in {_ERROR_INVALID_HANDLE, _ERROR_INVALID_PARAMETER, _ERROR_NOT_FOUND}
+        return buffer.value[: int(length.value)], False
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None, True
+    finally:
+        try:
+            kernel32.CloseHandle(handle)
+        except (AttributeError, OSError, TypeError):
+            pass
+
+
+def _native_process_snapshot() -> tuple[frozenset[str], frozenset[str], bool]:
+    """Enumerate process paths with bounded Windows-native APIs.
+
+    The second set contains executable basenames whose image path could not be
+    read.  It is intentionally used only after comparing the basename to the
+    verified candidate, so an unrelated protected Windows process does not
+    make every AIRI status unknown.
+    """
+
+    if os.name != "nt":
+        return frozenset(), frozenset(), True
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        snapshot_fn = kernel32.CreateToolhelp32Snapshot
+        first_fn = kernel32.Process32FirstW
+        next_fn = kernel32.Process32NextW
+        open_fn = kernel32.OpenProcess
+        query_fn = kernel32.QueryFullProcessImageNameW
+        close_fn = kernel32.CloseHandle
+        snapshot_fn.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+        snapshot_fn.restype = ctypes.c_void_p
+        first_fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        first_fn.restype = ctypes.c_int
+        next_fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        next_fn.restype = ctypes.c_int
+        open_fn.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        open_fn.restype = ctypes.c_void_p
+        query_fn.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_uint32)]
+        query_fn.restype = ctypes.c_int
+        close_fn.argtypes = [ctypes.c_void_p]
+        close_fn.restype = ctypes.c_int
+
+        class _ProcessEntry32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", ctypes.c_uint32),
+                ("cntUsage", ctypes.c_uint32),
+                ("th32ProcessID", ctypes.c_uint32),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", ctypes.c_uint32),
+                ("cntThreads", ctypes.c_uint32),
+                ("th32ParentProcessID", ctypes.c_uint32),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", ctypes.c_uint32),
+                ("szExeFile", ctypes.c_wchar * 260),
+            ]
+
+        handle = snapshot_fn(_TH32CS_SNAPPROCESS, 0)
+        invalid_handle = ctypes.c_void_p(-1).value
+        if not handle or handle == invalid_handle or handle == -1:
+            return frozenset(), frozenset(), True
+        paths: set[str] = set()
+        unreadable_names: set[str] = set()
+        truncated = False
+        try:
+            entry = _ProcessEntry32W()
+            entry.dwSize = ctypes.sizeof(_ProcessEntry32W)
+            if not first_fn(handle, ctypes.byref(entry)):
+                return frozenset(), frozenset(), True
+            for index in range(_MAX_PROCESS_ENUMERATION):
+                name = str(entry.szExeFile or "").casefold()
+                if name:
+                    image, unreadable = _query_process_image_path(kernel32, int(entry.th32ProcessID))
+                    normalized = _normalize_process_path(image)
+                    if normalized is not None:
+                        paths.add(normalized)
+                    elif unreadable:
+                        unreadable_names.add(name)
+                if not next_fn(handle, ctypes.byref(entry)):
+                    break
+            else:
+                truncated = True
+        finally:
+            try:
+                close_fn(handle)
+            except (OSError, TypeError):
+                pass
+        return frozenset(paths), frozenset(unreadable_names), truncated
+    except (AttributeError, OSError, TypeError, ValueError):
+        return frozenset(), frozenset(), True
+
+
+def _running_process_snapshot(*, force: bool = False) -> tuple[frozenset[str], frozenset[str], bool]:
+    global _process_snapshot_cache
+    now = time.monotonic()
+    with _process_snapshot_lock:
+        if not force and _process_snapshot_cache and now - _process_snapshot_cache[0] < _PROCESS_SNAPSHOT_CACHE_SECONDS:
+            return _process_snapshot_cache[1]
+    snapshot = _native_process_snapshot()
+    with _process_snapshot_lock:
+        _process_snapshot_cache = (now, snapshot)
+    return snapshot
+
+
+def _candidate_running_observation(candidate: _Candidate, *, force: bool = False) -> tuple[bool, str]:
+    """Return whether the candidate is still verified and its running state."""
+
+    # Discovery and process observation are separate TOCTOU windows.  A file
+    # replacement must fail closed instead of matching a process by basename.
+    if _revalidate_candidate(candidate) is None:
+        return False, "not_running"
+    target = _normalize_process_path(str(candidate.executable))
+    if target is None:
+        return True, "unknown"
+    paths, unreadable_names, uncertain = _running_process_snapshot(force=force)
+    if target in paths:
+        return True, "running"
+    if candidate.executable.name.casefold() in unreadable_names or uncertain:
+        return True, "unknown"
+    return True, "not_running"
+
+
+def _candidate_running_state(candidate: _Candidate, *, force: bool = False) -> str:
+    """Return running/not_running/unknown using exact verified image paths."""
+
+    return _candidate_running_observation(candidate, force=force)[1]
 
 
 def _safe_public_label(value: object, fallback: str) -> str:
@@ -743,15 +874,22 @@ def _safe_public_label(value: object, fallback: str) -> str:
 
 
 def _public_airi_entry(discovery: _Discovery, *, provenance: str, force: bool = False) -> dict[str, Any]:
-    running = bool(discovery.candidate and _candidate_running(discovery.candidate, force=force))
-    component_status = "running" if running else "installed" if discovery.candidate else "unavailable"
+    candidate_valid, running_state = _candidate_running_observation(discovery.candidate, force=force) if discovery.candidate else (False, "not_running")
+    running = running_state == "running"
+    launchable = discovery.candidate is not None and candidate_valid
+    component_status = "running" if running else "installed" if launchable else "unavailable"
     public_provenance = discovery.source if discovery.candidate is not None or discovery.candidates else provenance
-    if discovery.state == DISCOVERY_AMBIGUOUS:
+    discovery_state = discovery.state if candidate_valid or discovery.candidate is None else DISCOVERY_UNAVAILABLE
+    launch_state = discovery.launch_state if candidate_valid or discovery.candidate is None else LAUNCH_UNAVAILABLE
+    reason_code = discovery.reason_code if candidate_valid or discovery.candidate is None else "airi_candidate_changed"
+    if discovery_state == DISCOVERY_AMBIGUOUS:
         notes = "Nhiều launcher AIRI hợp lệ; Hub không tự chọn candidate."
-    elif discovery.candidate:
+    elif launchable:
         notes = "AIRI do installer Windows quản lý; Hub chỉ dùng launcher đã xác minh."
-    elif discovery.identity_found:
+    elif discovery.identity_found and discovery.candidate is None:
         notes = "Đã thấy identity installer AIRI nhưng chưa có executable hợp lệ để mở."
+    elif discovery.candidate is not None and not candidate_valid:
+        notes = "Launcher AIRI đã thay đổi sau lần xác minh; Hub không mở candidate hiện tại."
     else:
         notes = "Chưa tìm thấy AIRI qua registry local hoặc Windows installer identity."
     return {
@@ -762,11 +900,12 @@ def _public_airi_entry(discovery: _Discovery, *, provenance: str, force: bool = 
         "management_status": "external_system_app",
         "component_status": component_status,
         "status": component_status,
-        "launchable": discovery.candidate is not None,
+        "launchable": launchable,
         "running": running,
-        "discovery_state": discovery.state,
-        "launch_state": discovery.launch_state,
-        "reason_code": discovery.reason_code,
+        "running_state": running_state,
+        "discovery_state": discovery_state,
+        "launch_state": launch_state,
+        "reason_code": reason_code,
         "registry_provenance": public_provenance,
         "discovery_source": discovery.source,
         "managed_location": "External managed",
@@ -778,8 +917,10 @@ def _public_airi_entry(discovery: _Discovery, *, provenance: str, force: bool = 
 def _public_entry(entry: Mapping[str, Any], discovery: _Discovery, *, provenance: str, force: bool = False) -> dict[str, Any]:
     application_id = str(entry.get("id") or "")
     display_name = _safe_public_label(entry.get("display_name"), application_id or "Application")
-    running = bool(discovery.candidate and _candidate_running(discovery.candidate, force=force))
-    component_status = "running" if running else "installed" if discovery.candidate else "unavailable"
+    candidate_valid, running_state = _candidate_running_observation(discovery.candidate, force=force) if discovery.candidate else (False, "not_running")
+    running = running_state == "running"
+    launchable = discovery.candidate is not None and candidate_valid
+    component_status = "running" if running else "installed" if launchable else "unavailable"
     return {
         "id": application_id,
         "display_name": display_name,
@@ -788,8 +929,9 @@ def _public_entry(entry: Mapping[str, Any], discovery: _Discovery, *, provenance
         "management_status": "configured_allowlist" if provenance == "local" else provenance,
         "component_status": component_status,
         "status": component_status,
-        "launchable": discovery.candidate is not None,
+        "launchable": launchable,
         "running": running,
+        "running_state": running_state,
         "discovery_state": discovery.state,
         "launch_state": discovery.launch_state,
         "reason_code": discovery.reason_code,

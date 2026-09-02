@@ -87,7 +87,7 @@ _GATE_IMPACT_SCOPES: dict[str, frozenset[str]] = {
     "bundle_atomic_rollback": frozenset({"bundle_atomic"}),
     "real_component_lifecycle": frozenset({"component_lifecycle"}),
     "loopback_api": frozenset({"loopback_api", "desktop_startup"}),
-    "webview2_product_ux": frozenset({"desktop_startup", "product_experience", "diagnostics"}),
+    "webview2_product_ux": frozenset({"desktop_startup", "product_experience", "diagnostics", "application_launch"}),
     "sqlite_backup_restore": frozenset({"sqlite_backup"}),
     "packaging_upgrade": frozenset({"desktop_startup", "updater"}),
     "crash_recovery": frozenset({"desktop_startup", "updater"}),
@@ -113,7 +113,7 @@ _HIGH_RISK_UNCLASSIFIED_PREFIXES = (
 
 def _path_impact_scope(path: str) -> str | None:
     normalized = path.replace("\\", "/")
-    if normalized in {"src/services/runtime_registry.py", "src/services/local_registry_recovery.py"} or normalized.startswith("src/modules/airi/"):
+    if normalized in {"src/services/runtime_registry.py", "src/services/local_registry_recovery.py"} or normalized.startswith("src/modules/airi/") or normalized.startswith("src/ui/features/airi/"):
         # AIRI's installer-managed application discovery/launch boundary is
         # distinct from AI runtime execution.  It must not invalidate a
         # reused runtime_smoke report, while remaining explicitly classified
@@ -133,8 +133,10 @@ def _path_impact_scope(path: str) -> str | None:
         return "diagnostics"
     if normalized.startswith(("src/app/main.py", "src/app/payload_bootstrap.py", "src/app/desktop_lifecycle.py")):
         return "desktop_startup"
-    if normalized.startswith(("src/services/app_update.py", "src/services/update_transport.py", "src/app/update_")):
+    if normalized.startswith(("src/services/app_update.py", "src/services/update_transport.py", "src/app/update_", "scripts/bootstrap_first_watchdog_payload.py")):
         return "updater"
+    if normalized == "scripts/generate_api_route_inventory.py":
+        return "loopback_api"
     if normalized == "scripts/stage_stable_product.py":
         return "updater"
     if normalized.startswith("src/services/api/"):

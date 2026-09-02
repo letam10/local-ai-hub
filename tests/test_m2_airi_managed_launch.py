@@ -76,15 +76,16 @@ class AiriManagedLaunchTests(unittest.TestCase):
                 "_read_file_identity",
                 return_value={"product_name": "AIRI", "publisher": "Moeru AI"},
             ), patch.object(runtime_registry, "_discover_windows_candidates", side_effect=AssertionError("local registry must win")), patch.object(
-                runtime_registry, "_running_executables", return_value={"airi.exe"}
+                runtime_registry, "_running_process_snapshot", return_value=(frozenset({runtime_registry._normalize_process_path(str(executable))}), frozenset(), False)
             ):
                 records = runtime_registry.applications(force=True)
             airi = next(item for item in records if item["id"] == "airi")
-            self.assertTrue({"id", "display_name", "discovery_state", "launch_state", "launchable", "running", "reason_code"}.issubset(airi))
+            self.assertTrue({"id", "display_name", "discovery_state", "launch_state", "launchable", "running", "running_state", "reason_code"}.issubset(airi))
             self.assertEqual(airi["discovery_state"], "verified")
             self.assertEqual(airi["launch_state"], "available")
             self.assertTrue(airi["launchable"])
             self.assertTrue(airi["running"])
+            self.assertEqual(airi["running_state"], "running")
             self.assertEqual(airi["reason_code"], "airi_verified")
             encoded = json.dumps(airi, ensure_ascii=True).lower()
             for marker in ("c:/", "private", "api_key", "secret-token", "executable", "command"):
@@ -101,7 +102,15 @@ class AiriManagedLaunchTests(unittest.TestCase):
                 runtime_registry,
                 "_discover_windows_candidates",
                 return_value=([candidate], "airi_not_discovered", False),
-            ), patch.object(runtime_registry, "_running_executables", return_value=set()):
+            ), patch.object(
+                runtime_registry,
+                "_read_file_identity",
+                return_value={"product_name": "AIRI", "publisher": "Moeru AI"},
+            ), patch.object(runtime_registry, "_file_fingerprint", return_value=candidate.fingerprint), patch.object(
+                runtime_registry,
+                "_running_process_snapshot",
+                return_value=(frozenset(), frozenset(), False),
+            ):
                 record = runtime_registry.application("airi")
             self.assertEqual(record["discovery_state"], "verified")
             self.assertEqual(record["discovery_source"], "windows_registry")
@@ -247,6 +256,7 @@ class AiriManagedLaunchTests(unittest.TestCase):
         self.assertIn("data-refresh-applications", renderer)
         self.assertIn("Chưa tìm thấy AIRI", renderer)
         self.assertIn("data-launch=\"airi\"", renderer)
+        self.assertEqual(renderer.count("data-launch=\"airi\""), 1)
 
     def test_acceptance_impact_classifies_airi_launch_separately_from_ai_runtime(self) -> None:
         from scripts.v8_acceptance_gate import _path_impact_scope
