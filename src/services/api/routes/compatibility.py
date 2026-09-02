@@ -57,4 +57,12 @@ def register(router: Router) -> None:
     router.register(route_id="compat.storage_scan_cancel", method="POST", path="/api/storage/scan/cancel", domain="storage", owner=owner, handler=storage_scan_cancel)
     router.register(route_id="compat.storage_scan_status", method="GET", path="/api/storage/scan", domain="storage", owner=owner, handler=storage_scan_status)
     router.register(route_id="applications.list", method="GET", path="/api/applications", domain="applications", owner=owner, handler=applications)
-    router.register(route_id="applications.launch", method="POST", path="/api/applications/{application_id}/launch", domain="applications", owner=owner, handler=launch)
+    router.register(
+        route_id="applications.launch",
+        method="POST",
+        path="/api/applications/{application_id}/launch",
+        domain="applications",
+        owner=owner,
+        handler=launch,
+        status_codes=(202, 404, 409, 500, 503),
+    )

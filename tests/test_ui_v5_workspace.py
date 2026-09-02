@@ -25,8 +25,9 @@ class V5WorkspaceUiContractTests(unittest.TestCase):
         self.assertIn("workflowLibraryState", self.pages)
         self.assertIn("data-status=", self.shared_renderer + self.renderers)
         self.assertIn("data-workflow-library-status", self.nodes)
-        self.assertIn("V5-D", self.adapter)
-        self.assertIn("partial", self.adapter)
+        self.assertIn('WORKFLOW_LIBRARY_ADAPTER_VERSION = "workflow-library-adapter.v1"', self.adapter)
+        self.assertIn("server-owned adapter", self.adapter)
+        self.assertIn('status: "partial"', self.adapter)
 
     def test_adapter_does_not_invent_fetch_route_or_execute_graph(self) -> None:
         self.assertNotIn("fetch(", self.adapter)
