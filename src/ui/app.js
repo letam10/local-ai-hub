@@ -37,6 +37,7 @@ import {
   getImageMaskStudioOverview,
   getHealth,
   getJobs,
+  getJob,
   deleteJobHistory,
   clearTerminalJobHistory,
   getDurableJobs,
@@ -129,6 +130,7 @@ import {
 // clients; this UI deliberately uses retryDurableJob so V8 says "new record,
 // not executed" truthfully.
 import { disposeNodeStudios, mountNodeStudios } from "./features/node_studio/studio.js";
+import { ensureM3State, mountM3InteractiveWorkspaces, rememberM3FileSelection, selectionToPayload, setM3UploadedArtifact, syncM3WorkspaceDom } from "./features/vision/interactive.js";
 import { createStorageScanPoller, STORAGE_SCAN_ACTIVE_STATES } from "./storage_scan_polling.js";
 import { mountImageMaskCanvases } from "./image_mask_studio.js";
 import { createWorkflowLibraryAdapter } from "./workflow_library.js";
@@ -147,6 +149,10 @@ const state = {
   storageScan: { status: "idle", progress: 0, exact: false },
   productionCatalog: { status: "partial", models: [], runtimes: [] }, updateCenter: { settings: { policy: "manual" }, records: [] }, modelFilters: { query: "", category: "", installed: "all" }, modelActionStatus: "", settingsActionStatus: "", settingsDirty: false,
   featureRegistry: FEATURE_REGISTRY,
+  m3: {
+    vision: { activeTool: "omniparser", thresholds: {}, selectedDetectionIndex: -1, sourceFile: null, sourceArtifact: null, localPreviewUrl: "", job: null },
+    sam2: { mode: "points", intent: "positive", selection: { points: [], box: null }, selectionHistory: [], selectionHistoryIndex: -1, selectedPointIndex: -1, frameIndex: 0, resultTab: "original", maskOpacity: 0.68, zoom: 1, panX: 0, panY: 0, sourceFile: null, sourceArtifact: null, localPreviewUrl: "", job: null },
+  },
 };
 const view = document.querySelector("#module-view");
 const nav = document.querySelector("#sidebar-nav");
@@ -225,6 +231,7 @@ let routeLoad = null;
 let desktopCloseLayer = null;
 let artifactPreviewOpener = null;
 let disposeImageMaskCanvases = () => {};
+let disposeM3Workspaces = () => {};
 
 const SIDEBAR_PREFERENCE_KEY = "local-ai-hub-sidebar-v1";
 const SIDEBAR_PREFERENCE_VERSION = 1;
@@ -696,7 +703,11 @@ const TOOL_EXECUTION_READY = new Set(["operational"]);
 const applyToolActionGates = () => {
   const tools = new Map((Array.isArray(state.tools) ? state.tools : []).map((item) => [String(item?.name || ""), item]));
   view.querySelectorAll("form[data-job-form]").forEach((form) => {
-    const toolId = String(form.dataset.tool || "");
+    let toolId = String(form.dataset.tool || "");
+    if (form.dataset.toolByField && form.dataset.toolMap) {
+      const control = form.elements?.[form.dataset.toolByField];
+      try { toolId = JSON.parse(form.dataset.toolMap)[control?.value] || toolId; } catch { /* keep the declared fallback */ }
+    }
     const item = tools.get(toolId) || {};
     const status = String(item.tool_status || item.status || "unavailable").toLowerCase();
     const ready = TOOL_EXECUTION_READY.has(status);
@@ -745,14 +756,19 @@ const render = ({ background = false, focus = "" } = {}) => {
     updateTopbar();
     return false;
   }
+  ensureM3State(state);
   disposeNodeStudios();
   disposeImageMaskCanvases();
+  disposeM3Workspaces();
   renderNavigation();
   renderGlobalSearch();
   renderCommandPalette();
   syncSidebarState();
   view.innerHTML = `${renderApiState()}${renderPage(routeId(), state)}`;
   applyToolActionGates();
+  disposeM3Workspaces = mountM3InteractiveWorkspaces(view, state, {
+    onStateChange: () => applyToolActionGates(),
+  });
   restoreScrollContinuity(continuity.scroll);
   restoreFocusContinuity(continuity, focus);
   setSnapshotStatus(background ? (continuity.activeInside ? "preserved" : "received") : (continuity.activeInside && !focus ? "preserved" : "received"));
@@ -1222,6 +1238,24 @@ const toPayload = async (form) => {
     const artifacts = await Promise.all([...fileInput.files].map((selected) => uploadFile(selected)));
     payload[fileInput.dataset.assetKey] = fileInput.multiple ? artifacts.map((artifact) => artifact.id) : artifacts[0].id;
   }
+  const workspace = form.closest("[data-m3-workspace]");
+  if (workspace) {
+    ensureM3State(state);
+    const workspaceKey = workspace.dataset.m3Workspace;
+    const workspaceState = state.m3[workspaceKey] || {};
+    const sourceInput = workspace.querySelector("input[type=file][data-asset-key]");
+    let sourceArtifactId = sourceInput?.dataset?.uploadedArtifactId || workspaceState.sourceArtifact?.id || "";
+    if (!sourceArtifactId) {
+      const selected = sourceInput?.files?.[0] || workspaceState.sourceFile;
+      if (!selected) throw new Error("Chọn tệp nguồn trước khi tạo job.");
+      const artifact = await uploadFile(selected);
+      setM3UploadedArtifact(workspace, state, artifact);
+      sourceArtifactId = artifact?.id || "";
+    }
+    if (!sourceArtifactId) throw new Error("Upload không trả artifact ID opaque.");
+    payload.source_artifact_id = sourceArtifactId;
+    if (workspaceKey === "sam2") Object.assign(payload, selectionToPayload(workspaceState));
+  }
   if (payload.points_text) {
     payload.points = payload.points_text.split(";").map((token) => token.trim()).filter(Boolean).map((token) => {
       const [x, y, label = "1"] = token.split(",").map((part) => part.trim());
@@ -1251,6 +1285,82 @@ const inlineResult = (form, text, kind = "") => {
   target.textContent = text;
 };
 
+const M3_TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "unavailable", "interrupted"]);
+const M3_JOB_POLL_INTERVAL_MS = 1000;
+const M3_JOB_POLL_MAX_MS = 30 * 60 * 1000;
+const m3JobPollers = new Map();
+
+const stopM3JobPoll = (workspaceKey) => {
+  const entry = m3JobPollers.get(workspaceKey);
+  if (!entry) return;
+  if (entry.timer) clearTimeout(entry.timer);
+  m3JobPollers.delete(workspaceKey);
+};
+
+const updateM3JobDom = (workspaceKey, job) => {
+  const workspace = view.querySelector(`[data-m3-workspace="${workspaceKey}"]`);
+  if (!workspace || !job) return;
+  const status = String(job.status || "unknown");
+  const progressValue = Number(job.progress);
+  const progress = Number.isFinite(progressValue) ? Math.max(0, Math.min(100, Math.round(progressValue))) : 0;
+  const stateNode = workspace.querySelector("[data-workspace-job-status]");
+  if (stateNode) stateNode.dataset.workspaceJobStatus = status;
+  const label = workspace.querySelector("[data-workspace-job-status-label]");
+  if (label) label.textContent = formatStatus(status);
+  const value = workspace.querySelector("[data-workspace-job-progress-value]");
+  if (value) value.textContent = `${progress}%`;
+  const bar = workspace.querySelector("[data-workspace-job-progress]");
+  if (bar) bar.style.width = `${progress}%`;
+  const progressBar = bar?.closest("[role=progressbar]");
+  if (progressBar) progressBar.setAttribute("aria-valuenow", String(progress));
+  const message = job.message || job.error || job.result?.reason || "";
+  const messageNode = workspace.querySelector("[data-workspace-job-message]");
+  if (messageNode) messageNode.textContent = message;
+};
+
+const startM3JobPoll = (workspaceKey, jobId) => {
+  stopM3JobPoll(workspaceKey);
+  const startedAt = Date.now();
+  const entry = { jobId, startedAt, timer: null };
+  m3JobPollers.set(workspaceKey, entry);
+  const poll = async () => {
+    const current = m3JobPollers.get(workspaceKey);
+    if (!current || current.jobId !== jobId || routeId() !== workspaceKey) {
+      stopM3JobPoll(workspaceKey);
+      return;
+    }
+    try {
+      const payload = await getJob(jobId);
+      const job = payload?.job && typeof payload.job === "object" ? payload.job : payload;
+      if (!job || typeof job !== "object") throw new Error("JOB_SNAPSHOT_INVALID");
+      ensureM3State(state);
+      state.m3[workspaceKey].job = job;
+      updateM3JobDom(workspaceKey, job);
+      if (M3_TERMINAL_JOB_STATUSES.has(String(job.status || ""))) {
+        stopM3JobPoll(workspaceKey);
+        render({ focus: "main" });
+        return;
+      }
+    } catch (error) {
+      // A transient loopback failure does not turn a live background job into
+      // failed.  Keep the last truthful snapshot and retry until the bounded
+      // observation window expires.
+      if (Date.now() - startedAt >= M3_JOB_POLL_MAX_MS) {
+        const model = state.m3?.[workspaceKey];
+        if (model?.job) {
+          model.job = { ...model.job, message: "Không thể lấy snapshot job trong thời hạn theo dõi; job vẫn thuộc Jobs.", next_action: error?.message || "Mở Jobs để kiểm tra snapshot canonical." };
+          updateM3JobDom(workspaceKey, model.job);
+        }
+        stopM3JobPoll(workspaceKey);
+        return;
+      }
+    }
+    const latest = m3JobPollers.get(workspaceKey);
+    if (latest && latest.jobId === jobId) latest.timer = setTimeout(poll, M3_JOB_POLL_INTERVAL_MS);
+  };
+  void poll();
+};
+
 const pointFromEvent = (event, image) => {
   const bounds = image.getBoundingClientRect();
   const x = Math.max(0, Math.min(image.naturalWidth - 1, (event.clientX - bounds.left) * image.naturalWidth / bounds.width));
@@ -1264,28 +1374,22 @@ const renderFilePreview = (input) => {
   if (preview.dataset.objectUrl) URL.revokeObjectURL(preview.dataset.objectUrl);
   preview.replaceChildren(); delete preview.dataset.objectUrl;
   const selected = [...(input.files || [])];
-  if (!selected.length) return;
+  const pickerButton = input.closest("[data-file-picker]")?.querySelector("[data-file-picker-button]");
+  const selection = input.closest("[data-file-picker]")?.querySelector("[data-file-selection]");
+  if (!selected.length) {
+    if (pickerButton) pickerButton.textContent = "Chọn tệp";
+    if (selection) selection.textContent = "Chưa chọn tệp";
+    return;
+  }
   const note = document.createElement("small");
   note.textContent = selected.length > 1 ? `${selected.length} tệp đã chọn; preview tệp đầu.` : selected[0].name;
   preview.append(note);
+  if (pickerButton) pickerButton.textContent = "Đổi tệp";
+  if (selection) selection.textContent = `${selected.length > 1 ? `${selected.length} tệp` : selected[0].name} · ${selected[0].type || "loại chưa rõ"} · ${Number.isFinite(selected[0].size) ? `${selected[0].size.toLocaleString()} bytes` : "kích thước chưa rõ"}`;
   const file = selected[0];
   const source = URL.createObjectURL(file); preview.dataset.objectUrl = source;
   if (file.type.startsWith("image/")) {
     const image = document.createElement("img"); image.src = source; image.alt = `Preview ${file.name}`;
-    const sam2Form = input.closest('form[data-tool="segment_from_points"]');
-    if (sam2Form) {
-      image.classList.add("sam2-selection-preview"); let start = null;
-      image.addEventListener("pointerdown", (event) => { start = pointFromEvent(event, image); image.setPointerCapture?.(event.pointerId); });
-      image.addEventListener("pointerup", (event) => {
-        if (!start) return;
-        const end = pointFromEvent(event, image);
-        const points = sam2Form.querySelector('[name="points_text"]'); const box = sam2Form.querySelector('[name="box_text"]');
-        if (Math.abs(end.x - start.x) < 8 && Math.abs(end.y - start.y) < 8 && points) {
-          points.value = [points.value.trim(), `${end.x},${end.y},1`].filter(Boolean).join("; "); showToast(`Đã thêm điểm SAM2: ${end.x}, ${end.y}`);
-        } else if (box) { box.value = `${Math.min(start.x, end.x)},${Math.min(start.y, end.y)},${Math.max(start.x, end.x)},${Math.max(start.y, end.y)}`; showToast("Đã chọn box SAM2 trên preview."); }
-        start = null;
-      });
-    }
     preview.append(image);
   } else if (file.type.startsWith("video/") || file.type.startsWith("audio/")) {
     const media = document.createElement(file.type.startsWith("video/") ? "video" : "audio"); media.src = source; media.controls = true; media.preload = "metadata"; preview.append(media);
@@ -1485,7 +1589,10 @@ document.addEventListener("change", (event) => {
     return;
   }
   const input = event.target.closest("input[type=file][data-asset-key]");
-  if (input) renderFilePreview(input);
+  if (input) {
+    renderFilePreview(input);
+    if (input.closest("[data-m3-workspace]")) rememberM3FileSelection(input, state);
+  }
   const projectSelect = event.target.closest("[data-project-select]");
   if (projectSelect) {
     state.selectedProjectId = projectSelect.value || "";
@@ -1604,12 +1711,31 @@ document.addEventListener("submit", async (event) => {
   inlineResult(form, "Đang tải input và tạo job…");
   try {
     const payload = await toPayload(form); const tool = toolForForm(form, payload); const result = await submitJob(tool, payload);
-    inlineResult(form, `Đã tạo ${result.job?.id || "job"}. Theo dõi ở Jobs.`, "success"); showToast(`Đã thêm ${tool} vào hàng đợi Hub.`); await refreshFast({ quiet: true });
+    const workspace = form.closest("[data-m3-workspace]");
+    if (workspace) {
+      const workspaceKey = workspace.dataset.m3Workspace;
+      ensureM3State(state);
+      state.m3[workspaceKey].job = result.job || null;
+      inlineResult(form, `Đã tạo ${result.job?.id || "job"}. Đang theo dõi ngay trong workspace.`, "success");
+      showToast(`Đã thêm ${tool} vào hàng đợi Hub.`);
+      render({ focus: "main" });
+      if (result.job?.id) startM3JobPoll(workspaceKey, result.job.id);
+      await refreshFast({ quiet: true, renderView: false });
+    } else {
+      inlineResult(form, `Đã tạo ${result.job?.id || "job"}. Theo dõi ở Jobs.`, "success"); showToast(`Đã thêm ${tool} vào hàng đợi Hub.`); await refreshFast({ quiet: true });
+    }
   } catch (error) { inlineResult(form, error.message, "error"); showToast(error.message, "error"); }
   finally { if (submit) submit.disabled = false; }
 });
 
 document.addEventListener("click", async (event) => {
+  const filePickerButton = event.target.closest("[data-file-picker-button]");
+  if (filePickerButton) {
+    event.preventDefault();
+    const input = filePickerButton.closest("[data-file-picker]")?.querySelector("input[type=file]");
+    input?.click();
+    return;
+  }
   if (event.target.closest("[data-command-close]")) {
     state.commandPaletteOpen = false;
     renderCommandPalette();
@@ -2479,6 +2605,34 @@ document.addEventListener("click", async (event) => {
     finally { launchButton.disabled = false; }
     return;
   }
+  const workspaceCancel = event.target.closest("[data-cancel-workspace-job]");
+  if (workspaceCancel) {
+    workspaceCancel.disabled = true;
+    const workspace = workspaceCancel.closest("[data-m3-workspace]");
+    const workspaceKey = workspace?.dataset.m3Workspace || "";
+    try {
+      const result = await cancelJob(workspaceCancel.dataset.cancelWorkspaceJob || "");
+      const job = result?.job && typeof result.job === "object" ? result.job : null;
+      if (workspaceKey && job) {
+        ensureM3State(state);
+        state.m3[workspaceKey].job = job;
+        updateM3JobDom(workspaceKey, job);
+      }
+      showToast(result?.message || "Đang hủy tác vụ Hub-owned.", "success");
+    } catch (error) {
+      showToast(error.message || "Không thể hủy tác vụ.", "error");
+    } finally { workspaceCancel.disabled = false; }
+    return;
+  }
+  const workspaceJson = event.target.closest("[data-workspace-download-json]");
+  if (workspaceJson) {
+    const workspaceKey = workspaceJson.dataset.workspaceDownloadJson || "vision";
+    const job = state.m3?.[workspaceKey]?.job;
+    if (!job?.result) { showToast("Chưa có result contract để tải.", "warning"); return; }
+    downloadJson(`${workspaceKey}-${job.id || "result"}.json`, job.result.annotation || job.result.selection || job.result);
+    showToast("Đã tạo JSON từ result contract opaque.", "success");
+    return;
+  }
   const cancel = event.target.closest("[data-cancel-job]");
   if (cancel) {
     cancel.disabled = true;
@@ -2620,7 +2774,12 @@ document.addEventListener("keydown", async (event) => {
 });
 
 window.addEventListener("resize", syncSidebarState);
-window.addEventListener("hashchange", async () => { storageScanPoller.stop(); render({ focus: "main" }); await loadRouteData(); });
+window.addEventListener("hashchange", async () => {
+  storageScanPoller.stop();
+  for (const workspaceKey of ["vision", "sam2"]) if (routeId() !== workspaceKey) stopM3JobPoll(workspaceKey);
+  render({ focus: "main" });
+  await loadRouteData();
+});
 syncSidebarState();
 applyTheme(currentTheme());
 setLanguage(currentLanguage());

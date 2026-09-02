@@ -24,6 +24,7 @@ from src.services.tool_smoke import (
     runtime_evidence_projection,
 )
 from src.shared.runtime_identity import api_identity
+from src.shared.schemas.vision import normalize_tool_payload
 
 from .config import BASE_DIR, component, components, hub_config, module_manager_config
 from .gpu import gpu_policy, query_gpu
@@ -932,6 +933,19 @@ def submit_tool(tool: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]
     request, error = _resolve_assets(payload, tool=tool)
     if error:
         return 400, {"status": "error", "error": error}
+    if tool in {
+        "parse_screen",
+        "detect_objects",
+        "ground_objects",
+        "segment_image",
+        "segment_from_box",
+        "segment_from_points",
+        "segment_from_text",
+        "track_video_object",
+    }:
+        request, selection_error = normalize_tool_payload(tool, request)
+        if selection_error:
+            return 400, {"status": "error", "error": selection_error, "code": "selection_contract_invalid"}
     with _submission_gate:
         if _submissions_quiesced:
             return _submission_closed_payload()

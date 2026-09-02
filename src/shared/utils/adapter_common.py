@@ -297,7 +297,7 @@ def normalize_worker_result(
             normalized = _safe_metadata(value.get(key))
             if normalized is not None:
                 safe[key] = normalized
-    for key in ("grounded", "detections", "objects", "boxes", "text", "markdown", "json", "tables", "segments", "artifact"):
+    for key in ("grounded", "detections", "objects", "boxes", "text", "markdown", "json", "tables", "segments", "artifact", "annotation", "selection"):
         if key in value:
             normalized = _safe_metadata(value.get(key))
             if normalized is not None:

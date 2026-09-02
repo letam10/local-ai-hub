@@ -124,6 +124,23 @@ def _preflight(request: dict[str, Any]) -> tuple[Path, Path, Path, Path] | None:
         return hub_root.resolve(strict=True), safe_runtime, safe_checkpoint, safe_source
     except (OSError, RuntimeError, ValueError):
         return None
+
+
+def _validate_selection(request: dict[str, Any], operation: str) -> str | None:
+    """Validate normalized selection before decoding, model load, or writes."""
+
+    from src.shared.schemas.vision import normalize_tool_payload
+
+    tool = "track_video_object" if operation == "track_video" else operation
+    normalized, error = normalize_tool_payload(tool, request)
+    if error:
+        return error
+    # The adapter normally supplies this canonical form.  Keeping the worker
+    # copy equally strict protects direct invocation and stale callers.
+    request.update({key: value for key, value in normalized.items() if key in {"points", "box", "normalized_box", "frame_index"}})
+    return None
+
+
 def _points(request: dict[str, Any], width: int, height: int):
     import numpy as np
 
@@ -193,6 +210,10 @@ def _segment(request: dict[str, Any]) -> dict[str, Any]:
     bound = _preflight(request)
     if bound is None:
         return {"status": "error", "code": "sam2_path_contract_invalid", "error": "SAM2 từ chối input hoặc runtime ngoài vùng Hub an toàn."}
+    operation = str(request.get("operation") or "segment_image")
+    selection_error = _validate_selection(request, operation)
+    if selection_error:
+        return {"status": "error", "code": "selection_contract_invalid", "error": selection_error}
     hub_root, runtime, checkpoint, source = bound
     import numpy as np
     from PIL import Image
@@ -206,7 +227,6 @@ def _segment(request: dict[str, Any]) -> dict[str, Any]:
         predictor, _device = _build_predictor(runtime, checkpoint)
         predictor.set_image(image)
         height, width = image.shape[:2]
-        operation = str(request.get("operation") or "segment_image")
         if operation == "segment_from_box":
             masks, scores, _ = predictor.predict(box=_box(request, width, height), multimask_output=True)
         else:
@@ -230,6 +250,9 @@ def _track(request: dict[str, Any]) -> dict[str, Any]:
     bound = _preflight(request)
     if bound is None:
         return {"status": "error", "code": "sam2_path_contract_invalid", "error": "SAM2 từ chối input hoặc runtime ngoài vùng Hub an toàn."}
+    selection_error = _validate_selection(request, "track_video")
+    if selection_error:
+        return {"status": "error", "code": "selection_contract_invalid", "error": selection_error}
     hub_root, runtime, checkpoint, source = bound
     import cv2
     import numpy as np
@@ -261,24 +284,28 @@ def _track(request: dict[str, Any]) -> dict[str, Any]:
         if count == 0 or width <= 0 or height <= 0:
             _discard_task_output(output)
             return {"status": "error", "code": "video_unreadable", "error": "SAM2 không thể trích frame từ video artifact."}
+        frame_index = int(request.get("frame_index", 0))
+        if frame_index < 0 or frame_index >= count:
+            _discard_task_output(output)
+            return {"status": "error", "code": "frame_index_invalid", "error": "Frame được chọn không tồn tại trong video artifact."}
         device = "cuda" if torch.cuda.is_available() and os.environ.get("LOCALAIHUB_FORCE_CPU") != "1" else "cpu"
         predictor = build_sam2_video_predictor("configs/sam2.1/sam2.1_hiera_s.yaml", str(checkpoint), device=device)
         state = predictor.init_state(video_path=str(frames))
         points, labels = _points(request, width, height)
         box = _box(request, width, height)
         if box is not None:
-            predictor.add_new_points_or_box(state, frame_idx=0, obj_id=1, box=box)
+            predictor.add_new_points_or_box(state, frame_idx=frame_index, obj_id=1, box=box)
         else:
-            predictor.add_new_points_or_box(state, frame_idx=0, obj_id=1, points=points, labels=labels)
+            predictor.add_new_points_or_box(state, frame_idx=frame_index, obj_id=1, points=points, labels=labels)
         mask_dir = output / "masks"
         mask_dir.mkdir()
         preview = output / "mask_preview.mp4"
         writer = cv2.VideoWriter(str(preview), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height), False)
         written = 0
         first_mask: Path | None = None
-        for frame_index, _, logits in predictor.propagate_in_video(state):
+        for propagated_frame_index, _, logits in predictor.propagate_in_video(state, start_frame_idx=frame_index):
             mask = (logits[0] > 0.0).detach().cpu().numpy().astype(np.uint8) * 255
-            mask_path = mask_dir / f"{frame_index:06d}.png"
+            mask_path = mask_dir / f"{propagated_frame_index:06d}.png"
             cv2.imwrite(str(mask_path), mask)
             if first_mask is None:
                 first_mask = mask_path
