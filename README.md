@@ -286,6 +286,14 @@ Backend có trong source hoặc catalog không đồng nghĩa backend đã đư�
 
 Job Manager chịu trách nhiệm lifecycle của job; Artifact Store chịu trách nhiệm artifact publication/opaque artifact identity; Project layer quản lý metadata/workflow state thay vì để browser sở hữu raw filesystem.
 
+OCR và Whisper dùng workspace inline nhưng vẫn giữ Job Manager/Artifact Store là
+nguồn canonical. Kết quả công khai được version hóa bằng `ocr.result.v1` và
+`whisper.transcript.v1`; page/block geometry, transcript timestamps và mọi output
+đều bị giới hạn trong schema, còn source/output media chỉ tham chiếu bằng opaque
+artifact ID. Preview, PDF page navigation, OCR region selection, timeline và
+timestamp seek là projection tương tác trong route hiện tại, không phải một
+đường thực thi thứ hai.
+
 Nguyên tắc an toàn:
 
 - Không coi arbitrary path từ client là artifact authority.

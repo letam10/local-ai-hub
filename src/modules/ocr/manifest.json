@@ -1,1 +1,1 @@
-{"schema_version": 1, "module_id": "ocr", "display_name": "OCR / Documents", "component_status": "installed_or_configured", "tool_status": "partial", "backend": "src.modules.ocr.backend.adapter", "ui": "src.ui"}
+{"schema_version": 1, "module_id": "ocr", "display_name": "OCR / Documents", "component_status": "installed_or_configured", "tool_status": "partial", "backend": "src.modules.ocr.backend.adapter", "ui": "src.ui", "result_contract": "ocr.result.v1"}

@@ -20,6 +20,13 @@ from typing import Any
 
 from src.services import artifact_store
 from src.services.artifact_store import publicize
+from src.shared.schemas.ocr_whisper import (
+    OcrWhisperContractError,
+    attach_ocr_artifacts,
+    attach_whisper_artifacts,
+    validate_ocr_result_contract,
+    validate_whisper_transcript_contract,
+)
 from src.shared.schemas.vision import (
     VisionContractError,
     attach_published_artifacts,
@@ -92,7 +99,27 @@ _RESULT_SCALAR_KEYS = {
     "message",
     "failure_code",
 }
-_RESULT_CONTRACT_KEYS = ("annotation", "selection")
+_RESULT_CONTRACT_KEYS = ("annotation", "selection", "ocr_result", "transcript")
+
+
+def _validate_result_contract(key: str, value: object) -> dict[str, Any]:
+    if key in {"annotation", "selection"}:
+        return validate_public_result_contract(value, key=key)
+    if key == "ocr_result":
+        return validate_ocr_result_contract(value)
+    if key == "transcript":
+        return validate_whisper_transcript_contract(value)
+    raise ValueError("result_contract")
+
+
+def _attach_result_contract(key: str, value: object, artifacts: list[dict[str, Any]]) -> dict[str, Any]:
+    if key == "annotation" or key == "selection":
+        return attach_published_artifacts(value, artifacts, key=key)
+    if key == "ocr_result":
+        return attach_ocr_artifacts(value, artifacts)
+    if key == "transcript":
+        return attach_whisper_artifacts(value, artifacts)
+    raise ValueError("result_contract")
 def _job_fingerprint(record: dict[str, Any]) -> str:
     """Return an opaque legacy-job binding for produced artifact provenance."""
 
@@ -180,8 +207,8 @@ def _publish_result(result: object, record: dict[str, Any]) -> tuple[dict[str, A
         if key not in result:
             continue
         try:
-            safe[key] = validate_public_result_contract(result.get(key), key=key)
-        except VisionContractError:
+            safe[key] = _validate_result_contract(key, result.get(key))
+        except (VisionContractError, OcrWhisperContractError):
             return {"status": "failed", "error": "Worker trả result contract không hợp lệ."}, "result_contract"
     if status != "completed":
         return safe, None
@@ -233,8 +260,8 @@ def _publish_result(result: object, record: dict[str, Any]) -> tuple[dict[str, A
     for key in _RESULT_CONTRACT_KEYS:
         if key in safe:
             try:
-                safe[key] = attach_published_artifacts(safe[key], artifacts, key=key)
-            except VisionContractError:
+                safe[key] = _attach_result_contract(key, safe[key], artifacts)
+            except (VisionContractError, OcrWhisperContractError):
                 return {"status": "failed", "error": "Artifact không khớp result contract."}, "result_contract"
     return safe, None
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import uuid
@@ -11,6 +12,7 @@ from typing import Any
 from src.services.artifact_store import describe, resolve
 from src.services.api.config import models
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
+from src.shared.schemas.ocr_whisper import OcrWhisperContractError, build_whisper_transcript
 from src.shared.utils.adapter_common import configured_path, local_root, unavailable
 
 
@@ -194,12 +196,26 @@ def transcribe(payload: dict[str, Any], context: ProcessOwner | None = None) -> 
         }
     transcript, srt = outputs
     segment_count = result.get("segment_count")
+    try:
+        transcript_document = json.loads(transcript.read_text(encoding="utf-8"))
+        transcript_contract = build_whisper_transcript(
+            payload.get("source_artifact_id"),
+            result,
+            transcript_document=transcript_document if isinstance(transcript_document, dict) else None,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, OcrWhisperContractError):
+        return {
+            "status": "error",
+            "code": "transcript_result_contract_invalid",
+            "error": "Faster-Whisper không tạo transcript result contract hợp lệ.",
+        }
     return {
         "status": "completed",
         "operation": "transcribe_media",
         "files": [str(transcript), str(srt)],
         "segment_count": int(segment_count) if isinstance(segment_count, int) and segment_count >= 0 else 0,
         "device": result.get("device") if result.get("device") in {"cpu", "cuda"} else "cpu",
+        "transcript": transcript_contract,
     }
 
 

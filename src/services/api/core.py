@@ -24,6 +24,7 @@ from src.services.tool_smoke import (
     runtime_evidence_projection,
 )
 from src.shared.runtime_identity import api_identity
+from src.shared.schemas.ocr_whisper import normalize_ocr_payload, normalize_whisper_payload
 from src.shared.schemas.vision import normalize_tool_payload
 
 from .config import BASE_DIR, component, components, hub_config, module_manager_config
@@ -946,6 +947,14 @@ def submit_tool(tool: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]
         request, selection_error = normalize_tool_payload(tool, request)
         if selection_error:
             return 400, {"status": "error", "error": selection_error, "code": "selection_contract_invalid"}
+    if tool == "ocr_document":
+        request, ocr_error = normalize_ocr_payload(request)
+        if ocr_error:
+            return 400, {"status": "error", "error": ocr_error, "code": "ocr_payload_invalid"}
+    elif tool in {"transcribe_media", "create_subtitled_video"}:
+        request, whisper_error = normalize_whisper_payload(request)
+        if whisper_error:
+            return 400, {"status": "error", "error": whisper_error, "code": "whisper_payload_invalid"}
     with _submission_gate:
         if _submissions_quiesced:
             return _submission_closed_payload()
