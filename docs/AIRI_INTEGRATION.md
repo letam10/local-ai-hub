@@ -47,12 +47,19 @@ discovery_state
 launch_state
 launchable
 running
+running_state
 reason_code
 ```
 
 It may include other sanitized compatibility metadata, but never a raw
 executable path, working directory, user-profile path, arguments, command
 line, secret, or exception text.
+
+`running_state` is `running`, `not_running`, or `unknown`. It is `running` only
+when a bounded Windows-native process enumeration reads an exact executable
+path matching the still-verified candidate. A basename match is insufficient;
+an access-denied process path is reported as `unknown` and never as a positive
+running claim.
 
 The launch contract is:
 

@@ -13,6 +13,7 @@ def capability() -> dict:
         "launch_state": "unavailable",
         "launchable": False,
         "running": False,
+        "running_state": "not_running",
         "reason_code": "airi_not_discovered",
         "component_status": "unavailable",
     }
@@ -26,5 +27,6 @@ def capability() -> dict:
         "launch_state": record.get("launch_state", "unavailable"),
         "launchable": record.get("launchable") is True,
         "running": record.get("running") is True,
+        "running_state": record.get("running_state") if record.get("running_state") in {"running", "not_running", "unknown"} else "unknown",
         "reason_code": str(record.get("reason_code") or "airi_not_discovered"),
     }

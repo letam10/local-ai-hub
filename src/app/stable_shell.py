@@ -255,7 +255,11 @@ def resolve_launch_plan(app_root: Path, *, allow_test_root: bool = False) -> Lau
     environment.update({
         "LOCALAIHUB_INSTALL_ROOT": str(root),
         "LOCALAIHUB_APP_ROOT": str(app_payload),
-        "LOCALAIHUB_DATA_ROOT": str(installation.data_root),
+        # Pass the canonical physical data root to the bundled API.  A
+        # mapped candidate install may be launched through a logical drive;
+        # keeping the data spelling consistent with ``get_paths()`` prevents
+        # desktop/API installation identities from disagreeing.
+        "LOCALAIHUB_DATA_ROOT": str(installation.data_root.resolve(strict=False)),
         "PYTHONPATH": str(app_payload),
         "PYTHONNOUSERSITE": "1",
         "PYTHONUTF8": "1",
@@ -311,7 +315,7 @@ def resolve_verified_running_plan(app_root: Path, running_app_root: Path, *, all
     environment.update({
         "LOCALAIHUB_INSTALL_ROOT": str(root),
         "LOCALAIHUB_APP_ROOT": str(app_payload),
-        "LOCALAIHUB_DATA_ROOT": str(installation.data_root),
+        "LOCALAIHUB_DATA_ROOT": str(installation.data_root.resolve(strict=False)),
         "PYTHONPATH": str(app_payload),
         "PYTHONNOUSERSITE": "1",
         "PYTHONUTF8": "1",

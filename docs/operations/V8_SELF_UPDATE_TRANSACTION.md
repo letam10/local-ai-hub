@@ -56,6 +56,8 @@ requires_restart
 current_payload_id
 candidate_payload_id
 rollback_payload_id
+can_rollback
+rollback_mode
 reason_code
 last_error_code
 ```
@@ -67,6 +69,12 @@ they are never filesystem paths, executable paths, runtime paths, or command
 lines. `reason_code` is a stable lower-case classification while
 `last_error_code` retains the bounded internal diagnostic label. Unknown
 internal failures map to the stable `update_failed` classification.
+
+`can_rollback` is false while a candidate is only `staged`; at that point the
+current pointer has not changed. `rollback_mode` is one of
+`automatic_watchdog`, `recovery_only`, or `unavailable`. The normal update card
+therefore exposes only `Khởi động lại và cập nhật` and `Để sau`; activated-payload
+rollback remains owned by watchdog/recovery handling.
 
 After artifact verification and candidate preflight, the dashboard displays
 `Bản cập nhật đã sẵn sàng` with the actions `Khởi động lại và cập nhật` and

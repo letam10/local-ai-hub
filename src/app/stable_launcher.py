@@ -69,7 +69,13 @@ def launch() -> int:
     """Launch the active installed payload; never fall back to dev Python."""
 
     _set_app_user_model_id()
-    executable = Path(sys.executable).resolve()
+    # Preserve the logical launch path for task-owned mapped candidate roots.
+    # ``resolve()`` collapses a Windows SUBST path back to its physical
+    # ``D:\...\Temp`` target before the stable-shell boundary can validate the
+    # candidate.  ``resolve_launch_plan`` still performs the complete
+    # no-reparse/manifest/path validation, so keeping the launch spelling here
+    # does not weaken the installed-product safety checks.
+    executable = Path(sys.executable).absolute()
     try:
         plan = resolve_launch_plan(executable.parent)
     except StableShellError:

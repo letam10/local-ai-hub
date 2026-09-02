@@ -42,6 +42,7 @@ class UiRefreshIntegrationTests(unittest.TestCase):
     def test_dashboard_emitted_classes_are_all_styled(self) -> None:
         expected = {
             "dashboard-page",
+            "dashboard-onboarding",
             "dashboard-hero",
             "dashboard-metric-grid",
             "dashboard-main-grid",

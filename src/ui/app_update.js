@@ -9,7 +9,6 @@ const API = Object.freeze({
   status: "/api/app-update/status",
   changes: "/api/app-update/changes",
   prepare: "/api/app-update/prepare",
-  rollback: "/api/app-update/rollback",
 });
 
 let lastStatus = null;
@@ -122,7 +121,7 @@ const showConfirmModal = ({ title, current, candidate, message, confirmLabel, ca
   const copy = make("p"); copy.textContent = message;
   const builds = make("div", "app-update-modal__builds");
   const oldBuild = make("div", "app-update-modal__build");
-  const oldLabel = make("span"); oldLabel.textContent = "Build hiện tại (giữ để rollback)";
+  const oldLabel = make("span"); oldLabel.textContent = "Build hiện tại (được giữ nguyên)";
   const oldValue = make("code"); oldValue.textContent = String(current || "—");
   oldBuild.append(oldLabel, oldValue);
   const newBuild = make("div", "app-update-modal__build");
@@ -182,10 +181,9 @@ const ensureCard = () => {
   const changes = make("button", "button button--compact"); changes.type = "button"; changes.dataset.appUpdateChanges = "true"; changes.textContent = "Xem thay đổi"; changes.disabled = true;
   const update = make("button", "button button--compact"); update.type = "button"; update.dataset.appUpdateApply = "true"; update.textContent = "Cập nhật Local AI Hub"; update.disabled = true;
   const restart = make("button", "button button--compact"); restart.type = "button"; restart.dataset.appUpdateRestart = "true"; restart.textContent = "Khởi động lại để áp dụng"; restart.hidden = true;
-  const rollback = make("button", "button button--compact"); rollback.type = "button"; rollback.dataset.appUpdateRollback = "true"; rollback.textContent = "Quay lại payload trước"; rollback.hidden = true;
   const auth = make("button", "button button--compact"); auth.type = "button"; auth.dataset.appUpdateAuth = "true"; auth.textContent = "Đăng nhập GitHub"; auth.hidden = true;
   const authCancel = make("button", "button button--compact"); authCancel.type = "button"; authCancel.dataset.appUpdateAuthCancel = "true"; authCancel.textContent = "Hủy đăng nhập"; authCancel.hidden = true;
-  actions.append(refresh, changes, update, restart, rollback, auth, authCancel);
+  actions.append(refresh, changes, update, restart, auth, authCancel);
   const authDetail = make("p", "app-update-card__message"); authDetail.dataset.updateAuth = "true"; authDetail.hidden = true; card.append(authDetail);
 
   const changeList = make("ol", "app-update-card__changes"); changeList.dataset.updateChangesList = "true"; changeList.hidden = true;
@@ -209,7 +207,6 @@ const render = (card, value) => {
   card.querySelector("[data-app-update-apply]").disabled = !(value?.can_prepare === true || value?.available === true);
   const restartButton = card.querySelector("[data-app-update-restart]");
   restartButton.hidden = !((value?.can_restart === true || ["staged", "activated", "ready_to_restart", "confirm_restart"].includes(state)) && value?.requires_restart !== false && value?.restart_required !== false);
-  card.querySelector("[data-app-update-rollback]").hidden = !(["staged", "activated", "ready_to_restart", "confirm_restart", "restarting"].includes(state) || value?.can_restart === true);
   const authButton = card.querySelector("[data-app-update-auth]");
   const needsAuth = value?.status === "auth_required" || value?.status === "oauth_configuration_required";
   authButton.hidden = !needsAuth;
@@ -287,9 +284,17 @@ const applyUpdate = async (card) => {
     });
     if (confirmed) await restart(card);
   } catch (error) {
-    const code = error.payload?.reason_code || error.payload?.code || error.message;
-    card.querySelector("[data-update-message]").textContent = `Cập nhật bị chặn an toàn: ${code}. Bản đang chạy không bị thay đổi.`;
-    button.disabled = false;
+    const payload = error?.payload && typeof error.payload === "object" ? error.payload : {};
+    const code = payload.reason_code || payload.code || error.message;
+    // Re-render the complete server projection.  In particular, transient
+    // prepare failures carry can_prepare=true; changing only text would leave
+    // lastStatus.can_prepare=false and make the visible retry a no-op.
+    render(card, {
+      ...payload,
+      status: payload.status || "blocked",
+      phase: payload.phase || "error",
+      action: `Cập nhật bị chặn an toàn: ${code}. Bản đang chạy không bị thay đổi.`,
+    });
   }
 };
 
@@ -313,31 +318,9 @@ const restart = async (card) => {
       requires_restart: true,
     };
     render(card, failed);
-    card.querySelector("[data-update-message]").textContent = `${error.message} Mã lỗi: ${error.payload?.reason_code || error.payload?.code || "restart_failed"}. Payload mới vẫn được stage an toàn; bạn có thể thử lại hoặc chọn rollback.`;
+    card.querySelector("[data-update-message]").textContent = `${error.message} Mã lỗi: ${error.payload?.reason_code || error.payload?.code || "restart_failed"}. Payload mới vẫn được stage an toàn; bạn có thể thử lại.`;
     button.disabled = false;
   }
-};
-
-const rollback = async (card) => {
-  const confirmed = await showConfirmModal({
-    title: "Xác nhận rollback payload",
-    current: shortBuild(lastStatus?.current_build || lastStatus?.current_payload),
-    candidate: "Payload trước đã xác minh",
-    message: "File dữ liệu người dùng không bị xóa; current pointer sẽ quay về payload trước.",
-    confirmLabel: "Rollback",
-  });
-  if (!confirmed) return;
-  const button = card.querySelector("[data-app-update-rollback]");
-  button.disabled = true;
-  render(card, { ...(lastStatus || {}), status: "rollback", phase: "restarting", available: false, can_prepare: false, can_restart: false, progress: 85 });
-  try {
-    const value = await api(API.rollback, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: true }) });
-    render(card, { ...(lastStatus || {}), ...value, status: "rolled_back", phase: "rolled_back", available: false, can_prepare: false, can_restart: false, requires_restart: true, current_payload_id: value.payload_id });
-    card.querySelector("[data-update-message]").textContent = `Đã quay pointer về ${value.payload_id}. Khởi động lại để áp dụng.`;
-    card.querySelector("[data-app-update-restart]").hidden = false;
-  } catch (error) {
-    card.querySelector("[data-update-message]").textContent = `Không thể rollback: ${error.payload?.code || error.message}`;
-  } finally { button.disabled = false; }
 };
 
 const startAuth = async (card) => {
@@ -400,7 +383,6 @@ document.addEventListener("click", (event) => {
   if (event.target.closest("[data-app-update-changes]")) { showChanges(card); return; }
   if (event.target.closest("[data-app-update-apply]")) { applyUpdate(card); return; }
   if (event.target.closest("[data-app-update-restart]")) { restart(card); return; }
-  if (event.target.closest("[data-app-update-rollback]")) { rollback(card); }
   if (event.target.closest("[data-app-update-auth]")) { startAuth(card); }
   if (event.target.closest("[data-app-update-auth-cancel]")) { cancelAuth(card); }
 });

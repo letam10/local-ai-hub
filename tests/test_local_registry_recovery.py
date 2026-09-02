@@ -53,7 +53,7 @@ class LocalRegistryRecoveryTests(unittest.TestCase):
 
     def test_offline_inspect_and_plan_do_not_call_service_or_process_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, patch("scripts.refresh_managed_registry.urlopen", side_effect=AssertionError("no network")), patch(
-            "src.services.runtime_registry._running_executables", side_effect=AssertionError("no tasklist")
+            "src.services.runtime_registry._running_process_snapshot", side_effect=AssertionError("no process enumeration")
         ):
             directory = Path(temporary)
             snapshot = recovery.inspect_registry(config_dir=directory)
@@ -69,7 +69,7 @@ class LocalRegistryRecoveryTests(unittest.TestCase):
             runtime_registry, "LOCAL_REGISTRY", Path(temporary) / "application_registry.local.json"
         ), patch.object(
             runtime_registry, "EXAMPLE_REGISTRY", ROOT / "Config" / "application_registry.example.json"
-        ), patch.object(runtime_registry, "_running_executables", side_effect=AssertionError("example must not query processes")), patch.object(
+        ), patch.object(runtime_registry, "_running_process_snapshot", side_effect=AssertionError("example must not query processes")), patch.object(
             runtime_registry, "_discover_windows_candidates", return_value=([], "airi_not_discovered", False)
         ):
             (Path(temporary) / "application_registry.example.json").write_bytes(

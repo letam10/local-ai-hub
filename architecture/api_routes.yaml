@@ -2482,8 +2482,7 @@
       "streaming": false,
       "body_limit": "json_default",
       "status_codes": [
-        200,
-        400,
+        202,
         404,
         409,
         500,

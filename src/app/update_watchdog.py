@@ -139,6 +139,10 @@ def _session_port() -> int | None:
     return int(value["api_port"]) if value is not None else None
 
 
+def _pending_health_path(app_root: Path) -> Path:
+    return app_root / "update-state" / "pending-health.json"
+
+
 def _target_identity(app_root: Path, *, require_build: bool = False) -> tuple[str, str | None, dict[str, str]]:
     pointer = load_current_pointer(app_root)
     version = str(pointer["version"])
@@ -165,7 +169,15 @@ def _target_identity(app_root: Path, *, require_build: bool = False) -> tuple[st
     return version, source_commit, expected
 
 
-def _health_matches(app_root: Path, *, version: str, source_commit: str | None, expected: dict[str, str], port: int | None = None) -> bool:
+def _health_matches(
+    app_root: Path,
+    *,
+    version: str,
+    source_commit: str | None,
+    expected: dict[str, str],
+    port: int | None = None,
+    require_frontend: bool = True,
+) -> bool:
     try:
         selected_port = _session_port() if port is None else port
         if selected_port is None:
@@ -178,6 +190,7 @@ def _health_matches(app_root: Path, *, version: str, source_commit: str | None, 
             and all(value.get(key) == item for key, item in expected.items())
             and value.get("api_protocol_version") == API_PROTOCOL_VERSION
             and (not source_commit or (value.get("build_source_commit") == source_commit and value.get("build_payload_id") == version))
+            and (not require_frontend or not _pending_health_path(app_root).exists())
         )
     except (OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError, urllib.error.URLError, urllib.error.HTTPError):
         return False
@@ -207,7 +220,7 @@ def _wait_for_target_health(app_root: Path, *, version: str, source_commit: str 
     return False
 
 
-def _rollback_previous(app_root: Path, *, reason: str) -> bool:
+def _rollback_previous(app_root: Path, *, reason: str, reason_code: str | None = None) -> bool:
     marker = app_root / "update-state" / "pending-health.json"
     history = app_root / "update-state" / "previous-current.json"
     try:
@@ -245,7 +258,7 @@ def _rollback_previous(app_root: Path, *, reason: str) -> bool:
                 current_payload_id=pointer.get("version"),
                 candidate_payload_id=pending.get("payload_id") if isinstance(pending.get("payload_id"), str) else None,
                 rollback_payload_id=pointer.get("version"),
-                reason_code=reason_code_for(reason),
+                reason_code=reason_code_for(reason_code or reason),
                 last_error_code=reason if re.fullmatch(r"[A-Z][A-Z0-9_]{2,95}", reason) else "WATCHDOG_ROLLBACK_FAILED",
             )
             return True
@@ -347,11 +360,31 @@ def run(*, app_root: Path, wait_pid: int, timeout_seconds: float = WATCHDOG_TIME
             candidate_payload_id=target_version,
         )
         return {"status": "healthy", "payload_id": target_version, "source_commit": target_commit}
+    # Preserve the distinction between an API that never became healthy and a
+    # healthy API whose frontend handshake remained pending.  The normal
+    # health wait intentionally treats both as failure; one bounded API-only
+    # probe before cleanup gives the recovery record an accurate reason.
+    candidate_failure_reason = (
+        "frontend_readiness_timeout"
+        if _health_matches(
+            app_root,
+            version=target_version,
+            source_commit=target_commit,
+            expected=target_identity,
+            port=_session_port(),
+            require_frontend=False,
+        )
+        else "api_readiness_timeout"
+    )
     try:
         terminate_owned_process(child)
     except Exception:
         pass
-    if not _rollback_previous(app_root, reason="WATCHDOG_POST_RESTART_HEALTH_FAILED"):
+    if not _rollback_previous(
+        app_root,
+        reason="WATCHDOG_POST_RESTART_HEALTH_FAILED",
+        reason_code=candidate_failure_reason,
+    ):
         return {"status": "failed", "code": "WATCHDOG_ROLLBACK_FAILED"}
     try:
         # The rollback relaunch targets the previous payload, so the candidate
@@ -368,7 +401,7 @@ def run(*, app_root: Path, wait_pid: int, timeout_seconds: float = WATCHDOG_TIME
                 progress=100,
                 current_payload_id=version,
                 rollback_payload_id=version,
-                reason_code="previous_payload_relaunch_failed",
+                reason_code=candidate_failure_reason,
                 last_error_code="WATCHDOG_POST_RESTART_HEALTH_FAILED",
             )
             return {"status": "rolled_back", "payload_id": version, "source_commit": commit}
