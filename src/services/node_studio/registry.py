@@ -23,6 +23,36 @@ _UNSAFE_PROPERTY_NAMES = {
     "command", "commands", "executable", "executable_path", "filter", "filter_complex",
     "font", "font_path", "path", "path_override", "secret", "token", "url", "vf",
 }
+_INLINE_CONTROL_TYPES = frozenset({
+    "text", "prompt", "textarea", "integer", "number", "slider", "color", "size", "select", "toggle", "artifact",
+})
+
+
+def _default_ui_control(name: str, kind: str) -> str:
+    """Map the closed schema kind to a safe, renderable Node Studio control."""
+
+    lowered = name.casefold()
+    if kind == "asset":
+        return "artifact"
+    if kind == "boolean":
+        return "toggle"
+    if kind in {"select", "encoder"}:
+        return "select"
+    if kind == "color":
+        return "color"
+    if kind == "textarea":
+        return "textarea"
+    if kind == "number":
+        if lowered in {"width", "height", "size"}:
+            return "size"
+        if lowered == "seed":
+            return "integer"
+        if lowered in {"threshold", "box_threshold", "text_threshold", "brightness", "contrast", "saturation", "gamma", "opacity", "target_lufs", "true_peak", "gain_db"}:
+            return "slider"
+        return "number"
+    if "prompt" in lowered:
+        return "prompt"
+    return "text"
 
 
 @dataclass(frozen=True)
@@ -94,6 +124,27 @@ def _port(name: str, kind: str, *, required: bool = False, multi: bool = False, 
 
 def _prop(name: str, label: str, kind: str, default: Any = None, **extra: Any) -> dict[str, Any]:
     result = {"name": name, "label": label, "kind": kind, "default": default}
+    supplied_ui = extra.pop("ui", None)
+    ui = dict(supplied_ui) if isinstance(supplied_ui, dict) else {}
+    ui.setdefault("control", _default_ui_control(name, kind))
+    ui.setdefault("label", label)
+    ui.setdefault("group", "General")
+    ui.setdefault("order", 0)
+    ui.setdefault("multiline", ui.get("control") in {"prompt", "textarea"})
+    if "min" in extra:
+        ui.setdefault("minimum", extra["min"])
+    if "max" in extra:
+        ui.setdefault("maximum", extra["max"])
+    if "step" in extra:
+        ui.setdefault("step", extra["step"])
+    if "options" in extra and isinstance(extra["options"], list):
+        ui.setdefault("options", list(extra["options"]))
+    if "max_length" in extra:
+        ui.setdefault("max_length", extra["max_length"])
+    # ``ui.control`` is server-owned and intentionally not coerced here.  An
+    # invalid published value must fail closed in the browser instead of being
+    # silently rendered as a different control.
+    result["ui"] = ui
     result.update(extra)
     return result
 

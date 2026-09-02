@@ -81,6 +81,20 @@ const NODE_COPY = Object.freeze({
   "Mask": "Mask",
   "Escaped metadata only; this artifact type is not rendered as media.": "Chỉ hiển thị metadata đã thoát; loại artifact này không được dựng thành media.",
   "Preview unavailable in this node snapshot; no safe artifact was published.": "Bản xem trước chưa khả dụng trong snapshot node này; chưa có artifact an toàn được công bố.",
+  "Output states": "Trạng thái output",
+  "Control unavailable; server metadata is not recognized.": "Control chưa khả dụng; metadata server không được nhận dạng.",
+  "Add node": "Thêm node",
+  "Search nodes…": "Tìm node…",
+  "Show all nodes": "Hiện tất cả node",
+  "Show recommended nodes": "Hiện node được khuyến nghị",
+  "Recommended · ": "Khuyến nghị · ",
+  "Node actions": "Thao tác node",
+  "Center node": "Đưa node vào giữa",
+  "Duplicate node": "Nhân bản node",
+  "Delete node": "Xóa node",
+  "Auto layout": "Tự động sắp xếp",
+  "No output": "Chưa có",
+  "Result available": "Có kết quả",
   "Video grade": "Hiệu chỉnh video",
   "Logo overlay": "Phủ logo",
   "Encode": "Mã hóa",
@@ -127,7 +141,7 @@ const NODE_COPY = Object.freeze({
 });
 const NODE_STATIC_TEXT = Object.freeze([
   "NODE WORKFLOW", "Recent", "Recent workflows", "Export JSON", "Import JSON", "Preview indicator (manual; no auto-run)",
-  "Palette", "Inspector", "Canvas focus", "Palette width", "Inspector width", "Preview size", "Fit", "Minimap graph",
+  "Palette", "Inspector", "Canvas focus", "Palette width", "Inspector width", "Preview size", "Fit", "Auto layout", "Minimap graph",
   "Inspector / Live preview", "Open preview",
 ]);
 const localizeNodeStaticMarkup = (root) => {
@@ -431,6 +445,380 @@ const ARTIFACT_PREVIEW_STATE_COPY = Object.freeze({
   not_run: ["Chưa có đầu ra để xem trước", "Node chưa chạy; không suy đoán rằng artifact đã được tạo."],
 });
 
+const INLINE_CONTROL_TYPES = Object.freeze([
+  "text", "prompt", "textarea", "integer", "number", "slider", "color", "size", "select", "toggle", "artifact",
+]);
+const INLINE_CONTROL_ALIASES = Object.freeze({
+  asset: "artifact",
+  boolean: "toggle",
+  combo: "select",
+  encoder: "select",
+});
+const OUTPUT_STATE_COPY = Object.freeze({
+  none: ["Chưa có", "Chưa có artifact an toàn được công bố cho output này."],
+  running: ["Đang chạy", "Node đang xử lý; chưa khẳng định artifact đã được công bố."],
+  completed: ["Có kết quả", "Output đã có kết quả từ snapshot server-owned."],
+  error: ["Lỗi", "Node lỗi hoặc bị hủy; không hiển thị output giả."],
+});
+const OUTPUT_STATE_LABEL_KEYS = Object.freeze({ none: "No output", running: "Running", completed: "Result available", error: "Error" });
+const NODE_GRID_SIZE = 40;
+const NODE_LAYOUT_GAP_X = 72;
+const NODE_LAYOUT_GAP_Y = 32;
+const CONTEXT_MENU_LIMIT = 24;
+
+const finiteOr = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+
+/**
+ * Resolve the server-owned UI metadata without inventing a fallback for an
+ * explicitly unknown control.  ``kind`` remains the graph/schema authority;
+ * ``ui`` only projects that same property into a canvas widget.
+ */
+export function inlineControlMetadata(property) {
+  if (!property || typeof property !== "object" || Array.isArray(property)) return null;
+  const ui = property.ui && typeof property.ui === "object" && !Array.isArray(property.ui) ? property.ui : {};
+  const hasExplicitControl = Object.prototype.hasOwnProperty.call(ui, "control") || Object.prototype.hasOwnProperty.call(property, "control");
+  const rawControl = String(ui.control ?? property.control ?? property.kind ?? "").trim().toLocaleLowerCase();
+  const control = hasExplicitControl ? rawControl : (INLINE_CONTROL_ALIASES[rawControl] || rawControl);
+  if (!INLINE_CONTROL_TYPES.includes(control)) return null;
+  const options = Array.isArray(ui.options) ? ui.options : Array.isArray(property.options) ? property.options : [];
+  const label = String(ui.label ?? property.label ?? property.name ?? "").slice(0, 160);
+  const name = typeof property.name === "string" ? property.name : "";
+  const multiline = ui.multiline === true || control === "prompt" || control === "textarea" || /prompt/i.test(name);
+  return {
+    control,
+    name,
+    label,
+    group: String(ui.group ?? "General").slice(0, 80),
+    order: finiteOr(ui.order, 0),
+    multiline,
+    minimum: ui.minimum ?? property.min,
+    maximum: ui.maximum ?? property.max,
+    step: ui.step ?? property.step,
+    options: options.slice(0, 64),
+    unit: String(ui.unit ?? "").slice(0, 24),
+    placeholder: String(ui.placeholder ?? "").slice(0, 120),
+    advanced: ui.advanced === true,
+    maxLength: ui.max_length ?? property.max_length,
+  };
+}
+
+export function normalizeInlineControlValue(property, rawValue) {
+  const control = inlineControlMetadata(property);
+  if (!control) return { accepted: false, reason: "unknown_control_type" };
+  if (control.control === "toggle") {
+    if (typeof rawValue === "boolean") return { accepted: true, value: rawValue };
+    if (rawValue === "true" || rawValue === "1" || rawValue === 1) return { accepted: true, value: true };
+    if (rawValue === "false" || rawValue === "0" || rawValue === 0) return { accepted: true, value: false };
+    return { accepted: false, reason: "boolean_required" };
+  }
+  if (control.control === "select") {
+    const selected = control.options.find((option) => String(option) === String(rawValue));
+    if (selected === undefined) return { accepted: false, reason: "option_not_published" };
+    return { accepted: true, value: selected };
+  }
+  if (control.control === "artifact") {
+    const value = typeof rawValue === "string" ? rawValue.trim() : "";
+    return OPAQUE_ARTIFACT_ID.test(value) ? { accepted: true, value } : { accepted: false, reason: "opaque_artifact_id_required" };
+  }
+  if (control.control === "color") {
+    const value = typeof rawValue === "string" ? rawValue.trim() : "";
+    return /^#[0-9a-f]{6,8}$/i.test(value) ? { accepted: true, value } : { accepted: false, reason: "hex_color_required" };
+  }
+  if (["integer", "number", "slider", "size"].includes(control.control)) {
+    const value = Number(rawValue);
+    if (!Number.isFinite(value)) return { accepted: false, reason: "finite_number_required" };
+    let normalized = control.control === "integer" ? Math.round(value) : value;
+    if (control.minimum !== undefined && control.minimum !== null && Number.isFinite(Number(control.minimum))) normalized = Math.max(Number(control.minimum), normalized);
+    if (control.maximum !== undefined && control.maximum !== null && Number.isFinite(Number(control.maximum))) normalized = Math.min(Number(control.maximum), normalized);
+    return { accepted: true, value: normalized };
+  }
+  const value = typeof rawValue === "string" ? rawValue : String(rawValue ?? "");
+  if (control.maxLength !== undefined && Number.isFinite(Number(control.maxLength)) && value.length > Number(control.maxLength)) {
+    return { accepted: false, reason: "text_too_long" };
+  }
+  return { accepted: true, value };
+}
+
+function nodeGeometry(node) {
+  const pos = Array.isArray(node?.pos) || ArrayBuffer.isView(node?.pos) ? node.pos : [node?.position?.x ?? node?.x, node?.position?.y ?? node?.y];
+  const size = Array.isArray(node?.size) || ArrayBuffer.isView(node?.size) ? node.size : [node?.size?.width ?? node?.width, node?.size?.height ?? node?.height];
+  return {
+    id: String(node?.hubId ?? node?.id ?? ""),
+    x: finiteOr(pos?.[0], 0),
+    y: finiteOr(pos?.[1], 0),
+    width: Math.max(1, finiteOr(size?.[0], 230)),
+    height: Math.max(1, finiteOr(size?.[1], 100)),
+  };
+}
+
+export function nodesOverlap(first, second, gap = 0) {
+  const a = nodeGeometry(first);
+  const b = nodeGeometry(second);
+  const padding = Math.max(0, finiteOr(gap, 0));
+  return a.x < b.x + b.width + padding && a.x + a.width + padding > b.x && a.y < b.y + b.height + padding && a.y + a.height + padding > b.y;
+}
+
+export function graphBounds(nodes = [], padding = 0) {
+  const values = (Array.isArray(nodes) ? nodes : []).map(nodeGeometry);
+  if (!values.length) return { left: 0, top: 0, right: 1, bottom: 1, width: 1, height: 1 };
+  const inset = Math.max(0, finiteOr(padding, 0));
+  const left = Math.min(...values.map((item) => item.x)) - inset;
+  const top = Math.min(...values.map((item) => item.y)) - inset;
+  const right = Math.max(...values.map((item) => item.x + item.width)) + inset;
+  const bottom = Math.max(...values.map((item) => item.y + item.height)) + inset;
+  return { left, top, right, bottom, width: Math.max(1, right - left), height: Math.max(1, bottom - top) };
+}
+
+function candidateGridOffsets(radius) {
+  if (radius === 0) return [[0, 0]];
+  const result = [];
+  for (let x = -radius; x <= radius; x += 1) {
+    result.push([x, -radius], [x, radius]);
+  }
+  for (let y = -radius + 1; y < radius; y += 1) {
+    result.push([-radius, y], [radius, y]);
+  }
+  return result;
+}
+
+export function findFreeGridSlot(nodes = [], requested = {}, size = {}, options = {}) {
+  const grid = Math.max(1, finiteOr(options.grid, NODE_GRID_SIZE));
+  const gap = Math.max(0, finiteOr(options.gap, NODE_LAYOUT_GAP_Y));
+  const maxRadius = Math.max(1, Math.min(64, Math.floor(finiteOr(options.maxRadius, 32))));
+  const width = Math.max(1, finiteOr(size.width ?? size[0], 230));
+  const height = Math.max(1, finiteOr(size.height ?? size[1], 100));
+  const requestedX = finiteOr(requested.x ?? requested[0], 0);
+  const requestedY = finiteOr(requested.y ?? requested[1], 0);
+  const startX = options.snap === false ? requestedX : Math.round(requestedX / grid) * grid;
+  const startY = options.snap === false ? requestedY : Math.round(requestedY / grid) * grid;
+  const occupied = Array.isArray(nodes) ? nodes : [];
+  for (let radius = 0; radius <= maxRadius; radius += 1) {
+    const offsets = candidateGridOffsets(radius).sort((a, b) => (Math.abs(a[0]) + Math.abs(a[1])) - (Math.abs(b[0]) + Math.abs(b[1])) || a[1] - b[1] || a[0] - b[0]);
+    for (const [offsetX, offsetY] of offsets) {
+      const candidate = { x: startX + offsetX * grid, y: startY + offsetY * grid, width, height };
+      if (!occupied.some((node) => nodesOverlap(candidate, node, gap))) return { x: Math.round(candidate.x), y: Math.round(candidate.y) };
+    }
+  }
+  // The bounded search is fail-safe: keep the requested column but place the
+  // node below the known graph rather than silently overlapping an existing one.
+  const bounds = graphBounds(occupied, gap);
+  return { x: Math.round(startX), y: Math.round(Math.max(startY, bounds.bottom)) };
+}
+
+export function collisionFreeNodePositions(nodes = [], options = {}) {
+  const values = (Array.isArray(nodes) ? nodes : []).map((node, index) => ({ ...nodeGeometry(node), sourceIndex: index }));
+  values.sort((a, b) => a.id.localeCompare(b.id) || a.sourceIndex - b.sourceIndex);
+  const placed = [];
+  const positions = [];
+  for (const value of values) {
+    const direct = { x: value.x, y: value.y, width: value.width, height: value.height };
+    const position = placed.some((node) => nodesOverlap(direct, node, finiteOr(options.gap, 0)))
+      ? findFreeGridSlot(placed, value, value, { ...options, snap: true })
+      : { x: Math.round(value.x), y: Math.round(value.y) };
+    const placedNode = { id: value.id, x: position.x, y: position.y, width: value.width, height: value.height };
+    placed.push(placedNode);
+    positions.push({ id: value.id, x: position.x, y: position.y });
+  }
+  return positions.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+export function computeDeterministicLayout(nodes = [], edges = [], options = {}) {
+  const values = (Array.isArray(nodes) ? nodes : []).map((node, index) => ({ ...nodeGeometry(node), sourceIndex: index }));
+  const byId = new Map(values.map((node) => [node.id, node]));
+  const incoming = new Map(values.map((node) => [node.id, []]));
+  const outgoing = new Map(values.map((node) => [node.id, []]));
+  for (const edge of Array.isArray(edges) ? edges : []) {
+    const source = String(edge?.source?.node ?? edge?.origin_id ?? "");
+    const target = String(edge?.target?.node ?? edge?.target_id ?? "");
+    if (!byId.has(source) || !byId.has(target) || source === target) continue;
+    if (!outgoing.get(source).includes(target)) {
+      outgoing.get(source).push(target);
+      incoming.get(target).push(source);
+    }
+  }
+  for (const list of [...incoming.values(), ...outgoing.values()]) list.sort((a, b) => a.localeCompare(b));
+  const indegree = new Map(values.map((node) => [node.id, incoming.get(node.id).length]));
+  const layer = new Map(values.map((node) => [node.id, 0]));
+  const queue = values.filter((node) => indegree.get(node.id) === 0).map((node) => node.id).sort((a, b) => a.localeCompare(b));
+  const visited = new Set();
+  while (queue.length) {
+    const current = queue.shift();
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const target of outgoing.get(current)) {
+      layer.set(target, Math.max(layer.get(target) || 0, (layer.get(current) || 0) + 1));
+      indegree.set(target, indegree.get(target) - 1);
+      if (indegree.get(target) === 0) queue.push(target);
+    }
+    queue.sort((a, b) => a.localeCompare(b));
+  }
+  // Cyclic/invalid fragments remain deterministic and visible; validation
+  // still owns the cycle error and this layout never creates an overlap.
+  const maxKnownLayer = Math.max(0, ...[...layer.values()]);
+  values.filter((node) => !visited.has(node.id)).sort((a, b) => a.id.localeCompare(b.id)).forEach((node, index) => layer.set(node.id, maxKnownLayer + 1 + index));
+
+  const horizontalGap = Math.max(1, finiteOr(options.horizontalGap, NODE_LAYOUT_GAP_X));
+  const verticalGap = Math.max(1, finiteOr(options.verticalGap, NODE_LAYOUT_GAP_Y));
+  const marginX = finiteOr(options.marginX, 80);
+  const marginY = finiteOr(options.marginY, 80);
+  const columns = new Map();
+  for (const node of values) {
+    const columnIndex = layer.get(node.id) || 0;
+    if (!columns.has(columnIndex)) columns.set(columnIndex, []);
+    columns.get(columnIndex).push(node);
+  }
+  const maxLayer = Math.max(0, ...columns.keys());
+  const widths = new Map();
+  for (let index = 0; index <= maxLayer; index += 1) widths.set(index, Math.max(1, ...(columns.get(index) || []).map((node) => node.width)));
+  const positions = new Map();
+  let x = marginX;
+  for (let index = 0; index <= maxLayer; index += 1) {
+    let y = marginY;
+    const column = (columns.get(index) || []).sort((a, b) => a.id.localeCompare(b.id));
+    for (const node of column) {
+      positions.set(node.id, { id: node.id, x: Math.round(x), y: Math.round(y) });
+      y += node.height + verticalGap;
+    }
+    x += widths.get(index) + horizontalGap;
+  }
+  return values.slice().sort((a, b) => a.id.localeCompare(b.id)).map((node) => positions.get(node.id)).filter(Boolean);
+}
+
+export const deterministicNodeLayout = computeDeterministicLayout;
+
+export function minimapFingerprint({ nodes = [], edges = [], scale = 1, offset = [0, 0], selectedIds = [], viewport = [0, 0] } = {}) {
+  const rawNodes = Array.isArray(nodes) ? nodes : [];
+  const values = rawNodes.map(nodeGeometry).sort((a, b) => a.id.localeCompare(b.id));
+  const byGraphId = new Map();
+  rawNodes.forEach((node) => {
+    const ids = [node?.hubId, node?.id].filter((value) => value !== undefined && value !== null).map(String);
+    ids.forEach((id) => byGraphId.set(id, node));
+  });
+  const links = (Array.isArray(edges) ? edges : []).map((edge) => {
+    const source = String(edge?.source?.node ?? edge?.origin_id ?? "");
+    const target = String(edge?.target?.node ?? edge?.target_id ?? "");
+    const sourceNode = byGraphId.get(source);
+    const type = edge?.type || edge?.data?.type || sourceNode?.outputs?.[edge?.origin_slot]?.type || sourceNode?.type || "";
+    return { id: String(edge?.id ?? `${source}:${edge?.origin_slot ?? edge?.source?.port ?? ""}->${target}:${edge?.target_slot ?? edge?.target?.port ?? ""}`), source, target, type: String(type) };
+  }).sort((a, b) => a.id.localeCompare(b.id));
+  const bounds = graphBounds(values);
+  return JSON.stringify({
+    scale: Number(finiteOr(scale, 1).toFixed(6)),
+    offset: [Number(finiteOr(offset?.[0], 0).toFixed(3)), Number(finiteOr(offset?.[1], 0).toFixed(3))],
+    viewport: [finiteOr(viewport?.[0], 0), finiteOr(viewport?.[1], 0)],
+    bounds,
+    nodes: values,
+    edges: links,
+    selected: (Array.isArray(selectedIds) ? selectedIds : [...(selectedIds instanceof Set ? selectedIds : [])]).map(String).sort(),
+  });
+}
+
+export function createMinimapScheduler({ requestFrame, cancelFrame, fingerprint = () => "", redraw = () => {} } = {}) {
+  const request = requestFrame || ((callback) => setTimeout(callback, 16));
+  const cancel = cancelFrame || ((handle) => clearTimeout(handle));
+  let active = false;
+  let handle = null;
+  let lastFingerprint = "";
+  const tick = () => {
+    handle = null;
+    if (!active) return;
+    const next = String(fingerprint() || "");
+    if (next && next !== lastFingerprint) {
+      lastFingerprint = next;
+      redraw(next);
+    }
+    handle = request(tick);
+  };
+  return {
+    start() {
+      if (active) return;
+      active = true;
+      handle = request(tick);
+    },
+    stop() {
+      active = false;
+      if (handle !== null) cancel(handle);
+      handle = null;
+    },
+    invalidate() { lastFingerprint = ""; },
+    get active() { return active; },
+    get lastFingerprint() { return lastFingerprint; },
+  };
+}
+
+export function contextMenuPosition(event, containerRect = {}, menuSize = {}, padding = 8) {
+  const rect = containerRect || {};
+  const width = Math.max(1, finiteOr(rect.width, 0));
+  const height = Math.max(1, finiteOr(rect.height, 0));
+  const menuWidth = Math.max(1, finiteOr(menuSize.width, 300));
+  const menuHeight = Math.max(1, finiteOr(menuSize.height, 360));
+  const inset = Math.max(0, finiteOr(padding, 8));
+  const clamp = (value, minimum, maximum) => Math.min(Math.max(value, minimum), Math.max(minimum, maximum));
+  return {
+    left: clamp(finiteOr(event?.clientX, rect.left) - finiteOr(rect.left, 0), inset, width - menuWidth - inset),
+    top: clamp(finiteOr(event?.clientY, rect.top) - finiteOr(rect.top, 0), inset, height - menuHeight - inset),
+  };
+}
+
+const preferredCategoriesForScope = Object.freeze({
+  image: ["image", "utility", "vision", "annotation"],
+  sam2: ["vision", "image", "utility", "annotation"],
+  media: ["media", "video", "utility", "annotation"],
+  video: ["video", "media", "utility", "annotation"],
+  animesr: ["video", "media", "utility", "annotation"],
+});
+
+export function getCanvasContextMenuCandidates(definitions, { scope = "", query = "", showAll = false, limit = CONTEXT_MENU_LIMIT } = {}) {
+  const values = definitions instanceof Map ? [...definitions.values()] : Array.isArray(definitions) ? definitions : [];
+  const needle = String(query || "").trim().toLocaleLowerCase();
+  const categories = preferredCategoriesForScope[scope] || [];
+  const ranked = values.filter((definition) => {
+    if (!definition || typeof definition.type !== "string") return false;
+    const haystack = `${definition.title || ""} ${definition.type} ${definition.category || ""} ${definition.description || ""}`.toLocaleLowerCase();
+    return !needle || haystack.includes(needle);
+  }).map((definition) => {
+    const categoryRank = categories.indexOf(definition.category);
+    const operational = String(definition.status || definition.availability?.status || "") === "operational";
+    return { definition, recommended: categoryRank >= 0 && categoryRank < 2, _rank: (categoryRank < 0 ? 100 : categoryRank) * 10 + (operational ? 0 : 1) };
+  }).sort((a, b) => a._rank - b._rank || String(a.definition.title).localeCompare(String(b.definition.title)) || a.definition.type.localeCompare(b.definition.type));
+  const selected = showAll ? ranked : ranked.slice(0, Math.max(1, Math.min(120, Number(limit) || CONTEXT_MENU_LIMIT)));
+  return selected.map(({ definition, recommended }) => ({ definition, recommended }));
+}
+
+function outputStatusValue(value) {
+  const status = typeof value === "string" ? value : value && typeof value === "object" ? value.status ?? value.state : "";
+  const normalized = String(status || "").toLocaleLowerCase();
+  if (["running", "queued", "pending", "starting", "processing"].includes(normalized)) return "running";
+  if (["completed", "complete", "success", "ready"].includes(normalized)) return "completed";
+  if (["failed", "error", "cancelled", "canceled"].includes(normalized)) return "error";
+  return "none";
+}
+
+function hasOpaqueArtifactReference(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return OPAQUE_ARTIFACT_ID.test(String(value.artifact_id || "")) || OPAQUE_ARTIFACT_ID.test(String(value.artifactId || ""));
+}
+
+export function outputSocketState(nodeState = {}, portName = "") {
+  const sources = [nodeState?.outputs, nodeState?.output_states, nodeState?.outputStates];
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue;
+    const raw = Array.isArray(source) ? source.find((item) => item?.name === portName || item?.port === portName) : source[portName];
+    if (raw !== undefined) {
+      const explicit = outputStatusValue(raw);
+      if (explicit !== "none") return explicit;
+      if (hasOpaqueArtifactReference(raw) || collectArtifactProjections(raw).items.length) return "completed";
+    }
+  }
+  const run = outputStatusValue(nodeState?.status);
+  return run === "running" || run === "error" ? run : "none";
+}
+
+export function outputSocketStateLabel(state) {
+  const normalized = Object.prototype.hasOwnProperty.call(OUTPUT_STATE_LABEL_KEYS, state) ? state : "none";
+  return nodeText(OUTPUT_STATE_LABEL_KEYS[normalized]);
+}
+
 function artifactPreviewState(value) {
   const status = typeof value === "string" ? value.toLocaleLowerCase() : "";
   if (status === "error" || status === "cancelled") return "failed";
@@ -462,7 +850,7 @@ export function renderArtifactPreviewMarkup(collection, state = {}) {
   const previewState = artifactPreviewState(state?.status);
   const [title, message] = ARTIFACT_PREVIEW_STATE_COPY[previewState].map(nodeText);
   const summary = `<div class="graph-preview-summary" data-artifact-state="${escapeHtml(previewState)}"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(message)}</span></div>`;
-  if (!items.length) return `${summary}<p class="graph-empty graph-preview-empty">${escapeHtml(nodeText("Chưa có bản xem trước an toàn trong trạng thái này."))}</p>`;
+  if (!items.length) return `${summary}<p class="graph-empty graph-preview-empty">${escapeHtml(nodeText("Preview unavailable in this node snapshot; no safe artifact was published."))}</p>`;
   const truncation = collected.truncated ? `<p class="graph-preview-truncated">Showing the first ${MAX_PREVIEW_ARTIFACTS} safe artifacts; additional output metadata is unavailable.</p>` : "";
   return `${summary}<div class="graph-preview-list" aria-label="Node output artifacts">${items.map(artifactPreviewItem).join("")}</div>${truncation}`;
 }
@@ -472,27 +860,86 @@ function graphFingerprint(graph) {
 }
 
 function propertyControl(node, property) {
+  const control = inlineControlMetadata(property);
   const value = node.properties?.[property.name] ?? property.default ?? "";
   const target = `${node.id}:${property.name}`;
-  const label = escapeHtml(nodeText(property.label || property.name));
-  if (property.kind === "asset") {
+  if (!control) {
+    return `<div class="graph-property graph-property--unavailable" data-control-state="unavailable"><span>${escapeHtml(nodeText(property.label || property.name))}</span><small>${escapeHtml(nodeText("Control unavailable; server metadata is not recognized."))}</small></div>`;
+  }
+  const label = escapeHtml(nodeText(control.label || property.name));
+  const unit = control.unit ? ` <small class="graph-property__unit">${escapeHtml(control.unit)}</small>` : "";
+  const maxLength = control.maxLength === undefined || !Number.isFinite(Number(control.maxLength)) ? "" : ` maxlength="${escapeHtml(control.maxLength)}"`;
+  const min = control.minimum === undefined || control.minimum === null ? "" : ` min="${escapeHtml(control.minimum)}"`;
+  const max = control.maximum === undefined || control.maximum === null ? "" : ` max="${escapeHtml(control.maximum)}"`;
+  const step = control.step === undefined || control.step === null ? "" : ` step="${escapeHtml(control.step)}"`;
+  if (control.control === "artifact") {
     return `<div class="graph-property graph-property--file"><span>${label}</span><div class="file-picker" data-file-picker><small data-graph-asset-value>${escapeHtml(value || "Chưa có artifact")}</small><input class="file-picker__input" type="file" data-graph-asset="${escapeHtml(target)}" tabindex="-1" aria-hidden="true" accept="${escapeHtml(property.accept || "")}" /><button class="button button--compact" type="button" data-file-picker-button>Chọn tệp</button></div></div>`;
   }
-  if (property.kind === "boolean") {
+  if (control.control === "toggle") {
     return `<label class="graph-property graph-property--toggle"><input type="checkbox" role="switch" aria-label="${label}" data-graph-property="${escapeHtml(target)}" ${value ? "checked" : ""} /><span>${label} · <b>${value ? escapeHtml(nodeText("Bật")) : escapeHtml(nodeText("Tắt"))}</b></span></label>`;
   }
-  if (property.kind === "select" || property.kind === "encoder") {
-    const options = property.options || (property.kind === "encoder" ? ["auto"] : []);
-    return `<label class="graph-property"><span>${label}</span><select data-graph-property="${escapeHtml(target)}">${options.map((option) => `<option value="${escapeHtml(option)}" ${String(option) === String(value) ? "selected" : ""}>${escapeHtml(option)}</option>`).join("")}</select></label>`;
+  if (control.control === "select") {
+    return `<label class="graph-property"><span>${label}${unit}</span><select data-graph-property="${escapeHtml(target)}">${control.options.map((option) => `<option value="${escapeHtml(option)}" ${String(option) === String(value) ? "selected" : ""}>${escapeHtml(option)}</option>`).join("")}</select></label>`;
   }
-  if (property.kind === "textarea") {
-    return `<label class="graph-property"><span>${label}</span><textarea data-graph-property="${escapeHtml(target)}">${escapeHtml(value)}</textarea></label>`;
+  if (control.control === "textarea" || control.control === "prompt") {
+    return `<label class="graph-property"><span>${label}${unit}</span><textarea data-graph-property="${escapeHtml(target)}"${maxLength}${control.placeholder ? ` placeholder="${escapeHtml(control.placeholder)}"` : ""}>${escapeHtml(value)}</textarea></label>`;
   }
-  const type = property.kind === "number" ? "number" : property.kind === "color" ? "color" : "text";
-  const min = property.min === undefined ? "" : ` min="${escapeHtml(property.min)}"`;
-  const max = property.max === undefined ? "" : ` max="${escapeHtml(property.max)}"`;
-  const step = property.step === undefined ? "" : ` step="${escapeHtml(property.step)}"`;
-  return `<label class="graph-property"><span>${label}</span><input type="${type}" data-graph-property="${escapeHtml(target)}" value="${escapeHtml(value)}"${min}${max}${step} /></label>`;
+  if (control.control === "slider") {
+    return `<label class="graph-property graph-property--slider"><span>${label}${unit}</span><input type="range" data-graph-property="${escapeHtml(target)}" value="${escapeHtml(value)}"${min}${max}${step} /><output>${escapeHtml(value)}</output></label>`;
+  }
+  if (control.control === "color") {
+    return `<label class="graph-property graph-property--color"><span>${label}${unit}</span><span class="graph-property__color-row"><input type="color" data-graph-property="${escapeHtml(target)}" value="${escapeHtml(value || "#4d7dff")}" /><code>${escapeHtml(value || "#4d7dff")}</code></span></label>`;
+  }
+  const type = ["integer", "number", "size"].includes(control.control) ? "number" : "text";
+  const numberStep = control.control === "integer" && !step ? " step=\"1\"" : step;
+  return `<label class="graph-property"><span>${label}${unit}</span><input type="${type}" data-graph-property="${escapeHtml(target)}" value="${escapeHtml(value)}"${min}${max}${numberStep}${maxLength}${control.placeholder ? ` placeholder="${escapeHtml(control.placeholder)}"` : ""} /></label>`;
+}
+
+function inlineWidgetType(control) {
+  if (!control) return null;
+  if (control.control === "toggle") return "toggle";
+  if (control.control === "select") return "combo";
+  if (control.control === "slider") return "slider";
+  if (["integer", "number", "size"].includes(control.control)) return "number";
+  if (["text", "prompt", "textarea", "artifact"].includes(control.control)) return "text";
+  return null;
+}
+
+function createColorWidget(node, property, control) {
+  const widget = {
+    type: "hub-color",
+    name: property.name,
+    label: control.label,
+    value: node.properties?.[property.name] ?? property.default ?? "#4d7dff",
+    options: { property: property.name },
+    computeSize: () => [230, 26],
+    draw(ctx, _owner, width, y, height) {
+      const value = typeof this.value === "string" && /^#[0-9a-f]{6,8}$/i.test(this.value) ? this.value : "#4d7dff";
+      ctx.save();
+      ctx.fillStyle = "#29344d";
+      ctx.strokeStyle = "#7082a8";
+      ctx.beginPath();
+      ctx.roundRect(15, y, width - 30, height, [height * 0.4]);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = value;
+      ctx.fillRect(21, y + 4, height - 8, height - 8);
+      ctx.fillStyle = "#e9efff";
+      ctx.textAlign = "left";
+      ctx.fillText(this.label || this.name, 45, y + height * 0.7);
+      ctx.textAlign = "right";
+      ctx.fillText(value, width - 22, y + height * 0.7);
+      ctx.restore();
+    },
+    mouse(event) {
+      const editor = node._hubEditor;
+      if (!editor || !editor.liteCanvas || !["mousedown", "pointerdown"].includes(event?.type)) return false;
+      editor.captureWidgetBeforeChange(node, property.name);
+      editor.liteCanvas.prompt(control.label, this.value, (value) => editor.changeWidgetValue(node, property, value), event, false);
+      return true;
+    },
+  };
+  return widget;
 }
 
 class HubGraphEditor {
@@ -524,11 +971,18 @@ class HubGraphEditor {
     this.search = "";
     this.hydrating = false;
     this.beforeChange = null;
+    this.widgetBeforeChange = null;
     this.pollTimer = null;
     this.autoTimer = null;
     this.resizeObserver = null;
     this.abort = new AbortController();
     this.minimapBounds = null;
+    this.minimapFrame = null;
+    this.minimapLoopActive = false;
+    this.minimapLastFingerprint = "";
+    this.minimapDragging = null;
+    this.contextMenu = null;
+    this._contextMenuOutsideHandler = null;
     this.validation = null;
     this.runtimePreflightResult = null;
     this.runStatus = "idle";
@@ -607,6 +1061,283 @@ class HubGraphEditor {
     } catch (error) {
       this.root.innerHTML = `<div class="callout callout--warning">Không thể nạp graph editor: ${escapeHtml(error.message)}</div>`;
     }
+  }
+
+  drawGraphGrid(ctx, area = this.liteCanvas?.ds?.visible_area) {
+    if (!ctx || !area) return;
+    const gridSize = 24;
+    const majorEvery = 5;
+    const scale = Math.max(0.1, Number(this.liteCanvas?.ds?.scale || 1));
+    const left = Number(area[0] || 0);
+    const top = Number(area[1] || 0);
+    const right = left + Number(area[2] || 0);
+    const bottom = top + Number(area[3] || 0);
+    const firstX = Math.floor(left / gridSize) * gridSize;
+    const firstY = Math.floor(top / gridSize) * gridSize;
+    ctx.save();
+    ctx.lineWidth = 1 / scale;
+    ctx.beginPath();
+    for (let x = firstX, column = Math.floor(firstX / gridSize); x <= right; x += gridSize, column += 1) {
+      ctx.moveTo(x, top);
+      ctx.lineTo(x, bottom);
+    }
+    for (let y = firstY, row = Math.floor(firstY / gridSize); y <= bottom; y += gridSize, row += 1) {
+      ctx.moveTo(left, y);
+      ctx.lineTo(right, y);
+    }
+    ctx.strokeStyle = "rgba(167,190,244,.12)";
+    ctx.stroke();
+    ctx.beginPath();
+    for (let x = Math.floor(firstX / (gridSize * majorEvery)) * gridSize * majorEvery; x <= right; x += gridSize * majorEvery) {
+      ctx.moveTo(x, top);
+      ctx.lineTo(x, bottom);
+    }
+    for (let y = Math.floor(firstY / (gridSize * majorEvery)) * gridSize * majorEvery; y <= bottom; y += gridSize * majorEvery) {
+      ctx.moveTo(left, y);
+      ctx.lineTo(right, y);
+    }
+    ctx.strokeStyle = "rgba(167,190,244,.22)";
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  currentMinimapFingerprint() {
+    if (!this.liteGraph || !this.liteCanvas) return "";
+    const nodes = this.liteGraph._nodes || [];
+    const links = Object.values(this.liteGraph.links || {}).map((link) => {
+      const source = nodes.find((node) => node.id === link.origin_id);
+      return {
+        id: link.id,
+        origin_id: link.origin_id,
+        target_id: link.target_id,
+        origin_slot: link.origin_slot,
+        target_slot: link.target_slot,
+        type: source?.outputs?.[link.origin_slot]?.type || "",
+      };
+    });
+    const selectedIds = Object.values(this.liteCanvas.selected_nodes || {}).map((node) => node.hubId || node.id);
+    return minimapFingerprint({
+      nodes,
+      edges: links,
+      scale: this.liteCanvas.ds.scale,
+      offset: this.liteCanvas.ds.offset,
+      selectedIds,
+      viewport: [this.canvasElement?.width || 0, this.canvasElement?.height || 0],
+    });
+  }
+
+  scheduleMinimapUpdate() {
+    // The route-scoped rAF loop coalesces all pan/zoom/drag/resize/layout and
+    // import notifications.  No caller can cause more than one redraw/frame.
+    this.minimapDirty = true;
+  }
+
+  startMinimapLoop() {
+    if (this.minimapLoopActive) return;
+    const view = this.canvasElement?.ownerDocument?.defaultView || globalThis;
+    this._requestMinimapFrame = view.requestAnimationFrame?.bind(view) || globalThis.requestAnimationFrame?.bind(globalThis) || ((callback) => setTimeout(callback, 16));
+    this._cancelMinimapFrame = view.cancelAnimationFrame?.bind(view) || globalThis.cancelAnimationFrame?.bind(globalThis) || ((handle) => clearTimeout(handle));
+    this.minimapLoopActive = true;
+    const tick = () => {
+      this.minimapFrame = null;
+      if (!this.minimapLoopActive || !this.root?.isConnected) {
+        this.stopMinimapLoop();
+        return;
+      }
+      const fingerprint = this.currentMinimapFingerprint();
+      if (fingerprint && fingerprint !== this.minimapLastFingerprint) {
+        this.minimapLastFingerprint = fingerprint;
+        this.drawMinimap();
+      }
+      this.minimapFrame = this._requestMinimapFrame(tick);
+    };
+    this.minimapFrame = this._requestMinimapFrame(tick);
+  }
+
+  stopMinimapLoop() {
+    this.minimapLoopActive = false;
+    if (this.minimapFrame !== null && this._cancelMinimapFrame) this._cancelMinimapFrame(this.minimapFrame);
+    this.minimapFrame = null;
+    this._requestMinimapFrame = null;
+    this._cancelMinimapFrame = null;
+  }
+
+  canvasGraphPosition(event) {
+    if (Number.isFinite(Number(event?.canvasX)) && Number.isFinite(Number(event?.canvasY))) return { x: Number(event.canvasX), y: Number(event.canvasY) };
+    const position = this.liteCanvas?.convertEventToCanvasOffset?.(event || {}) || [0, 0];
+    return { x: finiteOr(position[0], 0), y: finiteOr(position[1], 0) };
+  }
+
+  contextMenuShellPosition(event, menu) {
+    const shell = this.root.querySelector(".graph-canvas-shell");
+    if (!shell) return { left: 8, top: 8 };
+    const rect = shell.getBoundingClientRect();
+    const menuRect = menu?.getBoundingClientRect?.() || {};
+    return contextMenuPosition(event, rect, { width: menuRect.width || 300, height: menuRect.height || 360 }, 8);
+  }
+
+  openContextMenu(node, event) {
+    if (!this.liteCanvas || !this.root.isConnected) return;
+    this.closeConnectionPicker(false);
+    this.closeContextMenu(false);
+    if (node) this.openNodeContextMenu(node, event);
+    else this.openCanvasContextMenu(event);
+  }
+
+  openCanvasContextMenu(event = {}) {
+    const shell = this.root.querySelector(".graph-canvas-shell");
+    if (!shell) return;
+    const menu = document.createElement("div");
+    menu.className = "graph-context-menu graph-context-menu--canvas";
+    menu.dataset.graphContextMenu = "canvas";
+    menu.setAttribute("data-graph-context-menu", "canvas");
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", nodeText("Add node"));
+    menu.innerHTML = `<div class="graph-context-menu__head"><strong>${escapeHtml(nodeText("Add node"))}</strong><button type="button" class="button button--compact" data-graph-context-close aria-label="${escapeHtml(nodeText("Close add node menu"))}">Esc</button></div><input type="search" data-graph-context-search aria-label="${escapeHtml(nodeText("Search nodes"))}" placeholder="${escapeHtml(nodeText("Search nodes…"))}" /><div data-graph-context-results role="group"></div><button type="button" class="graph-context-menu__all" data-graph-context-all>${escapeHtml(nodeText("Show all nodes"))}</button>`;
+    shell.appendChild(menu);
+    const position = this.canvasGraphPosition(event);
+    this.contextMenu = { kind: "canvas", element: menu, position, query: "", showAll: false };
+    const place = this.contextMenuShellPosition(event, menu);
+    menu.style.left = `${place.left}px`;
+    menu.style.top = `${place.top}px`;
+    const search = menu.querySelector("[data-graph-context-search]");
+    search?.addEventListener("input", () => {
+      this.contextMenu.query = search.value.slice(0, 120);
+      this.renderContextMenu();
+    });
+    menu.addEventListener("click", (clickEvent) => {
+      if (clickEvent.target.closest("[data-graph-context-close]")) {
+        this.closeContextMenu();
+        return;
+      }
+      if (clickEvent.target.closest("[data-graph-context-all]")) {
+        this.contextMenu.showAll = !this.contextMenu.showAll;
+        this.renderContextMenu();
+        return;
+      }
+      const add = clickEvent.target.closest("[data-graph-context-add]");
+      if (add) this.selectContextMenuNode(add.dataset.graphContextAdd);
+      const action = clickEvent.target.closest("[data-node-context-action]");
+      if (action) this.handleNodeContextAction(action.dataset.nodeContextAction);
+    });
+    this._contextMenuOutsideHandler = (clickEvent) => {
+      if (this.contextMenu && !this.contextMenu.element.contains(clickEvent.target)) this.closeContextMenu();
+    };
+    document.addEventListener("pointerdown", this._contextMenuOutsideHandler, true);
+    this.renderContextMenu();
+    setTimeout(() => search?.focus(), 0);
+  }
+
+  openNodeContextMenu(node, event = {}) {
+    const shell = this.root.querySelector(".graph-canvas-shell");
+    if (!shell) return;
+    const menu = document.createElement("div");
+    menu.className = "graph-context-menu graph-context-menu--node";
+    menu.dataset.graphContextMenu = "node";
+    menu.setAttribute("data-graph-context-menu", "node");
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", nodeText("Node actions"));
+    const definition = this.registry.get(node.hubType);
+    menu.innerHTML = `<div class="graph-context-menu__head"><strong>${escapeHtml(nodeText(definition?.title || node.hubType))}</strong><button type="button" class="button button--compact" data-graph-context-close aria-label="${escapeHtml(nodeText("Close node menu"))}">Esc</button></div><button type="button" role="menuitem" data-node-context-action="center">${escapeHtml(nodeText("Center node"))}</button><button type="button" role="menuitem" data-node-context-action="duplicate">${escapeHtml(nodeText("Duplicate node"))}</button><button type="button" role="menuitem" data-node-context-action="delete">${escapeHtml(nodeText("Delete node"))}</button>`;
+    shell.appendChild(menu);
+    this.contextMenu = { kind: "node", element: menu, node, position: this.canvasGraphPosition(event) };
+    const place = this.contextMenuShellPosition(event, menu);
+    menu.style.left = `${place.left}px`;
+    menu.style.top = `${place.top}px`;
+    menu.addEventListener("click", (clickEvent) => {
+      if (clickEvent.target.closest("[data-graph-context-close]")) this.closeContextMenu();
+      const action = clickEvent.target.closest("[data-node-context-action]");
+      if (action) this.handleNodeContextAction(action.dataset.nodeContextAction);
+    });
+    this._contextMenuOutsideHandler = (clickEvent) => {
+      if (this.contextMenu && !this.contextMenu.element.contains(clickEvent.target)) this.closeContextMenu();
+    };
+    document.addEventListener("pointerdown", this._contextMenuOutsideHandler, true);
+    setTimeout(() => menu.querySelector("[data-node-context-action]")?.focus(), 0);
+  }
+
+  renderContextMenu() {
+    const state = this.contextMenu;
+    if (!state?.element) return;
+    if (state.kind === "node") return;
+    const query = state.query || "";
+    const candidates = getCanvasContextMenuCandidates(this.registry, { scope: this.scope, query, showAll: state.showAll });
+    const groups = new Map();
+    candidates.forEach((item) => {
+      const category = item.definition.category || "other";
+      if (!groups.has(category)) groups.set(category, []);
+      groups.get(category).push(item);
+    });
+    const results = state.element.querySelector("[data-graph-context-results]");
+    if (results) results.innerHTML = [...groups.entries()].map(([category, items]) => `<section class="graph-context-menu__group"><h3>${escapeHtml(nodeText(category))}</h3>${items.map((item) => `<button type="button" role="menuitem" data-graph-context-add="${escapeHtml(item.definition.type)}" title="${escapeHtml(item.definition.description || "")}"><span>${escapeHtml(nodeText(item.definition.title))}</span><small>${item.recommended ? escapeHtml(nodeText("Recommended · ")) : ""}${escapeHtml(nodeText(item.definition.status || item.definition.availability?.status || "partial"))}</small></button>`).join("")}</section>`).join("") || `<p class="graph-empty">Không tìm thấy node.</p>`;
+    const all = state.element.querySelector("[data-graph-context-all]");
+    if (all) all.textContent = nodeText(state.showAll ? "Show recommended nodes" : "Show all nodes");
+  }
+
+  selectContextMenuNode(type) {
+    const state = this.contextMenu;
+    if (!state || state.kind !== "canvas" || !this.registry.has(type)) return;
+    const position = { ...state.position };
+    this.closeContextMenu(false);
+    this.addNode(type, { position, center: false });
+  }
+
+  handleNodeContextAction(action) {
+    const state = this.contextMenu;
+    const node = state?.kind === "node" ? state.node : null;
+    if (!node) return;
+    if (action === "delete") {
+      this.closeContextMenu(false);
+      this.liteCanvas.selectNode(node);
+      this.deleteSelected();
+    } else if (action === "duplicate") {
+      this.closeContextMenu(false);
+      this.duplicateNode(node);
+    } else if (action === "center") {
+      this.liteCanvas.centerOnNode(node);
+      this.scheduleMinimapUpdate();
+      this.closeContextMenu();
+    } else if (action === "close") {
+      this.closeContextMenu();
+    }
+  }
+
+  handleContextMenuKey(event) {
+    const menu = this.contextMenu?.element;
+    if (!menu || !menu.contains(event.target)) return false;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      this.closeContextMenu();
+      return true;
+    }
+    const items = [...menu.querySelectorAll("[data-graph-context-add], [data-node-context-action]")];
+    const current = items.indexOf(document.activeElement);
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      const next = items[(Math.max(0, current) + direction + items.length) % items.length];
+      next?.focus();
+      return true;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const target = document.activeElement?.closest?.("[data-graph-context-add], [data-node-context-action]") || items[0];
+      if (target?.dataset.graphContextAdd) this.selectContextMenuNode(target.dataset.graphContextAdd);
+      else if (target?.dataset.nodeContextAction) this.handleNodeContextAction(target.dataset.nodeContextAction);
+      return true;
+    }
+    return false;
+  }
+
+  closeContextMenu(restoreFocus = true) {
+    if (this._contextMenuOutsideHandler) {
+      document.removeEventListener("pointerdown", this._contextMenuOutsideHandler, true);
+      this._contextMenuOutsideHandler = null;
+    }
+    this.contextMenu?.element?.remove();
+    this.contextMenu = null;
+    if (restoreFocus) this.canvasElement?.focus();
   }
 
   async refreshWorkflowLibrary() {
@@ -692,6 +1423,9 @@ class HubGraphEditor {
   destroy() {
     this.abort.abort();
     this.closeConnectionPicker(false);
+    this.closeContextMenu(false);
+    this.stopMinimapDrag();
+    this.stopMinimapLoop();
     if (this.pollTimer) clearInterval(this.pollTimer);
     if (this.autoTimer) clearTimeout(this.autoTimer);
     this.resizeObserver?.disconnect();
@@ -952,9 +1686,10 @@ class HubGraphEditor {
       if (LiteGraph.registered_node_types[typeName]) continue;
       const captured = definition;
       function HubLiteNode() {
-          this.title = nodeText(captured.title);
+        this.title = nodeText(captured.title);
         this.hubType = captured.type;
         this.properties = Object.fromEntries((captured.properties || []).map((property) => [property.name, clone(property.default)]));
+        this._hubInlineControls = new Map();
         for (const port of captured.inputs || []) {
           this.addInput(nodeText(port.label || port.name), port.type, { hubPort: port.name, required: Boolean(port.required), multi: Boolean(port.multi) });
           const input = this.inputs[this.inputs.length - 1];
@@ -974,7 +1709,37 @@ class HubGraphEditor {
         this.color = CATEGORY_COLORS[captured.category] || "#8794ad";
         this.bgcolor = "#172039";
         this.shape = "round";
-        this.size = [230, Math.max(82, 42 + Math.max((captured.inputs || []).length, (captured.outputs || []).length) * 22)];
+        this.widgets_start_y = 42 + Math.max((captured.inputs || []).length, (captured.outputs || []).length) * 22;
+        this.size = [230, Math.max(82, this.widgets_start_y)];
+        for (const property of captured.properties || []) {
+          const control = inlineControlMetadata(property);
+          if (!control) continue;
+          if (control.control === "color") {
+            const widget = createColorWidget(this, property, control);
+            this.addCustomWidget(widget);
+            this._hubInlineControls.set(property.name, widget);
+            continue;
+          }
+          const type = inlineWidgetType(control);
+          if (!type) continue;
+          const options = {
+            property: property.name,
+            multiline: control.multiline,
+            min: control.minimum,
+            max: control.maximum,
+            step: control.step,
+            values: control.options,
+            max_length: control.maxLength,
+            placeholder: control.placeholder,
+            unit: control.unit,
+          };
+          if (type === "slider" && (options.min === undefined || options.max === undefined)) continue;
+          const widget = this.addWidget(type, nodeText(control.label || property.name), this.properties[property.name], (value) => this._hubEditor?.handleWidgetCallback(this, property, value), options);
+          widget.hubControl = control.control;
+          widget.hubProperty = property.name;
+          this._hubInlineControls.set(property.name, widget);
+        }
+        this.size = this.computeSize();
       }
       HubLiteNode.title = nodeText(captured.title);
       // LiteGraph defaults unselected titles to #999 even on bright category
@@ -983,12 +1748,37 @@ class HubGraphEditor {
       HubLiteNode.title_text_color = "#ffffff";
       HubLiteNode.desc = captured.description;
       HubLiteNode.prototype.onDrawForeground = function drawHubNodeForeground(ctx) {
-        if (this.hubStatus && this.hubStatus !== "completed") {
-          ctx.save();
-          ctx.fillStyle = this.hubStatus === "failed" || this.hubStatus === "error" ? "#ef7885" : "#80aaff";
-          ctx.fillRect(this.size[0] - 12, 8, 5, 5);
-          ctx.restore();
+        const editor = this._hubEditor;
+        const state = editor?.nodeStates?.get(this.hubId) || { status: this.hubStatus || "not_run" };
+        ctx.save();
+        ctx.font = "9px sans-serif";
+        ctx.textAlign = "right";
+        for (const [index, port] of (captured.outputs || []).entries()) {
+          const outputState = outputSocketState(state, port.name);
+          const color = outputState === "completed" ? "#45d19a" : outputState === "running" ? "#80aaff" : outputState === "error" ? "#ef7885" : "#8794ad";
+          const y = 42 + index * 22;
+          const outputLabel = nodeText(port.label || port.name);
+          const stateLabel = outputSocketStateLabel(outputState);
+          const outputLabelWidth = ctx.measureText(outputLabel).width;
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.arc(this.size[0] - 8, y, 3, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "#c8d4f2";
+          ctx.fillText(stateLabel, Math.max(8, this.size[0] - 15 - outputLabelWidth - 6), y + 3);
         }
+        ctx.restore();
+      };
+      HubLiteNode.prototype.onWidgetChanged = function captureHubWidgetChange(name) {
+        // LiteGraph reports number/slider/toggle changes before its delayed
+        // property callback runs.  Capture the old graph here; commit only
+        // from the callback after the shared property has actually changed.
+        this._hubEditor?.captureWidgetBeforeChange(this, name);
+      };
+      HubLiteNode.prototype.onMouseDown = function captureHubWidgetMouseDown(_event, _position, canvas) {
+        const widget = canvas?.node_widget?.[1];
+        const propertyName = widget?.options?.property || widget?.hubProperty;
+        if (propertyName) this._hubEditor?.captureWidgetBeforeChange(this, propertyName);
       };
       HubLiteNode.prototype.onConnectInput = function guardOccupiedInput(slot) {
         const input = this.inputs?.[slot];
@@ -1073,7 +1863,7 @@ class HubGraphEditor {
         </details>
         <div class="graph-editor__layout">
           <aside class="graph-palette"><input type="search" data-graph-search placeholder="Tìm node…" aria-label="Tìm node" /><div data-graph-palette></div></aside>
-          <div class="graph-canvas-shell"><canvas class="graph-canvas" data-graph-canvas></canvas><div class="graph-canvas__actions"><button type="button" data-graph-action="fit">Fit</button><button type="button" data-graph-action="clear-selection">Bỏ chọn</button><button type="button" data-graph-action="delete">Xóa chọn</button></div><canvas class="graph-minimap" data-graph-minimap width="180" height="118" aria-label="Minimap graph"></canvas></div>
+           <div class="graph-canvas-shell"><canvas class="graph-canvas" data-graph-canvas></canvas><div class="graph-canvas__actions"><button type="button" data-graph-action="fit">Fit</button><button type="button" data-graph-action="auto-layout">Auto layout</button><button type="button" data-graph-action="clear-selection">Bỏ chọn</button><button type="button" data-graph-action="delete">Xóa chọn</button></div><canvas class="graph-minimap" data-graph-minimap width="180" height="118" aria-label="Minimap graph"></canvas></div>
           <aside class="graph-inspector" data-graph-inspector></aside>
         </div>
       </section>`;
@@ -1121,12 +1911,22 @@ class HubGraphEditor {
     this.liteCanvas.render_shadows = true;
     this.liteCanvas.render_connections_border = true;
     this.liteCanvas.links_render_mode = globalThis.LiteGraph.SPLINE_LINK;
+    this.liteCanvas.render_canvas_border = false;
+    this.liteCanvas.onDrawBackground = (ctx, area) => this.drawGraphGrid(ctx, area);
     this.liteCanvas.onBeforeChange = () => this.captureBeforeChange();
     this.liteCanvas.onAfterChange = () => this.captureAfterChange();
-    this.liteCanvas.onSelectionChange = () => { this.renderInspector(); this.drawMinimap(); };
-    this.liteCanvas.onNodeMoved = () => this.drawMinimap();
+    this.liteCanvas.onSelectionChange = () => { this.renderInspector(); this.scheduleMinimapUpdate(); };
+    this.liteCanvas.onNodeMoved = () => this.scheduleMinimapUpdate();
     this.liteCanvas.onMouse = (event) => this.handleCanvasMouse(event);
     this.liteCanvas.onPointerCancel = () => this.handleCanvasPointerCancel();
+    this.liteCanvas.ds.onredraw = () => this.scheduleMinimapUpdate();
+    // LiteGraph's default processContextMenu appends a document-level menu.
+    // Keep LiteGraph as the only editor while routing both targets through the
+    // Hub-owned, container-bounded menu below.
+    this.liteCanvas.processContextMenu = (node, event) => {
+      event?.preventDefault?.();
+      this.openContextMenu(node, event);
+    };
     this.liteGraph.onNodeConnectionChange = () => this.captureConnectionChange();
     this.bindConnectionPickerHook();
     this.bindCanvasShortcuts();
@@ -1137,6 +1937,7 @@ class HubGraphEditor {
     this.resizeObserver = new ResizeObserver(() => this.resizeCanvas());
     this.resizeObserver.observe(this.canvasElement.parentElement);
     this.resizeCanvas();
+    this.startMinimapLoop();
     localizeNodeStaticMarkup(this.root);
   }
 
@@ -1165,13 +1966,14 @@ class HubGraphEditor {
       if (event.target.matches("[data-graph-asset]")) { this.uploadAsset(event.target); return; }
       if (event.target.matches("[data-graph-import]")) { this.importGraph(event.target.files?.[0]); }
     }, { signal });
-    this.minimap.addEventListener("pointerdown", (event) => this.recenterFromMinimap(event), { signal });
+    this.minimap.addEventListener("pointerdown", (event) => this.startMinimapDrag(event), { signal });
     // LiteGraph owns a capture-phase canvas key handler.  Handle the Hub
     // shortcuts from document capture first, otherwise LiteGraph prevents the
     // Escape/Delete event before this adapter can make selection state and
     // persistence consistent.
     window.addEventListener("keydown", (event) => {
       if (!this.root.isConnected) return;
+      if (this.contextMenu && this.handleContextMenuKey(event)) return;
       if (this.connectionPicker && this.handlePickerKey(event)) return;
       if (this.isTextControl(event.target)) return;
       if (this.handleSelectionShortcut(event)) return;
@@ -1384,7 +2186,8 @@ class HubGraphEditor {
     node.hubType = definition.type;
     node.hubId = uid();
     node._hubEditor = this;
-    node.pos = [pending.position.x, pending.position.y];
+    const free = findFreeGridSlot(this.liteGraph._nodes, pending.position, node, { grid: NODE_GRID_SIZE, gap: NODE_LAYOUT_GAP_Y });
+    node.pos = [free.x, free.y];
     const targetSlot = pending.direction === "input" ? node.inputs?.findIndex((port) => port.hubPort === candidate.port.name) : node.outputs?.findIndex((port) => port.hubPort === candidate.port.name);
     if (targetSlot === undefined || targetSlot < 0) return false;
     let connected = false;
@@ -1496,7 +2299,7 @@ class HubGraphEditor {
     if (!this.liteCanvas || !this.canvasElement.isConnected) return;
     const box = this.canvasElement.parentElement.getBoundingClientRect();
     this.liteCanvas.resize(Math.max(320, Math.floor(box.width)), Math.max(340, Math.floor(box.height)));
-    this.drawMinimap();
+    this.scheduleMinimapUpdate();
   }
 
   renderPalette() {
@@ -1575,9 +2378,14 @@ class HubGraphEditor {
     const error = state.error ? String(state.error).slice(0, 240) : "none";
     const statusRows = [["Validation", validation], ["Dirty / downstream", dirty], ["Cache", cache], ["Progress", progress], ["Error", error]]
       .map(([label, value]) => `<div><dt>${escapeHtml(nodeText(label))}</dt><dd>${escapeHtml(nodeText(value))}</dd></div>`).join("");
+    const outputStates = (definition?.outputs || []).map((port) => {
+      const outputState = outputSocketState(state, port.name);
+      return `<li class="graph-output-state" data-output-state="${escapeHtml(outputState)}"><span class="graph-output-state__dot" aria-hidden="true"></span><span>${escapeHtml(nodeText(port.label || port.name))}</span><strong>${escapeHtml(outputSocketStateLabel(outputState))}</strong></li>`;
+    }).join("");
+    const outputMarkup = outputStates ? `<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Output states"))}</strong><ul class="graph-output-states">${outputStates}</ul></section>` : "";
     const capability = `<div class="graph-inspector__capability" data-status="${escapeHtml(displayStatus)}"><div class="graph-inspector__capability-head"><strong>${escapeHtml(nodeText(displayStatus))}</strong><span class="status-pill" data-status="${escapeHtml(displayStatus)}">${escapeHtml(nodeText(displayStatus))}</span></div><p>${escapeHtml(nodeText(displayMessage || "Snapshot chưa công bố thêm giải thích."))}</p></div>`;
     const nextAction = action || "Chưa có hành động tiếp theo trong snapshot này.";
-    this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(nodeText(definition?.category || "node"))}</span><h3>${escapeHtml(nodeText(definition?.title || node.hubType))}</h3><p>${escapeHtml(nodeText(definition?.description || ""))}</p></div></div><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Capability"))}</strong>${capability}</section><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Bước tiếp theo"))}</strong><div class="graph-action-hint"><span>${escapeHtml(nodeText(nextAction))}</span></div></section><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Execution status"))}</strong><dl class="graph-status-list">${statusRows}</dl></section>${preview ? `<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Artifact"))}</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Parameters"))}</strong>${(definition?.properties || []).map((property) => propertyControl(node, property)).join("") || `<p class="graph-empty">${escapeHtml(nodeText("Node này không có property."))}</p>`}</section>`;
+    this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(nodeText(definition?.category || "node"))}</span><h3>${escapeHtml(nodeText(definition?.title || node.hubType))}</h3><p>${escapeHtml(nodeText(definition?.description || ""))}</p></div></div><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Capability"))}</strong>${capability}</section><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Bước tiếp theo"))}</strong><div class="graph-action-hint"><span>${escapeHtml(nodeText(nextAction))}</span></div></section><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Execution status"))}</strong><dl class="graph-status-list">${statusRows}</dl></section>${outputMarkup}${preview ? `<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Artifact"))}</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Parameters"))}</strong>${(definition?.properties || []).map((property) => propertyControl(node, property)).join("") || `<p class="graph-empty">${escapeHtml(nodeText("Node này không có property."))}</p>`}</section>`;
     if (isMediaScope(this.scope)) {
       this.inspectorElement.querySelector(".graph-inspector__head")?.insertAdjacentHTML("afterend", this.operationEvidenceMarkup(operationEvidence ? definition : null));
       const inspectorState = this.inspectorElement.querySelector(".graph-node-state");
@@ -1616,7 +2424,7 @@ class HubGraphEditor {
     this.markDirty(next.nodes.map((node) => node.id));
     this.persist();
     this.renderInspector();
-    this.drawMinimap();
+    this.scheduleMinimapUpdate();
     this.renderGraphStatus();
     this.scheduleAutoPreview();
   }
@@ -1627,7 +2435,7 @@ class HubGraphEditor {
     this.liteGraph.afterChange();
   }
 
-  addNode(type) {
+  addNode(type, { position = null, center = true } = {}) {
     const definition = this.registry.get(type);
     if (!definition) return;
     const node = globalThis.LiteGraph.createNode(`local-ai-hub/${type}`);
@@ -1635,11 +2443,66 @@ class HubGraphEditor {
     node.hubType = type;
     node.hubId = uid();
     node._hubEditor = this;
-    const count = this.liteGraph._nodes.length;
-    node.pos = [260 + (count % 5) * 46, 130 + (count % 7) * 34];
+    const requested = position || this.liteCanvas.convertCanvasToOffset([this.canvasElement.width * 0.5, this.canvasElement.height * 0.5]);
+    const free = findFreeGridSlot(this.liteGraph._nodes, requested, node, { grid: NODE_GRID_SIZE, gap: NODE_LAYOUT_GAP_Y });
+    node.pos = [free.x, free.y];
     this.mutate(() => this.liteGraph.add(node));
     this.liteCanvas.selectNode(node);
-    this.liteCanvas.centerOnNode(node);
+    if (center) this.liteCanvas.centerOnNode(node);
+    this.scheduleMinimapUpdate();
+  }
+
+  duplicateNode(source) {
+    const definition = this.registry.get(source?.hubType);
+    if (!definition) return;
+    const node = globalThis.LiteGraph.createNode(`local-ai-hub/${definition.type}`);
+    if (!node) return;
+    node.hubType = definition.type;
+    node.hubId = uid();
+    node._hubEditor = this;
+    node.properties = { ...node.properties, ...(source.properties || {}) };
+    this.syncNodeWidgetsFromProperties(node);
+    const free = findFreeGridSlot(this.liteGraph._nodes, { x: Number(source.pos?.[0] || 0) + NODE_GRID_SIZE, y: Number(source.pos?.[1] || 0) + NODE_GRID_SIZE }, node, { grid: NODE_GRID_SIZE, gap: NODE_LAYOUT_GAP_Y });
+    node.pos = [free.x, free.y];
+    this.mutate(() => this.liteGraph.add(node));
+    this.liteCanvas.selectNode(node);
+    this.scheduleMinimapUpdate();
+  }
+
+  reflowCollisionFreeNodes() {
+    if (!this.liteGraph?._nodes?.length) return;
+    const values = this.liteGraph._nodes.map((node) => ({ id: node.hubId || String(node.id), pos: node.pos, size: node.size }));
+    const positions = new Map(collisionFreeNodePositions(values, { gap: 0, grid: NODE_GRID_SIZE, maxRadius: 64 }).map((item) => [item.id, item]));
+    this.liteGraph._nodes.forEach((node) => {
+      const position = positions.get(node.hubId || String(node.id));
+      if (!position) return;
+      node.pos = [position.x, position.y];
+      node.setDirtyCanvas?.(true, true);
+    });
+  }
+
+  syncNodeWidgetsFromProperties(node) {
+    for (const widget of node?.widgets || []) {
+      const name = widget?.options?.property || widget?.hubProperty;
+      if (name && Object.prototype.hasOwnProperty.call(node.properties || {}, name)) widget.value = node.properties[name];
+    }
+  }
+
+  autoLayout() {
+    if (!this.liteGraph?._nodes?.length) return;
+    const graph = this.toHubGraph();
+    const nodes = this.liteGraph._nodes.map((node) => ({ id: node.hubId || String(node.id), pos: node.pos, size: node.size }));
+    const positions = new Map(computeDeterministicLayout(nodes, graph.edges, { horizontalGap: NODE_LAYOUT_GAP_X, verticalGap: NODE_LAYOUT_GAP_Y, marginX: 80, marginY: 80 }).map((item) => [item.id, item]));
+    this.mutate(() => {
+      this.liteGraph._nodes.forEach((node) => {
+        const position = positions.get(node.hubId || String(node.id));
+        if (!position) return;
+        node.pos = [position.x, position.y];
+        node.setDirtyCanvas?.(true, true);
+      });
+    });
+    this.fitView();
+    this.scheduleMinimapUpdate();
   }
 
   selectAllNodes() {
@@ -1659,7 +2522,7 @@ class HubGraphEditor {
         node.setDirtyCanvas?.(true, true);
       });
     });
-    this.drawMinimap();
+    this.scheduleMinimapUpdate();
   }
 
   deleteSelected() {
@@ -1667,13 +2530,14 @@ class HubGraphEditor {
     if (!selected.length) return;
     this.mutate(() => selected.forEach((node) => this.liteGraph.remove(node)));
     this.liteCanvas.deselectAllNodes();
+    this.renderGraphStatus();
   }
 
   clearSelection() {
     if (!this.liteCanvas) return;
     this.liteCanvas.deselectAllNodes();
     this.renderInspector();
-    this.drawMinimap();
+    this.scheduleMinimapUpdate();
   }
 
   changeProperty(element) {
@@ -1682,9 +2546,84 @@ class HubGraphEditor {
     const definition = node && this.registry.get(node.hubType);
     const property = definition?.properties?.find((item) => item.name === name);
     if (!node || !property) return;
-    let value = element.type === "checkbox" ? element.checked : element.value;
-    if (property.kind === "number") value = asNumber(value, property.default ?? 0);
-    this.mutate(() => { node.properties[name] = value; node.setDirtyCanvas(true, true); });
+    const rawValue = element.type === "checkbox" ? element.checked : element.value;
+    const normalized = normalizeInlineControlValue(property, rawValue);
+    if (!normalized.accepted) {
+      this.showToast(`Không thể cập nhật ${property.label || name}: ${normalized.reason}.`, "warning");
+      this.renderInspector();
+      return;
+    }
+    this.mutate(() => {
+      node.setProperty(name, normalized.value);
+      this.syncNodeWidgetsFromProperties(node);
+      node.setDirtyCanvas(true, true);
+    });
+  }
+
+  captureWidgetBeforeChange(node, name) {
+    if (this.hydrating || !node || !name || this.widgetBeforeChange) return;
+    this.widgetBeforeChange = graphFingerprint(this.toHubGraph());
+  }
+
+  changeWidgetValue(node, property, rawValue) {
+    const normalized = normalizeInlineControlValue(property, rawValue);
+    if (!normalized.accepted) {
+      this.showToast(`Không thể cập nhật ${property.label || property.name}: ${normalized.reason}.`, "warning");
+      return false;
+    }
+    const before = this.widgetBeforeChange || graphFingerprint(this.toHubGraph());
+    this.widgetBeforeChange = null;
+    const previous = node.properties?.[property.name];
+    if (previous === normalized.value) return false;
+    node.setProperty(property.name, normalized.value);
+    node.setDirtyCanvas(true, true);
+    this.commitWidgetChange(before);
+    return true;
+  }
+
+  handleWidgetChange(node, name) {
+    if (this.hydrating || !node || !name) return;
+    this.captureWidgetBeforeChange(node, name);
+  }
+
+  handleWidgetCallback(node, property, rawValue) {
+    if (this.hydrating || !node || !property) return;
+    const normalized = normalizeInlineControlValue(property, rawValue);
+    const before = this.widgetBeforeChange || graphFingerprint(this.toHubGraph());
+    this.widgetBeforeChange = null;
+    if (!normalized.accepted) {
+      let previous;
+      try {
+        const snapshot = JSON.parse(before);
+        previous = snapshot.nodes?.find((item) => item.id === node.hubId)?.data?.[property.name];
+      } catch {
+        previous = property.default;
+      }
+      node.setProperty(property.name, previous ?? property.default ?? "");
+      this.syncNodeWidgetsFromProperties(node);
+      this.showToast(`Không thể cập nhật ${property.label || property.name}: ${normalized.reason}.`, "warning");
+      return;
+    }
+    node.setProperty(property.name, normalized.value);
+    node.setDirtyCanvas(true, true);
+    this.commitWidgetChange(before);
+  }
+
+  commitWidgetChange(before) {
+    const after = this.toHubGraph();
+    const beforeValue = typeof before === "string" ? before : graphFingerprint(before);
+    if (beforeValue === graphFingerprint(after)) return;
+    this.history.push(beforeValue);
+    if (this.history.length > MAX_HISTORY) this.history.shift();
+    this.future = [];
+    this.graphData = after;
+    this.runtimePreflightResult = null;
+    this.unsaved = true;
+    this.markDirty(after.nodes.map((item) => item.id));
+    this.persist();
+    this.renderInspector();
+    this.scheduleMinimapUpdate();
+    this.renderGraphStatus();
   }
 
   async uploadAsset(input) {
@@ -1695,7 +2634,7 @@ class HubGraphEditor {
     input.disabled = true;
     try {
       const artifact = await uploadFile(file);
-      this.mutate(() => { node.properties[name] = artifact.id; node.setDirtyCanvas(true, true); });
+      this.mutate(() => { node.setProperty(name, artifact.id); node.setDirtyCanvas(true, true); });
       this.showToast(`Đã dùng artifact ${artifact.name} trong node.`);
     } catch (error) {
       this.showToast(error.message, "error");
@@ -1746,6 +2685,7 @@ class HubGraphEditor {
       node._hubEditor = this;
       node.pos = [asNumber(source.position?.x, 80), asNumber(source.position?.y, 80)];
       node.properties = { ...node.properties, ...(source.data || {}) };
+      this.syncNodeWidgetsFromProperties(node);
       this.liteGraph.add(node);
       byHubId.set(node.hubId, node);
     }
@@ -1756,12 +2696,14 @@ class HubGraphEditor {
       const targetSlot = target?.inputs?.findIndex((port) => port.hubPort === edge.target?.port) ?? -1;
       if (source && target && sourceSlot >= 0 && targetSlot >= 0) source.connect(sourceSlot, target, targetSlot);
     }
-    this.graphData = clone(graph);
+    this.reflowCollisionFreeNodes();
+    const hydrated = this.toHubGraph();
+    this.graphData = { ...clone(graph), nodes: hydrated.nodes, edges: hydrated.edges, groups: clone(this.groups || []) };
     this.hydrating = false;
     this.liteCanvas.setDirty(true, true);
     if (this.liteGraph._nodes.length) this.fitView();
     this.renderInspector();
-    this.drawMinimap();
+    this.scheduleMinimapUpdate();
     this.renderGraphStatus();
   }
 
@@ -1811,6 +2753,8 @@ class HubGraphEditor {
 
   markDirty(changedIds) {
     const graph = this.toHubGraph();
+    const currentIds = new Set(graph.nodes.map((node) => node.id));
+    this.dirty.forEach((id) => { if (!currentIds.has(id)) this.dirty.delete(id); });
     const changed = new Set(changedIds);
     const pending = [...changed];
     while (pending.length) {
@@ -1821,7 +2765,7 @@ class HubGraphEditor {
     }
     changed.forEach((id) => this.dirty.add(id));
     getDirtyNodes(graph, [...changed]).then((result) => {
-      if (result.valid) result.dirty_nodes.forEach((id) => this.dirty.add(id));
+      if (result.valid) result.dirty_nodes.forEach((id) => { if (currentIds.has(id)) this.dirty.add(id); });
     }).catch(() => {});
   }
 
@@ -1980,38 +2924,63 @@ class HubGraphEditor {
   fitView() {
     const nodes = this.liteGraph._nodes;
     if (!nodes.length) return;
-    const left = Math.min(...nodes.map((node) => node.pos[0]));
-    const top = Math.min(...nodes.map((node) => node.pos[1]));
-    const right = Math.max(...nodes.map((node) => node.pos[0] + node.size[0]));
-    const bottom = Math.max(...nodes.map((node) => node.pos[1] + node.size[1]));
-    const zoom = Math.max(0.35, Math.min(1.15, Math.min(this.canvasElement.width / (right - left + 160), this.canvasElement.height / (bottom - top + 140))));
+    const bounds = graphBounds(nodes, 32);
+    const usableWidth = Math.max(240, this.canvasElement.width - 210);
+    const usableHeight = Math.max(240, this.canvasElement.height - 150);
+    const zoom = Math.max(0.35, Math.min(1.15, Math.min(usableWidth / Math.max(1, bounds.width), usableHeight / Math.max(1, bounds.height))));
     this.liteCanvas.ds.scale = zoom;
-    this.liteCanvas.ds.offset[0] = this.canvasElement.width / (2 * zoom) - (left + right) / 2;
-    this.liteCanvas.ds.offset[1] = this.canvasElement.height / (2 * zoom) - (top + bottom) / 2;
+    this.liteCanvas.ds.offset[0] = usableWidth / (2 * zoom) - (bounds.left + bounds.right) / 2;
+    this.liteCanvas.ds.offset[1] = usableHeight / (2 * zoom) - (bounds.top + bounds.bottom) / 2;
     this.liteCanvas.setDirty(true, true);
-    this.drawMinimap();
+    this.scheduleMinimapUpdate();
   }
 
   drawMinimap() {
     if (!this.minimap || !this.liteGraph) return;
     const ctx = this.minimap.getContext("2d");
+    if (!ctx) return;
     const { width, height } = this.minimap;
     ctx.clearRect(0, 0, width, height);
     ctx.fillStyle = "rgba(8, 13, 27, .94)";
     ctx.fillRect(0, 0, width, height);
     const nodes = this.liteGraph._nodes;
-    if (!nodes.length) return;
-    const left = Math.min(...nodes.map((node) => node.pos[0]));
-    const top = Math.min(...nodes.map((node) => node.pos[1]));
-    const right = Math.max(...nodes.map((node) => node.pos[0] + node.size[0]));
-    const bottom = Math.max(...nodes.map((node) => node.pos[1] + node.size[1]));
-    const scale = Math.min((width - 18) / Math.max(1, right - left), (height - 18) / Math.max(1, bottom - top));
-    const offsetX = (width - (right - left) * scale) / 2 - left * scale;
-    const offsetY = (height - (bottom - top) * scale) / 2 - top * scale;
+    if (!nodes.length) {
+      this.minimapBounds = null;
+      return;
+    }
+    const bounds = graphBounds(nodes, 24);
+    const scale = Math.min((width - 18) / bounds.width, (height - 18) / bounds.height);
+    const offsetX = (width - bounds.width * scale) / 2 - bounds.left * scale;
+    const offsetY = (height - bounds.height * scale) / 2 - bounds.top * scale;
+    const selected = new Set(Object.values(this.liteCanvas.selected_nodes || {}).map((node) => String(node.hubId || node.id)));
+
+    // Typed edges are drawn before nodes so the selected node remains legible.
+    for (const link of Object.values(this.liteGraph.links || {})) {
+      const source = nodes.find((node) => node.id === link.origin_id);
+      const target = nodes.find((node) => node.id === link.target_id);
+      if (!source || !target) continue;
+      const sourcePort = source.outputs?.[link.origin_slot];
+      const type = sourcePort?.type || "METADATA";
+      const startX = (Number(source.pos[0]) + Number(source.size[0])) * scale + offsetX;
+      const startY = (Number(source.pos[1]) + Number(source.size[1]) * 0.5) * scale + offsetY;
+      const endX = Number(target.pos[0]) * scale + offsetX;
+      const endY = (Number(target.pos[1]) + Number(target.size[1]) * 0.5) * scale + offsetY;
+      ctx.strokeStyle = socketColor(type);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(startX, startY);
+      ctx.lineTo(endX, endY);
+      ctx.stroke();
+    }
     for (const node of nodes) {
       const color = CATEGORY_COLORS[this.registry.get(node.hubType)?.category] || "#8794ad";
       ctx.fillStyle = color;
       ctx.fillRect(node.pos[0] * scale + offsetX, node.pos[1] * scale + offsetY, Math.max(4, node.size[0] * scale), Math.max(3, node.size[1] * scale));
+      if (selected.has(String(node.hubId || node.id))) {
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(node.pos[0] * scale + offsetX - 1, node.pos[1] * scale + offsetY - 1, Math.max(4, node.size[0] * scale) + 2, Math.max(3, node.size[1] * scale) + 2);
+      }
     }
     const viewLeft = -this.liteCanvas.ds.offset[0];
     const viewTop = -this.liteCanvas.ds.offset[1];
@@ -2020,20 +2989,52 @@ class HubGraphEditor {
     ctx.strokeStyle = "#edf2ff";
     ctx.lineWidth = 1;
     ctx.strokeRect(viewLeft * scale + offsetX, viewTop * scale + offsetY, viewWidth * scale, viewHeight * scale);
-    this.minimapBounds = { scale, offsetX, offsetY };
+    this.minimapBounds = { scale, offsetX, offsetY, graphBounds: bounds };
   }
 
   recenterFromMinimap(event) {
-    if (!this.minimapBounds) return;
+    if (!this.minimapBounds || !this.minimap) return;
     const rect = this.minimap.getBoundingClientRect();
-    const x = (event.clientX - rect.left) * this.minimap.width / rect.width;
-    const y = (event.clientY - rect.top) * this.minimap.height / rect.height;
+    const x = (event.clientX - rect.left) * this.minimap.width / Math.max(1, rect.width);
+    const y = (event.clientY - rect.top) * this.minimap.height / Math.max(1, rect.height);
     const graphX = (x - this.minimapBounds.offsetX) / this.minimapBounds.scale;
     const graphY = (y - this.minimapBounds.offsetY) / this.minimapBounds.scale;
     this.liteCanvas.ds.offset[0] = this.canvasElement.width / (2 * this.liteCanvas.ds.scale) - graphX;
     this.liteCanvas.ds.offset[1] = this.canvasElement.height / (2 * this.liteCanvas.ds.scale) - graphY;
     this.liteCanvas.setDirty(true, true);
-    this.drawMinimap();
+    this.scheduleMinimapUpdate();
+  }
+
+  startMinimapDrag(event) {
+    if (!this.minimap || event?.button !== undefined && event.button !== 0) return;
+    event?.preventDefault?.();
+    this.minimapDragging = { pointerId: event?.pointerId ?? "mouse" };
+    this.recenterFromMinimap(event);
+    this.minimap.setPointerCapture?.(event.pointerId);
+    const move = (moveEvent) => {
+      if (!this.minimapDragging || (moveEvent.pointerId ?? "mouse") !== this.minimapDragging.pointerId) return;
+      this.recenterFromMinimap(moveEvent);
+    };
+    const end = (endEvent) => {
+      if (!this.minimapDragging || (endEvent.pointerId ?? "mouse") !== this.minimapDragging.pointerId) return;
+      this.stopMinimapDrag();
+    };
+    this._minimapDragMove = move;
+    this._minimapDragEnd = end;
+    window.addEventListener("pointermove", move, true);
+    window.addEventListener("pointerup", end, true);
+    window.addEventListener("pointercancel", end, true);
+  }
+
+  stopMinimapDrag() {
+    if (this._minimapDragMove) window.removeEventListener("pointermove", this._minimapDragMove, true);
+    if (this._minimapDragEnd) {
+      window.removeEventListener("pointerup", this._minimapDragEnd, true);
+      window.removeEventListener("pointercancel", this._minimapDragEnd, true);
+    }
+    this._minimapDragMove = null;
+    this._minimapDragEnd = null;
+    this.minimapDragging = null;
   }
 
   handleAction(action) {
@@ -2049,6 +3050,7 @@ class HubGraphEditor {
     if (action === "redo") this.redo();
     if (action === "clear-selection") this.clearSelection();
     if (action === "delete") this.deleteSelected();
+    if (action === "auto-layout") this.autoLayout();
     if (action === "toggle-palette") this.updatePanelState({ palette: this.panelState.palette === "collapsed" ? "open" : "collapsed" });
     if (action === "toggle-inspector") this.updatePanelState({ inspector: this.panelState.inspector === "collapsed" ? "open" : "collapsed" });
     if (action === "toggle-canvas-focus") this.updatePanelState({ canvasFocus: !this.panelState.canvasFocus });
