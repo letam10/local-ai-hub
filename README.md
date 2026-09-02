@@ -6,6 +6,19 @@ V7 là lớp kiến trúc và productization phát triển tiếp từ V6. V5 v�
 
 > **Trạng thái V7 hiện tại:** Core, Desktop shell, API, catalog V2, component lifecycle foundation, storage/privacy hardening và nhiều workflow đã được chuẩn hóa. Tuy nhiên việc một model xuất hiện trong catalog **không đồng nghĩa model đó đã sẵn sàng tải và cài tự động**. Các trạng thái chưa đủ bằng chứng vẫn được hiển thị là `MANUAL_IMPORT_ONLY`, `MANUAL_INSTALL`, `AUTH_REQUIRED`, `PARTIAL`, `INSTALLED_UNVERIFIED` hoặc `UNAVAILABLE` thay vì nâng sai thành `OPERATIONAL`.
 
+## Milestone 3 — Unified Creative UX
+
+Milestone 3 đưa Vision Studio và SAM2 vào workspace trực quan dùng chung: input đi qua
+Artifact Store, job/progress/cancel hiển thị tại route hiện tại, còn Jobs vẫn là lịch sử
+canonical. Các adapter Vision/SAM2 chỉ được nâng lên `operational` sau bounded smoke
+khớp runtime; nếu thiếu resource hoặc evidence, UI phải giữ `partial`/`unavailable`.
+Result contract dùng artifact ID opaque và tọa độ normalized, không đưa path máy vào
+browser. Video/GPU smoke vẫn chịu resource-safety gate riêng và không được suy luận từ
+file presence.
+
+Khi mô tả machine setup, chỉ dùng các file mẫu được track dưới `Config/*.example.json`;
+config local và model/runtime state không thuộc source release.
+
 ## 1. Mục tiêu của dự án
 
 Local AI Hub được xây dựng theo các nguyên tắc chính:

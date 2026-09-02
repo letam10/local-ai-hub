@@ -4,6 +4,7 @@ import os
 from typing import Any
 
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
+from src.shared.schemas.vision import build_vision_annotation
 from src.shared.utils.adapter_common import (
     bounded_timeout,
     local_cache_root,
@@ -46,7 +47,18 @@ def parse(payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[
         owner=context,
         timeout_seconds=bounded_timeout(payload.get("timeout_seconds"), 300, maximum=300),
     )
-    return normalize_worker_result(result, component_id="omniparser", context=context, output_fields=("output", "files", "outputs"))
+    safe = normalize_worker_result(result, component_id="omniparser", context=context, output_fields=("output", "files", "outputs"))
+    if safe.get("status") == "completed":
+        try:
+            safe["annotation"] = build_vision_annotation(
+                payload.get("source_artifact_id") or payload.get("asset_id"),
+                safe,
+            )
+        except ValueError:
+            safe["status"] = "error"
+            safe["code"] = "vision_result_contract_invalid"
+            safe["error"] = "OmniParser không trả annotation đúng contract Hub."
+    return safe
 
 
 def capability() -> dict[str, Any]:

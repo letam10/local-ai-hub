@@ -20,6 +20,11 @@ from typing import Any
 
 from src.services import artifact_store
 from src.services.artifact_store import publicize
+from src.shared.schemas.vision import (
+    VisionContractError,
+    attach_published_artifacts,
+    validate_public_result_contract,
+)
 
 from .config import BASE_DIR
 
@@ -87,6 +92,7 @@ _RESULT_SCALAR_KEYS = {
     "message",
     "failure_code",
 }
+_RESULT_CONTRACT_KEYS = ("annotation", "selection")
 def _job_fingerprint(record: dict[str, Any]) -> str:
     """Return an opaque legacy-job binding for produced artifact provenance."""
 
@@ -170,6 +176,13 @@ def _publish_result(result: object, record: dict[str, Any]) -> tuple[dict[str, A
             value = _safe_result_scalar(result.get(key), key=key)
             if value is not None:
                 safe[key] = value
+    for key in _RESULT_CONTRACT_KEYS:
+        if key not in result:
+            continue
+        try:
+            safe[key] = validate_public_result_contract(result.get(key), key=key)
+        except VisionContractError:
+            return {"status": "failed", "error": "Worker trả result contract không hợp lệ."}, "result_contract"
     if status != "completed":
         return safe, None
 
@@ -217,6 +230,12 @@ def _publish_result(result: object, record: dict[str, Any]) -> tuple[dict[str, A
     ):
         return {"status": "failed", "error": "Output không thể publish thành artifact Hub hợp lệ."}, "output_publish"
     safe["artifacts"] = artifacts
+    for key in _RESULT_CONTRACT_KEYS:
+        if key in safe:
+            try:
+                safe[key] = attach_published_artifacts(safe[key], artifacts, key=key)
+            except VisionContractError:
+                return {"status": "failed", "error": "Artifact không khớp result contract."}, "result_contract"
     return safe, None
 
 

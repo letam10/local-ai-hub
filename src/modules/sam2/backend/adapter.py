@@ -13,6 +13,7 @@ from typing import Any
 
 from src.services.process_manager.managed import ProcessOwner, run_json_worker
 from src.services.artifact_store import describe
+from src.shared.schemas.vision import build_sam2_selection, normalize_tool_payload
 from src.shared.utils.adapter_common import (
     bounded_timeout,
     configured_path,
@@ -113,7 +114,20 @@ def _input_error(code: str) -> dict[str, Any]:
     }
 
 
+def _public_tool(operation: str) -> str:
+    return "track_video_object" if operation == "track_video" else operation
+
+
 def _run(operation: str, payload: dict[str, Any], context: ProcessOwner | None = None) -> dict[str, Any]:
+    normalized, selection_error = normalize_tool_payload(_public_tool(operation), payload)
+    if selection_error:
+        return {
+            "status": "error",
+            "component": "sam2",
+            "code": "selection_contract_invalid",
+            "error": selection_error,
+        }
+    payload = normalized
     contract = _runtime_contract()
     if contract is None or not WORKER.is_file():
         return unavailable("sam2", "SAM2 runtime, checkpoint hoặc environment canonical chưa hoàn chỉnh.", code="runtime_contract_missing")
@@ -143,7 +157,21 @@ def _run(operation: str, payload: dict[str, Any], context: ProcessOwner | None =
         owner=context,
         timeout_seconds=bounded_timeout(payload.get("timeout_seconds"), 1200, maximum=1200),
     )
-    return normalize_worker_result(result, component_id="sam2", context=context, output_fields=("output", "files", "outputs"))
+    safe = normalize_worker_result(result, component_id="sam2", context=context, output_fields=("output", "files", "outputs"))
+    if safe.get("status") == "completed" and operation != "load_model":
+        source_id = payload.get("source_artifact_id") or payload.get("asset_id")
+        try:
+            safe["selection"] = build_sam2_selection(
+                source_id,
+                frame_index=payload.get("frame_index", 0),
+                points=payload.get("points"),
+                box=payload.get("box"),
+            )
+        except ValueError:
+            safe["status"] = "error"
+            safe["code"] = "sam2_result_contract_invalid"
+            safe["error"] = "SAM2 không trả selection đúng contract Hub."
+    return safe
 
 
 def load_model(payload: dict[str, Any] | None = None, context: ProcessOwner | None = None) -> dict[str, Any]:
