@@ -69,7 +69,9 @@ class LocalRegistryRecoveryTests(unittest.TestCase):
             runtime_registry, "LOCAL_REGISTRY", Path(temporary) / "application_registry.local.json"
         ), patch.object(
             runtime_registry, "EXAMPLE_REGISTRY", ROOT / "Config" / "application_registry.example.json"
-        ), patch.object(runtime_registry, "_running_executables", side_effect=AssertionError("example must not query processes")):
+        ), patch.object(runtime_registry, "_running_executables", side_effect=AssertionError("example must not query processes")), patch.object(
+            runtime_registry, "_discover_windows_candidates", return_value=([], "airi_not_discovered", False)
+        ):
             (Path(temporary) / "application_registry.example.json").write_bytes(
                 (ROOT / "Config" / "application_registry.example.json").read_bytes()
             )

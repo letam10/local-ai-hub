@@ -45,6 +45,10 @@ domains:
     owner: [src/services/runtime_manager/]
     depends_on: [platform.paths, process-manager]
     forbidden: [model-weights, driver-CUDA-change]
+  application_registry:
+    owner: [src/services/runtime_registry.py]
+    depends_on: [platform, shared, process-manager]
+    forbidden: [ui, raw-public-paths, recursive-drive-scan, credential-read, external-install-mutation, browser-command-input]
   component_installer:
     owner: [src/services/component_installer/]
     depends_on: [model_manager, runtime_manager, platform.paths, shared]

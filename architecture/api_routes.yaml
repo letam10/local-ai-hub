@@ -2486,7 +2486,8 @@
         400,
         404,
         409,
-        500
+        500,
+        503
       ],
       "transport": "router",
       "transport_class": "JSON"
