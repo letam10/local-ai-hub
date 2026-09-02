@@ -17,10 +17,16 @@ from src.app.stable_shell import (
 from src.services.app_update import (
     AppUpdateError,
     AppUpdateService,
+    STABLE_UPDATE_REASON_CODES,
     UPDATE_SCHEMA,
+    UPDATE_STATE_SCHEMA,
+    _read_update_state,
     _classify_channel_relation,
     _safe_extract_app_archive,
     _safe_update_manifest,
+    _write_update_state,
+    reason_code_for,
+    update_error_projection,
 )
 from src.shared.version import PRODUCT_VERSION
 
@@ -143,6 +149,76 @@ class V8AppMainUpdateTests(unittest.TestCase):
             self.assertEqual(result["latest_build"], commit)
             self.assertEqual(result["current_build"], "legacy")
             self.assertEqual(result["transport"], "github_cli")
+            for field in (
+                "transaction_id", "phase", "progress", "can_prepare", "can_restart", "requires_restart",
+                "current_payload_id", "candidate_payload_id", "rollback_payload_id", "reason_code", "last_error_code",
+            ):
+                self.assertIn(field, result)
+            self.assertEqual(result["phase"], "update_available")
+            self.assertTrue(result["can_prepare"])
+            self.assertFalse(result["can_restart"])
+            self.assertTrue(result["requires_restart"])
+            self.assertEqual(result["candidate_payload_id"], f"main-{commit[:12]}")
+            self.assertIsNone(result["reason_code"])
+
+    def test_public_error_projection_is_complete_and_path_free(self) -> None:
+        value = update_error_projection(
+            "UPDATE_ARCHIVE_HASH_MISMATCH",
+            transaction_id="txn-" + "a" * 32,
+            current_payload_id="main-aaaaaaaaaaaa",
+            candidate_payload_id="main-bbbbbbbbbbbb",
+            rollback_payload_id="8.0.1",
+        )
+        self.assertEqual(value["reason_code"], "manifest_hash_mismatch")
+        self.assertEqual(value["last_error_code"], "UPDATE_ARCHIVE_HASH_MISMATCH")
+        self.assertEqual(value["phase"], "blocked")
+        self.assertFalse(value["can_prepare"])
+        self.assertFalse(value["can_restart"])
+        self.assertEqual(value["transaction_id"], "txn-" + "a" * 32)
+        self.assertNotIn("\\", json.dumps(value))
+        self.assertNotIn("/", json.dumps(value))
+
+    def test_error_reason_mapping_covers_p0_failure_classes(self) -> None:
+        expected = {
+            "UPDATE_DOWNLOAD_FAILED": "artifact_download_failed",
+            "UPDATE_COMMIT_MISMATCH": "artifact_identity_mismatch",
+            "UPDATE_ARCHIVE_HASH_MISMATCH": "manifest_hash_mismatch",
+            "UPDATE_IMPORT_PREFLIGHT_FAILED": "candidate_preflight_failed",
+            "ACTIVE_JOBS_BLOCK_UPDATE": "active_job_blocks_restart",
+            "EXTERNAL_OWNER_UNVERIFIED": "external_owner_detected",
+            "PORT_OWNERSHIP_UNKNOWN": "port_ownership_unknown",
+            "UPDATE_COMMIT_FAILED": "pointer_commit_failed",
+            "UPDATE_CANDIDATE_API_EXITED": "new_payload_process_failed",
+            "UPDATE_CANDIDATE_API_TIMEOUT": "api_readiness_timeout",
+            "UPDATE_CANDIDATE_FRONTEND_PREFLIGHT_FAILED": "frontend_readiness_timeout",
+            "WATCHDOG_ROLLBACK_FAILED": "watchdog_rollback_failed",
+            "WATCHDOG_RECOVERY_FAILED": "previous_payload_relaunch_failed",
+        }
+        for internal, public in expected.items():
+            with self.subTest(internal=internal):
+                self.assertEqual(reason_code_for(internal), public)
+                self.assertIn(public, STABLE_UPDATE_REASON_CODES)
+
+    def test_update_state_round_trip_has_only_bounded_public_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "install"
+            state = _write_update_state(
+                root,
+                phase="confirm_restart",
+                progress=100,
+                transaction_id="txn-" + "b" * 32,
+                can_restart=True,
+                requires_restart=True,
+                current_payload_id="main-aaaaaaaaaaaa",
+                candidate_payload_id="main-bbbbbbbbbbbb",
+                rollback_payload_id="8.0.1",
+            )
+            self.assertEqual(state["schema_version"], UPDATE_STATE_SCHEMA)
+            self.assertEqual(_read_update_state(root), state)
+            serialized = json.dumps(state)
+            self.assertNotIn("runtime", serialized)
+            self.assertNotIn("command", serialized)
+            self.assertNotIn("\\", serialized)
 
 
 if __name__ == "__main__":

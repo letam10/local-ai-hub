@@ -60,14 +60,22 @@ const shortBuild = (value) => {
 
 const statusLabel = (value) => ({
   available: "Có bản cập nhật",
+  update_available: "Có bản cập nhật",
   up_to_date: "Đã mới nhất",
+  idle: "Đang ổn định",
   checking: "Đang kiểm tra",
+  preparing: "Đang chuẩn bị",
   downloading: "Đang tải",
   verifying: "Đang xác minh",
   staging: "Đang stage",
   staged: "Đã stage · chờ khởi động lại",
+  confirm_restart: "Sẵn sàng khởi động lại",
   ready_to_restart: "Sẵn sàng khởi động lại",
   restarting: "Đang khởi động lại",
+  succeeded: "Đã cập nhật",
+  rolled_back: "Đã khôi phục phiên bản trước",
+  blocked: "Đang bị chặn an toàn",
+  error: "Cập nhật thất bại",
   rollback: "Đang rollback",
   auth_required: "Cần đăng nhập GitHub",
   oauth_configuration_required: "Cần cấu hình OAuth",
@@ -80,15 +88,20 @@ const statusLabel = (value) => ({
 }[value] || "Trạng thái cập nhật");
 
 const statusMessage = (value) => {
-  if (value?.status === "available") return "Main CI đã xanh và có payload mới đã được đóng gói. Bạn có thể xem thay đổi trước khi cập nhật.";
+  if (value?.phase === "preparing" && Number.isFinite(Number(value?.progress))) return `Đang chuẩn bị payload cập nhật (${Number(value.progress)}%).`;
+  if (value?.phase === "restarting") return `Đang khởi động lại Local AI Hub (${Number.isFinite(Number(value?.progress)) ? Number(value.progress) : 0}%).`;
+  if (value?.status === "available" || value?.phase === "update_available") return "Main CI đã xanh và có payload mới đã được đóng gói. Bạn có thể xem thay đổi trước khi cập nhật.";
   if (value?.status === "up_to_date") return "Local AI Hub đang chạy đúng build main mới nhất đã có artifact.";
+  if (value?.phase === "succeeded") return "Cập nhật đã vượt qua API/frontend readiness; payload hiện tại đang hoạt động bình thường.";
   if (value?.status === "auth_required") return "Repo là private. Hãy đăng nhập GitHub CLI một lần trên máy này; Hub không lưu hoặc hiển thị token.";
   if (value?.status === "oauth_configuration_required") return "Native GitHub Device Flow cần OAuth App client_id do chủ repo cung cấp; vẫn có thể dùng GitHub CLI đã đăng nhập.";
   if (value?.status === "blocked_active_jobs") return "Không thể cập nhật khi Hub còn job hoạt động. Dữ liệu và payload hiện tại vẫn được giữ nguyên.";
   if (value?.status === "incompatible_runtime") return "Payload yêu cầu runtime/launcher khác; updater đã fail-closed và chưa đổi current pointer.";
-  if (value?.status === "failed") return "Cập nhật không hoàn tất; payload hiện tại vẫn được giữ nguyên hoặc đã rollback.";
+  if (value?.phase === "rolled_back" || value?.status === "rolled_back" || value?.status === "rollback") return `Readiness của payload mới chưa đạt; app đã phục hồi payload trước. Mã lỗi: ${String(value?.reason_code || value?.code || "unknown")}. Kiểm tra Diagnostics rồi thử lại khi phù hợp.`;
+  if (value?.status === "failed" || value?.phase === "error") return `Cập nhật không hoàn tất; payload hiện tại vẫn được giữ nguyên. Mã lỗi: ${String(value?.reason_code || value?.code || "unknown")}.`;
+  if (value?.phase === "blocked") return `Cập nhật đang bị chặn an toàn. Mã lý do: ${String(value?.reason_code || value?.code || "unknown")}. Payload hiện tại và dữ liệu người dùng vẫn được giữ nguyên.`;
   if (value?.status === "no_artifact") return "Main chưa có update artifact thành công. Hub sẽ không cập nhật từ một build chưa qua CI.";
-  if (value?.status === "staged") return "Candidate đã được stage và xác minh; current pointer chưa đổi. Bấm khởi động lại để commit–restart an toàn.";
+  if (value?.status === "staged" || value?.phase === "confirm_restart") return "Candidate đã được stage và xác minh; current pointer chưa đổi. Chọn “Khởi động lại và cập nhật” khi bạn sẵn sàng, hoặc chọn “Để sau”.";
   if (value?.retry_attempts) return `Đã thử lại kiểm tra GitHub ${value.retry_attempts}/3 lần do lỗi tạm thời; kết quả hiện tại đã được xác minh.`;
   if (value?.code === "GITHUB_CLI_REQUIRED") return "Cần cài GitHub CLI (gh) để Hub đọc artifact của repo private mà không nhúng token vào ứng dụng.";
   return String(value?.action || "Không thể xác minh bản cập nhật lúc này; phiên bản đang chạy vẫn được giữ nguyên.");
@@ -100,7 +113,7 @@ const make = (tag, className = "") => {
   return node;
 };
 
-const showConfirmModal = ({ title, current, candidate, message, confirmLabel }) => new Promise((resolve) => {
+const showConfirmModal = ({ title, current, candidate, message, confirmLabel, cancelLabel = "Hủy" }) => new Promise((resolve) => {
   const overlay = make("div", "app-update-modal");
   overlay.setAttribute("role", "dialog");
   overlay.setAttribute("aria-modal", "true");
@@ -117,7 +130,7 @@ const showConfirmModal = ({ title, current, candidate, message, confirmLabel }) 
   const newValue = make("code"); newValue.textContent = String(candidate || "—");
   newBuild.append(newLabel, newValue); builds.append(oldBuild, newBuild);
   const actions = make("div", "app-update-modal__actions");
-  const cancel = make("button", "button button--compact"); cancel.type = "button"; cancel.textContent = "Hủy";
+  const cancel = make("button", "button button--compact"); cancel.type = "button"; cancel.textContent = cancelLabel;
   const confirm = make("button", "button button--compact"); confirm.type = "button"; confirm.textContent = confirmLabel;
   actions.append(cancel, confirm); panel.append(heading, copy, builds, actions); overlay.append(panel); document.body.append(overlay);
   const finish = (value) => { overlay.remove(); resolve(value); };
@@ -186,17 +199,17 @@ const ensureCard = () => {
 const render = (card, value) => {
   if (!card) return;
   lastStatus = value;
-  const state = String(value?.status || "unavailable");
+  const state = String(value?.phase || value?.status || "unavailable");
   card.dataset.state = state;
   card.querySelector("[data-update-badge]").textContent = statusLabel(state);
-  card.querySelector("[data-update-current]").textContent = shortBuild(value?.current_build || value?.current_payload);
-  card.querySelector("[data-update-latest]").textContent = shortBuild(value?.latest_build);
+  card.querySelector("[data-update-current]").textContent = shortBuild(value?.current_payload_id || value?.current_payload || value?.current_build);
+  card.querySelector("[data-update-latest]").textContent = shortBuild(value?.candidate_payload_id || value?.latest_payload || value?.latest_build);
   card.querySelector("[data-update-message]").textContent = statusMessage(value);
-  card.querySelector("[data-app-update-changes]").disabled = !value?.latest_build;
-  card.querySelector("[data-app-update-apply]").disabled = value?.available !== true;
+  card.querySelector("[data-app-update-changes]").disabled = !(value?.latest_build || value?.candidate_payload_id);
+  card.querySelector("[data-app-update-apply]").disabled = !(value?.can_prepare === true || value?.available === true);
   const restartButton = card.querySelector("[data-app-update-restart]");
-  restartButton.hidden = !(["staged", "activated", "ready_to_restart"].includes(state) && value?.restart_required !== false);
-  card.querySelector("[data-app-update-rollback]").hidden = !(["staged", "activated", "ready_to_restart", "restarting"].includes(state));
+  restartButton.hidden = !((value?.can_restart === true || ["staged", "activated", "ready_to_restart", "confirm_restart"].includes(state)) && value?.requires_restart !== false && value?.restart_required !== false);
+  card.querySelector("[data-app-update-rollback]").hidden = !(["staged", "activated", "ready_to_restart", "confirm_restart", "restarting"].includes(state) || value?.can_restart === true);
   const authButton = card.querySelector("[data-app-update-auth]");
   const needsAuth = value?.status === "auth_required" || value?.status === "oauth_configuration_required";
   authButton.hidden = !needsAuth;
@@ -243,31 +256,39 @@ const showChanges = async (card) => {
 };
 
 const applyUpdate = async (card) => {
-  if (!lastStatus?.available) return;
-  const latest = shortBuild(lastStatus.latest_build);
-  const confirmed = await showConfirmModal({
-    title: "Xác nhận cập nhật Local AI Hub",
-    current: shortBuild(lastStatus.current_build || lastStatus.current_payload),
-    candidate: `main@${latest}`,
-    message: "Payload cũ được giữ nguyên để rollback. Candidate chỉ đổi current pointer sau khi preflight đóng desktop đã sẵn sàng.",
-    confirmLabel: "Cập nhật",
-  });
-  if (!confirmed) return;
+  if (!(lastStatus?.can_prepare === true || lastStatus?.available === true)) return;
   const button = card.querySelector("[data-app-update-apply]");
   button.disabled = true;
-  render(card, { ...(lastStatus || {}), status: "downloading", available: true });
-  card.querySelector("[data-update-message]").textContent = "Đang tải, xác minh SHA, stage payload và kiểm tra imports…";
+  render(card, { ...(lastStatus || {}), status: "preparing", phase: "preparing", available: false, can_prepare: false, can_restart: false, requires_restart: true, progress: 5 });
+  card.querySelector("[data-update-message]").textContent = "Đang tải artifact, xác minh identity/hash, stage payload và chạy candidate preflight…";
   try {
     const value = await api(API.prepare, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: true }) });
-    lastStatus = { ...(lastStatus || {}), status: value.status, available: false, staged_payload: value.payload_id, staged_build: value.source_commit };
-    card.dataset.state = "ready_to_restart";
-    card.querySelector("[data-update-badge]").textContent = "Sẵn sàng khởi động lại";
-    card.querySelector("[data-update-current]").textContent = shortBuild(value.source_commit);
-    card.querySelector("[data-update-message]").textContent = "Payload mới đã được xác minh và stage an toàn; current pointer chưa đổi. Bấm khởi động lại để commit–restart. Launcher, shortcut và DATA_ROOT không thay đổi.";
-    card.querySelector("[data-app-update-restart]").hidden = value.restart_required !== true;
-    card.querySelector("[data-app-update-rollback]").hidden = false;
+    const staged = {
+      ...(lastStatus || {}),
+      ...value,
+      status: "staged",
+      phase: "confirm_restart",
+      available: false,
+      can_prepare: false,
+      can_restart: true,
+      requires_restart: true,
+      staged_payload: value.payload_id,
+      staged_build: value.source_commit,
+      candidate_payload_id: value.candidate_payload_id || value.payload_id,
+    };
+    render(card, staged);
+    const confirmed = await showConfirmModal({
+      title: "Bản cập nhật đã sẵn sàng",
+      current: shortBuild(staged.current_payload_id || staged.current_payload || staged.current_build),
+      candidate: shortBuild(staged.candidate_payload_id || staged.payload_id || staged.source_commit),
+      message: "Artifact và candidate preflight đã đạt. Payload cũ được giữ nguyên để rollback; current pointer chỉ đổi sau khi bạn xác nhận khởi động lại.",
+      confirmLabel: "Khởi động lại và cập nhật",
+      cancelLabel: "Để sau",
+    });
+    if (confirmed) await restart(card);
   } catch (error) {
-    card.querySelector("[data-update-message]").textContent = `Cập nhật bị chặn an toàn: ${error.payload?.code || error.message}. Bản đang chạy không bị thay đổi.`;
+    const code = error.payload?.reason_code || error.payload?.code || error.message;
+    card.querySelector("[data-update-message]").textContent = `Cập nhật bị chặn an toàn: ${code}. Bản đang chạy không bị thay đổi.`;
     button.disabled = false;
   }
 };
@@ -275,7 +296,7 @@ const applyUpdate = async (card) => {
 const restart = async (card) => {
   const button = card.querySelector("[data-app-update-restart]");
   button.disabled = true;
-  render(card, { ...(lastStatus || {}), status: "restarting", available: false });
+  render(card, { ...(lastStatus || {}), status: "restarting", phase: "restarting", available: false, can_prepare: false, can_restart: false, progress: 85 });
   card.querySelector("[data-update-message]").textContent = "Đang khởi động lại Local AI Hub bằng stable launcher…";
   try {
     const bridge = window.pywebview?.api;
@@ -283,7 +304,16 @@ const restart = async (card) => {
     const value = await bridge.restart_after_update();
     if (value?.status !== "completed") throw new Error(value?.code || "Restart bị chặn.");
   } catch (error) {
-    card.querySelector("[data-update-message]").textContent = `${error.message} Bạn có thể đóng Local AI Hub và mở lại shortcut Desktop; payload mới đã được stage an toàn.`;
+    const failed = {
+      ...(lastStatus || {}),
+      status: "staged",
+      phase: "confirm_restart",
+      can_prepare: false,
+      can_restart: true,
+      requires_restart: true,
+    };
+    render(card, failed);
+    card.querySelector("[data-update-message]").textContent = `${error.message} Mã lỗi: ${error.payload?.reason_code || error.payload?.code || "restart_failed"}. Payload mới vẫn được stage an toàn; bạn có thể thử lại hoặc chọn rollback.`;
     button.disabled = false;
   }
 };
@@ -299,9 +329,10 @@ const rollback = async (card) => {
   if (!confirmed) return;
   const button = card.querySelector("[data-app-update-rollback]");
   button.disabled = true;
-  render(card, { ...(lastStatus || {}), status: "rollback", available: false });
+  render(card, { ...(lastStatus || {}), status: "rollback", phase: "restarting", available: false, can_prepare: false, can_restart: false, progress: 85 });
   try {
     const value = await api(API.rollback, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: true }) });
+    render(card, { ...(lastStatus || {}), ...value, status: "rolled_back", phase: "rolled_back", available: false, can_prepare: false, can_restart: false, requires_restart: true, current_payload_id: value.payload_id });
     card.querySelector("[data-update-message]").textContent = `Đã quay pointer về ${value.payload_id}. Khởi động lại để áp dụng.`;
     card.querySelector("[data-app-update-restart]").hidden = false;
   } catch (error) {

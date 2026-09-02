@@ -40,3 +40,37 @@ or rewritten by this transaction.
 GitHub update checks use at most three attempts for transient network/service
 failures (bounded backoff). Authentication, permission, malformed JSON,
 identity and hash failures are permanent and are not retried.
+
+## Public updater state contract
+
+`GET /api/app-update/status` keeps the historical build fields for older
+frontends and additionally publishes the bounded transaction projection:
+
+```text
+transaction_id
+phase
+progress
+can_prepare
+can_restart
+requires_restart
+current_payload_id
+candidate_payload_id
+rollback_payload_id
+reason_code
+last_error_code
+```
+
+`phase` is one of `idle`, `checking`, `update_available`, `preparing`,
+`staged`, `confirm_restart`, `restarting`, `succeeded`, `rolled_back`,
+`blocked`, or `error`. `transaction_id` and payload IDs are opaque identifiers;
+they are never filesystem paths, executable paths, runtime paths, or command
+lines. `reason_code` is a stable lower-case classification while
+`last_error_code` retains the bounded internal diagnostic label. Unknown
+internal failures map to the stable `update_failed` classification.
+
+After artifact verification and candidate preflight, the dashboard displays
+`Bản cập nhật đã sẵn sàng` with the actions `Khởi động lại và cập nhật` and
+`Để sau`. The latter leaves the candidate staged and does not call the native
+restart bridge. Pointer activation remains owned by the native bridge after an
+explicit restart action; API/frontend readiness and watchdog rollback update
+the same state projection without modifying user data or job records.

@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import socket
 import stat
@@ -75,10 +76,308 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PAYLOAD_RE = re.compile(r"^main-[0-9a-f]{12}$")
 _RUNTIME_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_TRANSACTION_RE = re.compile(r"^txn-[0-9a-f]{32}$")
+_OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+UPDATE_STATE_SCHEMA = "local-ai-hub-update-state.v1"
+UPDATE_STATE_FILE = "updater-state.json"
+UPDATE_PHASES = (
+    "idle",
+    "checking",
+    "update_available",
+    "preparing",
+    "staged",
+    "confirm_restart",
+    "restarting",
+    "succeeded",
+    "rolled_back",
+    "blocked",
+    "error",
+)
+STABLE_UPDATE_REASON_CODES = frozenset({
+    "artifact_download_failed",
+    "artifact_identity_mismatch",
+    "manifest_hash_mismatch",
+    "candidate_preflight_failed",
+    "active_job_blocks_restart",
+    "external_owner_detected",
+    "port_ownership_unknown",
+    "pointer_commit_failed",
+    "new_payload_process_failed",
+    "api_readiness_timeout",
+    "frontend_readiness_timeout",
+    "watchdog_rollback_failed",
+    "previous_payload_relaunch_failed",
+    # Stable classifications needed by the public status surface for checks
+    # that are not failures in the artifact/restart transaction itself.
+    "authentication_required",
+    "artifact_not_found",
+    "channel_update_blocked",
+    "channel_relation_unavailable",
+    "update_transaction_busy",
+    "staged_update_invalid",
+    "rollback_unavailable",
+    "state_unavailable",
+    "update_failed",
+})
+
+_ERROR_REASON_CODES = {
+    "UPDATE_DOWNLOAD_FAILED": "artifact_download_failed",
+    "GITHUB_API_FAILED": "artifact_download_failed",
+    "GITHUB_CLI_FAILED": "artifact_download_failed",
+    "GITHUB_RUNS_INVALID": "artifact_download_failed",
+    "UPDATE_ARTIFACT_NOT_FOUND": "artifact_not_found",
+    "UPDATE_IDENTITY_MISMATCH": "artifact_identity_mismatch",
+    "UPDATE_MANIFEST_INVALID": "artifact_identity_mismatch",
+    "UPDATE_MANIFEST_TOO_LARGE": "artifact_identity_mismatch",
+    "UPDATE_PRODUCT_VERSION_MISMATCH": "artifact_identity_mismatch",
+    "UPDATE_COMMIT_MISMATCH": "artifact_identity_mismatch",
+    "UPDATE_PAYLOAD_ID_INVALID": "artifact_identity_mismatch",
+    "UPDATE_ARCHIVE_IDENTITY_INVALID": "artifact_identity_mismatch",
+    "UPDATE_CONTRACT_INVALID": "artifact_identity_mismatch",
+    "UPDATE_KIND_UNSUPPORTED": "artifact_identity_mismatch",
+    "UPDATE_APP_PROTOCOL_INCOMPATIBLE": "artifact_identity_mismatch",
+    "UPDATE_RUNTIME_CONTRACT_MISMATCH": "artifact_identity_mismatch",
+    "UPDATE_RUNTIME_STRATEGY_UNSUPPORTED": "artifact_identity_mismatch",
+    "UPDATE_ARCHIVE_HASH_MISMATCH": "manifest_hash_mismatch",
+    "UPDATE_CONTRACT_HASH_MISMATCH": "manifest_hash_mismatch",
+    "UPDATE_CHECKSUM_MANIFEST_MISSING": "manifest_hash_mismatch",
+    "UPDATE_ARCHIVE_FILE_COUNT_MISMATCH": "artifact_identity_mismatch",
+    "UPDATE_ARCHIVE_PATH_INVALID": "artifact_identity_mismatch",
+    "UPDATE_ARCHIVE_TOO_LARGE": "artifact_identity_mismatch",
+    "UPDATE_EXTRACTED_SIZE_LIMIT": "artifact_identity_mismatch",
+    "UPDATE_ARCHIVE_EMPTY": "artifact_identity_mismatch",
+    "STAGED_MANIFEST_HASH_MISMATCH": "manifest_hash_mismatch",
+    "UPDATE_IMPORT_PREFLIGHT_FAILED": "candidate_preflight_failed",
+    "CURRENT_RUNTIME_UNAVAILABLE": "candidate_preflight_failed",
+    "FULL_RUNTIME_PAYLOAD_MISSING": "candidate_preflight_failed",
+    "UPDATE_RUNTIME_HASH_MISMATCH": "artifact_identity_mismatch",
+    "UPDATE_RUNTIME_REPARSE": "artifact_identity_mismatch",
+    "UPDATE_RUNTIME_BOUNDS_EXCEEDED": "artifact_identity_mismatch",
+    "UPDATE_TARGET_CONFLICT": "candidate_preflight_failed",
+    "UPDATE_PREPARE_FAILED": "candidate_preflight_failed",
+    "UPDATE_CANDIDATE_IDENTITY_INVALID": "candidate_preflight_failed",
+    "UPDATE_CANDIDATE_RUNTIME_UNAVAILABLE": "candidate_preflight_failed",
+    "UPDATE_CANDIDATE_PORT_UNAVAILABLE": "port_ownership_unknown",
+    "UPDATE_CANDIDATE_API_TIMEOUT": "api_readiness_timeout",
+    "UPDATE_CANDIDATE_API_START_FAILED": "new_payload_process_failed",
+    "UPDATE_CANDIDATE_API_EXITED": "new_payload_process_failed",
+    "UPDATE_CANDIDATE_FRONTEND_PREFLIGHT_FAILED": "frontend_readiness_timeout",
+    "UPDATE_CANDIDATE_BOOTSTRAP_PREFLIGHT_FAILED": "frontend_readiness_timeout",
+    "FRONTEND_BUILD_UNAVAILABLE": "frontend_readiness_timeout",
+    "UPDATE_COMMIT_FAILED": "pointer_commit_failed",
+    "UPDATE_STATE_WRITE_FAILED": "pointer_commit_failed",
+    "UPDATE_STATE_CLEAR_FAILED": "pointer_commit_failed",
+    "UPDATE_STATE_INVALID": "state_unavailable",
+    "UPDATE_PENDING_HEALTH_INVALID": "pointer_commit_failed",
+    "STAGED_CURRENT_POINTER_CHANGED": "pointer_commit_failed",
+    "DESKTOP_CLOSE_AUTHORIZATION_FAILED": "pointer_commit_failed",
+    "DESKTOP_DESTROY_FAILED": "pointer_commit_failed",
+    "DESKTOP_RESTART_TRANSACTION_UNAVAILABLE": "pointer_commit_failed",
+    "STABLE_LAUNCHER_UNAVAILABLE": "new_payload_process_failed",
+    "UPDATE_WATCHDOG_UNAVAILABLE": "new_payload_process_failed",
+    "WATCHDOG_LAUNCH_FAILED": "new_payload_process_failed",
+    "WATCHDOG_LAUNCH_FAILED_ROLLBACK": "new_payload_process_failed",
+    "WATCHDOG_PARENT_TIMEOUT_ROLLBACK": "watchdog_rollback_failed",
+    "WATCHDOG_POST_RESTART_HEALTH_FAILED": "api_readiness_timeout",
+    "WATCHDOG_ROLLBACK_FAILED": "watchdog_rollback_failed",
+    "WATCHDOG_RECOVERY_FAILED": "previous_payload_relaunch_failed",
+    "ACTIVE_JOBS_BLOCK_UPDATE": "active_job_blocks_restart",
+    "ACTIVE_OR_UNKNOWN_JOBS": "active_job_blocks_restart",
+    "EXTERNAL_OWNER_ACTIVE": "external_owner_detected",
+    "EXTERNAL_OWNER_UNVERIFIED": "external_owner_detected",
+    "PORT_OWNERSHIP_UNKNOWN": "port_ownership_unknown",
+    "GITHUB_AUTH_REQUIRED": "authentication_required",
+    "OAUTH_AUTH_REQUIRED": "authentication_required",
+    "OAUTH_LOGIN_REQUIRED": "authentication_required",
+    "OAUTH_TOKEN_INVALID": "authentication_required",
+    "GITHUB_CLI_REQUIRED": "authentication_required",
+    "GITHUB_CLI_INVALID": "authentication_required",
+    "CREDENTIAL_STORE_UNAVAILABLE": "authentication_required",
+    "UPDATE_TRANSACTION_BUSY": "update_transaction_busy",
+    "STAGED_UPDATE_INVALID": "staged_update_invalid",
+    "STAGED_PAYLOAD_INVALID": "staged_update_invalid",
+    "STAGED_PAYLOAD_UNAVAILABLE": "staged_update_invalid",
+    "STAGED_RUNTIME_UNAVAILABLE": "staged_update_invalid",
+    "ROLLBACK_POINTER_UNAVAILABLE": "rollback_unavailable",
+    "ROLLBACK_POINTER_INVALID": "rollback_unavailable",
+    "INSTALLED_PRODUCT_REQUIRED": "state_unavailable",
+    "CLOSE_PREFLIGHT_UNAVAILABLE": "active_job_blocks_restart",
+    "RUNNING_PAYLOAD_INVALID": "candidate_preflight_failed",
+    "STAGED_RUNNING_PAYLOAD_MISMATCH": "candidate_preflight_failed",
+    "NO_STAGED_PAYLOAD": "rollback_unavailable",
+}
+
+_STATUS_REASON_CODES = {
+    "blocked_current_ahead_of_main": "channel_update_blocked",
+    "blocked_channel_diverged": "channel_update_blocked",
+    "channel_relation_unavailable": "channel_relation_unavailable",
+    "auth_required": "authentication_required",
+    "oauth_configuration_required": "authentication_required",
+    "unavailable": "state_unavailable",
+    "no_artifact": "artifact_not_found",
+}
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _update_state_path(root: Path) -> Path:
+    return root / "update-state" / UPDATE_STATE_FILE
+
+
+def _new_transaction_id() -> str:
+    """Return an opaque transaction identifier safe for public projection."""
+
+    return f"txn-{secrets.token_hex(16)}"
+
+
+def _safe_opaque_id(value: object) -> str | None:
+    if not isinstance(value, str) or _OPAQUE_ID_RE.fullmatch(value) is None:
+        return None
+    return value
+
+
+def reason_code_for(error_code: object) -> str:
+    """Map internal error labels to the stable public updater vocabulary."""
+
+    value = str(error_code or "")
+    if value in STABLE_UPDATE_REASON_CODES:
+        return value
+    return _ERROR_REASON_CODES.get(value, "update_failed")
+
+
+def _write_update_state(
+    root: Path,
+    *,
+    phase: str,
+    progress: int,
+    transaction_id: str | None = None,
+    can_prepare: bool = False,
+    can_restart: bool = False,
+    requires_restart: bool = False,
+    current_payload_id: str | None = None,
+    candidate_payload_id: str | None = None,
+    rollback_payload_id: str | None = None,
+    reason_code: str | None = None,
+    last_error_code: str | None = None,
+) -> dict[str, Any]:
+    """Persist only bounded updater state; never persist paths or commands."""
+
+    if phase not in UPDATE_PHASES or not isinstance(progress, int) or isinstance(progress, bool) or not 0 <= progress <= 100:
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if transaction_id is not None and _TRANSACTION_RE.fullmatch(transaction_id) is None:
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    for value in (current_payload_id, candidate_payload_id, rollback_payload_id):
+        if value is not None and _safe_opaque_id(value) is None:
+            raise AppUpdateError("UPDATE_STATE_INVALID")
+    if reason_code is not None and reason_code not in STABLE_UPDATE_REASON_CODES:
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if last_error_code is not None and re.fullmatch(r"[A-Z][A-Z0-9_]{2,95}", last_error_code) is None:
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    value: dict[str, Any] = {
+        "schema_version": UPDATE_STATE_SCHEMA,
+        "transaction_id": transaction_id,
+        "phase": phase,
+        "progress": progress,
+        "can_prepare": bool(can_prepare),
+        "can_restart": bool(can_restart),
+        "requires_restart": bool(requires_restart),
+        "current_payload_id": current_payload_id,
+        "candidate_payload_id": candidate_payload_id,
+        "rollback_payload_id": rollback_payload_id,
+        "reason_code": reason_code,
+        "last_error_code": last_error_code,
+        "updated_at": _utc_now(),
+    }
+    _write_json_atomic(_update_state_path(root), value)
+    return value
+
+
+def _try_write_update_state(root: Path, **kwargs: Any) -> dict[str, Any] | None:
+    """Best-effort state publication; transaction safety remains authoritative."""
+
+    try:
+        return _write_update_state(root, **kwargs)
+    except (AppUpdateError, OSError, UnicodeError, ValueError):
+        return None
+
+
+def _read_update_state(root: Path) -> dict[str, Any] | None:
+    path = _update_state_path(root)
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        value = _safe_json_file(path, max_bytes=64 * 1024)
+    except (OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError, AppUpdateError) as exc:
+        raise AppUpdateError("UPDATE_STATE_INVALID") from exc
+    required = {
+        "schema_version", "transaction_id", "phase", "progress", "can_prepare", "can_restart",
+        "requires_restart", "current_payload_id", "candidate_payload_id", "rollback_payload_id",
+        "reason_code", "last_error_code", "updated_at",
+    }
+    if set(value) != required or value.get("schema_version") != UPDATE_STATE_SCHEMA:
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    transaction_id = value.get("transaction_id")
+    if transaction_id is not None and (not isinstance(transaction_id, str) or _TRANSACTION_RE.fullmatch(transaction_id) is None):
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if value.get("phase") not in UPDATE_PHASES:
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    progress = value.get("progress")
+    if isinstance(progress, bool) or not isinstance(progress, int) or not 0 <= progress <= 100:
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    for key in ("can_prepare", "can_restart", "requires_restart"):
+        if not isinstance(value.get(key), bool):
+            raise AppUpdateError("UPDATE_STATE_INVALID")
+    for key in ("current_payload_id", "candidate_payload_id", "rollback_payload_id"):
+        item = value.get(key)
+        if item is not None and _safe_opaque_id(item) is None:
+            raise AppUpdateError("UPDATE_STATE_INVALID")
+    reason = value.get("reason_code")
+    if reason is not None and reason not in STABLE_UPDATE_REASON_CODES:
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    error = value.get("last_error_code")
+    if error is not None and (not isinstance(error, str) or re.fullmatch(r"[A-Z][A-Z0-9_]{2,95}", error) is None):
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if not isinstance(value.get("updated_at"), str):
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    return dict(value)
+
+
+def update_error_projection(
+    error_code: object,
+    *,
+    status: str = "blocked",
+    transaction_id: str | None = None,
+    current_payload_id: str | None = None,
+    candidate_payload_id: str | None = None,
+    rollback_payload_id: str | None = None,
+    active_jobs: int | None = None,
+) -> dict[str, Any]:
+    """Build a complete, path-free error response for API/bridge callers."""
+
+    code = str(error_code or "UPDATE_FAILED")
+    phase = "blocked" if status == "blocked" else "error"
+    value: dict[str, Any] = {
+        "status": status,
+        "code": code,
+        "phase": phase,
+        "progress": 0,
+        "can_prepare": False,
+        "can_restart": False,
+        "requires_restart": False,
+        "transaction_id": transaction_id if _TRANSACTION_RE.fullmatch(transaction_id or "") else None,
+        "current_payload_id": _safe_opaque_id(current_payload_id),
+        "candidate_payload_id": _safe_opaque_id(candidate_payload_id),
+        "rollback_payload_id": _safe_opaque_id(rollback_payload_id),
+        "reason_code": reason_code_for(code),
+        "last_error_code": code if re.fullmatch(r"[A-Z][A-Z0-9_]{2,95}", code) else "UPDATE_FAILED",
+        "execution": "not_run",
+    }
+    if active_jobs is not None:
+        value["active_jobs"] = active_jobs
+    return value
 
 
 def _staged_update_path(root: Path) -> Path:
@@ -230,13 +529,23 @@ def _pending_health_path(root: Path) -> Path:
     return root / "update-state" / "pending-health.json"
 
 
-def _record_pending_health(root: Path, *, previous: dict[str, Any], payload_id: str, source_commit: str) -> None:
-    _write_json_atomic(_pending_health_path(root), {
+def _record_pending_health(
+    root: Path,
+    *,
+    previous: dict[str, Any],
+    payload_id: str,
+    source_commit: str,
+    transaction_id: str | None = None,
+) -> None:
+    value: dict[str, Any] = {
         "schema_version": PENDING_HEALTH_SCHEMA,
         "payload_id": payload_id,
         "source_commit": source_commit,
         "previous": previous,
-    })
+    }
+    if transaction_id is not None and _TRANSACTION_RE.fullmatch(transaction_id):
+        value["transaction_id"] = transaction_id
+    _write_json_atomic(_pending_health_path(root), value)
 
 
 def _write_restart_session(root: Path, value: dict[str, Any]) -> None:
@@ -259,7 +568,8 @@ def _read_staged_update(root: Path) -> dict[str, Any] | None:
         "schema_version", "payload_id", "source_commit", "payload_relative",
         "manifest_sha256", "previous", "staged_at", "update_kind",
     }
-    if set(value) != expected or value.get("schema_version") != STAGED_UPDATE_SCHEMA:
+    allowed = expected | {"transaction_id"}
+    if not expected.issubset(value) or not set(value).issubset(allowed) or value.get("schema_version") != STAGED_UPDATE_SCHEMA:
         raise AppUpdateError("STAGED_UPDATE_INVALID")
     payload_id = value.get("payload_id")
     source_commit = value.get("source_commit")
@@ -274,6 +584,13 @@ def _read_staged_update(root: Path) -> dict[str, Any] | None:
         or not isinstance(value.get("previous"), dict)
         or not isinstance(value.get("staged_at"), str)
         or value.get("update_kind") not in {UPDATE_KIND_APP_ONLY, UPDATE_KIND_FULL}
+        or (
+            value.get("transaction_id") is not None
+            and (
+                not isinstance(value.get("transaction_id"), str)
+                or _TRANSACTION_RE.fullmatch(str(value.get("transaction_id"))) is None
+            )
+        )
     ):
         raise AppUpdateError("STAGED_UPDATE_INVALID")
     return dict(value)
@@ -320,6 +637,11 @@ def mark_startup_health(
     pending = _safe_json_file(pending_path, max_bytes=64 * 1024)
     if pending.get("schema_version") != PENDING_HEALTH_SCHEMA or not isinstance(pending.get("previous"), dict):
         raise AppUpdateError("UPDATE_PENDING_HEALTH_INVALID")
+    transaction_id = pending.get("transaction_id") if isinstance(pending.get("transaction_id"), str) else None
+    if pending.get("transaction_id") is not None and transaction_id is None:
+        raise AppUpdateError("UPDATE_PENDING_HEALTH_INVALID")
+    if transaction_id is not None and _TRANSACTION_RE.fullmatch(transaction_id) is None:
+        raise AppUpdateError("UPDATE_PENDING_HEALTH_INVALID")
     current = load_current_pointer(root)
     build_path = root / str(current.get("payload_relative")) / "build.json"
     build = _safe_json_file(build_path, max_bytes=32 * 1024)
@@ -342,6 +664,14 @@ def mark_startup_health(
         except OSError as exc:
             raise AppUpdateError("UPDATE_STATE_CLEAR_FAILED") from exc
         _unlink_state(_staged_update_path(root))
+        _try_write_update_state(
+            root,
+            phase="succeeded",
+            progress=100,
+            transaction_id=transaction_id,
+            current_payload_id=current.get("version"),
+            rollback_payload_id=pending.get("previous", {}).get("version"),
+        )
         return {"status": "healthy", "payload_id": current["version"], "source_commit": build["source_commit"]}
     previous = pending["previous"]
     pointer = atomic_activate_pointer(root, version=str(previous["version"]), manifest_sha256=str(previous["manifest_sha256"]))
@@ -357,6 +687,17 @@ def mark_startup_health(
         pass
     _unlink_state(_staged_update_path(root))
     _unlink_state(_restart_session_path(root))
+    _try_write_update_state(
+        root,
+        phase="rolled_back",
+        progress=100,
+        transaction_id=transaction_id,
+        current_payload_id=pointer.get("version"),
+        candidate_payload_id=pending.get("payload_id"),
+        rollback_payload_id=pointer.get("version"),
+        reason_code="api_readiness_timeout",
+        last_error_code="POST_RESTART_HEALTH_FAILED",
+    )
     return {"status": "rollback", "payload_id": pointer["version"], "code": "POST_RESTART_HEALTH_FAILED"}
 
 
@@ -474,6 +815,7 @@ class AppUpdateService:
         self._lock = threading.RLock()
         self._cached: tuple[float, dict[str, Any]] | None = None
         self._retry_attempt: int | None = None
+        self._transaction_id: str | None = None
 
     def _on_transport_retry(self, attempt: int, total: int) -> None:
         self._retry_attempt = max(1, min(int(total), int(attempt)))
@@ -589,12 +931,244 @@ class AppUpdateService:
             return "channel_relation_unavailable"
         return _classify_channel_relation(comparison.get("status"))
 
+    @staticmethod
+    def _verified_previous_payload_id(root: Path) -> str | None:
+        """Read only an opaque, hash-bound rollback payload identifier."""
+
+        path = root / "update-state" / "previous-current.json"
+        try:
+            value = _safe_json_file(path, max_bytes=32 * 1024)
+        except (OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError, AppUpdateError):
+            return None
+        version = value.get("version")
+        relative = value.get("payload_relative")
+        digest = value.get("manifest_sha256")
+        if (
+            value.get("schema_version") != POINTER_SCHEMA
+            or not isinstance(version, str)
+            or _safe_opaque_id(version) is None
+            or relative != f"versions/{version}"
+            or not isinstance(digest, str)
+            or _SHA256_RE.fullmatch(digest) is None
+        ):
+            return None
+        manifest = root / relative / "manifest.json"
+        try:
+            if manifest.is_symlink() or not manifest.is_file() or _sha256(manifest) != digest:
+                return None
+        except OSError:
+            return None
+        return version
+
+    def _remember_update_state(
+        self,
+        root: Path,
+        *,
+        phase: str,
+        progress: int,
+        transaction_id: str | None = None,
+        can_prepare: bool = False,
+        can_restart: bool = False,
+        requires_restart: bool = False,
+        current_payload_id: str | None = None,
+        candidate_payload_id: str | None = None,
+        rollback_payload_id: str | None = None,
+        reason_code: str | None = None,
+        last_error_code: str | None = None,
+    ) -> dict[str, Any] | None:
+        return _try_write_update_state(
+            root,
+            phase=phase,
+            progress=progress,
+            transaction_id=transaction_id,
+            can_prepare=can_prepare,
+            can_restart=can_restart,
+            requires_restart=requires_restart,
+            current_payload_id=current_payload_id,
+            candidate_payload_id=candidate_payload_id,
+            rollback_payload_id=rollback_payload_id,
+            reason_code=reason_code,
+            last_error_code=last_error_code,
+        )
+
+    def _public_projection(self, result: dict[str, Any], *, root: Path | None = None) -> dict[str, Any]:
+        """Add the canonical state contract while preserving legacy fields."""
+
+        value = dict(result)
+        persisted: dict[str, Any] | None = None
+        staged: dict[str, Any] | None = None
+        if root is not None:
+            try:
+                persisted = _read_update_state(root)
+            except AppUpdateError:
+                persisted = None
+            try:
+                staged = _read_staged_update(root)
+            except (OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError, AppUpdateError):
+                staged = None
+
+        status = str(value.get("status") or "unavailable")
+        current_payload = _safe_opaque_id(value.get("current_payload_id") or value.get("current_payload"))
+        candidate_payload = _safe_opaque_id(value.get("candidate_payload_id") or value.get("latest_payload"))
+        rollback_payload = _safe_opaque_id(value.get("rollback_payload_id"))
+        transaction_id = value.get("transaction_id") if isinstance(value.get("transaction_id"), str) else None
+        if staged is not None:
+            transaction_id = staged.get("transaction_id") if isinstance(staged.get("transaction_id"), str) else transaction_id
+            candidate_payload = _safe_opaque_id(staged.get("payload_id")) or candidate_payload
+            previous = staged.get("previous")
+            if isinstance(previous, dict):
+                rollback_payload = _safe_opaque_id(previous.get("version")) or rollback_payload
+        if persisted is not None:
+            transaction_id = transaction_id or persisted.get("transaction_id")
+            current_payload = current_payload or _safe_opaque_id(persisted.get("current_payload_id"))
+            candidate_payload = candidate_payload or _safe_opaque_id(persisted.get("candidate_payload_id"))
+            rollback_payload = rollback_payload or _safe_opaque_id(persisted.get("rollback_payload_id"))
+        if rollback_payload is None and staged is not None and root is not None:
+            rollback_payload = self._verified_previous_payload_id(root)
+        if transaction_id is not None and _TRANSACTION_RE.fullmatch(transaction_id) is None:
+            transaction_id = None
+
+        pending_exists = False
+        if root is not None:
+            pending_path = _pending_health_path(root)
+            pending_exists = pending_path.is_file() and not pending_path.is_symlink()
+        if status in {"restarting", "activated"} or pending_exists:
+            phase = "restarting"
+            progress = 85
+            can_prepare = False
+            can_restart = False
+            requires_restart = True
+        elif staged is not None or status in {"staged", "ready_to_restart"}:
+            phase = "staged"
+            progress = 100
+            can_prepare = False
+            can_restart = True
+            requires_restart = True
+        elif status == "available":
+            phase = "update_available"
+            progress = 0
+            can_prepare = True
+            can_restart = False
+            requires_restart = True
+        elif status in {"checking"}:
+            phase = "checking"
+            progress = 0
+            can_prepare = False
+            can_restart = False
+            requires_restart = False
+        elif status in {"downloading", "verifying", "staging", "preparing"}:
+            phase = "preparing"
+            progress = 10 if status == "downloading" else 40 if status == "verifying" else 75
+            can_prepare = False
+            can_restart = False
+            requires_restart = True
+        elif status in {"rolled_back", "rollback"}:
+            phase = "rolled_back"
+            progress = 100
+            can_prepare = False
+            can_restart = True if status == "rollback" else False
+            requires_restart = status == "rollback"
+        elif status in {"blocked", "auth_required", "oauth_configuration_required", "blocked_current_ahead_of_main", "blocked_channel_diverged", "channel_relation_unavailable", "unavailable"}:
+            persisted_error = (
+                isinstance(persisted, dict)
+                and persisted.get("phase") == "error"
+                and isinstance(value.get("code"), str)
+                and persisted.get("last_error_code") == value.get("code")
+            )
+            phase = "error" if persisted_error else "blocked"
+            progress = int(persisted.get("progress", 0)) if persisted_error and isinstance(persisted.get("progress"), int) else 0
+            can_prepare = bool(persisted.get("can_prepare")) if persisted_error else False
+            can_restart = bool(persisted.get("can_restart")) if persisted_error else False
+            requires_restart = bool(persisted.get("requires_restart")) if persisted_error else False
+        elif status == "no_artifact":
+            phase = "idle"
+            progress = 0
+            can_prepare = False
+            can_restart = False
+            requires_restart = False
+        elif status == "up_to_date":
+            phase = "succeeded" if persisted is not None and persisted.get("phase") == "succeeded" else "idle"
+            progress = 100 if phase == "succeeded" else 0
+            can_prepare = False
+            can_restart = False
+            requires_restart = False
+        else:
+            phase = persisted.get("phase") if persisted and persisted.get("phase") in UPDATE_PHASES else "error"
+            progress = int(persisted.get("progress", 0)) if persisted and isinstance(persisted.get("progress"), int) else 0
+            can_prepare = False
+            can_restart = False
+            requires_restart = False
+
+        code = value.get("code")
+        reason = value.get("reason_code")
+        if not isinstance(reason, str) or reason not in STABLE_UPDATE_REASON_CODES:
+            reason = reason_code_for(code) if code else _STATUS_REASON_CODES.get(status)
+        last_error = value.get("last_error_code")
+        if not isinstance(last_error, str):
+            last_error = code if isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{2,95}", code) else None
+        if last_error is None and persisted is not None and phase in {"blocked", "error", "rolled_back"}:
+            last_error = persisted.get("last_error_code")
+        if transaction_id is None and self._retry_attempt is not None and phase == "checking":
+            transaction_id = None
+        value.update({
+            "transaction_id": transaction_id,
+            "phase": phase,
+            "progress": progress,
+            "can_prepare": can_prepare,
+            "can_restart": can_restart,
+            "requires_restart": requires_restart,
+            "current_payload_id": current_payload,
+            "candidate_payload_id": candidate_payload,
+            "rollback_payload_id": rollback_payload,
+            "reason_code": reason,
+            "last_error_code": last_error,
+        })
+        return value
+
+    def error_projection(self, error_code: object) -> dict[str, Any]:
+        """Return a complete path-free error projection for an API route."""
+
+        code = str(error_code or "UPDATE_FAILED")
+        try:
+            root = self._install_root()
+            current = self._current_build(root)
+            staged = _read_staged_update(root)
+            previous = staged.get("previous") if isinstance(staged, dict) else None
+            value = update_error_projection(
+                code,
+                current_payload_id=current.get("payload_id"),
+                candidate_payload_id=staged.get("payload_id") if isinstance(staged, dict) else None,
+                rollback_payload_id=previous.get("version") if isinstance(previous, dict) else None,
+                transaction_id=staged.get("transaction_id") if isinstance(staged, dict) else None,
+            )
+            try:
+                state = _read_update_state(root)
+            except AppUpdateError:
+                state = None
+            if isinstance(state, dict) and state.get("last_error_code") == code:
+                value.update({
+                    "phase": state.get("phase", value["phase"]),
+                    "progress": state.get("progress", value["progress"]),
+                    "transaction_id": state.get("transaction_id") or value["transaction_id"],
+                    "current_payload_id": state.get("current_payload_id") or value["current_payload_id"],
+                    "candidate_payload_id": state.get("candidate_payload_id") or value["candidate_payload_id"],
+                    "rollback_payload_id": state.get("rollback_payload_id") or value["rollback_payload_id"],
+                    "reason_code": state.get("reason_code") or value["reason_code"],
+                    "last_error_code": state.get("last_error_code"),
+                })
+            return self._public_projection(value, root=root)
+        except (AppUpdateError, OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+            return update_error_projection(code)
+
     def status(self, *, refresh: bool = False) -> dict[str, Any]:
         with self._lock:
             now = time.monotonic()
             self._retry_attempt = None
             if not refresh and self._cached and now - self._cached[0] < CACHE_SECONDS:
                 return dict(self._cached[1])
+            root: Path | None = None
+            current: dict[str, str] = {}
+            candidate: UpdateCandidate | None = None
             try:
                 root = self._install_root()
                 current = self._current_build(root)
@@ -614,67 +1188,81 @@ class AppUpdateService:
                             "latest_build": None, "transport": "github_cli", "action": "Chờ main CI tạo update artifact thành công.",
                         }
                     else:
+                        staged_error: AppUpdateError | None = None
                         try:
                             staged = _read_staged_update(root)
-                        except (OSError, UnicodeError, json.JSONDecodeError, AppUpdateError):
+                        except (OSError, UnicodeError, json.JSONDecodeError, AppUpdateError) as exc:
                             staged = None
-                        if staged is not None and staged.get("source_commit") == candidate.source_commit:
+                            staged_error = exc if isinstance(exc, AppUpdateError) else AppUpdateError("STAGED_UPDATE_INVALID")
+                        if staged_error is not None:
                             result = {
-                                "status": "staged", "available": False, "product_version": PRODUCT_VERSION,
+                                "status": "blocked", "available": False, "product_version": PRODUCT_VERSION,
+                                "current_build": current["commit"], "current_payload": current["payload_id"],
+                                "latest_build": candidate.source_commit, "latest_payload": f"main-{candidate.source_commit[:12]}",
+                                "transport": auth.transport, "code": staged_error.code,
+                                "action": "Trạng thái candidate đã stage không hợp lệ; Hub giữ nguyên payload hiện tại.",
+                            }
+                        elif staged is not None and staged.get("source_commit") == candidate.source_commit:
+                            pending_path = _pending_health_path(root)
+                            pending_exists = pending_path.is_file() and not pending_path.is_symlink()
+                            result = {
+                                "status": "restarting" if pending_exists else "staged", "available": False, "product_version": PRODUCT_VERSION,
                                 "current_build": current["commit"], "current_payload": current["payload_id"],
                                 "latest_build": candidate.source_commit, "latest_payload": staged.get("payload_id"),
                                 "staged_payload": staged.get("payload_id"), "restart_required": True,
                                 "run_id": candidate.run_id, "artifact_id": candidate.artifact_id, "transport": auth.transport,
                                 "action": "Candidate đã stage; khởi động lại để commit pointer an toàn.",
                             }
-                            self._cached = (now, dict(result))
-                            return result
-                        relation = self._channel_relation(current["commit"], candidate.source_commit)
-                        if relation == "blocked_current_ahead_of_main":
-                            result = {
-                                "status": relation, "available": False, "product_version": PRODUCT_VERSION,
-                                "current_build": current["commit"], "current_payload": current["payload_id"],
-                                "latest_build": candidate.source_commit, "latest_payload": f"main-{candidate.source_commit[:12]}",
-                                "run_id": candidate.run_id, "artifact_id": candidate.artifact_id, "transport": auth.transport,
-                                "action": "Bản đang chạy chứa thay đổi chưa được tích hợp vào main; Hub sẽ không tự hạ cấp.",
-                            }
-                        elif relation == "blocked_channel_diverged":
-                            result = {
-                                "status": relation, "available": False, "product_version": PRODUCT_VERSION,
-                                "current_build": current["commit"], "current_payload": current["payload_id"],
-                                "latest_build": candidate.source_commit, "latest_payload": f"main-{candidate.source_commit[:12]}",
-                                "run_id": candidate.run_id, "artifact_id": candidate.artifact_id, "transport": auth.transport,
-                                "action": "Bản đang chạy và main đã tách lịch sử; không tự thay đổi payload.",
-                            }
-                        elif relation == "channel_relation_unavailable":
-                            result = {
-                                "status": relation, "available": False, "product_version": PRODUCT_VERSION,
-                                "current_build": current["commit"], "current_payload": current["payload_id"],
-                                "latest_build": candidate.source_commit, "latest_payload": f"main-{candidate.source_commit[:12]}",
-                                "transport": auth.transport,
-                                "action": "Không xác minh được ancestry của payload; Hub không tự cài đặt.",
-                            }
                         else:
-                            available = relation == "forward_update_available" or (relation == "legacy_or_unbound" and current["commit"] != candidate.source_commit)
-                            result = {
-                            "status": "available" if available else "up_to_date", "available": available,
-                            "product_version": PRODUCT_VERSION, "current_build": current["commit"],
-                            "current_payload": current["payload_id"], "latest_build": candidate.source_commit,
-                            "latest_payload": f"main-{candidate.source_commit[:12]}", "run_id": candidate.run_id,
-                            "artifact_id": candidate.artifact_id, "transport": auth.transport,
-                            "action": "Cập nhật Local AI Hub" if available else "Bạn đang dùng build main mới nhất.",
-                            }
+                            relation = self._channel_relation(current["commit"], candidate.source_commit)
+                            if relation == "blocked_current_ahead_of_main":
+                                result = {
+                                    "status": relation, "available": False, "product_version": PRODUCT_VERSION,
+                                    "current_build": current["commit"], "current_payload": current["payload_id"],
+                                    "latest_build": candidate.source_commit, "latest_payload": f"main-{candidate.source_commit[:12]}",
+                                    "run_id": candidate.run_id, "artifact_id": candidate.artifact_id, "transport": auth.transport,
+                                    "action": "Bản đang chạy chứa thay đổi chưa được tích hợp vào main; Hub sẽ không tự hạ cấp.",
+                                }
+                            elif relation == "blocked_channel_diverged":
+                                result = {
+                                    "status": relation, "available": False, "product_version": PRODUCT_VERSION,
+                                    "current_build": current["commit"], "current_payload": current["payload_id"],
+                                    "latest_build": candidate.source_commit, "latest_payload": f"main-{candidate.source_commit[:12]}",
+                                    "run_id": candidate.run_id, "artifact_id": candidate.artifact_id, "transport": auth.transport,
+                                    "action": "Bản đang chạy và main đã tách lịch sử; không tự thay đổi payload.",
+                                }
+                            elif relation == "channel_relation_unavailable":
+                                result = {
+                                    "status": relation, "available": False, "product_version": PRODUCT_VERSION,
+                                    "current_build": current["commit"], "current_payload": current["payload_id"],
+                                    "latest_build": candidate.source_commit, "latest_payload": f"main-{candidate.source_commit[:12]}",
+                                    "transport": auth.transport,
+                                    "action": "Không xác minh được ancestry của payload; Hub không tự cài đặt.",
+                                }
+                            else:
+                                available = relation == "forward_update_available" or (relation == "legacy_or_unbound" and current["commit"] != candidate.source_commit)
+                                result = {
+                                    "status": "available" if available else "up_to_date", "available": available,
+                                    "product_version": PRODUCT_VERSION, "current_build": current["commit"],
+                                    "current_payload": current["payload_id"], "latest_build": candidate.source_commit,
+                                    "latest_payload": f"main-{candidate.source_commit[:12]}", "run_id": candidate.run_id,
+                                    "artifact_id": candidate.artifact_id, "transport": auth.transport,
+                                    "action": "Cập nhật Local AI Hub" if available else "Bạn đang dùng build main mới nhất.",
+                                }
             except AppUpdateError as exc:
                 result = {
                     "status": "unavailable", "available": False, "product_version": PRODUCT_VERSION,
-                    "current_build": None, "latest_build": None, "transport": "updater", "code": exc.code,
+                    "current_build": current.get("commit"), "current_payload": current.get("payload_id"),
+                    "latest_build": candidate.source_commit if candidate is not None else None,
+                    "latest_payload": f"main-{candidate.source_commit[:12]}" if candidate is not None else None,
+                    "transport": "updater", "code": exc.code,
                     "action": "Cài/đăng nhập GitHub CLI hoặc mở Diagnostics để kiểm tra updater.",
                 }
-            self._cached = (now, dict(result))
             if self._retry_attempt is not None:
                 result["retry_attempt"] = self._retry_attempt
                 result["retry_attempts"] = self._retry_attempt
-                self._cached = (now, dict(result))
+            result = self._public_projection(result, root=root)
+            self._cached = (now, dict(result))
             return result
 
     def changes(self) -> dict[str, Any]:
@@ -980,8 +1568,10 @@ class AppUpdateService:
             "status": "awaiting_candidate",
             "created_at": _utc_now(),
         }
+        if self._transaction_id is not None and _TRANSACTION_RE.fullmatch(self._transaction_id):
+            value["transaction_id"] = self._transaction_id
         _write_restart_session(root, value)
-        return {key: value[key] for key in ("schema_version", "payload_id", "source_commit", "nonce", "parent_pid", "status")}
+        return {key: value[key] for key in ("schema_version", "payload_id", "source_commit", "nonce", "parent_pid", "status", "transaction_id") if key in value}
 
     def commit_staged_restart(self) -> dict[str, Any]:
         """Commit a staged candidate after the native close gate is ready.
@@ -1007,12 +1597,19 @@ class AppUpdateService:
                 payload_id = str(staged["payload_id"])
                 source_commit = str(staged["source_commit"])
                 manifest_hash = str(staged["manifest_sha256"])
+                transaction_id = staged.get("transaction_id") if isinstance(staged.get("transaction_id"), str) else self._transaction_id
                 activated = False
                 try:
                     history = root / "update-state"
                     history.mkdir(parents=True, exist_ok=True)
                     _write_json_atomic(history / "previous-current.json", previous)
-                    _record_pending_health(root, previous=previous, payload_id=payload_id, source_commit=source_commit)
+                    _record_pending_health(
+                        root,
+                        previous=previous,
+                        payload_id=payload_id,
+                        source_commit=source_commit,
+                        transaction_id=transaction_id,
+                    )
                     atomic_activate_pointer(root, version=payload_id, manifest_sha256=manifest_hash)
                     activated = True
                 except (OSError, UnicodeError, json.JSONDecodeError, StableShellError, AppUpdateError) as exc:
@@ -1028,12 +1625,35 @@ class AppUpdateService:
                         except Exception:
                             pass
                     _unlink_state(_pending_health_path(root))
+                    _try_write_update_state(
+                        root,
+                        phase="error",
+                        progress=0,
+                        transaction_id=transaction_id,
+                        current_payload_id=previous.get("version"),
+                        candidate_payload_id=payload_id,
+                        rollback_payload_id=previous.get("version"),
+                        reason_code=reason_code_for(getattr(exc, "code", "UPDATE_COMMIT_FAILED")),
+                        last_error_code=getattr(exc, "code", "UPDATE_COMMIT_FAILED"),
+                    )
                     raise exc if isinstance(exc, AppUpdateError) else AppUpdateError("UPDATE_COMMIT_FAILED") from exc
                 self._cached = None
+                self._transaction_id = transaction_id
+                self._remember_update_state(
+                    root,
+                    phase="restarting",
+                    progress=85,
+                    transaction_id=transaction_id,
+                    requires_restart=True,
+                    current_payload_id=payload_id,
+                    candidate_payload_id=payload_id,
+                    rollback_payload_id=previous.get("version"),
+                )
                 return {
                     "status": "activated",
                     "source_commit": source_commit,
                     "payload_id": payload_id,
+                    "transaction_id": transaction_id,
                     "previous_payload": previous.get("version"),
                     "restart_required": True,
                     "launcher_changed": False,
@@ -1055,6 +1675,8 @@ class AppUpdateService:
                 previous = pending.get("previous") if isinstance(pending, dict) else None
                 if not isinstance(previous, dict):
                     raise AppUpdateError("UPDATE_PENDING_HEALTH_INVALID")
+                transaction_id = pending.get("transaction_id") if isinstance(pending.get("transaction_id"), str) else self._transaction_id
+                candidate_payload_id = pending.get("payload_id") if isinstance(pending.get("payload_id"), str) else None
                 pointer = atomic_activate_pointer(root, version=str(previous["version"]), manifest_sha256=str(previous["manifest_sha256"]))
                 _write_json_atomic(root / "update-state" / "last-rollback.json", {
                     "schema_version": PENDING_HEALTH_SCHEMA,
@@ -1066,7 +1688,19 @@ class AppUpdateService:
                 _unlink_state(_staged_update_path(root))
                 _unlink_state(_restart_session_path(root))
                 self._cached = None
-                return {"status": "rolled_back", "payload_id": pointer["version"], "reason": str(reason)[:96]}
+                self._transaction_id = transaction_id
+                self._remember_update_state(
+                    root,
+                    phase="rolled_back",
+                    progress=100,
+                    transaction_id=transaction_id,
+                    current_payload_id=pointer.get("version"),
+                    candidate_payload_id=candidate_payload_id,
+                    rollback_payload_id=pointer.get("version"),
+                    reason_code=reason_code_for(reason),
+                    last_error_code=str(reason)[:96] if re.fullmatch(r"[A-Z][A-Z0-9_]{2,95}", str(reason)[:96]) else "RESTART_TRANSACTION_FAILED",
+                )
+                return {"status": "rolled_back", "payload_id": pointer["version"], "reason": str(reason)[:96], "transaction_id": transaction_id}
 
     @staticmethod
     def _preserve_failed_staging(root: Path, work: Path, source_commit: str) -> None:
@@ -1095,11 +1729,59 @@ class AppUpdateService:
         with self._lock:
             root = self._install_root()
             with _update_serialization_lock(root):
-                return self._prepare_locked(root)
+                result = self._prepare_locked(root)
+                return self._public_projection(result, root=root)
 
     def _prepare_locked(self, root: Path) -> dict[str, Any]:
+        try:
+            return self._prepare_locked_impl(root)
+        except AppUpdateError as exc:
+            current_payload_id: str | None = None
+            candidate_payload_id: str | None = None
+            transaction_id = self._transaction_id
+            try:
+                current_payload_id = self._current_build(root).get("payload_id")
+            except (AppUpdateError, OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+                pass
+            try:
+                staged = _read_staged_update(root)
+            except (AppUpdateError, OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError):
+                staged = None
+            try:
+                previous_state = _read_update_state(root)
+            except (AppUpdateError, OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError):
+                previous_state = None
+            if isinstance(staged, dict):
+                candidate_payload_id = staged.get("payload_id")
+                transaction_id = transaction_id or staged.get("transaction_id")
+            if isinstance(previous_state, dict):
+                transaction_id = transaction_id or previous_state.get("transaction_id")
+                candidate_payload_id = candidate_payload_id or previous_state.get("candidate_payload_id")
+            phase = "blocked" if reason_code_for(exc.code) in {
+                "authentication_required", "active_job_blocks_restart", "external_owner_detected",
+                "port_ownership_unknown", "channel_update_blocked", "channel_relation_unavailable",
+                "update_transaction_busy",
+            } else "error"
+            self._remember_update_state(
+                root,
+                phase=phase,
+                progress=0,
+                transaction_id=transaction_id,
+                can_prepare=phase == "error" and candidate_payload_id is None,
+                can_restart=False,
+                requires_restart=False,
+                current_payload_id=current_payload_id if isinstance(current_payload_id, str) else None,
+                candidate_payload_id=candidate_payload_id if isinstance(candidate_payload_id, str) else None,
+                rollback_payload_id=self._verified_previous_payload_id(root),
+                reason_code=reason_code_for(exc.code),
+                last_error_code=exc.code,
+            )
+            raise
+
+    def _prepare_locked_impl(self, root: Path) -> dict[str, Any]:
         """Implementation of :meth:`prepare` under the cross-process lock."""
 
+        self._remember_update_state(root, phase="checking", progress=0)
         _transport, auth = self._selected_transport()
         if auth.status != "ready":
             raise AppUpdateError(auth.code or "GITHUB_AUTH_REQUIRED")
@@ -1108,7 +1790,26 @@ class AppUpdateService:
             raise AppUpdateError("UPDATE_ARTIFACT_NOT_FOUND")
         current = self._current_build(root)
         if current["commit"] == candidate.source_commit:
+            self._remember_update_state(
+                root,
+                phase="succeeded",
+                progress=100,
+                current_payload_id=current.get("payload_id"),
+                candidate_payload_id=f"main-{candidate.source_commit[:12]}",
+            )
             return {"status": "up_to_date", "restart_required": False, "source_commit": candidate.source_commit}
+        self._transaction_id = _new_transaction_id()
+        candidate_payload_id = f"main-{candidate.source_commit[:12]}"
+        self._remember_update_state(
+            root,
+            phase="preparing",
+            progress=5,
+            transaction_id=self._transaction_id,
+            current_payload_id=current.get("payload_id"),
+            candidate_payload_id=candidate_payload_id,
+            rollback_payload_id=self._verified_previous_payload_id(root),
+            requires_restart=True,
+        )
         relation = self._channel_relation(current["commit"], candidate.source_commit)
         if relation == "blocked_current_ahead_of_main":
             raise AppUpdateError("UPDATE_CURRENT_AHEAD_OF_MAIN")
@@ -1119,10 +1820,35 @@ class AppUpdateService:
         existing_staged = _read_staged_update(root)
         if existing_staged is not None:
             if existing_staged.get("source_commit") == candidate.source_commit:
+                transaction_id = existing_staged.get("transaction_id")
+                if not isinstance(transaction_id, str) or _TRANSACTION_RE.fullmatch(transaction_id) is None:
+                    transaction_id = self._transaction_id or _new_transaction_id()
+                    self._transaction_id = transaction_id
+                    try:
+                        _write_json_atomic(_staged_update_path(root), {**existing_staged, "transaction_id": transaction_id})
+                    except (AppUpdateError, OSError, UnicodeError, ValueError):
+                        pass
+                else:
+                    self._transaction_id = transaction_id
+                previous = existing_staged.get("previous")
+                rollback_payload_id = previous.get("version") if isinstance(previous, dict) else None
+                self._remember_update_state(
+                    root,
+                    phase="staged",
+                    progress=100,
+                    transaction_id=transaction_id,
+                    can_restart=True,
+                    requires_restart=True,
+                    current_payload_id=current.get("payload_id"),
+                    candidate_payload_id=existing_staged.get("payload_id"),
+                    rollback_payload_id=rollback_payload_id,
+                )
                 return {
                     "status": "staged",
                     "source_commit": candidate.source_commit,
                     "payload_id": existing_staged.get("payload_id"),
+                    "transaction_id": transaction_id,
+                    "previous_payload": rollback_payload_id,
                     "restart_required": True,
                     "staged": True,
                     "commit_phase": "awaiting_restart",
@@ -1137,7 +1863,27 @@ class AppUpdateService:
         target = root / "versions" / f"main-{candidate.source_commit[:12]}"
         try:
             work.mkdir(parents=False, exist_ok=False)
+            self._remember_update_state(
+                root,
+                phase="preparing",
+                progress=15,
+                transaction_id=self._transaction_id,
+                current_payload_id=current.get("payload_id"),
+                candidate_payload_id=candidate_payload_id,
+                rollback_payload_id=self._verified_previous_payload_id(root),
+                requires_restart=True,
+            )
             self._download_candidate(candidate, download)
+            self._remember_update_state(
+                root,
+                phase="preparing",
+                progress=35,
+                transaction_id=self._transaction_id,
+                current_payload_id=current.get("payload_id"),
+                candidate_payload_id=candidate_payload_id,
+                rollback_payload_id=self._verified_previous_payload_id(root),
+                requires_restart=True,
+            )
             manifest, contract, archive = self._validate_download(download, candidate)
             update_kind = str(contract["update_kind"])
             stage_payload.mkdir(parents=False, exist_ok=False)
@@ -1174,6 +1920,16 @@ class AppUpdateService:
             if not runtime_pythonw.is_file():
                 raise AppUpdateError("STAGED_RUNTIME_UNAVAILABLE")
             self._validate_staged_imports(stage_payload / "app", runtime_pythonw)
+            self._remember_update_state(
+                root,
+                phase="preparing",
+                progress=70,
+                transaction_id=self._transaction_id,
+                current_payload_id=current.get("payload_id"),
+                candidate_payload_id=candidate_payload_id,
+                rollback_payload_id=self._verified_previous_payload_id(root),
+                requires_restart=True,
+            )
             self._preflight_candidate_api(
                 install_root=root,
                 app_root=stage_payload / "app",
@@ -1198,16 +1954,29 @@ class AppUpdateService:
                 "schema_version": STAGED_UPDATE_SCHEMA,
                 "payload_id": version,
                 "source_commit": candidate.source_commit,
+                "transaction_id": self._transaction_id,
                 "payload_relative": f"versions/{version}",
                 "manifest_sha256": manifest_hash,
                 "previous": previous,
                 "staged_at": _utc_now(),
                 "update_kind": update_kind,
             })
+            self._remember_update_state(
+                root,
+                phase="staged",
+                progress=100,
+                transaction_id=self._transaction_id,
+                can_restart=True,
+                requires_restart=True,
+                current_payload_id=previous.get("version"),
+                candidate_payload_id=version,
+                rollback_payload_id=previous.get("version"),
+            )
             self._cached = None
             return {
                 "status": "staged", "source_commit": candidate.source_commit,
                 "payload_id": version, "previous_payload": previous.get("version"),
+                "transaction_id": self._transaction_id,
                 "restart_required": True, "staged": True, "launcher_changed": False, "data_root_changed": False,
                 "update_kind": update_kind, "runtime_contract": contract["runtime_contract"],
                 "commit_phase": "awaiting_restart",
@@ -1240,7 +2009,16 @@ class AppUpdateService:
                 _unlink_state(_staged_update_path(root))
                 _unlink_state(_restart_session_path(root))
                 self._cached = None
-                return {"status": "rolled_back", "payload_id": pointer["version"], "restart_required": True}
+                self._remember_update_state(
+                    root,
+                    phase="rolled_back",
+                    progress=100,
+                    transaction_id=self._transaction_id,
+                    current_payload_id=pointer.get("version"),
+                    rollback_payload_id=pointer.get("version"),
+                    reason_code=None,
+                )
+                return {"status": "rolled_back", "payload_id": pointer["version"], "restart_required": True, "transaction_id": self._transaction_id}
 
 
 _SERVICE: AppUpdateService | None = None
@@ -1258,5 +2036,5 @@ def app_update_service() -> AppUpdateService:
 __all__ = [
     "AppUpdateError", "AppUpdateService", "BUILD_INFO_SCHEMA", "REPOSITORY", "UPDATE_ARTIFACT_NAME",
     "UPDATE_CONTRACT_NAME", "UPDATE_CONTRACT_SCHEMA", "UPDATE_KIND_APP_ONLY", "UPDATE_KIND_FULL",
-    "PENDING_HEALTH_SCHEMA", "STAGED_UPDATE_SCHEMA", "RESTART_SESSION_SCHEMA", "CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS", "CANDIDATE_BOOTSTRAP_PREFLIGHT_TIMEOUT_SECONDS", "UPDATE_SCHEMA", "app_update_service", "mark_startup_health", "_runtime_inventory_hash", "_safe_extract_app_archive", "_safe_update_contract", "_safe_update_manifest", "_read_staged_update", "_write_restart_session",
+    "PENDING_HEALTH_SCHEMA", "STAGED_UPDATE_SCHEMA", "RESTART_SESSION_SCHEMA", "UPDATE_STATE_SCHEMA", "UPDATE_STATE_FILE", "UPDATE_PHASES", "STABLE_UPDATE_REASON_CODES", "CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS", "CANDIDATE_BOOTSTRAP_PREFLIGHT_TIMEOUT_SECONDS", "UPDATE_SCHEMA", "app_update_service", "mark_startup_health", "reason_code_for", "update_error_projection", "_runtime_inventory_hash", "_safe_extract_app_archive", "_safe_update_contract", "_safe_update_manifest", "_read_staged_update", "_read_update_state", "_try_write_update_state", "_write_restart_session",
 ]

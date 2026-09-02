@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Mapping
 
-from src.services.app_update import AppUpdateError, app_update_service
+from src.services.app_update import AppUpdateError, app_update_service, update_error_projection
 
 from ..context import ApiContext
 from ..response import ApiResponse
@@ -14,7 +14,28 @@ from ..router import ApiRequest, Router
 def _error(exc: AppUpdateError) -> ApiResponse:
     code = exc.code
     status_code = 409 if code.startswith(("UPDATE_", "ROLLBACK_")) else 503
-    return ApiResponse(status_code, {"status": "blocked", "code": code, "error": str(exc), "execution": "not_run"})
+    try:
+        value = app_update_service().error_projection(code)
+    except Exception:
+        value = update_error_projection(code)
+    value.update({"status": "blocked", "code": code, "error": str(exc), "execution": "not_run"})
+    return ApiResponse(status_code, value)
+
+
+def _active_jobs_block(active_jobs: object) -> ApiResponse:
+    value = update_error_projection("ACTIVE_JOBS_BLOCK_UPDATE", status="blocked")
+    value.update({
+        "error": "Không thể cập nhật khi còn job hoạt động hoặc chưa xác minh được ownership.",
+        "active_jobs": active_jobs,
+        "execution": "not_run",
+    })
+    return ApiResponse(409, value)
+
+
+def _invalid(code: str) -> ApiResponse:
+    value = update_error_projection(code, status="invalid")
+    value["execution"] = "not_run"
+    return ApiResponse(400, value)
 
 
 def status(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
@@ -30,14 +51,14 @@ def auth_status(request: ApiRequest, context: ApiContext, params: Mapping[str, s
 def auth_device_start(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
     body = request.json(strict=True)
     if body and set(body) != set():
-        return ApiResponse(400, {"status": "invalid", "code": "OAUTH_REQUEST_INVALID", "execution": "not_run"})
+        return _invalid("OAUTH_REQUEST_INVALID")
     return ApiResponse(200, app_update_service().begin_device_login())
 
 
 def auth_logout(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
     body = request.json(strict=True)
     if body and set(body) != set():
-        return ApiResponse(400, {"status": "invalid", "code": "OAUTH_REQUEST_INVALID", "execution": "not_run"})
+        return _invalid("OAUTH_REQUEST_INVALID")
     return ApiResponse(200, app_update_service().logout_auth())
 
 
@@ -45,7 +66,7 @@ def auth_device_poll(request: ApiRequest, context: ApiContext, params: Mapping[s
     body = request.json(strict=True)
     session_id = body.get("session_id") if isinstance(body, dict) else None
     if set(body) != {"session_id"} or not isinstance(session_id, str) or not session_id or len(session_id) > 128:
-        return ApiResponse(400, {"status": "invalid", "code": "OAUTH_SESSION_INVALID", "execution": "not_run"})
+        return _invalid("OAUTH_SESSION_INVALID")
     return ApiResponse(200, app_update_service().poll_device_login(session_id))
 
 
@@ -53,7 +74,7 @@ def auth_device_cancel(request: ApiRequest, context: ApiContext, params: Mapping
     body = request.json(strict=True)
     session_id = body.get("session_id") if isinstance(body, dict) else None
     if set(body) != {"session_id"} or not isinstance(session_id, str) or not session_id or len(session_id) > 128:
-        return ApiResponse(400, {"status": "invalid", "code": "OAUTH_SESSION_INVALID", "execution": "not_run"})
+        return _invalid("OAUTH_SESSION_INVALID")
     return ApiResponse(200, app_update_service().cancel_device_login(session_id))
 
 
@@ -67,12 +88,12 @@ def changes(request: ApiRequest, context: ApiContext, params: Mapping[str, str])
 def prepare(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
     body = request.json(strict=True)
     if set(body) != {"confirmed"} or body.get("confirmed") is not True:
-        return ApiResponse(400, {"status": "invalid", "code": "UPDATE_CONFIRMATION_REQUIRED", "execution": "not_run"})
+        return _invalid("UPDATE_CONFIRMATION_REQUIRED")
     try:
         health = context.call("health")
         active = health.get("active_jobs") if isinstance(health, dict) else None
         if isinstance(active, bool) or not isinstance(active, int) or active != 0:
-            return ApiResponse(409, {"status": "blocked", "code": "ACTIVE_JOBS_BLOCK_UPDATE", "active_jobs": active, "execution": "not_run"})
+            return _active_jobs_block(active)
         return ApiResponse(200, app_update_service().prepare())
     except AppUpdateError as exc:
         return _error(exc)
@@ -81,12 +102,12 @@ def prepare(request: ApiRequest, context: ApiContext, params: Mapping[str, str])
 def rollback(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
     body = request.json(strict=True)
     if set(body) != {"confirmed"} or body.get("confirmed") is not True:
-        return ApiResponse(400, {"status": "invalid", "code": "ROLLBACK_CONFIRMATION_REQUIRED", "execution": "not_run"})
+        return _invalid("ROLLBACK_CONFIRMATION_REQUIRED")
     try:
         health = context.call("health")
         active = health.get("active_jobs") if isinstance(health, dict) else None
         if isinstance(active, bool) or not isinstance(active, int) or active != 0:
-            return ApiResponse(409, {"status": "blocked", "code": "ACTIVE_JOBS_BLOCK_UPDATE", "active_jobs": active, "execution": "not_run"})
+            return _active_jobs_block(active)
         return ApiResponse(200, app_update_service().rollback())
     except AppUpdateError as exc:
         return _error(exc)

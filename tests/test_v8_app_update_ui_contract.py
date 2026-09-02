@@ -37,6 +37,11 @@ class V8AppUpdateUiContractTests(unittest.TestCase):
         self.assertNotIn("window.confirm", module)
         self.assertIn("showConfirmModal", module)
         self.assertIn("current pointer chưa đổi", module)
+        self.assertIn('title: "Bản cập nhật đã sẵn sàng"', module)
+        self.assertIn('confirmLabel: "Khởi động lại và cập nhật"', module)
+        self.assertIn('cancelLabel: "Để sau"', module)
+        self.assertIn("if (confirmed) await restart(card);", module)
+        self.assertNotIn('title: "Xác nhận cập nhật Local AI Hub"', module)
 
     def test_restart_bridge_is_opt_in_and_does_not_replace_close_contract(self) -> None:
         class FixtureBridge:
