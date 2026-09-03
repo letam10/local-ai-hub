@@ -51,7 +51,7 @@ export function createWhisperRenderer(deps) {
     const toolState = tool(state, "transcribe_media");
     const status = toolState.tool_status || item.component_status || "missing";
     const result = resultFor(model);
-    const job = renderWorkspaceJob(model.job, { escapeHtml, formatStatus, statusPill });
+    const job = renderWorkspaceJob(model.job, { escapeHtml, formatStatus, statusPill, staleJob: model.staleJob });
     const gpu = state.health?.gpu?.name || "Chưa có snapshot GPU";
     const sourceLabel = model.sourceArtifact?.name || model.sourceFile?.name || "Chưa chọn media";
     const supportedDevices = Array.isArray(toolState.supported_options?.devices)
@@ -63,7 +63,7 @@ export function createWhisperRenderer(deps) {
     const deviceControl = `<select name="device"${supportedDevices.length ? "" : " disabled data-whisper-option-unavailable=\"device\""}>${deviceOptions}</select>`;
     return heading("SPEECH", "Whisper / Subtitles", "Workspace transcript cho audio/video: nghe, chọn đoạn thời gian, xem timestamp inline và nhận transcript/SRT/JSON trong Hub.", statusPill(status, `Whisper · ${formatStatus(status)}`)) + `
       <section class="m4-tool-workspace" data-m4-workspace="whisper" data-m4-workspace-key="whisper">
-        <div class="m4-workspace__inputs">
+        <div class="m4-workspace__inputs m4-workspace__toolbar">
           ${card("Đầu vào và thiết lập", `${file("Video hoặc audio", "source_artifact_id", "audio/*,video/*")}<form data-job-form data-m4-job-form data-tool="transcribe_media" class="stack" data-workspace-form="whisper"><div class="m4-readiness" data-m4-readiness><strong>${escapeHtml(formatStatus(status))}</strong><span>${escapeHtml(toolState.reason || item.reason || "Chưa có readiness snapshot cho Whisper.")}</span><small>${escapeHtml(toolState.action || "Kiểm tra backend rồi thử lại.")}</small></div>${field("Ngôn ngữ nguồn", `<input name="language" value="auto" maxlength="32" placeholder="auto / vi / ja" />`)}${field("Thiết bị chạy", deviceControl)}<p class="small">Transcript + SRT là luồng được hỗ trợ. Thiết bị chỉ được chọn từ capability server-owned; worker nặng yêu cầu RTX 4060 đã xác minh. Ghi phụ đề trực tiếp vào video đang tắt cho đến khi transaction composite được chứng minh.</p><div class="form-actions">${button("Thêm vào hàng đợi", "button--primary")}</div>${formResult("whisper-result")}</form>`)}
           ${card("Preflight tài nguyên", `<div class="m4-resource-grid"><div><span>GPU snapshot</span><strong>${escapeHtml(gpu)}</strong></div><div><span>Thực thi</span><strong>Chỉ khi capability operational</strong></div></div><p class="small">Thiết bị chỉ là lựa chọn của workflow; backend vẫn là authority. Không tự tải model và không fallback âm thầm.</p>`)}
         </div>

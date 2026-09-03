@@ -29,8 +29,13 @@ const renderMediaStage = (_source, { vision = false } = {}) => `<div class="m3-m
   <div class="m3-media-empty" data-m3-preview-empty><strong>Chưa có tệp nguồn</strong><span>Chọn tệp để xem preview trong workspace.</span></div>
 </div>`;
 
-const renderProgress = (job, { escapeHtml, formatStatus, statusPill }) => {
-  if (!job || typeof job !== "object") return `<div class="workspace-job-empty" data-workspace-job-empty><strong>Chưa có tác vụ trong workspace</strong><span>Chọn input và bấm chạy; progress, lỗi và artifact sẽ xuất hiện tại đây.</span></div>`;
+const renderProgress = (job, { escapeHtml, formatStatus, statusPill, staleJob = null }) => {
+  if (!job || typeof job !== "object") {
+    if (staleJob && typeof staleJob === "object" && staleJob.id) {
+      return `<div class="callout callout--warning" data-workspace-stale-result><strong>Kết quả này thuộc tệp trước</strong><span>Job ${escapeHtml(String(staleJob.id))} vẫn được giữ nguyên trong lịch sử; chưa hiển thị kết quả đó cho tệp hiện tại.</span><button class="button button--compact" type="button" data-route="jobs">Mở Jobs / lịch sử</button></div>`;
+    }
+    return `<div class="workspace-job-empty" data-workspace-job-empty><strong>Chưa có tác vụ trong workspace</strong><span>Chọn input và bấm chạy; progress, lỗi và artifact sẽ xuất hiện tại đây.</span></div>`;
+  }
   const status = String(job.status || "unknown");
   const progressNumber = Number(job.progress);
   const progress = Number.isFinite(progressNumber) ? Math.max(0, Math.min(100, Math.round(progressNumber))) : 0;
@@ -99,16 +104,15 @@ export function createVisionRenderer(deps) {
     });
     const annotation = model.job?.result?.annotation || model.job?.result?.vision_annotation;
     const source = sourceFor(model);
-    const capabilityMarkup = definitions.map((definition) => capability(definition.label, definition.componentState, definition.note, tool(state, definition.tool))).join("");
     const tabs = definitions.map((definition) => `<button class="tab ${definition.id === selected ? "is-selected" : ""}" type="button" role="tab" data-vision-tool="${escapeHtml(definition.id)}" aria-selected="${definition.id === selected}">${escapeHtml(definition.label)}<small>${escapeHtml(definition.statusLabel)}</small></button>`).join("");
-    const results = renderProgress(model.job, { escapeHtml, formatStatus, statusPill });
+    const results = renderProgress(model.job, { escapeHtml, formatStatus, statusPill, staleJob: model.staleJob });
+    const selectedDefinition = definitions.find((definition) => definition.id === selected) || definitions[0];
     return heading("VISION", "Vision Studio", "Một workspace chung cho OmniParser, RF-DETR và Grounding DINO: chọn input, xem preview, theo dõi job và nhận artifact ngay tại đây.") + `
       <section class="m3-tool-workspace" data-m3-workspace="vision" data-m3-workspace-key="vision" data-active-tool="${escapeHtml(selected)}">
-        <div class="m3-workspace__inputs">
+        <div class="m3-workspace__inputs m3-workspace__toolbar">
           ${card("Đầu vào dùng chung", `${file("Ảnh hoặc screenshot", "source_artifact_id", "image/*")}<p class="small">Upload đi qua Artifact Store; các tab Vision dùng cùng một artifact opaque và không sao chép output ngoài Store.</p>`)}
           <section class="m3-tool-tabs" role="tablist" aria-label="Công cụ Vision">${tabs}</section>
-          <div class="capability-grid m3-capability-grid">${capabilityMarkup}</div>
-          ${definitions.map((definition) => renderVisionPanel(definition, model, { ...deps, formResult, escapeHtml })).join("")}
+          <div class="m3-selected-tool-settings" data-vision-active-settings="${escapeHtml(selectedDefinition.id)}">${renderVisionPanel(selectedDefinition, model, { ...deps, formResult, escapeHtml })}</div>
         </div>
         <div class="m3-workspace__canvas">
           ${card("Canvas / preview", `${renderMediaStage(source, { vision: true })}<p class="small m3-canvas-hint">Preview chỉ xem tại route hiện tại. Chọn detection để highlight box; click ảnh không mở file picker. Result contract: <code>vision.annotation.v1</code>.</p>`)}

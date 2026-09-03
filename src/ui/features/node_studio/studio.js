@@ -473,8 +473,32 @@ const NODE_GRID_SIZE = 40;
 const NODE_LAYOUT_GAP_X = 72;
 const NODE_LAYOUT_GAP_Y = 32;
 const CONTEXT_MENU_LIMIT = 24;
+const NODE_MIN_WIDTH = 320;
+const NODE_MAX_WIDTH = 720;
+const NODE_MIN_HEIGHT = 96;
+const NODE_MAX_HEIGHT = 1200;
+const NODE_OUTPUT_STATE_HEADER_HEIGHT = 22;
+const NODE_OUTPUT_STATE_ROW_HEIGHT = 18;
+const NODE_INLINE_MIN_HEIGHT = 28;
+const NODE_INLINE_MULTILINE_MAX_HEIGHT = 92;
+const NODE_INLINE_EDITOR_MAX_HEIGHT = 240;
 
 const finiteOr = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+
+export function normalizeNodeSize(value, fallback = { width: NODE_MIN_WIDTH, height: NODE_MIN_HEIGHT }) {
+  const source = value && typeof value === "object" ? value : {};
+  const fallbackSource = fallback && typeof fallback === "object" ? fallback : {};
+  const rawWidth = Array.isArray(source) ? source[0] : source.width ?? source[0];
+  const rawHeight = Array.isArray(source) ? source[1] : source.height ?? source[1];
+  const fallbackWidth = Array.isArray(fallbackSource) ? fallbackSource[0] : fallbackSource.width ?? fallbackSource[0];
+  const fallbackHeight = Array.isArray(fallbackSource) ? fallbackSource[1] : fallbackSource.height ?? fallbackSource[1];
+  const width = finiteOr(rawWidth, finiteOr(fallbackWidth, NODE_MIN_WIDTH));
+  const height = finiteOr(rawHeight, finiteOr(fallbackHeight, NODE_MIN_HEIGHT));
+  return {
+    width: Math.round(Math.max(NODE_MIN_WIDTH, Math.min(NODE_MAX_WIDTH, width))),
+    height: Math.round(Math.max(NODE_MIN_HEIGHT, Math.min(NODE_MAX_HEIGHT, height))),
+  };
+}
 
 /**
  * Resolve the server-owned UI metadata without inventing a fallback for an
@@ -554,7 +578,7 @@ function nodeGeometry(node) {
     id: String(node?.hubId ?? node?.id ?? ""),
     x: finiteOr(pos?.[0], 0),
     y: finiteOr(pos?.[1], 0),
-    width: Math.max(1, finiteOr(size?.[0], 230)),
+    width: Math.max(1, finiteOr(size?.[0], NODE_MIN_WIDTH)),
     height: Math.max(1, finiteOr(size?.[1], 100)),
   };
 }
@@ -577,6 +601,20 @@ export function graphBounds(nodes = [], padding = 0) {
   return { left, top, right, bottom, width: Math.max(1, right - left), height: Math.max(1, bottom - top) };
 }
 
+export function minimapWorldBounds({ nodes = [], viewport = [0, 0], offset = [0, 0], scale = 1, padding = 24 } = {}) {
+  const zoom = Math.max(0.01, finiteOr(scale, 1));
+  const viewportWidth = Math.max(1, finiteOr(Array.isArray(viewport) ? viewport[0] : viewport?.width, 1));
+  const viewportHeight = Math.max(1, finiteOr(Array.isArray(viewport) ? viewport[1] : viewport?.height, 1));
+  const offsetX = finiteOr(Array.isArray(offset) ? offset[0] : offset?.x, 0);
+  const offsetY = finiteOr(Array.isArray(offset) ? offset[1] : offset?.y, 0);
+  const viewportNode = {
+    id: "__current_viewport__",
+    pos: [-offsetX / zoom, -offsetY / zoom],
+    size: [viewportWidth / zoom, viewportHeight / zoom],
+  };
+  return graphBounds([...(Array.isArray(nodes) ? nodes : []), viewportNode], padding);
+}
+
 function candidateGridOffsets(radius) {
   if (radius === 0) return [[0, 0]];
   const result = [];
@@ -593,7 +631,7 @@ export function findFreeGridSlot(nodes = [], requested = {}, size = {}, options 
   const grid = Math.max(1, finiteOr(options.grid, NODE_GRID_SIZE));
   const gap = Math.max(0, finiteOr(options.gap, NODE_LAYOUT_GAP_Y));
   const maxRadius = Math.max(1, Math.min(64, Math.floor(finiteOr(options.maxRadius, 32))));
-  const width = Math.max(1, finiteOr(size.width ?? size[0], 230));
+  const width = Math.max(1, finiteOr(size.width ?? size[0], NODE_MIN_WIDTH));
   const height = Math.max(1, finiteOr(size.height ?? size[1], 100));
   const requestedX = finiteOr(requested.x ?? requested[0], 0);
   const requestedY = finiteOr(requested.y ?? requested[1], 0);
@@ -1037,14 +1075,101 @@ export function propertyControl(node, property) {
   return `<label class="graph-property"><span>${label}${unit}</span><input type="${type}" data-graph-property="${escapeHtml(target)}" value="${escapeHtml(value)}"${min}${max}${numberStep}${maxLength}${control.placeholder ? ` placeholder="${escapeHtml(control.placeholder)}"` : ""} /></label>`;
 }
 
-function inlineWidgetType(control) {
-  if (!control) return null;
-  if (control.control === "toggle") return "toggle";
-  if (control.control === "select") return "combo";
-  if (control.control === "slider") return "slider";
-  if (["integer", "number", "size"].includes(control.control)) return "number";
-  if (["text", "prompt", "textarea", "artifact"].includes(control.control)) return "text";
-  return null;
+export function orderedPropertyGroups(properties = []) {
+  const groups = new Map();
+  (Array.isArray(properties) ? properties : []).forEach((property, index) => {
+    const control = inlineControlMetadata(property);
+    const name = control?.group || "General";
+    const advanced = control?.advanced === true;
+    const key = `${name}\u0000${advanced ? "advanced" : "basic"}`;
+    if (!groups.has(key)) groups.set(key, { name, advanced, firstIndex: index, properties: [] });
+    groups.get(key).properties.push({ property, index, order: control?.order ?? 0 });
+  });
+  return [...groups.values()]
+    .sort((first, second) => first.firstIndex - second.firstIndex)
+    .map((group) => ({
+      name: group.name,
+      advanced: group.advanced,
+      properties: group.properties
+        .sort((first, second) => Number(first.order) - Number(second.order) || first.index - second.index)
+        .map((item) => item.property),
+    }));
+}
+
+function renderPropertyGroups(node, properties) {
+  const groups = orderedPropertyGroups(properties);
+  return groups.map((group) => {
+    const controls = group.properties.map((property) => propertyControl(node, property)).join("");
+    if (group.advanced) {
+      return `<details class="graph-property-group graph-property-group--advanced"><summary>${escapeHtml(nodeText(group.name))} · Advanced</summary><div class="graph-property-group__body">${controls}</div></details>`;
+    }
+    return `<section class="graph-property-group" data-graph-property-group-name="${escapeHtml(group.name)}"><strong>${escapeHtml(nodeText(group.name))}</strong><div class="graph-property-group__body">${controls}</div></section>`;
+  }).join("");
+}
+
+function inlineWidgetRawValue(node, property, widget) {
+  const drafts = node?._hubInlineDrafts;
+  if (drafts && Object.prototype.hasOwnProperty.call(drafts, property.name)) return drafts[property.name];
+  return widget?.value ?? node?.properties?.[property.name] ?? property.default ?? "";
+}
+
+function inlineWidgetHeight(node, property, control, widget) {
+  if (!control.multiline) return NODE_INLINE_MIN_HEIGHT;
+  const value = String(inlineWidgetRawValue(node, property, widget) ?? "");
+  const lines = value.split(/\r?\n/).reduce((total, line) => total + Math.max(1, Math.ceil(line.length / 34)), 0);
+  return Math.min(NODE_INLINE_MULTILINE_MAX_HEIGHT, NODE_INLINE_MIN_HEIGHT + Math.max(1, Math.min(4, lines)) * 14);
+}
+
+function createInlineWidget(node, property, control) {
+  const widget = {
+    type: "hub-inline",
+    name: property.name,
+    label: control.label,
+    value: node.properties?.[property.name] ?? property.default ?? "",
+    options: { property: property.name },
+    hubControl: control.control,
+    hubProperty: property.name,
+    computeSize: (width) => [Math.max(NODE_MIN_WIDTH, finiteOr(width, NODE_MIN_WIDTH)), inlineWidgetHeight(node, property, control, widget)],
+    draw(ctx, _owner, width, y, height) {
+      const value = String(inlineWidgetRawValue(node, property, widget) ?? "");
+      const singleLine = value.replace(/\s+/g, " ").trim();
+      const display = (singleLine || "—").slice(0, 48) + (singleLine.length > 48 ? "…" : "");
+      const widgetHeight = Math.max(Number(height) || 0, inlineWidgetHeight(node, property, control, widget));
+      ctx.save();
+      ctx.fillStyle = "#18223b";
+      ctx.strokeStyle = "#55698f";
+      ctx.beginPath();
+      ctx.roundRect(14, y, width - 28, widgetHeight, [5]);
+      ctx.fill();
+      ctx.stroke();
+      ctx.font = "11px sans-serif";
+      ctx.fillStyle = "#aebddd";
+      ctx.textAlign = "left";
+      ctx.fillText(control.label || property.name, 22, y + 16);
+      ctx.fillStyle = "#edf4ff";
+      ctx.textAlign = "right";
+      ctx.fillText(display, width - 22, y + 16);
+      if (control.multiline) {
+        ctx.fillStyle = "#80aaff";
+        ctx.font = "9px sans-serif";
+        ctx.fillText("Ctrl+Enter", width - 22, y + widgetHeight - 5);
+      }
+      ctx.restore();
+    },
+    mouse(event) {
+      const editor = node._hubEditor;
+      if (!editor || !event || !["mousedown", "pointerdown"].includes(event.type)) return Boolean(event?.type);
+      editor.captureWidgetBeforeChange(node, property.name);
+      editor.openInlineEditor(node, property, widget, event);
+      return true;
+    },
+  };
+  return widget;
+}
+
+function outputStateAreaHeight(node) {
+  const count = Array.isArray(node?.outputs) ? node.outputs.length : 0;
+  return count ? NODE_OUTPUT_STATE_HEADER_HEIGHT + count * NODE_OUTPUT_STATE_ROW_HEIGHT + 6 : 0;
 }
 
 function createSliderWidget(node, property, control) {
@@ -1063,14 +1188,15 @@ function createSliderWidget(node, property, control) {
     value: snap(node.properties?.[property.name] ?? property.default ?? minimum),
     options: { property: property.name, min: minimum, max: maximum, step },
     _dragging: false,
-    computeSize: () => [230, 42],
+    computeSize: () => [NODE_MIN_WIDTH, 42],
     draw(ctx, _owner, width, y, height) {
       const value = snap(this.value);
+      const widgetHeight = Math.max(Number(height) || 0, 42);
       const ratio = maximum === minimum ? 0 : (value - minimum) / (maximum - minimum);
       const left = 16;
       const numberWidth = 66;
       const right = Math.max(left + 18, width - numberWidth - 18);
-      const trackY = y + height * 0.63;
+      const trackY = y + widgetHeight * 0.63;
       ctx.save();
       ctx.font = "11px sans-serif";
       ctx.textAlign = "left";
@@ -1097,18 +1223,18 @@ function createSliderWidget(node, property, control) {
       ctx.strokeStyle = "#8aa8d9";
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.roundRect(width - numberWidth - 8, y + 4, numberWidth, height - 8, 4);
+      ctx.roundRect(width - numberWidth - 8, y + 4, numberWidth, widgetHeight - 8, 4);
       ctx.fill();
       ctx.stroke();
       ctx.fillStyle = "#edf4ff";
       ctx.textAlign = "center";
-      ctx.fillText(String(value), width - numberWidth / 2 - 8, y + height * 0.68);
+      ctx.fillText(String(value), width - numberWidth / 2 - 8, y + widgetHeight * 0.68);
       ctx.restore();
     },
     mouse(event, position) {
       const editor = node._hubEditor;
       if (!editor || !["mousedown", "pointerdown", "mousemove", "pointermove", "mouseup", "pointerup"].includes(event?.type)) return false;
-      const width = Number(node.size?.[0] || 230);
+      const width = Number(node.size?.[0] || NODE_MIN_WIDTH);
       const numberStart = width - 82;
       const x = Number(position?.[0] || 0);
       const updateFromPointer = () => {
@@ -1122,7 +1248,7 @@ function createSliderWidget(node, property, control) {
         editor.captureWidgetBeforeChange(node, property.name);
         if (x >= numberStart) {
           this._dragging = false;
-          editor.liteCanvas?.prompt(control.label || property.name, String(this.value), (value) => editor.changeWidgetValue(node, property, value), event, false);
+          editor.openInlineEditor(node, property, this, event);
         } else {
           this._dragging = true;
           updateFromPointer();
@@ -1152,30 +1278,31 @@ function createColorWidget(node, property, control) {
     label: control.label,
     value: node.properties?.[property.name] ?? property.default ?? "#4d7dff",
     options: { property: property.name },
-    computeSize: () => [230, 26],
+    computeSize: () => [NODE_MIN_WIDTH, 26],
     draw(ctx, _owner, width, y, height) {
       const value = typeof this.value === "string" && /^#[0-9a-f]{6,8}$/i.test(this.value) ? this.value : "#4d7dff";
+      const widgetHeight = Math.max(Number(height) || 0, 26);
       ctx.save();
       ctx.fillStyle = "#29344d";
       ctx.strokeStyle = "#7082a8";
       ctx.beginPath();
-      ctx.roundRect(15, y, width - 30, height, [height * 0.4]);
+      ctx.roundRect(15, y, width - 30, widgetHeight, [widgetHeight * 0.4]);
       ctx.fill();
       ctx.stroke();
       ctx.fillStyle = value;
-      ctx.fillRect(21, y + 4, height - 8, height - 8);
+      ctx.fillRect(21, y + 4, widgetHeight - 8, widgetHeight - 8);
       ctx.fillStyle = "#e9efff";
       ctx.textAlign = "left";
-      ctx.fillText(this.label || this.name, 45, y + height * 0.7);
+      ctx.fillText(this.label || this.name, 45, y + widgetHeight * 0.7);
       ctx.textAlign = "right";
-      ctx.fillText(value, width - 22, y + height * 0.7);
+      ctx.fillText(value, width - 22, y + widgetHeight * 0.7);
       ctx.restore();
     },
     mouse(event) {
       const editor = node._hubEditor;
       if (!editor || !editor.liteCanvas || !["mousedown", "pointerdown"].includes(event?.type)) return false;
       editor.captureWidgetBeforeChange(node, property.name);
-      editor.liteCanvas.prompt(control.label, this.value, (value) => editor.changeWidgetValue(node, property, value), event, false);
+      editor.openInlineEditor(node, property, this, event);
       return true;
     },
   };
@@ -1242,6 +1369,7 @@ class HubGraphEditor {
     this.connectionPicker = null;
     this.pendingConnection = null;
     this.connectionNotice = "";
+    this.inlineEditor = null;
     this.encoderCapabilities = null;
     this.operationScope = { ...MEDIA_OPERATION_SCOPE_FALLBACK, operationStatus: { ...MEDIA_OPERATION_SCOPE_FALLBACK.operationStatus } };
   }
@@ -1596,6 +1724,244 @@ class HubGraphEditor {
     if (restoreFocus) this.canvasElement?.focus();
   }
 
+  inlineEditorRawValue(state) {
+    if (!state) return "";
+    if (state.control.control === "toggle") return Boolean(state.input?.checked);
+    if (state.control.control === "color") return String(state.exactInput?.value || "").trim();
+    return state.input?.value ?? "";
+  }
+
+  positionInlineEditor() {
+    const state = this.inlineEditor;
+    const shell = this.root.querySelector(".graph-canvas-shell");
+    if (!state?.panel || !shell || !this.canvasElement || !state.node) return;
+    const canvasRect = this.canvasElement.getBoundingClientRect();
+    const shellRect = shell.getBoundingClientRect();
+    const scale = Math.max(0.01, Number(this.liteCanvas?.ds?.scale || 1));
+    const offset = this.liteCanvas?.ds?.offset || [0, 0];
+    const widgetY = Number(state.widget?.last_y ?? state.node.widgets_start_y ?? 42);
+    const anchorX = canvasRect.left - shellRect.left + Number(offset[0] || 0) + (Number(state.node.pos?.[0] || 0) + 8) * scale;
+    const anchorY = canvasRect.top - shellRect.top + Number(offset[1] || 0) + (Number(state.node.pos?.[1] || 0) + widgetY) * scale;
+    const maxWidth = Math.max(220, Math.min(360, shell.clientWidth - 16));
+    state.panel.style.width = `${maxWidth}px`;
+    const panelWidth = state.panel.offsetWidth || maxWidth;
+    const panelHeight = state.panel.offsetHeight || 160;
+    const maxLeft = Math.max(8, shell.clientWidth - panelWidth - 8);
+    const maxTop = Math.max(8, shell.clientHeight - panelHeight - 8);
+    state.panel.style.left = `${Math.max(8, Math.min(maxLeft, anchorX))}px`;
+    state.panel.style.top = `${Math.max(8, Math.min(maxTop, anchorY + 8))}px`;
+  }
+
+  previewInlineEditor() {
+    const state = this.inlineEditor;
+    if (!state) return false;
+    const rawValue = this.inlineEditorRawValue(state);
+    state.node._hubInlineDrafts ||= Object.create(null);
+    state.node._hubInlineDrafts[state.property.name] = rawValue;
+    const normalized = normalizeInlineControlValue(state.property, rawValue);
+    if (normalized.accepted) {
+      state.error.hidden = true;
+      state.error.textContent = "";
+      if (state.widget && !state.control.multiline) state.widget.value = normalized.value;
+    } else {
+      state.error.hidden = false;
+      state.error.textContent = `Không thể cập nhật ${state.control.label || state.property.name}: ${normalized.reason}.`;
+    }
+    const minimum = state.node.computeSize?.() || [NODE_MIN_WIDTH, NODE_MIN_HEIGHT];
+    const current = normalizeNodeSize(state.node.size, { width: NODE_MIN_WIDTH, height: NODE_MIN_HEIGHT });
+    const previousSizing = state.node._hubInlineSizing === true;
+    state.node._hubInlineSizing = true;
+    try {
+      state.node.setSize?.([current.width, Math.max(current.height, Number(minimum[1]) || NODE_MIN_HEIGHT)]);
+    } finally {
+      state.node._hubInlineSizing = previousSizing;
+    }
+    state.node.setDirtyCanvas?.(true, true);
+    this.positionInlineEditor();
+    return normalized.accepted;
+  }
+
+  commitInlineEditor() {
+    const state = this.inlineEditor;
+    if (!state) return true;
+    const rawValue = this.inlineEditorRawValue(state);
+    const normalized = normalizeInlineControlValue(state.property, rawValue);
+    if (!normalized.accepted) {
+      state.error.hidden = false;
+      state.error.textContent = `Không thể cập nhật ${state.control.label || state.property.name}: ${normalized.reason}.`;
+      state.input?.focus();
+      return false;
+    }
+    delete state.node._hubInlineDrafts?.[state.property.name];
+    const changed = this.stageWidgetValue(state.node, state.property, normalized.value);
+    this.widgetBeforeChange = null;
+    state.committed = true;
+    this.closeInlineEditor(false);
+    if (changed) this.commitWidgetChange(state.before);
+    else this.renderInspector();
+    this.scheduleMinimapUpdate();
+    return true;
+  }
+
+  closeInlineEditor(restore = true) {
+    const state = this.inlineEditor;
+    if (!state) return true;
+    if (state.outsideHandler) window.removeEventListener("pointerdown", state.outsideHandler, true);
+    if (state.resizeHandler) window.removeEventListener("resize", state.resizeHandler, true);
+    state.panel?.remove();
+    if (restore && !state.committed) {
+      delete state.node._hubInlineDrafts?.[state.property.name];
+      if (state.beforeSize) state.node.setSize?.(state.beforeSize.slice());
+      state.node._hubSizeChanged = state.beforeSizeChanged;
+      if (state.widget) state.widget.value = state.node.properties?.[state.property.name] ?? state.property.default ?? "";
+      state.node.setDirtyCanvas?.(true, true);
+    }
+    this.inlineEditor = null;
+    this.widgetBeforeChange = null;
+    this.renderInspector();
+    this.scheduleMinimapUpdate();
+    return true;
+  }
+
+  openInlineEditor(node, property, widget = null, _event = null) {
+    const control = inlineControlMetadata(property);
+    if (this.destroyed || !node || !control) return false;
+    if (this.inlineEditor && !this.commitInlineEditor()) return false;
+    const panel = document.createElement("div");
+    panel.className = "graph-inline-editor";
+    panel.setAttribute("data-graph-inline-editor", "true");
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-label", control.label || property.name);
+    panel.style.maxHeight = `${NODE_INLINE_EDITOR_MAX_HEIGHT}px`;
+    const label = document.createElement("label");
+    label.className = "graph-inline-editor__label";
+    label.textContent = control.label || property.name;
+    const field = document.createElement("div");
+    field.className = "graph-inline-editor__field";
+    const initial = node.properties?.[property.name] ?? property.default ?? "";
+    let input = null;
+    let exactInput = null;
+    if (control.control === "toggle") {
+      input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = initial === true;
+      input.setAttribute("role", "switch");
+      field.append(input);
+    } else if (control.control === "select") {
+      input = document.createElement("select");
+      control.options.forEach((option) => {
+        const item = document.createElement("option");
+        item.value = String(option);
+        item.textContent = String(option);
+        item.selected = String(option) === String(initial);
+        input.append(item);
+      });
+      field.append(input);
+    } else if (control.control === "color") {
+      const row = document.createElement("div");
+      row.className = "graph-inline-editor__color-row";
+      input = document.createElement("input");
+      input.type = "color";
+      input.value = /^#[0-9a-f]{6}$/i.test(String(initial)) ? String(initial) : "#4d7dff";
+      exactInput = document.createElement("input");
+      exactInput.type = "text";
+      exactInput.value = String(initial || "#4d7dff");
+      exactInput.maxLength = 9;
+      row.append(input, exactInput);
+      field.append(row);
+    } else if (control.multiline) {
+      input = document.createElement("textarea");
+      input.rows = 4;
+      input.value = String(initial);
+      input.maxLength = Number.isFinite(Number(control.maxLength)) ? Number(control.maxLength) : 20000;
+      if (control.placeholder) input.placeholder = control.placeholder;
+      field.append(input);
+    } else {
+      input = document.createElement("input");
+      input.type = ["integer", "number", "size"].includes(control.control) ? "number" : "text";
+      input.value = String(initial);
+      if (control.minimum !== undefined && control.minimum !== null) input.min = String(control.minimum);
+      if (control.maximum !== undefined && control.maximum !== null) input.max = String(control.maximum);
+      if (control.step !== undefined && control.step !== null) input.step = String(control.step);
+      if (Number.isFinite(Number(control.maxLength))) input.maxLength = Number(control.maxLength);
+      if (control.placeholder) input.placeholder = control.placeholder;
+      field.append(input);
+    }
+    const error = document.createElement("div");
+    error.className = "graph-inline-editor__error";
+    error.setAttribute("role", "alert");
+    error.hidden = true;
+    const actions = document.createElement("div");
+    actions.className = "graph-inline-editor__actions";
+    const apply = document.createElement("button");
+    apply.type = "button";
+    apply.className = "button button--compact button--primary";
+    apply.textContent = control.multiline ? "Áp dụng (Ctrl+Enter)" : "Áp dụng";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "button button--compact";
+    cancel.textContent = "Hủy";
+    actions.append(apply, cancel);
+    panel.append(label, field, error, actions);
+    const shell = this.root.querySelector(".graph-canvas-shell");
+    if (!shell) return false;
+    shell.append(panel);
+    const state = {
+      node,
+      property,
+      control,
+      widget,
+      panel,
+      input,
+      exactInput,
+      error,
+      before: graphFingerprint(this.toHubGraph()),
+      beforeSize: Array.isArray(node.size) || ArrayBuffer.isView(node.size) ? [...node.size] : null,
+      beforeSizeChanged: node._hubSizeChanged === true,
+      committed: false,
+    };
+    this.inlineEditor = state;
+    node._hubInlineDrafts ||= Object.create(null);
+    node._hubInlineDrafts[property.name] = String(initial);
+    const preview = () => this.previewInlineEditor();
+    input?.addEventListener("input", preview);
+    input?.addEventListener("change", preview);
+    if (input && exactInput) input.addEventListener("input", () => { exactInput.value = input.value; preview(); });
+    exactInput?.addEventListener("input", () => {
+      if (input) input.value = exactInput.value;
+      preview();
+    });
+    apply.addEventListener("click", () => this.commitInlineEditor());
+    cancel.addEventListener("click", () => this.closeInlineEditor(true));
+    const handleEditorKeydown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        this.closeInlineEditor(true);
+      } else if (event.key === "Enter" && ((!control.multiline && !event.shiftKey) || (control.multiline && (event.ctrlKey || event.metaKey)))) {
+        event.preventDefault();
+        event.stopPropagation();
+        this.commitInlineEditor();
+      }
+    };
+    input?.addEventListener("keydown", handleEditorKeydown);
+    exactInput?.addEventListener("keydown", handleEditorKeydown);
+    state.outsideHandler = (event) => {
+      if (!this.inlineEditor || panel.contains(event.target)) return;
+      const committed = this.commitInlineEditor();
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!committed) input?.focus();
+    };
+    state.resizeHandler = () => this.positionInlineEditor();
+    window.addEventListener("pointerdown", state.outsideHandler, true);
+    window.addEventListener("resize", state.resizeHandler, true);
+    this.positionInlineEditor();
+    input?.focus();
+    if (input && typeof input.select === "function" && input.type !== "checkbox") input.select();
+    return true;
+  }
+
   async refreshWorkflowLibrary() {
     if (!this.workflowLibrary?.list) return this.workflowLibraryState;
     try {
@@ -1677,6 +2043,7 @@ class HubGraphEditor {
   }
 
   destroy() {
+    this.closeInlineEditor(true);
     this.abort.abort();
     this.destroyed = true;
     this.closeConnectionPicker(false);
@@ -2079,6 +2446,16 @@ class HubGraphEditor {
         this.hubType = captured.type;
         this.properties = Object.fromEntries((captured.properties || []).map((property) => [property.name, clone(property.default)]));
         this._hubInlineControls = new Map();
+        this._hubInlineDrafts = Object.create(null);
+        this._hubSizePersisted = false;
+        this._hubSizeChanged = false;
+        this.onResize = (size) => {
+          if (this._hubEditor && !this._hubEditor.hydrating && !this._hubInlineSizing) {
+            this._hubSizeChanged = true;
+            this._hubEditor.scheduleMinimapUpdate();
+          }
+          return size;
+        };
         for (const port of captured.inputs || []) {
           this.addInput(nodeText(port.label || port.name), port.type, { hubPort: port.name, required: Boolean(port.required), multi: Boolean(port.multi) });
           const input = this.inputs[this.inputs.length - 1];
@@ -2099,7 +2476,7 @@ class HubGraphEditor {
         this.bgcolor = "#172039";
         this.shape = "round";
         this.widgets_start_y = 42 + Math.max((captured.inputs || []).length, (captured.outputs || []).length) * 22;
-        this.size = [230, Math.max(82, this.widgets_start_y)];
+        this.size = [NODE_MIN_WIDTH, Math.max(NODE_MIN_HEIGHT, this.widgets_start_y)];
         for (const property of captured.properties || []) {
           const control = inlineControlMetadata(property);
           if (!control) continue;
@@ -2118,27 +2495,19 @@ class HubGraphEditor {
             this._hubInlineControls.set(property.name, widget);
             continue;
           }
-          const type = inlineWidgetType(control);
-          if (!type) continue;
-          const options = {
-            property: property.name,
-            multiline: control.multiline,
-            min: control.minimum,
-            max: control.maximum,
-            step: control.step,
-            values: control.options,
-            max_length: control.maxLength,
-            placeholder: control.placeholder,
-            unit: control.unit,
-          };
-          if (type === "slider" && (options.min === undefined || options.max === undefined)) continue;
-          const widget = this.addWidget(type, nodeText(control.label || property.name), this.properties[property.name], (value) => this._hubEditor?.handleWidgetCallback(this, property, value), options);
-          widget.hubControl = control.control;
-          widget.hubProperty = property.name;
+          const widget = createInlineWidget(this, property, control);
+          this.addCustomWidget(widget);
           this._hubInlineControls.set(property.name, widget);
         }
         this.size = this.computeSize();
       }
+      const baseComputeSize = LiteGraph.LGraphNode.prototype.computeSize;
+      HubLiteNode.prototype.computeSize = function computeHubNodeSize(out) {
+        const size = baseComputeSize.call(this, out);
+        size[0] = Math.max(NODE_MIN_WIDTH, Math.min(NODE_MAX_WIDTH, Number(size[0]) || NODE_MIN_WIDTH));
+        size[1] = Math.min(NODE_MAX_HEIGHT, Math.max(NODE_MIN_HEIGHT, Number(size[1]) || NODE_MIN_HEIGHT) + outputStateAreaHeight(this));
+        return size;
+      };
       HubLiteNode.title = nodeText(captured.title);
       // LiteGraph defaults unselected titles to #999 even on bright category
       // bars.  Use one high-contrast ink color for every category; selected
@@ -2148,22 +2517,35 @@ class HubGraphEditor {
       HubLiteNode.prototype.onDrawForeground = function drawHubNodeForeground(ctx) {
         const editor = this._hubEditor;
         const state = editor?.nodeStates?.get(this.hubId) || { status: this.hubStatus || "not_run" };
+        if (editor?.inlineEditor?.node === this) editor.positionInlineEditor();
+        const stateHeight = outputStateAreaHeight(this);
+        if (!stateHeight || !this.outputs?.length) return;
         ctx.save();
+        const top = this.size[1] - stateHeight;
+        ctx.fillStyle = "rgba(8, 13, 27, .32)";
+        ctx.fillRect(0, top, this.size[0], stateHeight);
+        ctx.strokeStyle = "rgba(154, 168, 199, .32)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, top + 0.5);
+        ctx.lineTo(this.size[0], top + 0.5);
+        ctx.stroke();
         ctx.font = "9px sans-serif";
-        ctx.textAlign = "right";
+        ctx.textAlign = "left";
+        ctx.fillStyle = "#aebddd";
+        ctx.fillText(nodeText("Output states"), 10, top + 14);
         for (const [index, port] of (captured.outputs || []).entries()) {
           const outputState = outputSocketState(state, port.name);
           const color = outputState === "completed" ? "#45d19a" : outputState === "running" ? "#80aaff" : outputState === "error" ? "#ef7885" : "#8794ad";
-          const y = 42 + index * 22;
+          const y = top + NODE_OUTPUT_STATE_HEADER_HEIGHT + index * NODE_OUTPUT_STATE_ROW_HEIGHT + 5;
           const outputLabel = nodeText(port.label || port.name);
           const stateLabel = outputSocketStateLabel(outputState);
-          const outputLabelWidth = ctx.measureText(outputLabel).width;
           ctx.fillStyle = color;
           ctx.beginPath();
-          ctx.arc(this.size[0] - 8, y, 3, 0, Math.PI * 2);
+          ctx.arc(12, y - 3, 3, 0, Math.PI * 2);
           ctx.fill();
           ctx.fillStyle = "#c8d4f2";
-          ctx.fillText(stateLabel, Math.max(8, this.size[0] - 15 - outputLabelWidth - 6), y + 3);
+          ctx.fillText(`${outputLabel} · ${stateLabel}`, 22, y);
         }
         ctx.restore();
       };
@@ -2312,11 +2694,15 @@ class HubGraphEditor {
     this.liteCanvas.render_canvas_border = false;
     this.liteCanvas.onDrawBackground = (ctx, area) => this.drawGraphGrid(ctx, area);
     this.liteCanvas.onBeforeChange = () => this.captureBeforeChange();
-    this.liteCanvas.onAfterChange = () => this.captureAfterChange();
+    this.liteCanvas.onAfterChange = () => { this.captureAfterChange(); this.scheduleMinimapUpdate(); };
     this.liteCanvas.onSelectionChange = () => { this.renderInspector(); this.scheduleMinimapUpdate(); };
     this.liteCanvas.onNodeMoved = () => this.scheduleMinimapUpdate();
     this.liteCanvas.onMouse = (event) => this.handleCanvasMouse(event);
     this.liteCanvas.onPointerCancel = () => this.handleCanvasPointerCancel();
+    this.liteCanvas.onDrawForeground = () => {
+      if (this.liteCanvas.node_dragged || this.liteCanvas.resizing_node || this.liteCanvas.dragging_canvas || this.liteCanvas.selected_group || this.liteCanvas.connecting_node) this.scheduleMinimapUpdate();
+      if (this.inlineEditor) this.positionInlineEditor();
+    };
     this.liteCanvas.ds.onredraw = () => this.scheduleMinimapUpdate();
     // LiteGraph's default processContextMenu appends a document-level menu.
     // Keep LiteGraph as the only editor while routing both targets through the
@@ -2464,6 +2850,7 @@ class HubGraphEditor {
   }
 
   handleCanvasPointerCancel() {
+    this.closeInlineEditor(true);
     this.closeConnectionPicker(false);
     this.cancelNativeConnection();
     const before = this.beforeChange;
@@ -2500,6 +2887,25 @@ class HubGraphEditor {
     canvas._mouseup_callback = wrapper;
   }
 
+  positionConnectionPicker(picker, pending) {
+    const shell = this.root.querySelector(".graph-canvas-shell");
+    if (!shell || !picker || !pending) return;
+    const canvasRect = this.canvasElement?.getBoundingClientRect?.() || shell.getBoundingClientRect();
+    const shellRect = shell.getBoundingClientRect();
+    const scale = Math.max(0.01, Number(this.liteCanvas?.ds?.scale || 1));
+    const offset = this.liteCanvas?.ds?.offset || [0, 0];
+    const anchorX = canvasRect.left - shellRect.left + Number(offset[0] || 0) + Number(pending.position?.x || 0) * scale + 12;
+    const anchorY = canvasRect.top - shellRect.top + Number(offset[1] || 0) + Number(pending.position?.y || 0) * scale + 12;
+    const panelWidth = Math.min(420, Math.max(240, shell.clientWidth - 16));
+    picker.style.width = `${panelWidth}px`;
+    const measuredWidth = picker.offsetWidth || panelWidth;
+    const measuredHeight = picker.offsetHeight || 240;
+    const maxLeft = Math.max(8, shell.clientWidth - measuredWidth - 8);
+    const maxTop = Math.max(8, shell.clientHeight - measuredHeight - 8);
+    picker.style.left = `${Math.max(8, Math.min(maxLeft, anchorX))}px`;
+    picker.style.top = `${Math.max(8, Math.min(maxTop, anchorY))}px`;
+  }
+
   openConnectionPicker(pending) {
     this.closeConnectionPicker(false);
     this.pendingConnection = pending;
@@ -2517,12 +2923,6 @@ class HubGraphEditor {
     picker.setAttribute("role", "dialog");
     picker.setAttribute("aria-modal", "true");
     picker.setAttribute("aria-labelledby", `graph-picker-title-${this.scope}`);
-    picker.style.cssText = "position:absolute;z-index:5;width:min(340px,calc(100% - 16px));max-height:72%;overflow:auto;padding:10px;background:var(--panel);box-shadow:var(--shadow);";
-    const scale = Number(this.liteCanvas.ds.scale || 1);
-    const left = Number(this.liteCanvas.ds.offset?.[0] || 0) + pending.position.x * scale;
-    const top = Number(this.liteCanvas.ds.offset?.[1] || 0) + pending.position.y * scale;
-    picker.style.left = `${Math.max(8, Math.min(Math.max(8, shell.clientWidth - 350), left))}px`;
-    picker.style.top = `${Math.max(8, Math.min(Math.max(8, shell.clientHeight - 300), top))}px`;
     picker.innerHTML = `<div class="graph-connection-picker__head"><strong id="graph-picker-title-${escapeHtml(this.scope)}">${escapeHtml(nodeText("Connect"))} ${escapeHtml(pending.type)} ${escapeHtml(nodeText("socket"))}</strong><button class="button button--compact" type="button" data-graph-picker-close aria-label="${escapeHtml(nodeText("Close connection picker"))}">Esc</button></div><input type="search" data-graph-picker-search aria-label="${escapeHtml(nodeText("Search compatible nodes"))}" placeholder="${escapeHtml(nodeText("Search compatible nodes"))}" value="${escapeHtml(this.panelState.pickerSearch)}" /><div data-graph-picker-results role="listbox" aria-label="${escapeHtml(nodeText("Compatible node ports"))}"></div><div data-graph-picker-rejected class="graph-empty" role="status"></div>`;
     shell.appendChild(picker);
     this.connectionPicker = { element: picker, candidates, pending };
@@ -2546,6 +2946,9 @@ class HubGraphEditor {
     };
     document.addEventListener("pointerdown", this._pickerOutsideHandler, true);
     this.renderConnectionPicker();
+    this.positionConnectionPicker(picker, pending);
+    const view = picker.ownerDocument?.defaultView || globalThis;
+    view.requestAnimationFrame?.(() => this.positionConnectionPicker(picker, pending));
     setTimeout(() => input?.focus(), 0);
   }
 
@@ -2557,12 +2960,24 @@ class HubGraphEditor {
       const haystack = `${candidate.definition.title} ${candidate.definition.type} ${candidate.port.label || candidate.port.name} ${candidate.definition.description}`.toLocaleLowerCase();
       return !query || haystack.includes(query);
     });
+    const groups = new Map();
+    matches.forEach((item) => {
+      const category = item.candidate.definition.category || item.candidate.port.type || "other";
+      if (!groups.has(category)) groups.set(category, []);
+      groups.get(category).push(item);
+    });
     const results = state.element.querySelector("[data-graph-picker-results]");
-    if (results) results.innerHTML = matches.length ? matches.map(({ candidate, index }) => `<button class="button button--compact" type="button" role="option" data-graph-picker-candidate="${index}" title="${escapeHtml(candidate.definition.description || "")}">${escapeHtml(candidate.definition.title)} · ${escapeHtml(candidate.port.label || candidate.port.name)} <small>${escapeHtml(nodeText(candidate.definition.availability?.status || candidate.definition.status || "operational"))}</small></button>`).join("") : `<p class="graph-empty">${escapeHtml(nodeText("No compatible node port matches this search."))}</p>`;
+    if (results) {
+      results.innerHTML = matches.length
+        ? [...groups.entries()].map(([category, items]) => `<section class="graph-connection-picker__group"><h3>${escapeHtml(nodeText(category))}</h3>${items.map(({ candidate, index }) => `<button class="graph-connection-picker__candidate" type="button" role="option" aria-selected="false" data-graph-picker-candidate="${index}" title="${escapeHtml(candidate.definition.description || "")}"><span class="graph-connection-picker__candidate-main"><strong>${escapeHtml(candidate.definition.title)}</strong><span>${escapeHtml(candidate.port.label || candidate.port.name)} · ${escapeHtml(candidate.port.type || "")}</span><small>${escapeHtml(candidate.definition.description || "")}</small></span><span class="graph-connection-picker__candidate-status">${escapeHtml(nodeText(candidate.definition.availability?.status || candidate.definition.status || "operational"))}</span></button>`).join("")}</section>`).join("")
+        : `<p class="graph-empty">${escapeHtml(nodeText("No compatible node port matches this search."))}</p>`;
+    }
     const rejected = state.element.querySelector("[data-graph-picker-rejected]");
     if (rejected) {
-      const reasons = state.candidates.rejected.slice(0, 4).map((item) => `${item.definition.title} · ${item.port.label || item.port.name}: ${item.reason}`);
-      rejected.textContent = reasons.length ? `${nodeText("Rejected candidates")}: ${reasons.join("; ")}` : nodeText("Only explicitly compatible typed ports are shown.");
+      const reasons = state.candidates.rejected.slice(0, 12).map((item) => `<li><strong>${escapeHtml(item.definition.title)}</strong> · ${escapeHtml(item.port.label || item.port.name)}: ${escapeHtml(item.reason)}</li>`).join("");
+      rejected.innerHTML = reasons
+        ? `<details class="graph-connection-picker__rejected"><summary>${escapeHtml(nodeText("Rejected candidates"))}</summary><ul>${reasons}</ul></details>`
+        : `<span>${escapeHtml(nodeText("Only explicitly compatible typed ports are shown."))}</span>`;
     }
   }
 
@@ -2642,11 +3057,32 @@ class HubGraphEditor {
   }
 
   handlePickerKey(event) {
-    if (!this.connectionPicker) return false;
+    const state = this.connectionPicker;
+    if (!state) return false;
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopImmediatePropagation();
       this.closeConnectionPicker();
+      return true;
+    }
+    const items = [...state.element.querySelectorAll("[data-graph-picker-candidate]")];
+    if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Home" || event.key === "End") {
+      if (!items.length) return true;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const current = items.indexOf(document.activeElement);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : (Math.max(0, current) + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+      items[next]?.focus();
+      return true;
+    }
+    if (event.key === "Enter") {
+      const target = document.activeElement?.closest?.("[data-graph-picker-candidate]") || items[0];
+      if (!target) return true;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const index = Number(target.dataset.graphPickerCandidate);
+      const candidate = state.candidates.compatible[index];
+      if (candidate) this.connectPickerCandidate(candidate);
       return true;
     }
     return false;
@@ -2775,7 +3211,8 @@ class HubGraphEditor {
     const outputMarkup = outputStates ? `<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Output states"))}</strong><ul class="graph-output-states">${outputStates}</ul></section>` : "";
     const capability = `<div class="graph-inspector__capability" data-status="${escapeHtml(displayStatus)}"><div class="graph-inspector__capability-head"><strong>${escapeHtml(nodeText(displayStatus))}</strong><span class="status-pill" data-status="${escapeHtml(displayStatus)}">${escapeHtml(nodeText(displayStatus))}</span></div><p>${escapeHtml(nodeText(displayMessage || "Snapshot chưa công bố thêm giải thích."))}</p></div>`;
     const nextAction = action || "Chưa có hành động tiếp theo trong snapshot này.";
-    this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(nodeText(definition?.category || "node"))}</span><h3>${escapeHtml(nodeText(definition?.title || node.hubType))}</h3><p>${escapeHtml(nodeText(definition?.description || ""))}</p></div></div><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Capability"))}</strong>${capability}</section><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Bước tiếp theo"))}</strong><div class="graph-action-hint"><span>${escapeHtml(nodeText(nextAction))}</span></div></section><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Execution status"))}</strong><dl class="graph-status-list">${statusRows}</dl></section>${outputMarkup}${preview ? `<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Artifact"))}</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Parameters"))}</strong>${(definition?.properties || []).map((property) => propertyControl(node, property)).join("") || `<p class="graph-empty">${escapeHtml(nodeText("Node này không có property."))}</p>`}</section>`;
+    const parameterMarkup = renderPropertyGroups(node, definition?.properties || []) || `<p class="graph-empty">${escapeHtml(nodeText("Node này không có property."))}</p>`;
+    this.inspectorElement.innerHTML = `<div class="graph-inspector__head"><div><span class="tag">${escapeHtml(nodeText(definition?.category || "node"))}</span><h3>${escapeHtml(nodeText(definition?.title || node.hubType))}</h3><p>${escapeHtml(nodeText(definition?.description || ""))}</p></div></div><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Capability"))}</strong>${capability}</section><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Bước tiếp theo"))}</strong><div class="graph-action-hint"><span>${escapeHtml(nodeText(nextAction))}</span></div></section><section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Execution status"))}</strong><dl class="graph-status-list">${statusRows}</dl></section>${outputMarkup}${preview ? `<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Artifact"))}</strong>${preview}</section>` : ""}<section class="graph-inspector__section"><strong>${escapeHtml(nodeText("Parameters"))}</strong><div class="graph-property-groups">${parameterMarkup}</div></section>`;
     if (isMediaScope(this.scope)) {
       this.inspectorElement.querySelector(".graph-inspector__head")?.insertAdjacentHTML("afterend", this.operationEvidenceMarkup(operationEvidence ? definition : null));
       const inspectorState = this.inspectorElement.querySelector(".graph-node-state");
@@ -2839,6 +3276,12 @@ class HubGraphEditor {
     node._hubEditor = this;
     node.properties = { ...node.properties, ...(source.properties || {}) };
     this.syncNodeWidgetsFromProperties(node);
+    if (source._hubSizePersisted || source._hubSizeChanged) {
+      const requested = normalizeNodeSize(source.size, node.computeSize?.());
+      const minimum = node.computeSize?.() || [NODE_MIN_WIDTH, NODE_MIN_HEIGHT];
+      node.setSize?.([Math.max(requested.width, Number(minimum[0]) || NODE_MIN_WIDTH), Math.max(requested.height, Number(minimum[1]) || NODE_MIN_HEIGHT)]);
+      node._hubSizePersisted = true;
+    }
     const free = findFreeGridSlot(this.liteGraph._nodes, { x: Number(source.pos?.[0] || 0) + NODE_GRID_SIZE, y: Number(source.pos?.[1] || 0) + NODE_GRID_SIZE }, node, { grid: NODE_GRID_SIZE, gap: NODE_LAYOUT_GAP_Y });
     node.pos = [free.x, free.y];
     this.mutate(() => this.liteGraph.add(node));
@@ -3101,6 +3544,9 @@ class HubGraphEditor {
         position: { x: Math.round(asNumber(node.pos?.[0], 0)), y: Math.round(asNumber(node.pos?.[1], 0)) },
         data,
       };
+      if (node._hubSizePersisted || node._hubSizeChanged) {
+        value.size = normalizeNodeSize(node.size, node.computeSize?.());
+      }
       nodeByLiteId.set(node.id, { node, value });
       return value;
     });
@@ -3130,9 +3576,16 @@ class HubGraphEditor {
       node.hubType = type;
       node.hubId = String(source.id || uid());
       node._hubEditor = this;
+      node._hubSizePersisted = Boolean(source.size);
+      node._hubSizeChanged = false;
       node.pos = [asNumber(source.position?.x, 80), asNumber(source.position?.y, 80)];
       node.properties = { ...node.properties, ...(source.data || {}) };
       this.syncNodeWidgetsFromProperties(node);
+      if (source.size) {
+        const requested = normalizeNodeSize(source.size, node.computeSize?.());
+        const minimum = node.computeSize?.() || [NODE_MIN_WIDTH, NODE_MIN_HEIGHT];
+        node.setSize?.([Math.max(requested.width, Number(minimum[0]) || NODE_MIN_WIDTH), Math.max(requested.height, Number(minimum[1]) || NODE_MIN_HEIGHT)]);
+      }
       this.liteGraph.add(node);
       byHubId.set(node.hubId, node);
     }
@@ -3396,10 +3849,11 @@ class HubGraphEditor {
       this.minimapBounds = null;
       return;
     }
-    const bounds = graphBounds(nodes, 24);
-    const scale = Math.min((width - 18) / bounds.width, (height - 18) / bounds.height);
-    const offsetX = (width - bounds.width * scale) / 2 - bounds.left * scale;
-    const offsetY = (height - bounds.height * scale) / 2 - bounds.top * scale;
+    const canvasScale = Math.max(0.01, Number(this.liteCanvas.ds.scale || 1));
+    const bounds = minimapWorldBounds({ nodes, viewport: [this.canvasElement?.width || 1, this.canvasElement?.height || 1], offset: this.liteCanvas.ds.offset, scale: canvasScale, padding: 24 });
+    const minimapScale = Math.min((width - 18) / bounds.width, (height - 18) / bounds.height);
+    const offsetX = (width - bounds.width * minimapScale) / 2 - bounds.left * minimapScale;
+    const offsetY = (height - bounds.height * minimapScale) / 2 - bounds.top * minimapScale;
     const selected = new Set(Object.values(this.liteCanvas.selected_nodes || {}).map((node) => String(node.hubId || node.id)));
     const nodeById = new Map(nodes.map((node) => [node.id, node]));
 
@@ -3410,10 +3864,10 @@ class HubGraphEditor {
       if (!source || !target) continue;
       const sourcePort = source.outputs?.[link.origin_slot];
       const type = sourcePort?.type || "METADATA";
-      const startX = (Number(source.pos[0]) + Number(source.size[0])) * scale + offsetX;
-      const startY = (Number(source.pos[1]) + Number(source.size[1]) * 0.5) * scale + offsetY;
-      const endX = Number(target.pos[0]) * scale + offsetX;
-      const endY = (Number(target.pos[1]) + Number(target.size[1]) * 0.5) * scale + offsetY;
+      const startX = (Number(source.pos[0]) + Number(source.size[0])) * minimapScale + offsetX;
+      const startY = (Number(source.pos[1]) + Number(source.size[1]) * 0.5) * minimapScale + offsetY;
+      const endX = Number(target.pos[0]) * minimapScale + offsetX;
+      const endY = (Number(target.pos[1]) + Number(target.size[1]) * 0.5) * minimapScale + offsetY;
       ctx.strokeStyle = socketColor(type);
       ctx.lineWidth = 1.5;
       ctx.beginPath();
@@ -3424,21 +3878,21 @@ class HubGraphEditor {
     for (const node of nodes) {
       const color = CATEGORY_COLORS[this.registry.get(node.hubType)?.category] || "#8794ad";
       ctx.fillStyle = color;
-      ctx.fillRect(node.pos[0] * scale + offsetX, node.pos[1] * scale + offsetY, Math.max(4, node.size[0] * scale), Math.max(3, node.size[1] * scale));
+      ctx.fillRect(node.pos[0] * minimapScale + offsetX, node.pos[1] * minimapScale + offsetY, Math.max(4, node.size[0] * minimapScale), Math.max(3, node.size[1] * minimapScale));
       if (selected.has(String(node.hubId || node.id))) {
         ctx.strokeStyle = "#ffffff";
         ctx.lineWidth = 2;
-        ctx.strokeRect(node.pos[0] * scale + offsetX - 1, node.pos[1] * scale + offsetY - 1, Math.max(4, node.size[0] * scale) + 2, Math.max(3, node.size[1] * scale) + 2);
+        ctx.strokeRect(node.pos[0] * minimapScale + offsetX - 1, node.pos[1] * minimapScale + offsetY - 1, Math.max(4, node.size[0] * minimapScale) + 2, Math.max(3, node.size[1] * minimapScale) + 2);
       }
     }
-    const viewLeft = -this.liteCanvas.ds.offset[0];
-    const viewTop = -this.liteCanvas.ds.offset[1];
-    const viewWidth = this.canvasElement.width / this.liteCanvas.ds.scale;
-    const viewHeight = this.canvasElement.height / this.liteCanvas.ds.scale;
+    const viewLeft = -Number(this.liteCanvas.ds.offset?.[0] || 0) / canvasScale;
+    const viewTop = -Number(this.liteCanvas.ds.offset?.[1] || 0) / canvasScale;
+    const viewWidth = (this.canvasElement?.width || 1) / canvasScale;
+    const viewHeight = (this.canvasElement?.height || 1) / canvasScale;
     ctx.strokeStyle = "#edf2ff";
     ctx.lineWidth = 1;
-    ctx.strokeRect(viewLeft * scale + offsetX, viewTop * scale + offsetY, viewWidth * scale, viewHeight * scale);
-    this.minimapBounds = { scale, offsetX, offsetY, graphBounds: bounds };
+    ctx.strokeRect(viewLeft * minimapScale + offsetX, viewTop * minimapScale + offsetY, viewWidth * minimapScale, viewHeight * minimapScale);
+    this.minimapBounds = { scale: minimapScale, offsetX, offsetY, graphBounds: bounds };
   }
 
   recenterFromMinimap(event) {

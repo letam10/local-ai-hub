@@ -217,6 +217,31 @@ class M6DashboardStorageModuleUxTests(unittest.TestCase):
         self.assertIn(">Quét chính xác</button>", html)
         self.assertNotIn(">Quét lại</button>", html)
 
+    def test_storage_scan_metrics_have_one_dom_owner_each(self) -> None:
+        html = _render(
+            "models",
+            {
+                "productionCatalog": {"models": []},
+                "models": [],
+                "storage": {"scan": {"status": "partial", "mode": "fast"}},
+                "updateCenter": {},
+            },
+        )
+        root = re.search(r'<div class="storage-scan-status"[^>]*>', html)
+        self.assertIsNotNone(root)
+        root_tag = root.group(0)
+        for attribute in (
+            "data-storage-disk-free",
+            "data-storage-owned-total",
+            "data-storage-entries-scanned",
+            "data-storage-directories-scanned",
+            "data-storage-reparse-entries",
+            "data-storage-unreadable-entries",
+            "data-storage-completed-roots",
+        ):
+            self.assertNotIn(attribute, root_tag)
+            self.assertEqual(html.count(attribute), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

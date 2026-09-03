@@ -130,7 +130,7 @@ import {
 // clients; this UI deliberately uses retryDurableJob so V8 says "new record,
 // not executed" truthfully.
 import { disposeNodeStudios, mountNodeStudios } from "./features/node_studio/studio.js";
-import { ensureM3State, mountM3InteractiveWorkspaces, rememberM3FileSelection, selectionToPayload, setM3UploadedArtifact, syncM3WorkspaceDom } from "./features/vision/interactive.js";
+import { detachWorkspaceJob, ensureM3State, jobSourceArtifactId, mountM3InteractiveWorkspaces, rememberM3FileSelection, selectionToPayload, setM3UploadedArtifact, sourceArtifactIdFor, syncM3WorkspaceDom, workspaceJobMatchesSource } from "./features/vision/interactive.js";
 import { ensureM4State, mountM4InteractiveWorkspaces, rememberM4FileSelection, setM4UploadedArtifact, syncM4WorkspaceDom } from "./features/ocr_whisper/interactive.js";
 import { createStorageScanPoller, STORAGE_SCAN_ACTIVE_STATES } from "./storage_scan_polling.js";
 import { mountImageMaskCanvases } from "./image_mask_studio.js";
@@ -152,12 +152,12 @@ const state = {
   productionCatalog: { status: "partial", models: [], runtimes: [] }, updateCenter: { settings: { policy: "manual" }, records: [] }, modelFilters: { query: "", category: "", installed: "all" }, modelActionStatus: "", settingsActionStatus: "", settingsDirty: false,
   featureRegistry: FEATURE_REGISTRY,
   m3: {
-    vision: { activeTool: "omniparser", thresholds: {}, selectedDetectionIndex: -1, sourceFile: null, sourceArtifact: null, localPreviewUrl: "", job: null },
-    sam2: { mode: "points", intent: "positive", selection: { points: [], box: null }, selectionHistory: [], selectionHistoryIndex: -1, selectedPointIndex: -1, frameIndex: 0, resultTab: "original", maskOpacity: 0.68, zoom: 1, panX: 0, panY: 0, sourceFile: null, sourceArtifact: null, localPreviewUrl: "", job: null },
+    vision: { activeTool: "omniparser", thresholds: {}, selectedDetectionIndex: -1, sourceFile: null, sourceArtifact: null, localPreviewUrl: "", job: null, staleJob: null },
+    sam2: { mode: "points", intent: "positive", selection: { points: [], box: null }, selectionHistory: [], selectionHistoryIndex: -1, selectedPointIndex: -1, frameIndex: 0, resultTab: "original", maskOpacity: 0.68, zoom: 1, panX: 0, panY: 0, sourceFile: null, sourceArtifact: null, localPreviewUrl: "", job: null, staleJob: null },
   },
   m4: {
-    ocr: { resultTab: "text", pdfPage: 1, pdfPageCount: 0, region: null, sourceFile: null, sourceArtifact: null, localPreviewUrl: "", job: null },
-    whisper: { resultTab: "transcript", currentTime: 0, duration: 0, start: 0, end: 10, sourceFile: null, sourceArtifact: null, localPreviewUrl: "", job: null },
+    ocr: { resultTab: "text", pdfPage: 1, pdfPageCount: 0, region: null, sourceFile: null, sourceArtifact: null, localPreviewUrl: "", job: null, staleJob: null },
+    whisper: { resultTab: "transcript", currentTime: 0, duration: 0, start: 0, end: 10, sourceFile: null, sourceArtifact: null, localPreviewUrl: "", job: null, staleJob: null },
   },
 };
 const view = document.querySelector("#module-view");
@@ -988,17 +988,9 @@ const updateStorageScanDom = (result) => {
   const totalRoots = Number.isSafeInteger(scan.total_roots) && scan.total_roots > 0 ? scan.total_roots : 7;
   const banner = view.querySelector("[data-storage-scan-status]");
   if (!banner) { render(); return; }
-  const setBannerMetric = (attribute, value) => banner.setAttribute(attribute, String(value));
   banner.dataset.storageScanStatus = status;
   banner.dataset.storageScanMode = mode;
   banner.dataset.storageScanProgress = String(progress);
-  setBannerMetric("data-storage-disk-free", diskFree === null ? "" : diskFree);
-  setBannerMetric("data-storage-owned-total", ownedTotal);
-  setBannerMetric("data-storage-entries-scanned", entriesScanned);
-  setBannerMetric("data-storage-directories-scanned", directoriesScanned);
-  setBannerMetric("data-storage-reparse-entries", reparseEntries);
-  setBannerMetric("data-storage-unreadable-entries", unreadableEntries);
-  setBannerMetric("data-storage-completed-roots", completedRoots);
   const title = banner.querySelector(".card-title-row strong");
   if (title) {
     const area = currentRoot ? ` · ${currentRoot}` : "";
@@ -1028,9 +1020,15 @@ const updateStorageScanDom = (result) => {
   const liveArea = banner.querySelector("[data-storage-current-area]");
   if (liveArea) liveArea.textContent = currentRoot;
   const ownedNode = banner.querySelector("[data-storage-owned-total] strong");
-  if (ownedNode) ownedNode.textContent = formatGb(ownedTotal);
+  if (ownedNode) {
+    ownedNode.parentElement?.setAttribute("data-storage-owned-total", String(ownedTotal));
+    ownedNode.textContent = formatGb(ownedTotal);
+  }
   const diskNode = banner.querySelector("[data-storage-disk-free] strong");
-  if (diskNode) diskNode.textContent = diskFree === null ? "—" : formatGb(diskFree);
+  if (diskNode) {
+    diskNode.parentElement?.setAttribute("data-storage-disk-free", diskFree === null ? "" : String(diskFree));
+    diskNode.textContent = diskFree === null ? "—" : formatGb(diskFree);
+  }
   const countNodes = [
     ["data-storage-entries-scanned", `${entriesScanned} mục`],
     ["data-storage-directories-scanned", `${directoriesScanned} thư mục`],
@@ -1397,10 +1395,14 @@ const restoreWorkspaceJobReferences = () => {
     const model = workspaceModelForKey(workspaceKey);
     if (model?.job?.id) continue;
     const tools = WORKSPACE_JOB_TOOLS[workspaceKey] || new Set();
-    const candidate = (Array.isArray(state.jobs) ? state.jobs : [])
+    const candidates = (Array.isArray(state.jobs) ? state.jobs : [])
       .filter((job) => job && tools.has(job.tool))
-      .sort((left, right) => String(right.created_at || right.updated_at || right.id || "").localeCompare(String(left.created_at || left.updated_at || left.id || "")))[0];
-    if (candidate && model) model.job = candidate;
+      .sort((left, right) => String(right.created_at || right.updated_at || right.id || "").localeCompare(String(left.created_at || left.updated_at || left.id || "")));
+    const source = sourceArtifactIdFor(model);
+    if (!source || !model || !candidates.length) continue;
+    const candidate = candidates.find((job) => jobSourceArtifactId(job) === source);
+    if (candidate) model.job = candidate;
+    else if (!model.staleJob) model.staleJob = candidates[0];
   }
 };
 
@@ -1409,6 +1411,11 @@ const resumeVisibleWorkspaceJobPollers = () => {
   if (!workspaceKeys().includes(route)) return;
   const model = workspaceModelForKey(route);
   const job = model?.job;
+  if (job && !workspaceJobMatchesSource(model, job)) {
+    detachWorkspaceJob(model);
+    render({ focus: "main" });
+    return;
+  }
   if (job?.id && !M3_TERMINAL_JOB_STATUSES.has(String(job.status || ""))) {
     updateM3JobDom(route, job);
     startM3JobPoll(route, job.id);
@@ -1462,7 +1469,14 @@ const startM3JobPoll = (workspaceKey, jobId) => {
       if (!job || typeof job !== "object") throw new Error("JOB_SNAPSHOT_INVALID");
       const afterRead = m3JobPollers.get(workspaceKey);
       if (!afterRead || afterRead !== entry || routeId() !== workspaceKey) return;
-      workspaceModelForKey(workspaceKey).job = job;
+      const model = workspaceModelForKey(workspaceKey);
+      if (!workspaceJobMatchesSource(model, job)) {
+        detachWorkspaceJob(model);
+        stopM3JobPoll(workspaceKey);
+        render({ focus: "main" });
+        return;
+      }
+      model.job = job;
       updateM3JobDom(workspaceKey, job);
       if (M3_TERMINAL_JOB_STATUSES.has(String(job.status || ""))) {
         stopM3JobPoll(workspaceKey);
@@ -1728,8 +1742,10 @@ document.addEventListener("change", (event) => {
   const input = event.target.closest("input[type=file][data-asset-key]");
   if (input) {
     renderFilePreview(input);
-    if (input.closest("[data-m3-workspace]")) rememberM3FileSelection(input, state);
-    if (input.closest("[data-m4-workspace]")) rememberM4FileSelection(input, state);
+    let sourceChanged = false;
+    if (input.closest("[data-m3-workspace]")) sourceChanged = rememberM3FileSelection(input, state) || sourceChanged;
+    if (input.closest("[data-m4-workspace]")) sourceChanged = rememberM4FileSelection(input, state) || sourceChanged;
+    if (sourceChanged) render({ focus: "main" });
   }
   const projectSelect = event.target.closest("[data-project-select]");
   if (projectSelect) {
@@ -1853,7 +1869,9 @@ document.addEventListener("submit", async (event) => {
     if (workspace) {
       const isM4 = Boolean(workspace.dataset.m4Workspace);
       const workspaceKey = isM4 ? workspace.dataset.m4Workspace : workspace.dataset.m3Workspace;
-      workspaceModelForKey(workspaceKey).job = result.job || null;
+      const workspaceModel = workspaceModelForKey(workspaceKey);
+      workspaceModel.staleJob = null;
+      workspaceModel.job = result.job || null;
       inlineResult(form, `Đã tạo ${result.job?.id || "job"}. Đang theo dõi ngay trong workspace.`, "success");
       showToast(`Đã thêm ${tool} vào hàng đợi Hub.`);
       render({ focus: "main" });

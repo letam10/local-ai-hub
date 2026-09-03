@@ -6,6 +6,8 @@
  * is placed in a request or public projection.
  */
 
+import { detachWorkspaceJob, sourceArtifactIdFor, workspaceJobMatchesSource } from "../vision/interactive.js";
+
 const MAX_PDF_PAGE = 100000;
 const MAX_DURATION_SECONDS = 86400;
 const ARTIFACT_URL_RE = /^\/api\/artifacts\/artifact_[a-f0-9]{32}$/;
@@ -27,6 +29,7 @@ const createOcrState = (initial = {}) => ({
   localPreviewUrl: safePreviewUrl(initial.localPreviewUrl),
   sourceError: "",
   job: initial.job && typeof initial.job === "object" ? initial.job : null,
+  staleJob: initial.staleJob && typeof initial.staleJob === "object" ? initial.staleJob : null,
 });
 
 const createWhisperState = (initial = {}) => ({
@@ -40,6 +43,7 @@ const createWhisperState = (initial = {}) => ({
   localPreviewUrl: safePreviewUrl(initial.localPreviewUrl),
   sourceError: "",
   job: initial.job && typeof initial.job === "object" ? initial.job : null,
+  staleJob: initial.staleJob && typeof initial.staleJob === "object" ? initial.staleJob : null,
 });
 
 export const ensureM4State = (state) => {
@@ -51,6 +55,8 @@ export const ensureM4State = (state) => {
   ocr.pdfPage = Math.max(1, Math.min(MAX_PDF_PAGE, Math.trunc(numberValue(ocr.pdfPage, 1))));
   ocr.pdfPageCount = Math.max(0, Math.min(MAX_PDF_PAGE, Math.trunc(numberValue(ocr.pdfPageCount))));
   ocr.region = Array.isArray(ocr.region) && ocr.region.length === 4 ? ocr.region.map((value) => clamp(value, 0, 1)) : null;
+  ocr.job = ocr.job && typeof ocr.job === "object" ? ocr.job : null;
+  ocr.staleJob = ocr.staleJob && typeof ocr.staleJob === "object" ? ocr.staleJob : null;
   const whisper = state.m4.whisper;
   whisper.resultTab = ["transcript", "srt", "json"].includes(whisper.resultTab) ? whisper.resultTab : "transcript";
   whisper.duration = clamp(whisper.duration, 0, MAX_DURATION_SECONDS);
@@ -58,6 +64,8 @@ export const ensureM4State = (state) => {
   whisper.start = clamp(whisper.start, 0, whisper.duration || MAX_DURATION_SECONDS);
   whisper.end = clamp(whisper.end, whisper.start, whisper.duration || MAX_DURATION_SECONDS);
   if (whisper.end <= whisper.start) whisper.end = Math.min(MAX_DURATION_SECONDS, whisper.start + 0.1);
+  whisper.job = whisper.job && typeof whisper.job === "object" ? whisper.job : null;
+  whisper.staleJob = whisper.staleJob && typeof whisper.staleJob === "object" ? whisper.staleJob : null;
   return state.m4;
 };
 
@@ -259,6 +267,9 @@ export const syncM4WorkspaceDom = (workspace, state) => {
   if (!workspace) return;
   const key = workspace.dataset.m4Workspace;
   const model = modelFor(state, key);
+  if (model.job && sourceArtifactIdFor(model) && !workspaceJobMatchesSource(model, model.job)) {
+    detachWorkspaceJob(model);
+  }
   if (key === "ocr") syncOcrDom(workspace, model);
   if (key === "whisper") syncWhisperDom(workspace, model);
 };
@@ -268,6 +279,7 @@ export const rememberM4FileSelection = (input, state) => {
   if (!workspace || !input.files?.length) return false;
   const key = workspace.dataset.m4Workspace;
   const model = modelFor(state, key);
+  detachWorkspaceJob(model);
   const preview = input.closest(".field")?.querySelector("[data-file-preview]");
   const objectUrl = safePreviewUrl(preview?.dataset?.objectUrl) || safePreviewUrl(URL.createObjectURL(input.files[0]));
   if (model.localPreviewUrl && model.localPreviewUrl !== objectUrl && model.localPreviewUrl.startsWith("blob:")) {
@@ -278,10 +290,12 @@ export const rememberM4FileSelection = (input, state) => {
   model.localPreviewUrl = objectUrl;
   model.sourceError = "";
   if (key === "ocr") {
+    model.resultTab = "text";
     model.pdfPage = 1;
     model.pdfPageCount = 0;
     model.region = null;
   } else {
+    model.resultTab = "transcript";
     model.currentTime = 0;
     model.duration = 0;
     model.start = 0;
@@ -294,6 +308,10 @@ export const rememberM4FileSelection = (input, state) => {
 export const setM4UploadedArtifact = (workspace, state, artifact) => {
   if (!workspace || !artifact || typeof artifact !== "object") return false;
   const model = modelFor(state, workspace.dataset.m4Workspace);
+  const currentSource = sourceArtifactIdFor(model);
+  if ((currentSource && currentSource !== artifact.id) || (model.job && currentSource !== artifact.id)) {
+    detachWorkspaceJob(model);
+  }
   model.sourceArtifact = {
     id: artifact.id,
     name: artifact.name,

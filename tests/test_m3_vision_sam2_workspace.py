@@ -35,15 +35,20 @@ import assert from "node:assert/strict";
 import {
   boxHandleAt,
   createSam2SelectionState,
+  detachWorkspaceJob,
+  jobSourceArtifactId,
   moveNormalizedBox,
   normalizeBox,
   resizeNormalizedBox,
   selectionToPayload,
+  sourceArtifactIdFor,
   transitionSam2Mode,
   commitSam2Selection,
+  workspaceJobMatchesSource,
 } from "./src/ui/features/vision/interactive.js";
 
 const source = "artifact_" + "a".repeat(32);
+const nextSource = "artifact_" + "b".repeat(32);
 const model = createSam2SelectionState({ mode: "box", selection: { points: [{ x: .1, y: .1, label: 1 }], box: [.2, .2, .8, .8] } });
 assert.deepEqual(model.selection, { points: [], box: [.2, .2, .8, .8] });
 assert.equal(transitionSam2Mode(model, "points"), true);
@@ -73,6 +78,18 @@ assert.equal(boxHandleAt(box, { x: .2, y: .2 }), "nw");
 assert.deepEqual(moveNormalizedBox(box, .6, -.5), [.6, 0, 1, .5]);
 assert.deepEqual(resizeNormalizedBox(box, "se", { x: .9, y: .9 }), [.2, .2, .9, .9]);
 assert.deepEqual(normalizeBox([.2, .2, .2, .8]), null);
+
+const provenance = createSam2SelectionState({ sourceArtifact: { id: source } });
+provenance.sourceArtifact = { id: source };
+provenance.job = { id: "job_a", source_artifact_id: source, result: { selection: { source_artifact_id: source } } };
+assert.equal(sourceArtifactIdFor(provenance), source);
+assert.equal(jobSourceArtifactId(provenance.job), source);
+assert.equal(workspaceJobMatchesSource(provenance, provenance.job), true);
+provenance.sourceArtifact = { id: nextSource };
+assert.equal(workspaceJobMatchesSource(provenance, provenance.job), false);
+detachWorkspaceJob(provenance);
+assert.equal(provenance.job, null);
+assert.equal(provenance.staleJob.id, "job_a");
 '''
         result = subprocess.run([node, "--input-type=module", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
