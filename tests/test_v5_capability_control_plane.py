@@ -9,6 +9,7 @@ from unittest.mock import patch
 from src.services.api import core
 from src.services.api.core import capability_control_plane
 from src.services.module_manager import build_capability_registry, build_module_plan, plan_module_resources
+from src.services.module_manager.registry import build_server_owned_records
 from src.shared.schemas.module_manager import (
     CAPABILITY_REGISTRY_SCHEMA_VERSION,
     canonical_module_manager_json,
@@ -59,6 +60,50 @@ def _record(identifier: str, *, status: str = "available", dependencies: list[di
 
 
 class V5CapabilityControlPlaneTests(unittest.TestCase):
+    def test_versioned_workflow_packages_keep_distinct_capability_identities(self) -> None:
+        sources = {
+            key: {"status": "partial", "records": []}
+            for key in ("extensions", "workflow_packages", "assets", "privacy", "capability_gateway")
+        }
+        sources["release_evidence"] = {
+            "status": "not_published",
+            "reason": "No release evidence in this fixture.",
+            "action": "Review the release packet.",
+        }
+        sources["workflow_packages"] = {
+            "status": "partial",
+            "records": [
+                {
+                    "id": "local-ai-hub.image-review",
+                    "version": "1.0.0",
+                    "availability": {"status": "partial", "reason": "v1", "action": "review"},
+                },
+                {
+                    "id": "local-ai-hub.image-review",
+                    "version": "1.1.0",
+                    "availability": {"status": "partial", "reason": "v1.1", "action": "review"},
+                },
+            ],
+        }
+
+        records = build_server_owned_records(sources)
+        package_records = [
+            item for item in records
+            if item["id"] == "workflow_packages:local-ai-hub.image-review"
+        ]
+        self.assertEqual({item["version"] for item in package_records}, {"1.0.0", "1.1.0"})
+
+        snapshot = build_capability_registry(sources=sources)
+        self.assertEqual(snapshot["status"], "partial")
+        self.assertNotIn("duplicate_identity", {item["code"] for item in snapshot.get("errors", [])})
+
+    def test_exact_duplicate_capability_identity_fails_closed(self) -> None:
+        first = _record("same-identity")
+        second = copy.deepcopy(first)
+        snapshot = build_capability_registry(records=[first, second])
+        self.assertEqual(snapshot["status"], "error")
+        self.assertIn("duplicate_identity", {item["code"] for item in snapshot["errors"]})
+
     def test_registry_schema_parity_is_deterministic_and_redacted(self) -> None:
         first = build_capability_registry(sources=_sources())
         second = build_capability_registry(sources=_sources())

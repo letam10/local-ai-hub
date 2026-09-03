@@ -60,10 +60,12 @@ class Milestone3ContractTests(unittest.TestCase):
     def test_public_job_is_session_truthful_and_keeps_provenance(self) -> None:
         from src.services.api.jobs import public_job
 
+        source_artifact_id = "artifact_" + "a" * 32
         record = {
             "id": "job_contract",
             "contract_version": "job.v2",
             "tool": "generate_flux",
+            "source_artifact_id": source_artifact_id,
             "status": "unavailable",
             "input": {"path": r"D:\private\secret.png"},
             "resume_data": {"path": r"D:\private\secret.png"},
@@ -72,12 +74,25 @@ class Milestone3ContractTests(unittest.TestCase):
         stale = public_job(record)
         self.assertNotIn("input", stale)
         self.assertNotIn("resume_data", stale)
+        self.assertEqual(stale["source_artifact_id"], source_artifact_id)
         self.assertFalse(stale["resumable"])
         self.assertIn("workspace", stale["next_action"])
         in_session = public_job({**record, "resume_available": True})
         self.assertTrue(in_session["resumable"])
         self.assertNotIn("next_action", in_session)
         self.assertEqual(in_session["result"]["provenance"][0]["node_type"], "flux_generate")
+
+    def test_public_job_does_not_reflect_invalid_source_identity(self) -> None:
+        from src.services.api.jobs import public_job
+
+        public = public_job({
+            "id": "job_invalid_source",
+            "tool": "segment_image",
+            "source_artifact_id": r"D:\private\input.png",
+            "status": "queued",
+        })
+        self.assertNotIn("source_artifact_id", public)
+        self.assertNotIn("private", json.dumps(public).lower())
 
     def test_restart_clears_durable_runner_availability(self) -> None:
         from src.services.api import jobs
