@@ -241,18 +241,51 @@ class V8P0StartupRecoveryTests(unittest.TestCase):
             root = Path(temporary) / "install"
             self._install(root, current="main-aaaaaaaaaaaa", current_commit="a" * 40)
             session_path = root / "update-state" / "restart-session.json"
+            session_path.parent.mkdir(parents=True, exist_ok=True)
             nonce = "a" * 32
             captured = {}
+
+            # The watchdog must retain the stable launcher guard even though
+            # recovery no longer re-enters the one-file PyInstaller stub.
+            (root / "LocalAIHub.exe").unlink()
+            with patch("src.app.update_watchdog.resolve_launch_plan") as resolve:
+                with self.assertRaisesRegex(OSError, "stable_launcher_unavailable"):
+                    _launch_stable(root)
+                resolve.assert_not_called()
+            (root / "LocalAIHub.exe").write_bytes(b"stable")
+
             with patch.dict(os.environ, {
+                "LOCALAIHUB_INSTALL_ROOT": str(root),
                 "LOCALAIHUB_WATCHDOG_SESSION_PATH": str(session_path),
                 "LOCALAIHUB_WATCHDOG_SESSION_NONCE": nonce,
                 "LOCALAIHUB_WATCHDOG_WAIT_PID": "1234",
-            }, clear=False), patch("src.app.update_watchdog.subprocess.Popen", side_effect=lambda *args, **kwargs: captured.update(kwargs) or SimpleNamespace()):
-                _launch_stable(root)
-            environment = captured["env"]
+            }, clear=False):
+                expected_plan = resolve_launch_plan(root, allow_test_root=True)
+
+                def capture(*args, **kwargs):
+                    captured["args"] = args
+                    captured["kwargs"] = kwargs
+                    return SimpleNamespace()
+
+                with patch("src.app.update_watchdog.resolve_launch_plan", return_value=expected_plan) as resolve, patch("src.app.update_watchdog.subprocess.Popen", side_effect=capture):
+                    _launch_stable(root)
+
+            resolve.assert_called_once_with(root)
+            self.assertEqual(captured["args"][0], list(expected_plan.command))
+            self.assertEqual(captured["args"][0], [str(expected_plan.runtime_pythonw), "-m", "src.app.launcher"])
+            self.assertNotEqual(captured["args"][0][0], str(root / "LocalAIHub.exe"))
+            self.assertEqual(captured["kwargs"]["cwd"], str(expected_plan.app_payload))
+            environment = captured["kwargs"]["env"]
+            self.assertEqual(environment["LOCALAIHUB_INSTALL_ROOT"], str(root))
+            self.assertEqual(environment["LOCALAIHUB_APP_ROOT"], str(expected_plan.app_payload))
+            self.assertEqual(environment["LOCALAIHUB_DATA_ROOT"], str(expected_plan.data_root.resolve()))
+            self.assertEqual(environment["PYTHONPATH"], str(expected_plan.app_payload))
             self.assertEqual(environment["LOCALAIHUB_RESTART_SESSION_PATH"], str(session_path))
             self.assertEqual(environment["LOCALAIHUB_RESTART_SESSION_NONCE"], nonce)
             self.assertEqual(environment["LOCALAIHUB_RESTART_WAIT_PID"], "1234")
+            self.assertNotIn("LOCALAIHUB_WATCHDOG_WAIT_PID", environment)
+            self.assertEqual(environment["LOCALAIHUB_BUILD_SHA"], "a" * 40)
+            self.assertEqual(environment["LOCALAIHUB_BUILD_PAYLOAD"], "main-aaaaaaaaaaaa")
 
     def test_owned_api_pid_reports_child_pid_only_when_live(self):
         process = SimpleNamespace(pid=4321, poll=lambda: None)

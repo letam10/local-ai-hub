@@ -112,8 +112,23 @@ def _restart_after_update(self: Any) -> dict[str, object]:
             raise AppUpdateError("UPDATE_COMMIT_FAILED")
         service.create_restart_session(payload_id=payload_id, source_commit=source_commit, nonce=nonce, parent_pid=os.getpid())
 
+        # The running desktop owns this bridge, but its payload may predate
+        # the restart-runtime fix. Resolve the newly activated candidate
+        # before spawning the watchdog so the first update after the fix does
+        # not fall back to the old payload's PyInstaller-stub watchdog.
+        try:
+            candidate_plan = resolve_launch_plan(install_root)
+        except (OSError, ValueError, StableShellError) as exc:
+            raise AppUpdateError("CANDIDATE_LAUNCH_PLAN_INVALID") from exc
+        if (
+            candidate_plan.version != payload_id
+            or candidate_plan.environment.get("LOCALAIHUB_BUILD_SHA") != source_commit
+            or candidate_plan.environment.get("LOCALAIHUB_BUILD_PAYLOAD") != payload_id
+        ):
+            raise AppUpdateError("CANDIDATE_LAUNCH_IDENTITY_MISMATCH")
+
         launcher = install_root / "LocalAIHub.exe"
-        watchdog_script = running_plan.app_payload / "src" / "app" / "update_watchdog.py"
+        watchdog_script = candidate_plan.app_payload / "src" / "app" / "update_watchdog.py"
         if not launcher.is_file() or launcher.is_symlink():
             raise AppUpdateError("STABLE_LAUNCHER_UNAVAILABLE")
         if not watchdog_script.is_file() or watchdog_script.is_symlink():
@@ -121,24 +136,24 @@ def _restart_after_update(self: Any) -> dict[str, object]:
         if not authorize():
             raise AppUpdateError("DESKTOP_CLOSE_AUTHORIZATION_FAILED")
         session_path = install_root / "update-state" / "restart-session.json"
-        environment = dict(os.environ)
+        environment = dict(candidate_plan.environment)
         environment.update({
             "LOCALAIHUB_WATCHDOG_INSTALL_ROOT": str(install_root),
-            "LOCALAIHUB_WATCHDOG_APP_ROOT": str(running_plan.app_payload),
+            "LOCALAIHUB_WATCHDOG_APP_ROOT": str(candidate_plan.app_payload),
             "LOCALAIHUB_WATCHDOG_WAIT_PID": str(os.getpid()),
             "LOCALAIHUB_WATCHDOG_TIMEOUT": "30",
             "LOCALAIHUB_WATCHDOG_SESSION_PATH": str(session_path),
             "LOCALAIHUB_WATCHDOG_SESSION_NONCE": nonce,
             "LOCALAIHUB_INSTALL_ROOT": str(install_root),
-            "LOCALAIHUB_APP_ROOT": str(running_plan.app_payload),
-            "LOCALAIHUB_DATA_ROOT": str(running_plan.data_root),
-            "PYTHONPATH": str(running_plan.app_payload),
+            "LOCALAIHUB_APP_ROOT": str(candidate_plan.app_payload),
+            "LOCALAIHUB_DATA_ROOT": str(candidate_plan.data_root),
+            "PYTHONPATH": str(candidate_plan.app_payload),
             "PYTHONNOUSERSITE": "1",
             "PYTHONUTF8": "1",
         })
         watchdog = subprocess.Popen(
-            [str(running_plan.runtime_pythonw), "-m", "src.app.update_watchdog"],
-            cwd=str(running_plan.app_payload), env=environment,
+            [str(candidate_plan.runtime_pythonw), "-m", "src.app.update_watchdog"],
+            cwd=str(candidate_plan.app_payload), env=environment,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True, creationflags=_creationflags(),
         )

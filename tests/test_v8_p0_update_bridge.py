@@ -46,6 +46,21 @@ class V8P0UpdateBridgeTests(unittest.TestCase):
             old_runtime = root / "old-runtime.exe"
             old_runtime.write_bytes(b"runtime")
             old_plan = SimpleNamespace(app_payload=old_app, runtime_pythonw=old_runtime, data_root=root / "data", version="main-aaaaaaaaaaaa")
+            candidate_app = root / "candidate-app"
+            (candidate_app / "src" / "app").mkdir(parents=True)
+            (candidate_app / "src" / "app" / "update_watchdog.py").write_text("# candidate fixture", encoding="utf-8")
+            candidate_runtime = root / "candidate-runtime.exe"
+            candidate_runtime.write_bytes(b"runtime")
+            candidate_plan = SimpleNamespace(
+                app_payload=candidate_app,
+                runtime_pythonw=candidate_runtime,
+                data_root=root / "data",
+                version="main-bbbbbbbbbbbb",
+                environment={
+                    "LOCALAIHUB_BUILD_SHA": "b" * 40,
+                    "LOCALAIHUB_BUILD_PAYLOAD": "main-bbbbbbbbbbbb",
+                },
+            )
             service = _Service(root)
             calls = {"authorize": 0, "destroy": 0, "abort": 0}
 
@@ -63,6 +78,7 @@ class V8P0UpdateBridgeTests(unittest.TestCase):
 
             with patch.dict(os.environ, {"LOCALAIHUB_INSTALL_ROOT": str(root), "LOCALAIHUB_APP_ROOT": str(old_app)}, clear=False), \
                 patch("src.app.update_bridge.resolve_verified_running_plan", return_value=old_plan), \
+                patch("src.app.update_bridge.resolve_launch_plan", return_value=candidate_plan), \
                 patch("src.app.update_bridge.app_update_service", return_value=service), \
                 patch("src.app.update_bridge.subprocess.Popen", return_value=SimpleNamespace()) as popen, \
                 patch("src.app.update_bridge.importlib.import_module", return_value=SimpleNamespace(_prepare_owned_api_close=lambda: {"verification": "verified", "active_jobs": 0})):
@@ -72,6 +88,10 @@ class V8P0UpdateBridgeTests(unittest.TestCase):
             self.assertIsNotNone(service.session)
             self.assertEqual(service.session["payload_id"], "main-bbbbbbbbbbbb")
             self.assertEqual(popen.call_count, 1)
+            self.assertEqual(popen.call_args.args[0], [str(candidate_runtime), "-m", "src.app.update_watchdog"])
+            self.assertEqual(popen.call_args.kwargs["cwd"], str(candidate_app))
+            self.assertEqual(popen.call_args.kwargs["env"]["LOCALAIHUB_APP_ROOT"], str(candidate_app))
+            self.assertEqual(popen.call_args.kwargs["env"]["LOCALAIHUB_WATCHDOG_APP_ROOT"], str(candidate_app))
 
     def test_destroy_failure_rolls_pointer_back_and_does_not_leave_authorized_close(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -83,6 +103,21 @@ class V8P0UpdateBridgeTests(unittest.TestCase):
             old_runtime = root / "old-runtime.exe"
             old_runtime.write_bytes(b"runtime")
             old_plan = SimpleNamespace(app_payload=old_app, runtime_pythonw=old_runtime, data_root=root / "data", version="main-aaaaaaaaaaaa")
+            candidate_app = root / "candidate-app"
+            (candidate_app / "src" / "app").mkdir(parents=True)
+            (candidate_app / "src" / "app" / "update_watchdog.py").write_text("# candidate fixture", encoding="utf-8")
+            candidate_runtime = root / "candidate-runtime.exe"
+            candidate_runtime.write_bytes(b"runtime")
+            candidate_plan = SimpleNamespace(
+                app_payload=candidate_app,
+                runtime_pythonw=candidate_runtime,
+                data_root=root / "data",
+                version="main-bbbbbbbbbbbb",
+                environment={
+                    "LOCALAIHUB_BUILD_SHA": "b" * 40,
+                    "LOCALAIHUB_BUILD_PAYLOAD": "main-bbbbbbbbbbbb",
+                },
+            )
             service = _Service(root)
             calls = {"abort": 0}
 
@@ -99,6 +134,7 @@ class V8P0UpdateBridgeTests(unittest.TestCase):
             child = SimpleNamespace()
             with patch.dict(os.environ, {"LOCALAIHUB_INSTALL_ROOT": str(root), "LOCALAIHUB_APP_ROOT": str(old_app)}, clear=False), \
                 patch("src.app.update_bridge.resolve_verified_running_plan", return_value=old_plan), \
+                patch("src.app.update_bridge.resolve_launch_plan", return_value=candidate_plan), \
                 patch("src.app.update_bridge.app_update_service", return_value=service), \
                 patch("src.app.update_bridge.subprocess.Popen", return_value=child), \
                 patch("src.app.update_bridge.terminate_owned_process") as terminate, \

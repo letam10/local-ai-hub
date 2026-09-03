@@ -274,11 +274,23 @@ def _rollback_previous(app_root: Path, *, reason: str, reason_code: str | None =
 
 
 def _launch_stable(app_root: Path) -> subprocess.Popen[object]:
+    """Launch the selected payload without re-entering the PyInstaller stub.
+
+    The stable ``LocalAIHub.exe`` remains the normal shortcut entrypoint.  A
+    restart watchdog, however, already owns a validated installation root and
+    payload pointer.  Starting that one-file stub during the narrow restart
+    window can fail before Python starts when its ``_MEI`` extraction is
+    transiently unavailable.  Launching the exact bundled ``pythonw.exe``
+    selected by :func:`resolve_launch_plan` keeps the same manifest/path
+    validation while removing that bootloader dependency from recovery.
+    """
+
     launcher = app_root / "LocalAIHub.exe"
     if not launcher.is_file() or launcher.is_symlink():
         raise OSError("stable_launcher_unavailable")
-    environment = dict(os.environ)
-    # The launcher waits for the exact old desktop PID, while the watchdog
+    plan = resolve_launch_plan(app_root)
+    environment = dict(plan.environment)
+    # The payload waits for the exact old desktop PID, while the watchdog
     # itself remains alive to own rollback/health decisions.
     wait_pid = environment.get("LOCALAIHUB_WATCHDOG_WAIT_PID")
     if wait_pid:
@@ -307,11 +319,10 @@ def _launch_stable(app_root: Path) -> subprocess.Popen[object]:
     # child environment so the API handshake remains exact without rebuilding
     # the launcher executable first.
     try:
-        pointer = load_current_pointer(app_root)
-        build_path = app_root / str(pointer["payload_relative"]) / "build.json"
+        build_path = plan.payload_root / "build.json"
         build = _json(build_path) if build_path.is_file() else {}
         commit = str(build.get("source_commit") or "")
-        version = str(pointer.get("version") or "")
+        version = str(plan.version)
         if _SHA_RE.fullmatch(commit) and version == f"main-{commit[:12]}":
             environment.update({"LOCALAIHUB_BUILD_SHA": commit, "LOCALAIHUB_BUILD_PAYLOAD": version})
         else:
@@ -321,8 +332,8 @@ def _launch_stable(app_root: Path) -> subprocess.Popen[object]:
         environment.pop("LOCALAIHUB_BUILD_SHA", None)
         environment.pop("LOCALAIHUB_BUILD_PAYLOAD", None)
     return subprocess.Popen(
-        [str(launcher)],
-        cwd=str(app_root),
+        list(plan.command),
+        cwd=str(plan.app_payload),
         env=environment,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,

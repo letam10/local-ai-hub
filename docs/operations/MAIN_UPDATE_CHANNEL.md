@@ -53,15 +53,20 @@ the candidate and its bounded preflight log and leaves the current pointer
 untouched.  The production API port and persistent data root are not used by
 this probe.
 
-Restart is guarded by `src.app.update_watchdog`, an updater-owned helper started
-from the currently running old verified payload/runtime before the old desktop
-closes.  It waits for the old desktop PID, starts
-the stable launcher, and accepts the new payload only after the pending-health
-marker is cleared by matching health/build identity.  On crash, identity
-mismatch, or timeout it terminates only the launcher process it started,
-atomically restores the verified previous pointer, and relaunches the stable
-launcher once.  Foreign loopback listeners and `DATA_ROOT` are never killed or
-modified.
+Restart is guarded by `src.app.update_watchdog`, an updater-owned helper
+scheduled by the currently running desktop before it closes, but launched from
+the newly activated candidate's verified bundled runtime/script.  It waits for
+the old desktop PID, then starts
+the selected payload's validated bundled `pythonw.exe -m src.app.launcher`
+with the payload app directory as its working directory, and accepts the new
+payload only after the pending-health marker is cleared by matching
+health/build identity.  `LocalAIHub.exe` remains the ordinary shortcut
+entrypoint; the direct bundled-runtime route is limited to watchdog restart
+recovery so a transient PyInstaller `_MEI` extraction failure cannot prevent
+the post-update launch.  On crash, identity mismatch, or timeout it terminates
+only the process tree it started, atomically restores the verified previous
+pointer, and relaunches the previous payload once.  Foreign loopback listeners
+and `DATA_ROOT` are never killed or modified.
 
 If the desktop API cannot start, the native shell leaves the indefinite loading
 state and shows a Vietnamese recovery screen with a bounded error code and

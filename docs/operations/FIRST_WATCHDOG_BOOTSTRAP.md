@@ -34,9 +34,12 @@ then records the previous pointer/pending-health marker and atomically switches
 `current.json`.  A failed preflight preserves bounded staging evidence and
 requires the old pointer to remain unchanged; no model, environment, runtime
 or `DATA_ROOT` bytes are moved.  The pending marker remains until the new
-frontend calls the explicit ready handshake.  The watchdog then runs from the
-old verified payload/runtime for the first restart and can restore the previous
-pointer if the new payload exits or fails identity/health checks.
+frontend calls the explicit ready handshake.  The restart bridge then resolves
+the newly activated candidate and runs its watchdog from the candidate's
+verified bundled runtime/script; this keeps a legacy running desktop from
+re-entering the fragile PyInstaller stub.  Installations whose currently
+running payload predates the watchdog-capable bridge still require this
+one-time reviewed bootstrap before using Dashboard self-update.
 
 This procedure is a one-time bootstrap aid, not a release activation command.
 It does not create tags, merge `main`, rebuild `LocalAIHub.exe`, publish a
