@@ -17,7 +17,7 @@ import secrets
 import subprocess
 from typing import Any
 
-from src.app.stable_shell import StableShellError, resolve_launch_plan, resolve_verified_running_plan
+from src.app.stable_shell import StableShellError, _is_reparse, resolve_launch_plan, resolve_verified_running_plan
 from src.services.app_update import AppUpdateError, app_update_service, reason_code_for, update_error_projection
 from src.services.process_manager.managed import terminate_owned_process
 
@@ -129,7 +129,7 @@ def _restart_after_update(self: Any) -> dict[str, object]:
 
         launcher = install_root / "LocalAIHub.exe"
         watchdog_script = candidate_plan.app_payload / "src" / "app" / "update_watchdog.py"
-        if not launcher.is_file() or launcher.is_symlink():
+        if not launcher.is_file() or launcher.is_symlink() or _is_reparse(launcher):
             raise AppUpdateError("STABLE_LAUNCHER_UNAVAILABLE")
         if not watchdog_script.is_file() or watchdog_script.is_symlink():
             raise AppUpdateError("UPDATE_WATCHDOG_UNAVAILABLE")

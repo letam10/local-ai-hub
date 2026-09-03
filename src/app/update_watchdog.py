@@ -22,6 +22,7 @@ import urllib.request
 from src.app.stable_shell import (
     POINTER_SCHEMA,
     StableShellError,
+    _is_reparse,
     atomic_activate_pointer,
     load_current_pointer,
     resolve_launch_plan,
@@ -286,7 +287,7 @@ def _launch_stable(app_root: Path) -> subprocess.Popen[object]:
     """
 
     launcher = app_root / "LocalAIHub.exe"
-    if not launcher.is_file() or launcher.is_symlink():
+    if not launcher.is_file() or launcher.is_symlink() or _is_reparse(launcher):
         raise OSError("stable_launcher_unavailable")
     plan = resolve_launch_plan(app_root)
     environment = dict(plan.environment)

@@ -253,6 +253,10 @@ class V8P0StartupRecoveryTests(unittest.TestCase):
                     _launch_stable(root)
                 resolve.assert_not_called()
             (root / "LocalAIHub.exe").write_bytes(b"stable")
+            with patch("src.app.update_watchdog._is_reparse", return_value=True) as is_reparse:
+                with self.assertRaisesRegex(OSError, "stable_launcher_unavailable"):
+                    _launch_stable(root)
+                is_reparse.assert_called_once_with(root / "LocalAIHub.exe")
 
             with patch.dict(os.environ, {
                 "LOCALAIHUB_INSTALL_ROOT": str(root),
