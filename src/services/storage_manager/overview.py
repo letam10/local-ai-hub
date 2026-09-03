@@ -581,8 +581,14 @@ def _storage_summary_from_reports(
     # A result is exact only when every allowlisted storage area has a
     # terminal complete report.  ``all([])`` and a cancelled worker with only
     # its first area completed must never be promoted to exact.
-    exact = len(reports) == len(_SCAN_AREA_NAMES) and all(report.get("complete") is True for report in reports.values())
+    exact = _reports_are_exact(reports)
     owned_total_bytes = sum(int(report.get("bytes", 0) or 0) for report in reports.values())
+    entries_scanned = sum(int(report.get("entries_scanned", 0) or 0) for report in reports.values())
+    files_scanned = sum(int(report.get("files_scanned", 0) or 0) for report in reports.values())
+    directories_scanned = sum(int(report.get("directories_scanned", 0) or 0) for report in reports.values())
+    reparse_entries = sum(int(report.get("reparse_entries", 0) or 0) for report in reports.values())
+    unreadable_entries = sum(int(report.get("unreadable_entries", 0) or 0) for report in reports.values())
+    completed_roots = sum(report.get("complete") is True for report in reports.values())
     managed_root_counts = {}
     for name in _SCAN_AREA_NAMES:
         report = reports.get(name, {"status": "pending", "complete": False})
@@ -597,6 +603,8 @@ def _storage_summary_from_reports(
             "deduplicated": report.get("deduplicated") is True,
         }
     status = scan_status or ("completed" if exact else "partial")
+    if status == "completed" and not exact:
+        status = "partial"
     if status == "running":
         reason = "Storage đang được quét nền theo từng vùng; số liệu hiện tại chưa phải tổng chính xác."
         next_action = "Giữ trang mở hoặc bấm làm mới để theo dõi tiến độ; không chạy lại khi scan đang hoạt động."
@@ -647,9 +655,14 @@ def _storage_summary_from_reports(
             "deduplicated_targets": max(0, int(deduplicated_targets)),
             "max_entries": _DIRECTORY_SCAN_MAX_ENTRIES if scan_mode == "fast" else None,
             "max_depth": _DIRECTORY_SCAN_MAX_DEPTH,
-            "entries_scanned": sum(int(report.get("entries_scanned", 0)) for report in reports.values()),
-            "files_scanned": sum(int(report.get("files_scanned", 0)) for report in reports.values()),
-            "total_bytes_counted": sum(int(report.get("bytes", 0)) for report in reports.values()),
+            "entries_scanned": entries_scanned,
+            "files_scanned": files_scanned,
+            "directories_scanned": directories_scanned,
+            "reparse_entries": reparse_entries,
+            "unreadable_entries": unreadable_entries,
+            "completed_roots": completed_roots,
+            "total_roots": len(_SCAN_AREA_NAMES),
+            "total_bytes_counted": owned_total_bytes,
             "cancel_requested": False,
             "reason": reason,
             "next_action": next_action,
@@ -693,6 +706,20 @@ def storage_scan_snapshot() -> dict[str, Any]:
     with _scan_lock:
         _restore_exact_scan_cache()
     state = _copy_scan_state()
+    area_values = state.get("areas") if isinstance(state.get("areas"), dict) else {}
+
+    def aggregate_count(key: str) -> int:
+        value = state.get(key)
+        if isinstance(value, int) and value >= 0:
+            return value
+        return sum(int(item.get(key, 0) or 0) for item in area_values.values() if isinstance(item, dict))
+
+    entries_scanned = aggregate_count("entries_scanned")
+    files_scanned = aggregate_count("files_scanned")
+    directories_scanned = aggregate_count("directories_scanned")
+    reparse_entries = aggregate_count("reparse_entries")
+    unreadable_entries = aggregate_count("unreadable_entries")
+    completed_roots = sum(item.get("complete") is True for item in area_values.values() if isinstance(item, dict))
     scan = {
         key: state.get(key)
         for key in (
@@ -702,6 +729,16 @@ def storage_scan_snapshot() -> dict[str, Any]:
             "reason", "next_action", "mode", "cancel_requested",
         )
     }
+    scan.update({
+        "entries_scanned": entries_scanned,
+        "files_scanned": files_scanned,
+        "directories_scanned": directories_scanned,
+        "reparse_entries": reparse_entries,
+        "unreadable_entries": unreadable_entries,
+        "completed_roots": completed_roots,
+        "total_roots": len(_SCAN_AREA_NAMES),
+        "current_root": state.get("current_area"),
+    })
     return {
         "status": state.get("status", "idle"),
         "execution": state.get("execution", "not_run"),
@@ -757,6 +794,19 @@ def _scan_progress(index: int, total_areas: int, report: dict[str, Any], estimat
     return max(0, min(99, int(((index - 1) + fraction) * 100 / total_areas)))
 
 
+def _reports_are_exact(reports: dict[str, dict[str, Any]]) -> bool:
+    """Return true only when every managed root is complete and readable."""
+
+    if len(reports) != len(_SCAN_AREA_NAMES) or any(name not in reports for name in _SCAN_AREA_NAMES):
+        return False
+    return all(
+        report.get("complete") is True
+        and int(report.get("reparse_entries", 0) or 0) == 0
+        and int(report.get("unreadable_entries", 0) or 0) == 0
+        for report in reports.values()
+    )
+
+
 def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None:
     global _scan_state, _size_cache, _scan_thread
     data_root, model_root, environments_root, runtime_root, cache_root, output_root, temp_root, log_root = _managed_roots()
@@ -794,6 +844,7 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
                     "status": str(value.get("status") or "pending"),
                     "entries_scanned": int(value.get("entries_scanned", 0) or 0),
                     "files_scanned": int(value.get("files_scanned", 0) or 0),
+                    "directories_scanned": int(value.get("directories_scanned", 0) or 0),
                     "reparse_entries": int(value.get("reparse_entries", 0) or 0),
                     "unreadable_entries": int(value.get("unreadable_entries", 0) or 0),
                     "deduplicated": value.get("deduplicated") is True,
@@ -865,14 +916,12 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
             with _scan_lock:
                 _scan_state["progress"] = round(index * 100 / len(roots))
         cancelled_scan = cancel_event.is_set()
-        exact = len(reports) == len(roots) and not cancelled_scan and all(item.get("complete") is True for item in reports.values())
+        exact = _reports_are_exact(reports) and not cancelled_scan
         completed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         if cancelled_scan:
             final_status = "cancelled"
-        elif deep:
-            final_status = "completed" if exact else "partial"
         else:
-            final_status = "completed" if all(item.get("complete") is True for item in reports.values()) else "partial"
+            final_status = "completed" if exact else "partial"
         saved_at = datetime.now(timezone.utc).isoformat(timespec="seconds") if exact else None
         result = _storage_summary_from_reports(
             data_root,
@@ -951,6 +1000,7 @@ def start_storage_scan(*, force: bool = False, mode: str = "fast") -> dict[str, 
             return storage_scan_snapshot()
         scan_id = f"scan-{int(time.time() * 1000):x}"
         cancel_event = threading.Event()
+        initial_disk = _disk_snapshot(_managed_roots()[0])
         _scan_state = {
             "schema_version": "storage-scan.v1",
             "scan_id": scan_id,
@@ -974,6 +1024,7 @@ def start_storage_scan(*, force: bool = False, mode: str = "fast") -> dict[str, 
             "owned_storage_total_bytes": 0,
             "owned_storage_exact": False,
             "deduplicated_targets": 0,
+            "disk": initial_disk,
         }
         _scan_cache_loaded = True
         _scan_cancel_events[scan_id] = cancel_event
@@ -1227,8 +1278,14 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
         }
         for name, report in area_reports.items()
     }
-    fast_exact = all(report["complete"] for report in area_reports.values())
+    fast_exact = _reports_are_exact(area_reports)
     fast_owned_total = sum(int(report.get("bytes", 0) or 0) for report in area_reports.values())
+    fast_entries = sum(int(report.get("entries_scanned", 0) or 0) for report in area_reports.values())
+    fast_files = sum(int(report.get("files_scanned", 0) or 0) for report in area_reports.values())
+    fast_directories = sum(int(report.get("directories_scanned", 0) or 0) for report in area_reports.values())
+    fast_reparse = sum(int(report.get("reparse_entries", 0) or 0) for report in area_reports.values())
+    fast_unreadable = sum(int(report.get("unreadable_entries", 0) or 0) for report in area_reports.values())
+    fast_completed_roots = sum(report.get("complete") is True for report in area_reports.values())
     managed_root_counts = {
         name: {
             "complete": report.get("complete") is True,
@@ -1257,9 +1314,14 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
             "deduplicated_targets": 0,
             "max_entries": _DIRECTORY_SCAN_MAX_ENTRIES,
             "max_depth": _DIRECTORY_SCAN_MAX_DEPTH,
-            "entries_scanned": sum(int(report.get("entries_scanned", 0)) for report in area_reports.values()),
-            "files_scanned": sum(int(report.get("files_scanned", 0)) for report in area_reports.values()),
-            "total_bytes_counted": sum(int(report.get("bytes", 0)) for report in area_reports.values()),
+            "entries_scanned": fast_entries,
+            "files_scanned": fast_files,
+            "directories_scanned": fast_directories,
+            "reparse_entries": fast_reparse,
+            "unreadable_entries": fast_unreadable,
+            "completed_roots": fast_completed_roots,
+            "total_roots": len(_SCAN_AREA_NAMES),
+            "total_bytes_counted": fast_owned_total,
             "saved_at": None,
             "reason": "All managed roots were scanned within the bounded budget." if all(report["complete"] for report in area_reports.values()) else "One or more managed roots exceeded the bounded scan budget; partial totals are shown.",
         },

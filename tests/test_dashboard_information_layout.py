@@ -44,26 +44,24 @@ class DashboardInformationLayoutTests(unittest.TestCase):
         for class_name in (
             "dashboard-page",
             "dashboard-hero",
+            "dashboard-hero__copy",
+            "dashboard-tier",
+            "dashboard-tier--summary",
+            "dashboard-tier--attention",
+            "dashboard-tier--actions",
             "dashboard-metric-grid",
-            "dashboard-main-grid",
-            "dashboard-primary",
-            "dashboard-aside",
-            "dashboard-module-list",
-            "dashboard-module-row",
             "dashboard-attention-list",
             "dashboard-quick-actions",
-            "dashboard-storage",
-            "dashboard-storage-grid",
-            "dashboard-storage-volume",
-            "dashboard-storage-values",
-            "dashboard-storage-warning",
+            "dashboard-recent-jobs-wrap",
+            "dashboard-recent-jobs",
+            "dashboard-recent-job",
         ):
             self.assertIn(class_name, source)
         self.assertNotRegex(source, r"\bstyle\s*=")
         self.assertNotIn('class="metric-grid"', source)
         self.assertNotIn('workspace-grid workspace-grid--two', source)
 
-    def test_dashboard_module_priority_is_deterministic_and_does_not_mutate_components(self):
+    def test_dashboard_tiers_are_deterministic_and_do_not_mutate_components(self):
         state = {
             "health": {"status": "healthy"},
             "components": [
@@ -75,13 +73,13 @@ class DashboardInformationLayoutTests(unittest.TestCase):
         first = render_dashboard(state)
         second = render_dashboard(state)
         self.assertEqual(first, second)
-        self.assertLess(first.index("Zeta unavailable"), first.index("Alpha partial"))
-        self.assertLess(first.index("Alpha partial"), first.index("Omega operational"))
+        self.assertEqual(re.findall(r'data-dashboard-tier="([^\"]+)"', first), ["summary", "attention", "actions"])
+        self.assertNotIn("Alpha partial", first)
+        self.assertNotIn("Zeta unavailable", first)
 
         source = dashboard_source()
-        self.assertIn("components.map", source)
-        self.assertIn("modules.sort", source)
-        self.assertIn("statusRank", source)
+        self.assertIn("modules = rawModules.slice().sort", source)
+        self.assertIn("STATUS_RANK", source)
         self.assertNotIn("components.sort(", source)
 
     def test_dashboard_dynamic_values_are_escaped_and_empty_safe(self):
@@ -101,16 +99,16 @@ class DashboardInformationLayoutTests(unittest.TestCase):
         )
         self.assertNotIn("<img src=x", html)
         self.assertNotIn("<script>bad()", html)
-        self.assertIn("&lt;img src=x", html)
+        self.assertIn("&lt;job&gt;", html)
         self.assertIn("&lt;script&gt;bad()&lt;/script&gt;", html)
 
         empty = render_dashboard({"health": {"status": "healthy"}})
-        self.assertIn("Chưa có module", empty)
         self.assertIn("Không có hạng mục cần chú ý", empty)
+        self.assertIn("Chưa có bản ghi tác vụ", empty)
         self.assertNotIn("undefined", empty)
         self.assertNotIn("[object Object]", empty)
 
-    def test_dashboard_renders_server_owned_c_and_d_storage_with_low_space_action(self):
+    def test_dashboard_routes_storage_detail_to_models_page(self):
         html = render_dashboard({
             "health": {"status": "healthy"},
             "storage": {
@@ -122,13 +120,11 @@ class DashboardInformationLayoutTests(unittest.TestCase):
                 ],
             },
         })
-        self.assertIn("C:", html)
-        self.assertIn("D:", html)
-        self.assertTrue("Total" in html or "Tổng" in html)
-        self.assertTrue("Free" in html or "Trống" in html)
-        self.assertTrue("Used" in html or "Đã dùng" in html)
-        self.assertTrue("Low-space warning" in html or "Cảnh báo sắp hết dung lượng" in html)
-        self.assertIn("Review cache.", html)
+        self.assertIn('data-route="models"', html)
+        self.assertNotIn("dashboard-storage", html)
+        self.assertNotIn("C:/", html)
+        self.assertNotIn("D:/", html)
+        self.assertNotIn("Review cache.", html)
         self.assertNotIn("undefined", html)
         self.assertNotIn("[object Object]", html)
 
@@ -138,7 +134,7 @@ class DashboardInformationLayoutTests(unittest.TestCase):
         navigation_source = full_source.split("function renderDashboardLegacy", 1)[0]
         existing_routes = set(re.findall(r'\["([a-z0-9-]+)",\s*"[^"]+"', navigation_source))
         rendered_routes = set(re.findall(r'data-route="([^"]+)"', render_dashboard({})))
-        self.assertEqual(rendered_routes, {"image", "media", "jobs", "models"})
+        self.assertEqual(rendered_routes, {"image", "media", "jobs", "models", "settings"})
         self.assertTrue(rendered_routes.issubset(existing_routes))
         self.assertNotIn("fetch(", source)
         self.assertNotIn("request(", source)

@@ -1,89 +1,196 @@
-/* Dashboard's feature-owned renderer. The pages.js compatibility layer passes
- * only the bounded formatting/projection helpers it already owns. */
+/* Dashboard deliberately stays a compact control-plane surface.
+ * Detailed storage, module, media-evidence and recovery projections belong
+ * to their own routes so a refresh cannot turn the landing page into a
+ * second copy of every subsystem.
+ */
 export function createDashboardRenderer(deps) {
-  const { uiTextHtml, escapeHtml, formatGb, readinessSnapshot, jobRecoverySnapshot, readinessStatus, safeReadinessModules, statusPill, statusExplanation, statusImpact, readinessStatusLabel, textKey, mediaEvidencePanel, workflowLibraryState, formatStatus } = deps;
+  const {
+    uiTextHtml,
+    escapeHtml,
+    formatGb,
+    readinessSnapshot,
+    jobRecoverySnapshot,
+    readinessStatus,
+    safeReadinessModules,
+    statusPill,
+    statusExplanation,
+    statusImpact,
+    textKey,
+    formatStatus,
+  } = deps;
+
+  const SUCCESS_STATUSES = new Set(["healthy", "operational", "ready"]);
+  const ACTIONABLE_STATUSES = new Set([
+    "attention",
+    "blocked",
+    "cancelling",
+    "degraded",
+    "error",
+    "failed",
+    "needs_setup",
+    "recovery_required",
+    "stale_session",
+  ]);
+  const ATTENTION_JOB_STATUSES = new Set(["blocked", "cancelling", "failed", "interrupted"]);
+  const ATTENTION_TRANSPORT_STATUSES = new Set([
+    ...ACTIONABLE_STATUSES,
+    "incompatible",
+    "missing",
+    "partial",
+    "unavailable",
+  ]);
+  const STATUS_RANK = Object.freeze({
+    error: 0,
+    failed: 0,
+    blocked: 0,
+    needs_setup: 1,
+    degraded: 1,
+    attention: 1,
+    cancelling: 2,
+    interrupted: 2,
+    starting: 3,
+    running: 4,
+    queued: 4,
+    completed: 5,
+    healthy: 5,
+    operational: 5,
+    ready: 5,
+    partial: 6,
+    unavailable: 6,
+    missing: 6,
+    not_installed: 6,
+    not_run: 7,
+    unknown: 8,
+  });
+
+  const rankOf = (value) => {
+    const status = String(value || "unknown");
+    return Object.prototype.hasOwnProperty.call(STATUS_RANK, status) ? STATUS_RANK[status] : 4;
+  };
+
+  const compareText = (left, right) => {
+    const leftKey = textKey(String(left || ""));
+    const rightKey = textKey(String(right || ""));
+    return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+  };
+
+  const finiteBytes = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
+
   return function renderDashboard(state) {
     const source = state && typeof state === "object" ? state : {};
     const health = source.health && typeof source.health === "object" ? source.health : {};
-    const disk = health.disk && typeof health.disk === "object" ? health.disk : {};
+    const healthDisk = health.disk && typeof health.disk === "object" ? health.disk : {};
+    const storage = source.storage && typeof source.storage === "object" ? source.storage : {};
+    const storageDisk = storage.disk && typeof storage.disk === "object" ? storage.disk : {};
     const gpu = health.gpu && typeof health.gpu === "object" ? health.gpu : {};
     const productization = source.productization && typeof source.productization === "object" ? source.productization : {};
-    const storage = source.storage && typeof source.storage === "object" ? source.storage : (productization.storage && typeof productization.storage === "object" ? productization.storage : {});
     const readinessView = readinessSnapshot(source);
-    const volumes = readinessView.volumes;
     const jobRecovery = jobRecoverySnapshot(source);
-    const jobs = jobRecovery.records;
-    const components = Array.isArray(source.components) ? source.components : [];
-    const componentFallback = components.map((item) => item);
+    const jobs = Array.isArray(jobRecovery.records) ? jobRecovery.records : [];
     const control = source.capabilities && typeof source.capabilities === "object" ? source.capabilities : {};
-    const readiness = readinessView.status !== "unknown" ? readinessView.status : readinessStatus(control.status || health.status);
+    const readiness = readinessView.status !== "unknown"
+      ? readinessView.status
+      : readinessStatus(control.status || health.status);
     const transport = readinessStatus(health.status || "unknown");
-    const transportReady = ["healthy", "operational", "ready"].includes(transport);
-    const activeJobs = jobRecovery.counts.active;
-    const metricStatic = (label, value, detail) => {
-      if (label === "Hub API" && transportReady) {
-        value = formatStatus(transport);
-        detail = "Loopback API đang chạy; readiness module hiển thị riêng.";
-      }
-      return `<article class="metric-card"><span data-i18n="${escapeHtml(label)}">${uiTextHtml(label)}</span><strong>${escapeHtml(value)}</strong><small data-i18n="${escapeHtml(detail)}">${uiTextHtml(detail)}</small></article>`;
-    };
-    const metricSnapshot = (label, value, detail) => `<article class="metric-card"><span data-i18n="${escapeHtml(label)}">${uiTextHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail)}</small></article>`;
-    const statusRank = { error: 0, unavailable: 0, missing: 0, not_published: 0, partial: 1, not_run: 1, planned: 2, starting: 3, installed: 4, operational: 5, healthy: 5, ready: 5, clean: 5 };
-    const rankOf = (status) => Object.prototype.hasOwnProperty.call(statusRank, status) ? statusRank[status] : 3;
-    const productCapabilities = productization.capabilities && typeof productization.capabilities === "object" ? productization.capabilities : {};
-    const modules = Array.isArray(productCapabilities.modules) ? readinessView.modules : safeReadinessModules({ ...source, components: componentFallback });
-    modules.sort((left, right) => {
-      const rankDifference = rankOf(left.status) - rankOf(right.status);
-      if (rankDifference) return rankDifference;
-      const labelDifference = textKey(left.label) < textKey(right.label) ? -1 : textKey(left.label) > textKey(right.label) ? 1 : 0;
-      if (labelDifference) return labelDifference;
-      return textKey(left.id) < textKey(right.id) ? -1 : textKey(left.id) > textKey(right.id) ? 1 : 0;
+    const transportReady = SUCCESS_STATUSES.has(transport);
+    const activeJobs = Number.isInteger(jobRecovery.counts?.active) ? jobRecovery.counts.active : 0;
+    const freeBytes = finiteBytes(healthDisk.free_bytes) ?? finiteBytes(storageDisk.free_bytes);
+    const productCapabilities = productization.capabilities && typeof productization.capabilities === "object"
+      ? productization.capabilities
+      : {};
+    const rawModules = Array.isArray(productCapabilities.modules)
+      ? readinessView.modules
+      : safeReadinessModules({ ...source, components: Array.isArray(source.components) ? source.components : [] });
+    const modules = rawModules.slice().sort((left, right) => {
+      const statusDifference = rankOf(left.status) - rankOf(right.status);
+      if (statusDifference) return statusDifference;
+      const labelDifference = compareText(left.label, right.label);
+      return labelDifference || compareText(left.id, right.id);
     });
+
     const attention = [];
-    if (!transportReady && readiness !== "healthy" && readiness !== "operational") attention.push({ id: "hub-api", title: "Hub API", technicalId: "hub-api", purpose: "Kết nối loopback để Hub đọc snapshot và nhận thao tác.", reason: "Loopback API chưa đạt trạng thái healthy.", impact: "Các trang có thể hiển thị snapshot cũ hoặc không nhận thao tác.", nextAction: "Làm mới API và mở Diagnostics để xem nguyên nhân.", status: readiness });
-    modules.filter((item) => ["error", "unavailable", "missing", "partial", "not_published", "not_run", "not_installed"].includes(item.status)).forEach((item) => attention.push({ id: `module-${item.id}`, title: item.label, technicalId: item.id, purpose: item.purpose || `${item.kind} capability`, detail: item.kind, reason: item.reason, impact: item.impact || statusImpact(item.status, item.label), nextAction: item.nextAction, status: item.status }));
-    jobs.filter((item) => ["failed", "unavailable", "cancelled", "interrupted"].includes(String(item?.status || ""))).forEach((item, index) => {
-      const jobId = item?.id || `job-${index + 1}`;
-      attention.push({ id: `job-${jobId}`, title: item?.title || "Tác vụ Hub", technicalId: jobId, purpose: `Tác vụ ${item?.jobType || item?.tool || "Hub"} xử lý dữ liệu người dùng.`, detail: item?.jobType || item?.tool || "job", reason: item?.reason || item?.lifecycleNote || "Tác vụ kết thúc mà không có kết quả thành công.", impact: statusImpact(item?.status || "failed", item?.title || "Tác vụ"), nextAction: item?.nextAction || "Mở Jobs để xem chi tiết và thử lại khi backend sẵn sàng.", status: item?.status || "failed" });
+    if (!transportReady && ATTENTION_TRANSPORT_STATUSES.has(transport)) {
+      attention.push({
+        id: "hub-api",
+        title: "Hub API",
+        technicalId: "hub-api",
+        purpose: "Kết nối loopback để Hub đọc snapshot và nhận thao tác.",
+        reason: "Loopback API chưa đạt trạng thái healthy.",
+        impact: "Các trang có thể hiển thị snapshot cũ hoặc không nhận thao tác.",
+        nextAction: "Làm mới API và mở Diagnostics để xem nguyên nhân.",
+        status: transport,
+      });
+    }
+    modules.filter((item) => ACTIONABLE_STATUSES.has(item.status)).forEach((item) => {
+      attention.push({
+        id: `module-${item.id}`,
+        title: item.label,
+        technicalId: item.id,
+        purpose: item.purpose || "Capability server-owned cho workflow.",
+        reason: item.reason,
+        impact: item.impact || statusImpact(item.status, item.label),
+        nextAction: item.nextAction,
+        status: item.status,
+      });
     });
-    attention.sort((left, right) => { const rankDifference = rankOf(left.status) - rankOf(right.status); if (rankDifference) return rankDifference; return textKey(left.title) < textKey(right.title) ? -1 : textKey(left.title) > textKey(right.title) ? 1 : 0; });
+    jobs.filter((item) => ATTENTION_JOB_STATUSES.has(String(item?.status || ""))).forEach((item, index) => {
+      const jobId = item?.id || `job-${index + 1}`;
+      attention.push({
+        id: `job-${jobId}`,
+        title: item?.title || "Tác vụ Hub",
+        technicalId: jobId,
+        purpose: `Tác vụ ${item?.jobType || item?.tool || "Hub"} xử lý dữ liệu người dùng.`,
+        reason: item?.reason || item?.lifecycleNote || "Tác vụ chưa có kết quả thành công.",
+        impact: statusImpact(item?.status || "failed", item?.title || "Tác vụ"),
+        nextAction: item?.nextAction || "Mở Jobs để xem chi tiết và tạo lại khi backend sẵn sàng.",
+        status: item?.status || "failed",
+      });
+    });
+    attention.sort((left, right) => {
+      const statusDifference = rankOf(left.status) - rankOf(right.status);
+      return statusDifference || compareText(left.title, right.title) || compareText(left.id, right.id);
+    });
     const attentionItems = attention.slice(0, 4);
-    const moduleRows = modules.length ? modules.slice(0, 12).map((item) => statusExplanation({ name: item.label, technicalId: item.id, purpose: item.purpose || `${item.kind} capability`, status: item.status, reason: item.reason, impact: item.impact, nextAction: item.nextAction, compact: true })).join("") : `<p class="small muted">Chưa có module trong readiness snapshot.</p>`;
-    const attentionRows = attentionItems.length ? attentionItems.map((item) => statusExplanation({ name: item.title, technicalId: item.technicalId || item.id, purpose: item.purpose || item.detail, status: item.status, reason: item.reason || item.detail, impact: item.impact, nextAction: item.nextAction, compact: true })).join("") : `<p class="small muted">Không có hạng mục cần chú ý.</p>`;
-    const moduleEvidenceRows = modules.length ? modules.slice(0, 12).map((item) => statusExplanation({ name: item.label, technicalId: item.id, purpose: item.purpose || `${item.kind} capability`, status: item.status, reason: item.reason, impact: item.impact, nextAction: item.nextAction, compact: true })).join("") : `<p class="small muted">${uiTextHtml("No server-owned module evidence.")}</p>`;
-    const quickActions = [["image", "Image AI", "Compose và chỉnh sửa ảnh"], ["media", "Media", "Transform media trong Hub"], ["jobs", "Jobs", "Theo dõi queue và artifact"], ["models", "Models & Storage", "Kiểm tra inventory"]].map(([route, label, detail]) => `<button class="button button--compact" type="button" data-route="${escapeHtml(route)}"><strong>${uiTextHtml(label)}</strong><span class="row-meta">${uiTextHtml(detail)}</span></button>`).join("");
-    const readinessAction = `<button class="button button--compact" type="button" data-readiness-route="settings"><strong>${uiTextHtml("Readiness & Module Plan")}</strong><span class="row-meta">${uiTextHtml("Review the server snapshot")}</span></button>`;
-    const workflowSteps = [["01", "Check readiness", "Review module health and attention."], ["02", "Choose a route", "Open an existing Hub workspace."], ["03", "Run from Jobs", "Keep progress and artifacts in Hub."]].map(([step, title, detail]) => `<li class="dashboard-module-row"><span class="tag">${escapeHtml(step)}</span><div class="row-main"><strong>${uiTextHtml(title)}</strong><span class="row-meta">${uiTextHtml(detail)}</span></div></li>`).join("");
-    const gpuValue = gpu.name || "Chưa phát hiện";
+
+    const metric = (key, label, value, detail, extra = "") => `<article class="metric-card" data-dashboard-metric="${escapeHtml(key)}"${extra}><span>${uiTextHtml(label)}</span><strong>${escapeHtml(String(value))}</strong><small>${uiTextHtml(detail)}</small></article>`;
+    const attentionRows = attentionItems.length
+      ? attentionItems.map((item) => statusExplanation({
+        name: item.title,
+        technicalId: item.technicalId,
+        purpose: item.purpose,
+        status: item.status,
+        reason: item.reason,
+        impact: item.impact,
+        nextAction: item.nextAction,
+        compact: true,
+      })).join("")
+      : `<p class="small muted">Không có hạng mục cần chú ý.</p>`;
+
+    const quickActions = [
+      ["image", "Image AI", "Compose và chỉnh sửa ảnh"],
+      ["media", "Media", "Transform media trong Hub"],
+      ["jobs", "Jobs", "Theo dõi queue và artifact"],
+      ["models", "Models & Storage", "Kiểm tra inventory và dung lượng"],
+      ["settings", "Readiness & Module Plan", "Xem bằng chứng server-owned"],
+    ].map(([route, label, detail]) => `<button class="button button--compact" type="button" data-route="${escapeHtml(route)}"><strong>${uiTextHtml(label)}</strong><span class="row-meta">${uiTextHtml(detail)}</span></button>`).join("");
+
+    const recentJobs = jobs.slice(0, 6).map((item, index) => {
+      const id = String(item?.id || `job-${index + 1}`);
+      const status = readinessStatus(item?.status, "unknown");
+      const reconstructOnly = item?.reconstructOnlyPending === true;
+      const title = item?.title || item?.tool || "Tác vụ Hub";
+      const note = reconstructOnly ? "Đã tạo · chưa thực thi" : `${item?.progress || 0}%`;
+      return `<li class="dashboard-recent-job" data-dashboard-job-id="${escapeHtml(id)}" data-dashboard-job-status="${escapeHtml(status)}" data-reconstruct-only="${reconstructOnly}"><div class="row-main"><strong>${escapeHtml(title)}</strong><span class="row-meta">${escapeHtml(note)} · ${reconstructOnly ? escapeHtml("reconstruct-only") : escapeHtml(id)}</span></div>${statusPill(status, formatStatus(status))}</li>`;
+    }).join("");
+    const recentJobsHtml = recentJobs || `<li class="dashboard-recent-job"><span class="row-meta">Chưa có bản ghi tác vụ.</span></li>`;
+    const readinessNote = SUCCESS_STATUSES.has(readiness)
+      ? "Snapshot Hub ổn định; chi tiết từng module nằm trong Readiness."
+      : "Kiểm tra các mục cần chú ý trước khi chạy workflow.";
+    const gpuValue = gpu.name || gpu.model || "Chưa phát hiện";
     const gpuDetail = gpu.memory_free_mib != null ? `${gpu.memory_free_mib} MiB VRAM trống` : "Snapshot GPU chưa sẵn sàng";
-    const diskValue = disk.free_bytes != null ? formatGb(disk.free_bytes) : "—";
-    const readinessNote = readiness === "healthy" || readiness === "operational" ? "Hub API snapshot ổn định; readiness của từng module vẫn được hiển thị riêng." : "Kiểm tra các mục cần chú ý trước khi chạy workflow.";
-    const planStatus = readinessView.planStatus;
-    const planReason = readinessView.planReason;
-    const planAction = readinessView.planAction;
-    const storageStatus = readinessStatus(storage.status, "unavailable");
-    const storageExecution = readinessView.execution;
-    const storageVolumeCard = (volume) => {
-      const volumeId = String(volume?.id || "").toLowerCase();
-      const label = volumeId === "c" ? "C:" : volumeId === "d" ? "D:" : "Volume";
-      const status = readinessStatus(volume?.status, "unavailable");
-      const available = volume?.available === true;
-      const value = (key) => available ? formatGb(volume[`${key}Bytes`]) : "—";
-      const low = volume?.lowSpace === true;
-      const reason = volume?.reason || uiTextHtml("Volume statistics are unavailable; no figures are shown.");
-      const action = volume?.nextAction || uiTextHtml("Verify that the volume is mounted and readable, then refresh storage.");
-      return `<article class="dashboard-storage-volume" data-volume-id="${escapeHtml(volumeId || "unknown")}" data-status="${escapeHtml(status)}" data-low-space="${low}"><div class="card-title-row"><div><span class="eyebrow">${uiTextHtml("SERVER-OWNED VOLUME")}</span><h3>${escapeHtml(label)}</h3></div>${statusPill(status, uiTextHtml(status === "available" ? "Available" : "Unavailable"))}</div><div class="dashboard-storage-values"><div><span>${uiTextHtml("Total")}</span><strong>${escapeHtml(value("total"))}</strong></div><div><span>${uiTextHtml("Free")}</span><strong>${escapeHtml(value("free"))}</strong></div><div><span>${uiTextHtml("Used")}</span><strong>${escapeHtml(value("used"))}</strong></div></div><p class="dashboard-storage-reason">${escapeHtml(reason)}</p>${low ? `<div class="callout callout--warning dashboard-storage-warning" role="alert"><strong>${uiTextHtml("Low space")}</strong><span>${escapeHtml(action)}</span></div>` : `<div class="dashboard-storage-action"><strong>${uiTextHtml("Next action")}</strong><span>${escapeHtml(action)}</span></div>`}</article>`;
-    };
-    const storageHtml = volumes.length ? volumes.map(storageVolumeCard).join("") : `<div class="empty-state compact"><strong>${uiTextHtml("Storage projection unavailable")}</strong><span>${uiTextHtml("C:/ and D:/ figures are not available in this snapshot.")}</span></div>`;
-    const lowSpaceVolumes = volumes.filter((volume) => volume?.lowSpace === true);
-    const storageWarning = lowSpaceVolumes.length ? `<div class="callout callout--warning dashboard-storage-warning" role="alert"><strong>${uiTextHtml("Low-space warning")}</strong><span>${escapeHtml(lowSpaceVolumes.map((volume) => String(volume?.id || "").toLowerCase() === "c" ? "C:" : String(volume?.id || "").toLowerCase() === "d" ? "D:" : "volume").join(", "))} ${uiTextHtml("review storage before new writes.")}</span></div>` : "";
-    const workflowLibraryHtml = workflowLibraryState(source.workflowLibrary);
-    const experience = source.productExperienceV2 && typeof source.productExperienceV2 === "object" ? source.productExperienceV2 : {};
-    const onboarding = Array.isArray(experience.onboarding) ? experience.onboarding.slice(0, 7) : [];
-    const onboardingRows = onboarding.length ? onboarding.map((item) => `<li class="dashboard-module-row"><span class="tag">${escapeHtml(item.step || "—")}</span><div class="row-main"><strong>${escapeHtml(item.title || "Bước Hub")}</strong><span class="row-meta">${escapeHtml(item.reason || "")}</span></div><button class="button button--compact" type="button" data-route="${escapeHtml(item.route || "dashboard")}">${escapeHtml(item.action || "Mở")}</button></li>`).join("") : `<li class="dashboard-module-row"><span class="row-meta">Onboarding đang lấy từ Hub API.</span></li>`;
-    const experienceCard = source.onboardingDismissed === true
-      ? `<section class="dashboard-onboarding card" aria-labelledby="dashboard-onboarding-title" data-product-experience-status="skipped"><div class="card-title-row"><div><span class="eyebrow">PRODUCT EXPERIENCE V2</span><h2 id="dashboard-onboarding-title">Onboarding đã bỏ qua</h2><p class="small">Bạn có thể mở lại hướng dẫn bất kỳ lúc nào; trạng thái này chỉ ở phiên hiện tại.</p></div>${statusPill("not_run", "Chưa chạy")}</div><button class="button button--compact" type="button" data-onboarding-show>Hiện lại hướng dẫn</button></section>`
-      : `<section class="dashboard-onboarding card" aria-labelledby="dashboard-onboarding-title" data-product-experience-status="${escapeHtml(experience.status || "loading")}"><div class="card-title-row"><div><span class="eyebrow">PRODUCT EXPERIENCE V2</span><h2 id="dashboard-onboarding-title">Bắt đầu an toàn trong Hub</h2><p class="small">Hướng dẫn hữu hạn từ Hub API; không lưu completion trong trình duyệt và không chạy workflow.</p></div>${statusPill(experience.status || "not_run", formatStatus(experience.status || "not_run"))}</div><ol class="dashboard-module-list">${onboardingRows}</ol><div class="form-actions"><button class="button button--compact" type="button" data-onboarding-skip>Bỏ qua onboarding</button></div><p class="small">Theme và ngôn ngữ chỉ có hiệu lực sau khi bấm Áp dụng & lưu.</p></section>`;
-    return `<section class="dashboard-page" aria-labelledby="dashboard-title"><section class="dashboard-hero"><div><span class="eyebrow">CONTROL PLANE</span><h1 id="dashboard-title">Dashboard</h1><p>${escapeHtml(readinessNote)}</p></div>${statusPill(readiness, formatStatus(readiness))}</section>${workflowLibraryHtml}${experienceCard}<section class="dashboard-metric-grid" aria-label="Readiness metrics">${metricStatic("Hub API", formatStatus(readiness), "Static readiness snapshot")}${metricStatic("Module plan", formatStatus(planStatus), "Preflight is read-only; install/download is not_run")}${metricSnapshot("GPU", gpuValue, gpuDetail)}${metricStatic("Ổ đĩa", diskValue, "Dung lượng trống")}${metricSnapshot("Jobs hoạt động", String(activeJobs), `${jobs.length} bản ghi trong queue`)}</section><section class="dashboard-storage card" aria-labelledby="dashboard-storage-title" data-storage-status="${escapeHtml(storageStatus)}" data-execution="${escapeHtml(storageExecution)}"><div class="card-title-row"><div><span class="eyebrow" data-i18n="STORAGE PROJECTION">${uiTextHtml("STORAGE PROJECTION")}</span><h2 id="dashboard-storage-title" data-i18n="C:/ & D:/ dung lượng">${uiTextHtml("C:/ & D:/ dung lượng")}</h2><p class="small"><span data-i18n="Server-owned, allowlisted volume snapshot">${uiTextHtml("Server-owned, allowlisted volume snapshot")}</span> · <span data-i18n="execution:">${uiTextHtml("execution:")}</span> ${escapeHtml(storageExecution)}</p></div>${statusPill(storageStatus, formatStatus(storageStatus))}</div><div class="dashboard-storage-grid">${storageHtml}</div>${storageWarning}</section>${mediaEvidencePanel(source, "compact")}<section class="job-recovery-card card" aria-labelledby="dashboard-recovery-title" data-recovery-source="${escapeHtml(jobRecovery.source)}" data-recovery-status="${escapeHtml(jobRecovery.status)}"><div class="card-title-row"><div><span class="eyebrow" data-i18n="JOB RECOVERY">${uiTextHtml("JOB RECOVERY")}</span><h2 id="dashboard-recovery-title" data-i18n="Recovery attention">${uiTextHtml("Recovery attention")}</h2><p>${escapeHtml(jobRecovery.reason)}</p></div>${statusPill(jobRecovery.status, readinessStatusLabel(jobRecovery.status))}</div><div class="job-recovery-counts" aria-label="Job recovery counts"><div data-i18n-container="Active" data-recovery-count="active"><span>Active</span><strong>${escapeHtml(String(jobRecovery.counts.active))}</strong></div><div data-i18n-container="Attention" data-recovery-count="attention"><span>Attention</span><strong>${escapeHtml(String(jobRecovery.counts.attention))}</strong></div><div data-i18n-container="Interrupted" data-recovery-count="interrupted"><span>Interrupted</span><strong>${escapeHtml(String(jobRecovery.counts.interrupted))}</strong></div><div data-i18n-container="Recoverable" data-recovery-count="recoverable"><span>Recoverable</span><strong>${escapeHtml(String(jobRecovery.counts.recoverable))}</strong></div></div><div class="job-recovery-guidance"><span data-i18n="Next action">${uiTextHtml("Next action")}</span><p>${escapeHtml(jobRecovery.nextAction)}</p></div><button class="button button--compact" type="button" data-route="jobs" data-recovery-focus="${jobRecovery.counts.attention ? "attention" : "all"}" aria-controls="jobs-page" data-i18n="Open focused Jobs">${uiTextHtml("Open focused Jobs")}</button></section><section class="dashboard-main-grid"><section class="dashboard-primary card" aria-labelledby="dashboard-modules-title"><div class="card-title-row"><div><span class="eyebrow" data-i18n="MODULE HEALTH">${uiTextHtml("MODULE HEALTH")}</span><h2 id="dashboard-modules-title" data-i18n="Tình trạng module">${uiTextHtml("Tình trạng module")}</h2></div><span class="tag">${escapeHtml(String(modules.length))} module</span></div><div class="dashboard-module-list">${moduleRows}</div><details><summary data-i18n="Reason & next action">${uiTextHtml("Reason & next action")}</summary><div class="dashboard-module-list">${moduleEvidenceRows}</div></details><div class="callout" data-module-plan-status="${escapeHtml(planStatus)}"><strong data-i18n="Module preflight">${uiTextHtml("Module preflight")}</strong><p>${escapeHtml(planReason)}</p><p>${escapeHtml(planAction)}</p></div></section><aside class="dashboard-aside"><section class="card" aria-labelledby="dashboard-attention-title"><div class="card-title-row"><h2 id="dashboard-attention-title">Cần chú ý</h2><span class="tag">Tối đa 4</span></div><div class="dashboard-attention-list">${attentionRows}</div></section><section class="card" aria-labelledby="dashboard-quick-title"><div class="card-title-row"><h2 id="dashboard-quick-title">Điều hướng nhanh</h2></div><div class="dashboard-quick-actions">${quickActions}${readinessAction}</div></section><section class="card" aria-labelledby="dashboard-workflow-title"><div class="card-title-row"><h2 id="dashboard-workflow-title">Workflow ngắn</h2></div><ol class="dashboard-module-list">${workflowSteps}</ol></section></aside></section></section>`;
+    const diskValue = freeBytes === null ? "—" : formatGb(freeBytes);
+    const activeJobExtra = ` data-dashboard-active-count="${escapeHtml(String(activeJobs))}"`;
+
+    return `<section class="dashboard-page" aria-labelledby="dashboard-title" data-dashboard-simplified="true"><header class="dashboard-hero"><div class="dashboard-hero__copy"><span class="eyebrow">TRUNG TÂM ĐIỀU KHIỂN</span><h1 id="dashboard-title">Dashboard</h1><p>${escapeHtml(readinessNote)}</p></div>${statusPill(readiness, formatStatus(readiness))}</header><section class="dashboard-tier dashboard-tier--summary card" data-dashboard-tier="summary" aria-labelledby="dashboard-summary-title"><div class="card-title-row"><div><span class="eyebrow">TÓM TẮT</span><h2 id="dashboard-summary-title">Tóm tắt hệ thống</h2></div><span class="tag">4 chỉ số</span></div><div class="dashboard-metric-grid">${metric("api", "Hub API", formatStatus(transport), transportReady ? "Loopback API đang phản hồi" : "Kiểm tra trạng thái kết nối")}${metric("gpu", "GPU", gpuValue, gpuDetail)}${metric("disk-free", "Dung lượng trống", diskValue, "Dung lượng còn lại trên volume chính")}${metric("active-jobs", "Jobs hoạt động", activeJobs, `${jobs.length} bản ghi trong queue`, activeJobExtra)}</div></section><section class="dashboard-tier dashboard-tier--attention card" data-dashboard-tier="attention" aria-labelledby="dashboard-attention-title"><div class="card-title-row"><div><span class="eyebrow">CẦN CHÚ Ý</span><h2 id="dashboard-attention-title">Cần chú ý</h2></div><span class="tag" data-dashboard-attention-count="${escapeHtml(String(attentionItems.length))}">Tối đa 4 mục</span></div><div class="dashboard-attention-list">${attentionRows}</div></section><section class="dashboard-tier dashboard-tier--actions card" data-dashboard-tier="actions" aria-labelledby="dashboard-actions-title"><div class="card-title-row"><div><span class="eyebrow">THAO TÁC</span><h2 id="dashboard-actions-title">Thao tác nhanh và tác vụ gần đây</h2></div></div><div class="dashboard-quick-actions">${quickActions}</div><div class="dashboard-recent-jobs-wrap"><h3>Tác vụ gần đây</h3><ul class="dashboard-recent-jobs">${recentJobsHtml}</ul></div></section></section>`;
   };
 }

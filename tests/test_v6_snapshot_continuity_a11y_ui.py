@@ -113,7 +113,8 @@ process.stdout.write(html);
         ):
             self.assertIn(marker, self.app)
         self.assertNotIn('view.focus({ preventScroll: true })', self.app)
-        self.assertIn('window.addEventListener("hashchange", async () => { render({ focus: "main" });', self.app)
+        self.assertIn('window.addEventListener("hashchange", async () => {', self.app)
+        self.assertIn('render({ focus: "main" });', self.app)
         refresh_slice = self.app[self.app.index("const refreshFast"):self.app.index("const refreshCreative")]
         self.assertIn("getHealth()", refresh_slice)
         self.assertIn("getJobs()", refresh_slice)

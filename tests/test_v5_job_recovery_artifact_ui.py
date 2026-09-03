@@ -113,14 +113,14 @@ process.stdout.write(html);
         self.assertNotIn("JSON.stringify", recovery_slice)
         self.assertNotIn("Object.values", recovery_slice)
 
-    def test_dashboard_recovery_card_routes_to_existing_focused_jobs(self) -> None:
+    def test_dashboard_keeps_recovery_detail_on_jobs_route(self) -> None:
         html = self._render("dashboard", self._state())
-        self.assertIn('class="job-recovery-card card"', html)
-        self.assertIn('data-recovery-source="productization.jobs"', html)
-        self.assertIn('data-recovery-count="attention"><span>Attention</span><strong>4</strong>', html)
-        self.assertIn('data-recovery-count="recoverable"><span>Recoverable</span><strong>1</strong>', html)
-        self.assertIn('data-route="jobs" data-recovery-focus="attention"', html)
-        self.assertIn('aria-controls="jobs-page"', html)
+        self.assertIn('data-dashboard-tier="summary"', html)
+        self.assertIn('data-dashboard-tier="attention"', html)
+        self.assertIn('data-dashboard-tier="actions"', html)
+        self.assertIn('data-route="jobs"', html)
+        self.assertNotIn('class="job-recovery-card card"', html)
+        self.assertNotIn("media-evidence", html)
         self.assertNotIn("[object Object]", html)
         self.assertNotRegex(html, UNSAFE_DISPLAY_PATTERN)
 

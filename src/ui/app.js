@@ -136,6 +136,7 @@ import { createStorageScanPoller, STORAGE_SCAN_ACTIVE_STATES } from "./storage_s
 import { mountImageMaskCanvases } from "./image_mask_studio.js";
 import { createWorkflowLibraryAdapter } from "./workflow_library.js";
 import { NAVIGATION, jobRecoverySnapshot, renderPage } from "./pages.js";
+import { chooseComponentId } from "./features/components/render.js";
 import { currentLanguage, localizeDocument, setLanguage, translateText } from "./i18n.js";
 import { FEATURE_REGISTRY } from "./core/feature_registry.js";
 import { confirmComponentInstall, getProductionCatalog, planComponentInstall } from "./shared/api/catalog.js";
@@ -143,7 +144,7 @@ import { confirmComponentInstall, getProductionCatalog, planComponentInstall } f
 globalThis.__localAiHubFrontendStarted = true;
 
 const state = {
-  health: {}, capabilities: {}, productization: {}, components: [], componentManager: {}, componentPlans: {}, tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", jobQuery: "", jobTypeFilter: "all", jobSort: "newest", jobPage: 1, apiStatus: "loading", apiError: "",
+  health: {}, capabilities: {}, productization: {}, components: [], componentManager: {}, componentPlans: {}, selectedComponentId: "", componentDetailOpen: true, tools: [], applications: [], jobs: [], durableJobs: [], models: [], storage: {}, settings: {}, lifecycle: {}, comfyAdvanced: {}, comfyWorkflows: [], workspaceTabs: {}, jobFilter: "all", jobQuery: "", jobTypeFilter: "all", jobSort: "newest", jobPage: 1, apiStatus: "loading", apiError: "",
   creative: {}, creativeLoading: false, creativeTab: "projects", selectedProjectId: "", creativeProject: null, projectWorkspaceV2: {}, artifactLibraryV2: {}, mediaPipelineV2: {}, mediaPipelinePreflight: null, externalIntegrationsV2: {}, productExperienceV2: {}, platformHardeningV2: {}, platformExtensibilityV2: {}, onboardingDismissed: false, commandPaletteOpen: false, globalSearch: { query: "", results: [] }, assetFilters: {}, galleryFilters: {}, pendingQuickRecipe: null, pendingNodeRecipe: null, pendingGalleryPreset: null, pendingRecipeName: "",
   imageMaskStudio: {}, imageMaskLoading: false, selectedImageMaskSessionId: "", selectedImageMaskLayerId: "", imageMaskSession: null, imageMaskCompare: null, pendingImageMaskSourceId: "",
   workflowLibrary: { status: "partial", reason: "Workflow Library server-owned adapter chưa khả dụng.", action: "Tiếp tục local draft; kiểm tra endpoint typed trước khi đồng bộ." },
@@ -469,6 +470,20 @@ const routeId = () => {
   return isRoutableRoute(value) ? value : "dashboard";
 };
 
+const focusComponentMaster = (id = state.selectedComponentId) => {
+  const buttons = [...view.querySelectorAll("[data-component-select]")];
+  const button = buttons.find((candidate) => candidate.dataset.componentSelect === String(id || "")) || buttons[0];
+  if (button && typeof button.focus === "function") button.focus({ preventScroll: true });
+};
+const focusComponentDetail = () => {
+  const close = view.querySelector("[data-component-close-detail]");
+  if (close && typeof close.focus === "function") close.focus({ preventScroll: true });
+};
+const syncComponentSelection = () => {
+  const records = Array.isArray(state.componentManager?.records) ? state.componentManager.records : [];
+  state.selectedComponentId = chooseComponentId(records, state.selectedComponentId);
+};
+
 const safeDisplayMessage = (value, fallback) => typeof value === "string" && value.trim() ? value : fallback;
 const setJobActionStatus = (message, kind = "") => {
   const status = document.querySelector("[data-job-action-status]");
@@ -688,7 +703,7 @@ const COMMANDS = Object.freeze([
   { id: "open-diagnostics", label: "Mở Diagnostics", detail: "Xem chẩn đoán sanitized", route: "diagnostics" },
   { id: "new-workflow", label: "New Workflow", detail: "Mở workspace dự án; chưa tạo dữ liệu", route: "projects" },
   { id: "check-update", label: "Check Update", detail: "Mở nơi kiểm tra update thủ công", route: "models" },
-  { id: "scan-storage", label: "Scan Storage", detail: "Mở Storage; bạn tự bấm Quét lại", route: "models" },
+  { id: "scan-storage", label: "Scan Storage", detail: "Mở Storage; bạn tự bấm Quét chính xác", route: "models" },
   { id: "search-artifact", label: "Search Artifact", detail: "Tìm artifact trong metadata Hub", route: "" },
 ]);
 
@@ -937,6 +952,11 @@ const refreshImageMaskStudio = async ({ renderView = true, before = "", after = 
   }
 };
 
+const UNSAFE_STORAGE_DISPLAY = /(?:[a-z]:[\\/]|\\\\|(?:file|data|https?):|(?:api[_-]?key|password|secret|token)\s*[:=])/i;
+const safeStorageDisplay = (value, fallback = "") => {
+  const candidate = typeof value === "string" ? value.trim().slice(0, 240) : "";
+  return candidate && !UNSAFE_STORAGE_DISPLAY.test(candidate) ? candidate : fallback;
+};
 const updateStorageScanDom = (result) => {
   // Polling a storage scan must not tear down the module DOM (and must not
   // remount canvases, reset focus, or reload the whole WebView).  Update only
@@ -946,19 +966,46 @@ const updateStorageScanDom = (result) => {
   const status = String(scan.status || result?.status || "idle");
   const mode = String(scan.mode || result?.scan_mode || "fast");
   const progress = Math.max(0, Math.min(100, Number.isFinite(Number(scan.progress)) ? Number(scan.progress) : 0));
-  const savedAt = typeof scan.saved_at === "string" && scan.saved_at.trim() ? scan.saved_at.trim() : "";
+  const savedAt = safeStorageDisplay(scan.saved_at, "");
+  const currentRoot = safeStorageDisplay(scan.current_root || scan.current_area, "");
+  const areasForTotals = result?.areas && typeof result.areas === "object" ? result.areas : {};
+  const aggregateCount = (key) => {
+    if (Number.isSafeInteger(scan[key]) && scan[key] >= 0) return scan[key];
+    return Object.values(areasForTotals).reduce((total, value) => total + (Number.isSafeInteger(value?.[key]) && value[key] >= 0 ? value[key] : 0), 0);
+  };
+  const diskFree = Number.isSafeInteger(result?.disk?.free_bytes) && result.disk.free_bytes >= 0 ? result.disk.free_bytes : null;
+  const ownedTotal = Number.isSafeInteger(scan.owned_storage_total_bytes) && scan.owned_storage_total_bytes >= 0
+    ? scan.owned_storage_total_bytes
+    : Number.isSafeInteger(scan.total_bytes_counted) && scan.total_bytes_counted >= 0 ? scan.total_bytes_counted : 0;
+  const entriesScanned = aggregateCount("entries_scanned");
+  const filesScanned = aggregateCount("files_scanned");
+  const directoriesScanned = aggregateCount("directories_scanned");
+  const reparseEntries = aggregateCount("reparse_entries");
+  const unreadableEntries = aggregateCount("unreadable_entries");
+  const completedRoots = Number.isSafeInteger(scan.completed_roots) && scan.completed_roots >= 0
+    ? scan.completed_roots
+    : Object.values(areasForTotals).filter((value) => value?.complete === true).length;
+  const totalRoots = Number.isSafeInteger(scan.total_roots) && scan.total_roots > 0 ? scan.total_roots : 7;
   const banner = view.querySelector("[data-storage-scan-status]");
   if (!banner) { render(); return; }
+  const setBannerMetric = (attribute, value) => banner.setAttribute(attribute, String(value));
   banner.dataset.storageScanStatus = status;
   banner.dataset.storageScanMode = mode;
   banner.dataset.storageScanProgress = String(progress);
+  setBannerMetric("data-storage-disk-free", diskFree === null ? "" : diskFree);
+  setBannerMetric("data-storage-owned-total", ownedTotal);
+  setBannerMetric("data-storage-entries-scanned", entriesScanned);
+  setBannerMetric("data-storage-directories-scanned", directoriesScanned);
+  setBannerMetric("data-storage-reparse-entries", reparseEntries);
+  setBannerMetric("data-storage-unreadable-entries", unreadableEntries);
+  setBannerMetric("data-storage-completed-roots", completedRoots);
   const title = banner.querySelector(".card-title-row strong");
   if (title) {
-    const area = scan.current_area ? ` · ${scan.current_area}` : "";
+    const area = currentRoot ? ` · ${currentRoot}` : "";
     title.textContent = scan.polling_limited === true
       ? "Quét vẫn đang chạy nền"
       : status === "running"
-      ? `${mode === "deep_exact" ? "Đang tính chính xác" : "Đang quét nhanh"} · ${progress}%${area}`
+      ? `${mode === "deep_exact" ? "Quét chính xác · đang tính" : "Đang quét nhanh"} · ${progress}%${area}`
       : status === "cancelling" ? "Đang hủy quét …"
         : status === "completed" && scan.exact === true ? (savedAt ? `Chính xác tại ${savedAt}` : "Đã quét xong · tổng chính xác")
           : status === "partial" ? "Đã quét một phần · tổng chưa đủ"
@@ -972,26 +1019,43 @@ const updateStorageScanDom = (result) => {
   if (bar) bar.style.width = `${progress}%`;
   if (track) track.setAttribute("aria-valuenow", String(progress));
   const liveBytes = banner.querySelector("[data-storage-total-bytes]");
-  const countedBytes = Number(scan.total_bytes_counted ?? 0);
+  const countedBytes = ownedTotal;
   if (liveBytes) liveBytes.textContent = formatGb(countedBytes);
   const liveBytesRaw = banner.querySelector("[data-storage-total-bytes-raw]");
   if (liveBytesRaw) liveBytesRaw.textContent = `${Number.isFinite(countedBytes) ? countedBytes.toLocaleString() : "0"} bytes`;
   const liveFiles = banner.querySelector("[data-storage-files-scanned]");
-  if (liveFiles) liveFiles.textContent = `${Number(scan.files_scanned || 0)} tệp đã đếm`;
+  if (liveFiles) { liveFiles.setAttribute("data-storage-files-scanned", String(filesScanned)); liveFiles.textContent = `${filesScanned} tệp đã đếm`; }
   const liveArea = banner.querySelector("[data-storage-current-area]");
-  if (liveArea) liveArea.textContent = scan.current_area || "";
+  if (liveArea) liveArea.textContent = currentRoot;
+  const ownedNode = banner.querySelector("[data-storage-owned-total] strong");
+  if (ownedNode) ownedNode.textContent = formatGb(ownedTotal);
+  const diskNode = banner.querySelector("[data-storage-disk-free] strong");
+  if (diskNode) diskNode.textContent = diskFree === null ? "—" : formatGb(diskFree);
+  const countNodes = [
+    ["data-storage-entries-scanned", `${entriesScanned} mục`],
+    ["data-storage-directories-scanned", `${directoriesScanned} thư mục`],
+    ["data-storage-reparse-entries", `${reparseEntries} reparse bỏ qua`],
+    ["data-storage-unreadable-entries", `${unreadableEntries} không đọc được`],
+    ["data-storage-completed-roots", `${completedRoots}/${totalRoots} root hoàn tất`],
+  ];
+  countNodes.forEach(([attribute, text]) => {
+    const node = banner.querySelector(`[${attribute}]`);
+    if (node) node.textContent = text;
+  });
   const reason = banner.querySelector("[data-storage-scan-reason]");
-  if (reason) reason.textContent = scan.reason || result?.reason || "";
+  if (reason) reason.textContent = safeStorageDisplay(scan.reason || result?.reason, "Số liệu scan server-owned đang được cập nhật.");
+  const nextAction = banner.querySelector("[data-storage-scan-next-action]");
+  if (nextAction) nextAction.textContent = safeStorageDisplay(scan.next_action || result?.next_action, "Bấm Quét chính xác để xác nhận lại tổng managed.");
   const pollingNotice = banner.querySelector("[data-storage-polling-notice]");
   if (pollingNotice) {
     pollingNotice.textContent = scan.polling_limited === true
-      ? (scan.polling_message || "Quét vẫn đang chạy nền; bấm Theo dõi tiếp để cập nhật.")
+      ? safeStorageDisplay(scan.polling_message, "Quét vẫn đang chạy nền; bấm Theo dõi tiếp để cập nhật.")
       : "";
     pollingNotice.hidden = scan.polling_limited !== true;
   }
   const savedAtNode = banner.querySelector("[data-storage-scan-saved-at]");
   if (savedAtNode) {
-    savedAtNode.textContent = savedAt ? `Chính xác tại ${savedAt}; bấm Quét lại sau khi filesystem thay đổi.` : "";
+    savedAtNode.textContent = savedAt ? `Chính xác tại ${savedAt}; bấm Quét chính xác sau khi filesystem thay đổi.` : "";
     savedAtNode.hidden = !savedAt;
   }
 
@@ -1014,7 +1078,7 @@ const updateStorageScanDom = (result) => {
       const countNode = row.querySelector("[data-storage-area-count]");
       const bytes = Number(value?.bytes || 0);
       const partial = value?.complete === false || value?.status === "partial" || value?.status === "running";
-      if (label) label.textContent = name;
+      if (label) label.textContent = safeStorageDisplay(name, "Managed area");
       if (valueNode) valueNode.textContent = partial ? `Ít nhất ${formatGb(bytes)}` : formatGb(bytes);
       if (countNode) countNode.textContent = `${Number(value?.entries_scanned || 0)} mục · ${Number(value?.files_scanned || 0)} tệp · ${Number(value?.reparse_entries || 0)} reparse · ${Number(value?.unreadable_entries || 0)} không đọc được · ${value?.deduplicated === true ? "đã gộp trùng" : value?.complete === true ? "đã hoàn tất" : "chưa hoàn tất"}`;
     });
@@ -1029,7 +1093,7 @@ const updateStorageScanDom = (result) => {
     if (canCancel) {
       buttons.push(`<button class="button button--danger" type="button" data-cancel-storage-scan="${escapeHtml(scan.scan_id || "")}"${status === "cancelling" ? " disabled" : ""}>Hủy quét</button>`);
     }
-    if (!buttons.length) buttons.push(`<button class="button" type="button" data-refresh-storage${status === "cancelling" ? " disabled" : ""}>Quét lại</button>`);
+    if (!buttons.length) buttons.push(`<button class="button" type="button" data-refresh-storage${status === "cancelling" ? " disabled" : ""}>Quét chính xác</button>`);
     action.innerHTML = buttons.join("");
   }
 };
@@ -1038,9 +1102,9 @@ const storageScanPoller = createStorageScanPoller({
   getSnapshot: getStorageScan,
   isRouteActive: () => routeId() === "models",
   onSnapshot: (result) => {
-    state.storage = result || state.storage;
+    state.storage = result ? { ...(state.storage || {}), ...result, disk: result.disk || state.storage?.disk || {} } : state.storage;
     state.storageScan = result?.scan || state.storageScan;
-    updateStorageScanDom(result || {});
+    updateStorageScanDom(state.storage || {});
   },
   onCeiling: (result) => {
     const currentScan = state.storageScan && typeof state.storageScan === "object" ? state.storageScan : {};
@@ -1080,8 +1144,13 @@ const loadRouteData = async ({ scan = false } = {}) => {
     routeLoad = Promise.allSettled([getModels(), scan ? scanStorage() : getStorage(), getProductionCatalog(), getUpdateSettings()]).then((results) => {
       if (results[0].status === "fulfilled") state.models = results[0].value.models || [];
       if (results[1].status === "fulfilled") {
-        state.storage = results[1].value || {};
-        state.storageScan = state.storage.scan || state.storageScan;
+        const storageResult = results[1].value || {};
+        state.storage = {
+          ...(state.storage || {}),
+          ...storageResult,
+          disk: storageResult.disk || state.storage?.disk || {},
+        };
+        state.storageScan = storageResult.scan || state.storageScan;
       }
       if (results[2].status === "fulfilled") state.productionCatalog = results[2].value || state.productionCatalog;
       if (results[3].status === "fulfilled") state.updateCenter = { ...state.updateCenter, settings: results[3].value || state.updateCenter.settings };
@@ -1095,6 +1164,7 @@ const loadRouteData = async ({ scan = false } = {}) => {
     routeLoad = Promise.allSettled([getComponents(), getProductionCatalog()]).then((results) => {
       const payload = results[0].status === "fulfilled" ? results[0].value : {};
       state.componentManager = payload || {};
+      syncComponentSelection();
       if (results[1].status === "fulfilled") state.productionCatalog = results[1].value || state.productionCatalog;
       render();
     }).catch((error) => {
@@ -1851,9 +1921,23 @@ document.addEventListener("click", async (event) => {
   const refreshComponents = event.target.closest("[data-refresh-components]");
   if (refreshComponents) {
     refreshComponents.disabled = true;
-    try { state.componentManager = await getComponents(); render(); showToast("Đã làm mới Component Manager.", "success"); }
+    try { state.componentManager = await getComponents(); syncComponentSelection(); render(); showToast("Đã làm mới Component Manager.", "success"); }
     catch (error) { showToast(error.message || "Không thể làm mới Component Manager.", "error"); }
     finally { refreshComponents.disabled = false; }
+    return;
+  }
+  const componentSelect = event.target.closest("[data-component-select]");
+  if (componentSelect) {
+    state.selectedComponentId = componentSelect.dataset.componentSelect || "";
+    state.componentDetailOpen = true;
+    render();
+    focusComponentDetail();
+    return;
+  }
+  if (event.target.closest("[data-component-close-detail]")) {
+    state.componentDetailOpen = false;
+    render();
+    focusComponentMaster();
     return;
   }
   const componentPlanButton = event.target.closest("[data-component-plan]");
@@ -2558,9 +2642,9 @@ document.addEventListener("click", async (event) => {
     cancelStorageButton.disabled = true;
     try {
       const result = await cancelStorageScan(cancelStorageButton.dataset.cancelStorageScan || "");
-      state.storage = result || state.storage;
+      state.storage = result ? { ...(state.storage || {}), ...result, disk: result.disk || state.storage?.disk || {} } : state.storage;
       state.storageScan = result?.scan || state.storageScan;
-      updateStorageScanDom(result || {});
+      updateStorageScanDom(state.storage || {});
       showToast("Đã gửi yêu cầu hủy quét storage; worker sẽ dừng ở checkpoint gần nhất.", "warning");
       if (STORAGE_SCAN_ACTIVE_STATES.includes(String(state.storageScan?.status || ""))) pollStorageScan(state.storageScan.scan_id || "");
     } catch (error) {
@@ -2816,6 +2900,13 @@ document.addEventListener("keydown", async (event) => {
       closeArtifactPreview();
       return;
     }
+    if (routeId() === "components" && view.querySelector('[data-component-detail-panel][data-component-detail-open="true"]')) {
+      event.preventDefault();
+      state.componentDetailOpen = false;
+      render();
+      focusComponentMaster();
+      return;
+    }
     const openModals = Array.from(document.querySelectorAll(".modal, .dialog, .is-open, .modal-backdrop, .toast-container"));
     if (openModals.length) {
       event.preventDefault();
@@ -2823,6 +2914,32 @@ document.addEventListener("keydown", async (event) => {
         if (el.classList.contains("is-open")) el.classList.remove("is-open");
       });
       return;
+    }
+  }
+  if (routeId() === "components") {
+    const masterButton = event.target?.closest?.("[data-component-select]");
+    if (masterButton) {
+      const buttons = [...view.querySelectorAll("[data-component-select]")];
+      const currentIndex = buttons.indexOf(masterButton);
+      if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+        if (!buttons.length) return;
+        event.preventDefault();
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        const nextIndex = (currentIndex + direction + buttons.length) % buttons.length;
+        state.selectedComponentId = buttons[nextIndex].dataset.componentSelect || "";
+        state.componentDetailOpen = false;
+        render();
+        focusComponentMaster(state.selectedComponentId);
+        return;
+      }
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        state.selectedComponentId = masterButton.dataset.componentSelect || "";
+        state.componentDetailOpen = true;
+        render();
+        focusComponentDetail();
+        return;
+      }
     }
   }
   if (routeId() !== "image" || state.workspaceTabs.image !== "studio") return;

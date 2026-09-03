@@ -204,6 +204,36 @@ class StorageSummaryBoundedTests(unittest.TestCase):
             self.assertTrue(snapshot["scan"]["exact"])
             self.assertEqual(snapshot["scan"]["saved_at"], "2026-08-27T00:00:01+00:00")
 
+    def test_complete_root_with_unreadable_or_reparse_entries_cannot_be_exact(self) -> None:
+        reports = {
+            name: {
+                "bytes": 2,
+                "gb": 0.0,
+                "status": "available",
+                "complete": True,
+                "entries_scanned": 1,
+                "files_scanned": 1,
+                "directories_scanned": 0,
+                "reparse_entries": 0,
+                "unreadable_entries": 0,
+            }
+            for name in overview._SCAN_AREA_NAMES
+        }
+        reports["Models"]["unreadable_entries"] = 1
+        reports["Runtime"]["reparse_entries"] = 1
+        with patch.object(overview, "_volume_projection", return_value=[]), patch.object(overview, "_legacy_records", return_value=[]), patch.object(overview, "_disk_snapshot", return_value={"status": "available"}):
+            result = overview._storage_summary_from_reports(
+                Path("D:/m6-exactness-fixture"),
+                reports,
+                scan_status="completed",
+                scan_execution="background",
+                scan_mode="deep_exact",
+            )
+        self.assertEqual(result["status"], "partial")
+        self.assertFalse(result["scan"]["exact"])
+        self.assertEqual(result["scan"]["unreadable_entries"], 1)
+        self.assertEqual(result["scan"]["reparse_entries"], 1)
+
     def test_deep_background_scan_updates_area_before_completion(self) -> None:
         with TemporaryDirectory(dir=ROOT.parent) as temporary:
             root = Path(temporary)

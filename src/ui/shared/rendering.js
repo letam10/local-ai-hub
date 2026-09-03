@@ -117,8 +117,9 @@ const readinessStatusLabel = (value) => {
 };
 const STATUS_SEVERITY = Object.freeze({
   operational: "success", healthy: "success", ready: "success", clean: "success", available: "success", installed: "success", running: "success", completed: "success",
-  partial: "warning", degraded: "warning", needs_setup: "warning", unavailable: "warning", missing: "warning", not_installed: "warning", attention: "warning", cancelling: "warning",
-  error: "error", failed: "error", blocked: "error", incompatible: "error", recovery_required: "error", stale_session: "warning",
+  degraded: "warning", needs_setup: "warning", attention: "warning", cancelling: "warning", stale_session: "warning",
+  partial: "neutral", unavailable: "neutral", missing: "neutral", not_installed: "neutral",
+  error: "error", failed: "error", blocked: "error", incompatible: "error", recovery_required: "error",
   not_run: "neutral", planned: "neutral", not_published: "neutral", waiting: "neutral", starting: "neutral", queued: "neutral", cancelled: "neutral", interrupted: "neutral", unknown: "neutral",
   not_applicable: "muted", unsupported: "muted", external_managed: "muted",
 });
@@ -162,7 +163,7 @@ const statusExplanation = ({ name, technicalId = "", purpose = "Chức năng ser
   const safeReason = uiText(safeUiText(reason, meaning.reasonFallback));
   const safeImpact = uiText(safeUiText(impact, statusImpact(normalized, safePurpose)));
   const safeAction = uiText(safeUiText(nextAction, meaning.actionFallback));
-  return `<details class="status-explanation${compact ? " status-explanation--compact" : ""}" data-status-explanation data-status="${escapeHtml(normalized)}" data-severity="${escapeHtml(meaning.severity)}"><summary><span class="status-explanation__title"><strong>${escapeHtml(safeName)}</strong>${safeId ? `<code>${escapeHtml(safeId)}</code>` : ""}</span>${statusPill(normalized)}</summary><div class="status-explanation__body"><div><span class="status-explanation__label">${uiText("Dùng để làm gì")}</span><p>${escapeHtml(safePurpose)}</p></div><div><span class="status-explanation__label">${uiText("Trạng thái này nghĩa là gì")}</span><p>${escapeHtml(uiText(meaning.summary))}</p></div><div><span class="status-explanation__label">${uiText("Tại sao")}</span><p>${escapeHtml(safeReason)}</p></div><div><span class="status-explanation__label">${uiText("Ảnh hưởng")}</span><p>${escapeHtml(safeImpact)}</p></div><div><span class="status-explanation__label">${uiText("Bước tiếp theo")}</span><p>${escapeHtml(safeAction)}</p></div></div></details>`;
+  return `<details class="status-explanation${compact ? " status-explanation--compact" : ""}" data-status-explanation data-status="${escapeHtml(normalized)}" data-severity="${escapeHtml(meaning.severity)}"><summary><span class="status-explanation__title"><strong>${escapeHtml(safeName)}</strong>${safeId ? `<code>${escapeHtml(safeId)}</code>` : ""}</span>${statusPill(normalized)}</summary><div class="status-explanation__body"><div><span class="status-explanation__label">${uiText("Dùng để làm gì")}</span><p>${escapeHtml(safePurpose)}</p></div><div><span class="status-explanation__label">${uiText("Tại sao")}</span><p>${escapeHtml(safeReason)}</p></div><div><span class="status-explanation__label">${uiText("Ảnh hưởng")}</span><p>${escapeHtml(safeImpact)}</p></div><div><span class="status-explanation__label">${uiText("Bước tiếp theo")}</span><p>${escapeHtml(safeAction)}</p></div></div></details>`;
 };
 const unsafeUiText = /(?:[a-z]:[\\/]|\\\\|(?:^|\s)\/(?:etc|tmp|var|home)(?:[\\/]|$)|(?:file|data):|(?:api[_-]?key|password|secret|token)\s*[:=])/i;
 const safeUiText = (value, fallback = "") => {
