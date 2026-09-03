@@ -18,16 +18,16 @@ ROOT = Path(__file__).resolve().parents[1]
 ICON = ROOT / "distribution" / "assets" / "local-ai-hub.ico"
 ENTRY = ROOT / "src" / "app" / "stable_launcher.py"
 LAUNCHER_BUNDLE_NAME = "LocalAIHub"
+ALLOWED_OUTPUT_ROOT_NAMES = ("Temp", "dist")
 
 
 def build(output_dir: Path, *, clean: bool = True) -> Path:
     output_dir = output_dir.resolve()
     if output_dir == ROOT or any(part.casefold() == ".git" for part in output_dir.parts):
         raise ValueError("LAUNCHER_OUTPUT_ROOT_INVALID")
-    task_temp_roots = [ROOT / "Temp"]
-    task_temp_roots.extend(parent for parent in ROOT.parents if parent.name.casefold() == "temp")
-    if not any(output_dir == candidate or str(output_dir).casefold().startswith(str(candidate).casefold() + "\\") for candidate in task_temp_roots):
-        # A task-owned output under the repository Temp boundary is allowed;
+    allowed_output_roots = tuple(ROOT / name for name in ALLOWED_OUTPUT_ROOT_NAMES)
+    if not any(output_dir == candidate or candidate in output_dir.parents for candidate in allowed_output_roots):
+        # Build output is restricted to repository-owned disposable roots;
         # source and arbitrary user/system directories are never destinations.
         raise ValueError("LAUNCHER_OUTPUT_ROOT_INVALID")
     if not ENTRY.is_file() or not ICON.is_file():

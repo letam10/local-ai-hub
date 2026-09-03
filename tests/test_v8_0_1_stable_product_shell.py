@@ -110,7 +110,9 @@ class StableProductShellTests(unittest.TestCase):
         self.assertEqual(plan.environment["PYTHONNOUSERSITE"], "1")
 
     def test_stable_launcher_builder_uses_non_extracting_onedir_bundle(self) -> None:
-        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1].parent, prefix="lah-801-launcher-build-") as temp:
+        output_root = Path(__file__).resolve().parents[1] / "Temp"
+        output_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=output_root, prefix="lah-801-launcher-build-") as temp:
             output_dir = Path(temp)
 
             def run(command, **_kwargs):
