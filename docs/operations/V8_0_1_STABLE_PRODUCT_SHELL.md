@@ -14,6 +14,13 @@ AppUserModelID `LocalAIHub.Desktop`, validates `product.json`,
 the current working directory, a Git checkout, PATH, system Python, `cmd`,
 `wscript`, or a Temp/test root as a fallback.
 
+The stable launcher is built as a PyInstaller **onedir** bundle. The
+`LocalAIHub.exe` file remains at the installation root, while its immutable
+support files are installed beside it from the same reviewed bundle. This
+keeps normal startup from depending on transient one-file `_MEI` extraction;
+the updater still launches the exact payload `pythonw.exe` directly during its
+narrow recovery path.
+
 The active layout is bounded and versioned:
 
 ```text

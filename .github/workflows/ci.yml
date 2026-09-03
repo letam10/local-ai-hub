@@ -61,6 +61,49 @@ jobs:
         if: github.event_name == 'push'
         run: git diff --check HEAD^ HEAD
 
+  build-stable-launcher-windows:
+    name: Build stable Windows launcher
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - name: Check out exact validated source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install launcher builder
+        run: python -m pip install pyinstaller
+      - name: Build onedir stable launcher
+        run: python scripts/build_stable_launcher.py --output-dir dist/stable-launcher
+      - name: Bind launcher artifact to source head
+        shell: pwsh
+        run: |
+          $bundle = "dist/stable-launcher/dist/LocalAIHub"
+          $exe = Join-Path $bundle "LocalAIHub.exe"
+          if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Stable launcher executable is missing" }
+          $info = [ordered]@{
+            schema_version = "local-ai-hub-stable-launcher-build.v1"
+            source_commit = (git rev-parse HEAD).Trim()
+            format = "onedir"
+            executable_sha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
+          $info | ConvertTo-Json -Compress | Set-Content -LiteralPath "dist/stable-launcher/launcher-build.json" -Encoding utf8
+          Compress-Archive -Path "$bundle/*" -DestinationPath "dist/LocalAIHub-stable-launcher-onedir.zip" -CompressionLevel Optimal
+      - name: Upload stable launcher artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-ai-hub-stable-launcher-windows
+          path: |
+            dist/LocalAIHub-stable-launcher-onedir.zip
+            dist/stable-launcher/launcher-build.json
+          if-no-files-found: error
+          retention-days: 30
+
   build-main-update:
     name: Build stable main update artifact
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

@@ -20,6 +20,7 @@ from src.app.stable_shell import (
     atomic_activate_pointer,
     resolve_launch_plan,
 )
+from scripts import build_stable_launcher
 from scripts.stage_stable_product import StableProductBuildError, stage_product
 from scripts.v8_release_provenance import release_policy_snapshot
 
@@ -107,6 +108,59 @@ class StableProductShellTests(unittest.TestCase):
         self.assertEqual(plan.version, "8.0.2-testpayload")
         self.assertEqual(json.loads((root / "product.json").read_text(encoding="utf-8"))["version"], "8.0.1")
         self.assertEqual(plan.environment["PYTHONNOUSERSITE"], "1")
+
+    def test_stable_launcher_builder_uses_non_extracting_onedir_bundle(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1].parent, prefix="lah-801-launcher-build-") as temp:
+            output_dir = Path(temp)
+
+            def run(command, **_kwargs):
+                bundle = output_dir / "dist" / "LocalAIHub"
+                bundle.mkdir(parents=True)
+                (bundle / "LocalAIHub.exe").write_bytes(b"onedir-launcher")
+                (bundle / "_internal").mkdir()
+                (bundle / "_internal" / "support.dll").write_bytes(b"support")
+                return type("Result", (), {"returncode": 0})()
+
+            with patch.object(build_stable_launcher.shutil, "which", return_value="pyinstaller.exe"), patch.object(build_stable_launcher.subprocess, "run", side_effect=run) as invoked:
+                executable = build_stable_launcher.build(output_dir)
+            command = invoked.call_args.args[0]
+            self.assertIn("--onedir", command)
+            self.assertNotIn("--onefile", command)
+            self.assertEqual(executable, output_dir / "dist" / "LocalAIHub" / "LocalAIHub.exe")
+
+    def test_staging_preserves_all_files_from_an_onedir_launcher_bundle(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="lah-801-stage-onedir-") as temp:
+            root = Path(temp)
+            source = root / "source"
+            (source / "src" / "app").mkdir(parents=True)
+            (source / "src" / "app" / "launcher.py").write_text("# fixture\n", encoding="utf-8")
+            (source / "distribution" / "assets").mkdir(parents=True)
+            (source / "distribution" / "assets" / "local-ai-hub.ico").write_bytes(b"icon")
+            (source / "README.md").write_text("fixture\n", encoding="utf-8")
+            subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.name", "test"], check=True)
+            subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(source), "commit", "-m", "fixture"], check=True, capture_output=True)
+            runtime = root / "pythonw.exe"
+            runtime.write_bytes(b"runtime")
+            bundle = root / "launcher-dist" / "LocalAIHub"
+            bundle.mkdir(parents=True)
+            (bundle / "LocalAIHub.exe").write_bytes(b"launcher")
+            (bundle / "_internal").mkdir()
+            (bundle / "_internal" / "support.dll").write_bytes(b"support")
+            install = root / "Temp" / "stable-product"
+            result = stage_product(
+                install,
+                runtime_pythonw=runtime,
+                launcher=bundle / "LocalAIHub.exe",
+                data_root=root / "data",
+                source_root=source,
+                allow_test_root=True,
+            )
+            self.assertEqual(result["launcher_format"], "onedir")
+            self.assertEqual((install / "LocalAIHub.exe").read_bytes(), b"launcher")
+            self.assertEqual((install / "_internal" / "support.dll").read_bytes(), b"support")
 
     def test_stable_candidate_staging_builds_versioned_payload_without_source_root_install(self) -> None:
         with tempfile.TemporaryDirectory(prefix="lah-801-stage-") as temp:
