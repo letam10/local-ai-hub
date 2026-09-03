@@ -103,18 +103,22 @@ process.stdout.write(html);
         dashboard = self._render("dashboard", state)
         settings = self._render("settings", state)
         media = self._render("media", state)
-        for html in (dashboard, settings, media):
+        for html in (settings, media):
             self.assertIn('data-media-evidence-status="operational"', html)
             self.assertIn('data-media-evidence-outcome="completed"', html)
             for operation in fixture.MEDIA_OPERATIONS:
                 self.assertIn(f'data-media-operation="{operation}"', html)
             self.assertNotIn("[object Object]", html)
             self.assertNotRegex(html, UNSAFE_DISPLAY_PATTERN)
-        self.assertIn('data-readiness-route="settings"', dashboard)
+        self.assertNotIn("data-media-evidence-status", dashboard)
+        self.assertNotIn("media-evidence", dashboard)
+        self.assertNotIn("[object Object]", dashboard)
+        self.assertNotRegex(dashboard, UNSAFE_DISPLAY_PATTERN)
+        self.assertIn('data-route="settings"', dashboard)
         self.assertIn('data-route="media"', settings)
         self.assertIn('data-media-generic-status="partial"', settings)
         self.assertIn('data-media-generic-action="explanatory"', media)
-        self.assertIn("Execution unavailable from this snapshot", media)
+        self.assertIn("Thực thi chưa khả dụng trong snapshot này", media)
         self.assertNotIn('data-media-generic-status="operational"', media)
 
     def test_error_blocked_not_run_and_malformed_states_never_green_promote(self) -> None:

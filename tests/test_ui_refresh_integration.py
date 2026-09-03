@@ -42,23 +42,18 @@ class UiRefreshIntegrationTests(unittest.TestCase):
     def test_dashboard_emitted_classes_are_all_styled(self) -> None:
         expected = {
             "dashboard-page",
-            "dashboard-onboarding",
             "dashboard-hero",
+            "dashboard-hero__copy",
+            "dashboard-tier",
+            "dashboard-tier--summary",
+            "dashboard-tier--attention",
+            "dashboard-tier--actions",
             "dashboard-metric-grid",
-            "dashboard-main-grid",
-            "dashboard-primary",
-            "dashboard-aside",
-            "dashboard-module-list",
-            "dashboard-module-row",
             "dashboard-attention-list",
             "dashboard-quick-actions",
-            "dashboard-storage",
-            "dashboard-storage-grid",
-            "dashboard-storage-volume",
-            "dashboard-storage-values",
-            "dashboard-storage-reason",
-            "dashboard-storage-action",
-            "dashboard-storage-warning",
+            "dashboard-recent-jobs-wrap",
+            "dashboard-recent-jobs",
+            "dashboard-recent-job",
         }
         emitted = set()
         for value in re.findall(r'class="([^"]+)"', self.dashboard):

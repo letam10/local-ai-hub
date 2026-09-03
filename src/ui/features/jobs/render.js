@@ -39,10 +39,13 @@ export function createJobsRenderer(deps) {
       const durable = job.source === "durable";
       const durableReconstructOnly = durable && job.retryMode === "reconstruct_only";
       const reconstructOnlyPending = job.reconstructOnlyPending === true;
+      const resumeButton = durable
+        ? `<button class="button button--compact" type="button" data-focus-key="job-action-resume-durable" data-resume-durable-job="${escapeHtml(job.id)}">${uiTextHtml(durableReconstructOnly ? "Tạo lại tác vụ" : job.status === "cancelled" ? "Tiếp tục" : "Thử lại")}</button>`
+        : `<button class="button button--compact" type="button" data-focus-key="job-action-resume" data-resume-job="${escapeHtml(job.id)}">${uiTextHtml(job.status === "cancelled" ? "Tiếp tục" : "Thử lại")}</button>`;
       const actions = active && !durable && job.actionId
         ? `<button class="button button--compact button--danger" type="button" data-focus-key="job-action-cancel" data-cancel-job="${escapeHtml(job.actionId)}">${uiTextHtml("Hủy tác vụ")}</button>`
         : job.resumable && job.actionId
-          ? `<button class="button button--compact" type="button" data-focus-key="job-action-resume" ${durable ? `data-resume-durable-job="${escapeHtml(job.id)}"` : `data-resume-job="${escapeHtml(job.id)}"`}>${uiTextHtml(durableReconstructOnly ? "Tạo lại tác vụ" : job.status === "cancelled" ? "Tiếp tục" : "Thử lại")}</button>`
+          ? resumeButton
           : "";
       const deleteAction = terminal && !durable ? `<button class="button button--compact button--danger" type="button" data-delete-job="${escapeHtml(job.id)}">Xóa khỏi lịch sử</button>` : "";
       const timestampRows = [["Tạo lúc", job.createdAt], ["Bắt đầu", job.startedAt], ["Kết thúc", job.finishedAt], ["Thời lượng", durationText(job)]].filter(([, value]) => value).map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");

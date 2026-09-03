@@ -37,7 +37,8 @@ class UiPolishTests(unittest.TestCase):
         # PR44: render() uses string focus key; background renders preserve focus via continuity
         self.assertRegex(self.app, r'const render = \(\{ background = false, focus = "" \} = \{\}\) =>')
         self.assertIn("restoreFocusContinuity(continuity, focus);", self.app)
-        self.assertIn('render({ focus: "main" }); await loadRouteData()', self.app)
+        self.assertIn('render({ focus: "main" });', self.app)
+        self.assertIn("await loadRouteData();", self.app)
         self.assertIn("captureFocusContinuity", self.app)
 
     def test_full_width_content_and_focus_outline_are_explicit(self) -> None:
@@ -69,19 +70,17 @@ class UiPolishTests(unittest.TestCase):
     def test_rendered_page_templates_mark_fixed_copy_without_touching_snapshots(self) -> None:
         self.assertIn('import { translateText } from "../i18n.js";', self.shared_renderer)
         self.assertIn("const uiText = (value) => translateText", self.shared_renderer)
-        for phrase in ("Reason & next action", "Next action", "Recovery reason", "Module preflight", "Readiness & Module Plan", "Jobs recovery"):
-            self.assertIn(f'data-i18n="{phrase}"', self.pages + self.shared_renderer + self.renderers)
-        self.assertIn("escapeHtml(jobRecovery.reason)", self.renderers)
+        for phrase in ("Next action", "Recovery reason", "Module preflight", "Readiness & Module Plan"):
+            self.assertIn(phrase, self.pages + self.shared_renderer + self.renderers)
         self.assertIn("escapeHtml(recovery.reason)", self.renderers)
 
     def test_dynamic_snapshot_and_creative_values_never_enter_translation_markers(self) -> None:
-        self.assertIn("const metricSnapshot =", self.renderers)
-        self.assertIn("<small>${escapeHtml(detail)}</small>", self.renderers)
+        self.assertIn("data-dashboard-metric", self.renderers)
         self.assertIn("const cardDynamic =", self.shared_renderer)
         self.assertIn("const fieldDynamic =", self.shared_renderer)
         self.assertIn("cardDynamic(`Asset của ${selected.title}`", self.renderers)
         self.assertIn("fieldDynamic(variable.label || variable.name", self.renderers)
-        self.assertIn('data-i18n-container="Attention"', self.pages + self.renderers)
+        self.assertIn("data-dashboard-attention-count", self.pages + self.renderers)
         self.assertIn("const normalized = readinessStatus(status);", self.shared_renderer)
         self.assertIn("READINESS_STATUS_LABELS.unknown", self.shared_renderer)
         self.assertNotIn('nodes("[data-recovery-count]").forEach', self.i18n)

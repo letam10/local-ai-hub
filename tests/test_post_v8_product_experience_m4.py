@@ -80,7 +80,8 @@ class ProductExperienceV2Tests(unittest.TestCase):
         self.assertIn("searchProductExperienceV2", app)
         self.assertIn("COMMANDS", app)
         self.assertIn("command-palette", app)
-        self.assertIn("PRODUCT EXPERIENCE V2", dashboard)
+        self.assertIn('data-dashboard-simplified="true"', dashboard)
+        self.assertNotIn("PRODUCT EXPERIENCE V2", dashboard)
 
 
 if __name__ == "__main__":

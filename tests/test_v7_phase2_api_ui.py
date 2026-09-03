@@ -60,7 +60,8 @@ class Phase2ApiUiTests(unittest.TestCase):
         # Server-owned names, ids, reasons and actions remain escaped data;
         # the renderer must not add a dynamic translation marker to them.
         self.assertIn('escapeHtml(item.display_name || id)', pages)
-        self.assertIn('escapeHtml(item.reason || uiText("Server snapshot chưa có thêm lý do."))', pages)
+        self.assertIn("fixedCopy(copy.reason", pages)
+        self.assertIn("escapeHtml(plan.reason", pages)
 
     def test_api_error_projection_never_echoes_path_text(self) -> None:
         status, payload = component_api.handle_error(ValueError("C:\\private\\secret\\payload"))

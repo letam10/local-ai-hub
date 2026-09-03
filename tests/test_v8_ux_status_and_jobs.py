@@ -182,7 +182,8 @@ process.stdout.write(renderPage({json.dumps(route)}, {payload}));
             self.assertIn(marker, storage)
         for marker in ("data-cancel-storage-scan", "data-storage-total-bytes", "data-storage-total-bytes-raw", "data-storage-files-scanned", "data-storage-area-list"):
             self.assertIn(marker, models)
-        self.assertIn("updateStorageScanDom(result || {})", app)
+        self.assertIn("updateStorageScanDom(state.storage || {})", app)
+        self.assertIn("disk: result.disk || state.storage?.disk || {}", app)
         self.assertIn("cancelStorageScan", app)
         self.assertNotIn("render();\n      if (scan.status === \"running\")", app)
         self.assertIn("/api/storage/scan/cancel", routes)

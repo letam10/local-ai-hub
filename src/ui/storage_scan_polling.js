@@ -19,6 +19,7 @@ export function createStorageScanPoller({
   onCeiling,
   onError,
   schedule = (callback, delay) => globalThis.setTimeout(callback, delay),
+  cancel = (handle) => globalThis.clearTimeout(handle),
   now = () => Date.now(),
   intervalMs = STORAGE_SCAN_POLL_INTERVAL_MS,
   initialDelayMs = STORAGE_SCAN_POLL_INITIAL_DELAY_MS,
@@ -28,9 +29,29 @@ export function createStorageScanPoller({
     throw new TypeError("Storage scan poller requires snapshot, route and snapshot callbacks.");
   }
   let generation = 0;
+  let timer = null;
 
-  const stop = () => { generation += 1; };
+  const cancelScheduled = () => {
+    if (timer === null || typeof cancel !== "function") return;
+    cancel(timer);
+    timer = null;
+  };
+
+  const schedulePoll = (callback, delay, token) => {
+    if (token !== generation) return;
+    cancelScheduled();
+    timer = schedule(() => {
+      timer = null;
+      void callback();
+    }, delay);
+  };
+
+  const stop = () => {
+    generation += 1;
+    cancelScheduled();
+  };
   const start = (scanId = "") => {
+    cancelScheduled();
     const token = ++generation;
     const startedAt = now();
     let lastStatus = "running";
@@ -57,13 +78,13 @@ export function createStorageScanPoller({
         if (token !== generation || !isRouteActive()) return;
         lastStatus = String(scan.status || "");
         onSnapshot(result ? { ...result, scan: { ...scan, polling_limited: false } } : result);
-        if (activeState(lastStatus)) schedule(poll, intervalMs);
+        if (activeState(lastStatus)) schedulePoll(poll, intervalMs, token);
       } catch (error) {
         if (typeof onError === "function") onError(error);
-        if (token === generation && isRouteActive() && activeState(lastStatus)) schedule(poll, intervalMs);
+        if (token === generation && isRouteActive() && activeState(lastStatus)) schedulePoll(poll, intervalMs, token);
       }
     };
-    schedule(poll, initialDelayMs);
+    schedulePoll(poll, initialDelayMs, token);
     return token;
   };
 

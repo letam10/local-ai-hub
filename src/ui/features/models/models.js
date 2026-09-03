@@ -36,6 +36,12 @@ const MODEL_READINESS_COPY = Object.freeze({
 });
 
 const inventoryCount = (value, fallback = 0) => Number.isInteger(value) && value >= 0 ? value : fallback;
+const UNSAFE_STORAGE_TEXT = /(?:[a-z]:[\\/]|\\\\|(?:file|data|https?):|(?:api[_-]?key|password|secret|token)\s*[:=])/i;
+const safeStorageText = (value, fallback = "") => {
+  const candidate = typeof value === "string" ? value.trim().slice(0, 240) : "";
+  return candidate && !UNSAFE_STORAGE_TEXT.test(candidate) ? candidate : fallback;
+};
+const storageCount = (value, fallback = 0) => Number.isSafeInteger(value) && value >= 0 ? value : fallback;
 
 const modelSizeLabel = (item, { escapeHtml, formatGb, uiTextHtml }) => {
   const raw = typeof item?.size_label === "string" ? item.size_label.trim() : "";
@@ -131,17 +137,39 @@ export function renderProductionModels({ productionCatalog, legacyModels, storag
     return partial ? `${uiTextHtml("At least")} ${size} ${uiTextHtml("— not fully scanned")}` : size;
   };
   const scan = storage?.scan && typeof storage.scan === "object" ? storage.scan : {};
+  const disk = storage?.disk && typeof storage.disk === "object" ? storage.disk : {};
+  const areaTotal = areas.reduce((total, [, value]) => total + storageCount(value?.bytes), 0);
+  const areaCount = (key) => areas.reduce((total, [, value]) => total + storageCount(value?.[key]), 0);
+  const scanValue = (keys, fallback = 0) => {
+    for (const key of keys) {
+      if (Number.isSafeInteger(scan?.[key]) && scan[key] >= 0) return scan[key];
+      if (Number.isSafeInteger(storage?.[key]) && storage[key] >= 0) return storage[key];
+    }
+    return fallback;
+  };
+  const diskFree = Number.isSafeInteger(disk.free_bytes) && disk.free_bytes >= 0 ? disk.free_bytes : null;
+  const ownedTotal = scanValue(["owned_storage_total_bytes", "total_bytes_counted"], areaTotal);
+  const entriesScanned = scanValue(["entries_scanned"], areaCount("entries_scanned"));
+  const filesScanned = scanValue(["files_scanned"], areaCount("files_scanned"));
+  const directoriesScanned = scanValue(["directories_scanned"], areaCount("directories_scanned"));
+  const reparseEntries = scanValue(["reparse_entries"], areaCount("reparse_entries"));
+  const unreadableEntries = scanValue(["unreadable_entries"], areaCount("unreadable_entries"));
+  const completedRoots = scanValue(["completed_roots"], areas.filter(([, value]) => value?.complete === true).length);
+  const totalRoots = scanValue(["total_roots"], areas.length);
+  const currentRoot = safeStorageText(scan.current_root || scan.current_area, "");
+  const scanReason = safeStorageText(scan.reason || storage?.reason, "Số liệu scan server-owned đang được cập nhật.");
+  const scanNextAction = safeStorageText(scan.next_action || storage?.next_action, "Bấm Quét chính xác để xác nhận lại tổng managed sau khi filesystem thay đổi.");
   const scanStatus = String(scan.status || storage?.status || "idle");
   const scanProgress = Math.max(0, Math.min(100, Number.isFinite(Number(scan.progress)) ? Number(scan.progress) : scanStatus === "completed" ? 100 : 0));
   const scanMode = String(scan.mode || storage?.scan_mode || "fast");
   const scanRunning = scanStatus === "running" || scanStatus === "cancelling";
   const scanCanCancel = scanRunning && scanMode === "deep_exact";
   const scanPollingLimited = scan.polling_limited === true;
-  const scanSavedAt = typeof scan.saved_at === "string" && scan.saved_at.trim() ? scan.saved_at.trim() : "";
+  const scanSavedAt = safeStorageText(scan.saved_at, "");
   const scanLabel = scanPollingLimited
     ? "Quét vẫn đang chạy nền"
     : scanStatus === "running"
-    ? `${scanMode === "deep_exact" ? "Đang tính chính xác" : "Đang quét nhanh"} · ${scanProgress}%${scan.current_area ? ` · ${escapeHtml(scan.current_area)}` : ""}`
+    ? `${scanMode === "deep_exact" ? "Quét chính xác · đang tính" : "Đang quét nhanh"} · ${scanProgress}%${currentRoot ? ` · ${escapeHtml(currentRoot)}` : ""}`
     : scanStatus === "cancelling"
       ? "Đang hủy quét …"
     : scanStatus === "completed" && scan.exact === true
@@ -151,25 +179,27 @@ export function renderProductionModels({ productionCatalog, legacyModels, storag
         : scanStatus === "unavailable"
           ? "Quét storage chưa khả dụng"
           : "Chưa có lần quét storage";
-  const countedBytes = Number(scan.total_bytes_counted ?? scan.bytes_counted ?? 0);
-  const countedFiles = Number(scan.files_scanned ?? 0);
+  const countedBytes = ownedTotal;
+  const countedFiles = filesScanned;
   const scanActions = [];
   if (scanPollingLimited && scanRunning) scanActions.push(`<button class="button" type="button" data-resume-storage-polling="${escapeHtml(scan.scan_id || "")}">Theo dõi tiếp</button>`);
   if (scanCanCancel) scanActions.push(`<button class="button button--danger" type="button" data-cancel-storage-scan="${escapeHtml(scan.scan_id || "")}">Hủy quét</button>`);
-  if (!scanActions.length) scanActions.push(`<button class="button" type="button" data-refresh-storage ${scanStatus === "cancelling" ? "disabled" : ""}>Quét lại</button>`);
+  if (!scanActions.length) scanActions.push(`<button class="button" type="button" data-refresh-storage ${scanStatus === "cancelling" ? "disabled" : ""}>Quét chính xác</button>`);
   const scanAction = scanActions.join("");
   const exactLabel = scan.exact === true
     ? (scanSavedAt ? `Chính xác tại ${escapeHtml(scanSavedAt)}` : "Tổng managed chính xác")
     : scanMode === "deep_exact" ? "Đang tính — chưa xác nhận tổng" : "Ước tính nhanh — chưa quét toàn bộ";
-  const scanBanner = `<div class="storage-scan-status" data-storage-scan-status="${escapeHtml(scanStatus)}" data-storage-scan-mode="${escapeHtml(scanMode)}" data-storage-scan-progress="${escapeHtml(String(scanProgress))}" role="status"><div class="card-title-row"><strong>${scanLabel}</strong><span>${exactLabel}</span></div><div class="storage-scan-live"><strong data-storage-total-bytes>${escapeHtml(formatGb(countedBytes))}</strong><span data-storage-total-bytes-raw>${escapeHtml(String(countedBytes))} bytes</span><span data-storage-files-scanned>${escapeHtml(String(countedFiles))} tệp đã đếm</span><span data-storage-current-area>${escapeHtml(scan.current_area || "")}</span></div><div class="progress-track" role="progressbar" aria-label="Tiến độ quét storage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${scanProgress}"><div class="progress-bar" style="width:${scanProgress}%"></div></div><small data-storage-polling-notice${scanPollingLimited ? "" : " hidden"}>${scanPollingLimited ? escapeHtml(scan.polling_message || "Quét vẫn đang chạy nền; bấm Theo dõi tiếp để cập nhật.") : ""}</small><small data-storage-scan-saved-at${scanSavedAt ? "" : " hidden"}>${scanSavedAt ? `Chính xác tại ${escapeHtml(scanSavedAt)}; bấm Quét lại sau khi filesystem thay đổi.` : ""}</small><small data-storage-scan-reason>${escapeHtml(scan.reason || storage?.reason || "Số liệu nhanh chỉ là ước tính; bấm Quét lại để tính toàn bộ.")}</small></div>`;
+  const pollingMessage = safeStorageText(scan.polling_message, "Quét vẫn đang chạy nền; bấm Theo dõi tiếp để cập nhật.");
+  const scanBanner = `<div class="storage-scan-status" data-storage-scan-status="${escapeHtml(scanStatus)}" data-storage-scan-mode="${escapeHtml(scanMode)}" data-storage-scan-progress="${escapeHtml(String(scanProgress))}" data-storage-disk-free="${escapeHtml(diskFree === null ? "" : String(diskFree))}" data-storage-owned-total="${escapeHtml(String(ownedTotal))}" data-storage-entries-scanned="${escapeHtml(String(entriesScanned))}" data-storage-directories-scanned="${escapeHtml(String(directoriesScanned))}" data-storage-reparse-entries="${escapeHtml(String(reparseEntries))}" data-storage-unreadable-entries="${escapeHtml(String(unreadableEntries))}" data-storage-completed-roots="${escapeHtml(String(completedRoots))}" role="status"><div class="card-title-row"><strong>${scanLabel}</strong><span>${exactLabel}</span></div><div class="storage-scan-live"><div data-storage-owned-total><strong>${escapeHtml(formatGb(countedBytes))}</strong><span>${uiTextHtml("Tổng managed đã đếm")}</span></div><div data-storage-disk-free><strong>${escapeHtml(diskFree === null ? "—" : formatGb(diskFree))}</strong><span>${uiTextHtml("Dung lượng trống trên đĩa")}</span></div><span data-storage-total-bytes>${escapeHtml(formatGb(countedBytes))}</span><span data-storage-total-bytes-raw>${escapeHtml(String(countedBytes))} bytes</span><span data-storage-files-scanned="${escapeHtml(String(countedFiles))}">${escapeHtml(String(countedFiles))} tệp đã đếm</span><span data-storage-current-area data-storage-current-root>${escapeHtml(currentRoot)}</span></div><div class="storage-scan-counts"><span data-storage-entries-scanned="${escapeHtml(String(entriesScanned))}">${escapeHtml(String(entriesScanned))} mục</span><span data-storage-directories-scanned="${escapeHtml(String(directoriesScanned))}">${escapeHtml(String(directoriesScanned))} thư mục</span><span data-storage-reparse-entries="${escapeHtml(String(reparseEntries))}">${escapeHtml(String(reparseEntries))} reparse bỏ qua</span><span data-storage-unreadable-entries="${escapeHtml(String(unreadableEntries))}">${escapeHtml(String(unreadableEntries))} không đọc được</span><span data-storage-completed-roots="${escapeHtml(String(completedRoots))}">${escapeHtml(String(completedRoots))}/${escapeHtml(String(totalRoots))} root hoàn tất</span></div><div class="progress-track" role="progressbar" aria-label="Tiến độ quét storage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${scanProgress}"><div class="progress-bar" style="width:${scanProgress}%"></div></div><small data-storage-polling-notice${scanPollingLimited ? "" : " hidden"}>${scanPollingLimited ? escapeHtml(pollingMessage) : ""}</small><small data-storage-scan-saved-at${scanSavedAt ? "" : " hidden"}>${scanSavedAt ? `Chính xác tại ${escapeHtml(scanSavedAt)}; bấm Quét chính xác sau khi filesystem thay đổi.` : ""}</small><small data-storage-scan-reason>${escapeHtml(scanReason)}</small><small data-storage-scan-next-action>${escapeHtml(scanNextAction)}</small></div>`;
   const areaRows = areas.map(([name, value]) => {
+    const displayName = safeStorageText(name, "Managed area");
     const reparse = Number(value?.reparse_entries || 0);
     const unreadable = Number(value?.unreadable_entries || 0);
     const entries = Number(value?.entries_scanned || 0);
     const files = Number(value?.files_scanned || 0);
     const stateLabel = value?.deduplicated === true ? "đã gộp trùng" : value?.complete === true ? "đã hoàn tất" : "chưa hoàn tất";
     const detail = `${entries} mục · ${files} tệp · ${reparse} reparse · ${unreadable} không đọc được · ${stateLabel}`;
-    return `<div class="row-item" data-storage-area="${escapeHtml(name)}"><span>${escapeHtml(name)}</span><strong data-storage-area-value>${storageAreaValue(value)}</strong><small data-storage-area-count>${escapeHtml(detail)}</small></div>`;
+    return `<div class="row-item" data-storage-area="${escapeHtml(displayName)}"><span>${escapeHtml(displayName)}</span><strong data-storage-area-value>${storageAreaValue(value)}</strong><small data-storage-area-count>${escapeHtml(detail)}</small></div>`;
   }).join("");
   return heading("STORAGE", "Models & Storage", "Model store canonical không nhân bản. Legacy cleanup chỉ xử lý mục đã phân loại và xác minh, không tự xoá UNKNOWN hoặc user media.", `<span data-storage-scan-action>${scanAction}</span>`) + `
     <div class="workspace-grid workspace-grid--two">
