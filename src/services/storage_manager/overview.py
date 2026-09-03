@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import inspect
 import os
 import shutil
+import stat
 import threading
 import time
 from datetime import datetime, timezone
@@ -30,6 +33,8 @@ _CACHE_SECONDS = 120.0
 _LOW_SPACE_BYTES = 20 * 1024**3
 _DIRECTORY_SCAN_MAX_ENTRIES = 12_000
 _DIRECTORY_SCAN_MAX_DEPTH = 24
+_FINGERPRINT_MAX_ENTRIES = 4_096
+_FINGERPRINT_MAX_DEPTH = 24
 _DEEP_SCAN_YIELD_ENTRIES = 512
 _DEEP_SCAN_YIELD_SECONDS = 0.25
 _DEEP_SCAN_PROGRESS_WINDOW = 1_000
@@ -71,8 +76,160 @@ _scan_state: dict[str, Any] = {
     "owned_storage_total_bytes": 0,
     "owned_storage_exact": False,
     "deduplicated_targets": 0,
+    "deduplicated_entries": 0,
+    "category_counts": {},
+    "fingerprint": None,
 }
 _SCAN_AREA_NAMES = ("Models", "Environments", "Runtime", "Cache", "Output", "Temp", "Logs")
+_STORAGE_ENTRY_CATEGORIES = (
+    "NORMAL_OWNED_ENTRY",
+    "INTERNAL_ALLOWLISTED_ALIAS",
+    "INTERNAL_DUPLICATE_ALIAS",
+    "EXTERNAL_EXCLUDED_TARGET",
+    "UNKNOWN_REPARSE",
+    "UNREADABLE",
+    "IDENTITY_CHANGED",
+)
+
+
+def _empty_category_counts() -> dict[str, int]:
+    return {name: 0 for name in _STORAGE_ENTRY_CATEGORIES}
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    """Return a bounded identity/fingerprint for one no-follow filesystem entry."""
+
+    return (
+        int(getattr(value, "st_dev", 0)),
+        int(getattr(value, "st_ino", 0)),
+        int(value.st_mode),
+        int(value.st_size),
+        int(getattr(value, "st_mtime_ns", 0)),
+        int(getattr(value, "st_ctime_ns", 0)),
+        int(getattr(value, "st_file_attributes", 0)),
+    )
+
+
+def _object_identity(value: os.stat_result) -> tuple[int, int, int] | None:
+    """Return the stable no-follow object identity used for deduplication."""
+
+    device = int(getattr(value, "st_dev", 0) or 0)
+    inode = int(getattr(value, "st_ino", 0) or 0)
+    if device == 0 and inode == 0:
+        return None
+    return (device, inode, stat.S_IFMT(int(value.st_mode)))
+
+
+def _reparse_from_stat(value: os.stat_result) -> bool:
+    return stat.S_ISLNK(value.st_mode) or bool(getattr(value, "st_file_attributes", 0) & 0x400)
+
+
+def _absolute_path(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _contained_by_any(path: Path, roots: tuple[Path, ...]) -> bool:
+    candidate = _absolute_path(path)
+    for root in roots:
+        try:
+            candidate.relative_to(_absolute_path(root))
+            return True
+        except (OSError, TypeError, ValueError):
+            continue
+    return False
+
+
+def _reparse_target(path: Path) -> Path | None:
+    """Resolve a reparse target for classification only; never traverse it."""
+
+    try:
+        target = Path(os.path.realpath(os.fspath(path)))
+        if _absolute_path(target) == _absolute_path(path):
+            return None
+        return target
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _classify_reparse_entry(
+    path: Path,
+    *,
+    allowlisted_roots: tuple[Path, ...] = (),
+    seen_identities: set[tuple[int, int, int]] | None = None,
+) -> str:
+    """Classify a reparse without following its bytes into the scan."""
+
+    target = _reparse_target(path)
+    if target is None:
+        return "UNKNOWN_REPARSE"
+    if not _contained_by_any(target, allowlisted_roots):
+        return "EXTERNAL_EXCLUDED_TARGET"
+    try:
+        target_stat = os.stat(target, follow_symlinks=False)
+    except (OSError, TypeError, ValueError):
+        return "UNKNOWN_REPARSE"
+    identity = _object_identity(target_stat)
+    if identity is not None and seen_identities is not None and identity in seen_identities:
+        return "INTERNAL_DUPLICATE_ALIAS"
+    return "INTERNAL_ALLOWLISTED_ALIAS"
+
+
+def _fingerprint_roots(roots: tuple[Path, ...]) -> str | None:
+    """Build a complete, bounded no-follow metadata fingerprint.
+
+    ``None`` means that the complete managed-root tree could not be verified
+    within the explicit entry/depth budget or an entry could not be read.
+    Callers must treat that result as cache-unusable; a partial digest is not
+    safe evidence for restoring an exact storage snapshot.
+    """
+
+    digest = hashlib.sha256()
+    try:
+        max_entries = int(_FINGERPRINT_MAX_ENTRIES)
+        max_depth = max(0, int(_FINGERPRINT_MAX_DEPTH))
+    except (TypeError, ValueError):
+        return None
+    if max_entries < 1:
+        return None
+    for root in roots:
+        root_abs = _absolute_path(root)
+        digest.update(b"root\0" + root_abs.as_posix().casefold().encode("utf-8", errors="replace"))
+        visited = 0
+        stack: list[tuple[Path, int]] = [(root_abs, 0)]
+        try:
+            while stack:
+                if visited >= max_entries:
+                    return None
+                current, depth = stack.pop()
+                current_stat = os.stat(current, follow_symlinks=False)
+                visited += 1
+                relative = _absolute_path(current).relative_to(root_abs).as_posix()
+                digest.update(repr((relative, _stat_identity(current_stat))).encode("utf-8"))
+                if _reparse_from_stat(current_stat) or not stat.S_ISDIR(current_stat.st_mode):
+                    continue
+
+                # At the depth boundary, inspect only whether a child exists.
+                # A non-empty boundary directory cannot be fully fingerprinted
+                # without exceeding the declared depth, so fail closed.
+                if depth >= max_depth:
+                    with os.scandir(current) as entries:
+                        if next(entries, None) is not None:
+                            return None
+                    continue
+
+                remaining = max_entries - visited - len(stack)
+                child_paths: list[Path] = []
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        if len(child_paths) >= max(0, remaining):
+                            return None
+                        child_paths.append(Path(entry.path))
+                child_paths.sort(key=lambda item: item.name)
+                for child in reversed(child_paths):
+                    stack.append((child, depth + 1))
+        except (OSError, TypeError, ValueError, UnicodeError):
+            return None
+    return digest.hexdigest()
 
 
 def _scan_cache_path(data_root: Path | None = None) -> Path:
@@ -90,6 +247,11 @@ def _persist_exact_scan(result: dict[str, Any], data_root: Path) -> None:
     scan = result.get("scan", {}) if isinstance(result.get("scan"), dict) else {}
     if result.get("status") != "completed" or scan.get("mode") != "deep_exact" or scan.get("exact") is not True:
         return
+    fingerprint = scan.get("fingerprint") or result.get("fingerprint")
+    if not isinstance(fingerprint, str) or len(fingerprint) != 64:
+        fingerprint = _fingerprint_roots(tuple(Path(data_root) / name for name in _SCAN_AREA_NAMES))
+    if not isinstance(fingerprint, str) or len(fingerprint) != 64:
+        return
     target = _scan_cache_path(data_root)
     config_root = target.parent
     try:
@@ -98,7 +260,7 @@ def _persist_exact_scan(result: dict[str, Any], data_root: Path) -> None:
             return
         config_root.mkdir(parents=True, exist_ok=True)
         saved_at = str(result.get("scan", {}).get("saved_at") or datetime.now(timezone.utc).isoformat(timespec="seconds"))
-        payload = {"schema_version": _SCAN_CACHE_SCHEMA, "saved_at": saved_at, "summary": result}
+        payload = {"schema_version": _SCAN_CACHE_SCHEMA, "saved_at": saved_at, "fingerprint": fingerprint, "summary": result}
         temporary = config_root / ".storage_scan_cache.tmp"
         with temporary.open("w", encoding="utf-8", newline="\n") as handle:
             json.dump(payload, handle, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
@@ -122,10 +284,21 @@ def _restore_exact_scan_cache() -> None:
     _scan_cache_loaded = True
     try:
         data_root = _managed_roots()[0]
-        payload = json.loads(_scan_cache_path(data_root).read_text(encoding="utf-8"))
+        cache_path = _scan_cache_path(data_root)
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
         result = payload.get("summary") if isinstance(payload, dict) else None
         scan = result.get("scan") if isinstance(result, dict) else None
         if not isinstance(result, dict) or not isinstance(scan, dict) or scan.get("mode") != "deep_exact" or scan.get("exact") is not True or result.get("status") != "completed":
+            return
+        cached_fingerprint = scan.get("fingerprint") or result.get("fingerprint") or (payload.get("fingerprint") if isinstance(payload, dict) else None)
+        if not isinstance(cached_fingerprint, str) or len(cached_fingerprint) != 64:
+            return
+        cache_data_root = cache_path.parent.parent
+        current_roots = tuple(_managed_roots()[1:])
+        if _absolute_path(cache_data_root) != _absolute_path(data_root):
+            current_roots = tuple(cache_data_root / name for name in _SCAN_AREA_NAMES)
+        current_fingerprint = _fingerprint_roots(current_roots)
+        if current_fingerprint != cached_fingerprint:
             return
         areas = result.get("areas") if isinstance(result.get("areas"), dict) else {}
         saved_at = payload.get("saved_at") if isinstance(payload, dict) else None
@@ -143,6 +316,9 @@ def _restore_exact_scan_cache() -> None:
             "owned_storage_total_bytes": int(result.get("owned_storage_total_bytes", scan.get("owned_storage_total_bytes", scan.get("total_bytes_counted", 0))) or 0),
             "owned_storage_exact": result.get("owned_storage_exact") is True or scan.get("owned_storage_exact") is True,
             "deduplicated_targets": int(result.get("deduplicated_targets", scan.get("deduplicated_targets", 0)) or 0),
+            "deduplicated_entries": int(result.get("deduplicated_entries", scan.get("deduplicated_entries", 0)) or 0),
+            "category_counts": {str(k): int(v) for k, v in (result.get("category_counts") or scan.get("category_counts") or {}).items() if isinstance(v, int) and v >= 0},
+            "fingerprint": cached_fingerprint,
             "disk": dict(result.get("disk") or {}), "volumes": [dict(item) for item in result.get("volumes") or [] if isinstance(item, dict)],
             "volume_projection": dict(result.get("volume_projection") or {}), "legacy": [dict(item) for item in result.get("legacy") or [] if isinstance(item, dict)],
             "legacy_counts": dict(result.get("legacy_counts") or {}),
@@ -172,6 +348,9 @@ def invalidate_storage_scan_cache() -> None:
                 "owned_storage_total_bytes": 0,
                 "owned_storage_exact": False,
                 "deduplicated_targets": 0,
+                "deduplicated_entries": 0,
+                "category_counts": {},
+                "fingerprint": None,
             }
 
 
@@ -210,152 +389,42 @@ def _is_reparse_point(entry: os.DirEntry[str]) -> bool:
         return True
 
 
-def _directory_size_report(path: Path) -> dict[str, Any]:
-    """Return a bounded, path-free size projection for one managed root.
-
-    The storage page is a read-only overview, not a recursive inventory.  A
-    historical implementation walked every file under Temp/Models/Runtime and
-    could keep ``GET /api/storage`` blocked for minutes on a real installation
-    containing payloads, caches and preserved task worktrees.  Keep the scan
-    finite and report a partial total when the budget is reached; callers can
-    still show a useful number without claiming that the entire tree was read.
-    Reparse points and non-regular entries are never followed.
-    """
-
-    def unavailable(reason: str) -> dict[str, Any]:
-        return {
-            "bytes": 0,
-            "gb": 0.0,
-            "status": "unavailable",
-            "complete": False,
-            "entries_scanned": 0,
-            "files_scanned": 0,
-            "directories_scanned": 0,
-            "reparse_entries": 0,
-            "unreadable_entries": 0,
-            "reason": reason,
-            "next_action": "Review the managed storage root before retrying.",
-        }
-
-    try:
-        root_stat = path.stat(follow_symlinks=False)
-        if getattr(root_stat, "st_file_attributes", 0) & 0x400 or path.is_symlink():
-            return unavailable("Managed storage root is a reparse point and was not scanned.")
-        if path.is_file():
-            size = path.stat(follow_symlinks=False).st_size
-            return {
-                "bytes": size,
-                "gb": round(size / (1024**3), 3),
-                "status": "available",
-                "complete": True,
-                "entries_scanned": 1,
-                "files_scanned": 1,
-                "directories_scanned": 0,
-                "reparse_entries": 0,
-                "unreadable_entries": 0,
-                "reason": "Managed storage size was read from a regular file.",
-                "next_action": "No action is required; refresh after external storage changes.",
-            }
-        if not path.is_dir():
-            return unavailable("Managed storage root is not a regular directory.")
-    except OSError:
-        return unavailable("Managed storage root is unavailable or cannot be read.")
-
-    total = 0
-    entries_scanned = 0
-    files_scanned = 0
-    directories_scanned = 0
-    reparse_entries = 0
-    unreadable_entries = 0
-    truncated = False
-    stack: list[tuple[Path, int]] = [(path, 0)]
-    while stack:
-        current, depth = stack.pop()
-        if depth > _DIRECTORY_SCAN_MAX_DEPTH:
-            truncated = True
-            continue
-        try:
-            entries = os.scandir(current)
-        except OSError:
-            truncated = True
-            continue
-        with entries:
-            for entry in entries:
-                if entries_scanned >= _DIRECTORY_SCAN_MAX_ENTRIES:
-                    truncated = True
-                    break
-                entries_scanned += 1
-                try:
-                    if _is_reparse_point(entry):
-                        reparse_entries += 1
-                        continue
-                    if entry.is_dir(follow_symlinks=False):
-                        directories_scanned += 1
-                        if depth < _DIRECTORY_SCAN_MAX_DEPTH:
-                            stack.append((Path(entry.path), depth + 1))
-                        else:
-                            truncated = True
-                        continue
-                    if entry.is_file(follow_symlinks=False):
-                        files_scanned += 1
-                        total += entry.stat(follow_symlinks=False).st_size
-                    else:
-                        truncated = True
-                except OSError:
-                    truncated = True
-                    unreadable_entries += 1
-        if entries_scanned >= _DIRECTORY_SCAN_MAX_ENTRIES:
-            break
-
-    if truncated:
-        status = "partial"
-        reason = "Storage size is a bounded partial scan; deeper entries were not read."
-        next_action = "Refresh storage after external changes; the displayed total is not a full inventory."
-    else:
-        status = "available"
-        reason = "Managed storage size was read from the fixed server-owned root."
-        next_action = "No action is required; refresh after external storage changes."
-    return {
-        "bytes": total,
-        "gb": round(total / (1024**3), 3),
-        "status": status,
-        "complete": not truncated,
-        "entries_scanned": entries_scanned,
-        "files_scanned": files_scanned,
-        "directories_scanned": directories_scanned,
-        "reparse_entries": reparse_entries,
-        "unreadable_entries": unreadable_entries,
-        "reason": reason,
-        "next_action": next_action,
-    }
-
-
-def _deep_directory_size_report(
+def _directory_tree_report(
     path: Path,
     *,
+    deep: bool,
     cancel_event: threading.Event | None = None,
     on_progress: Any = None,
+    allowlisted_roots: tuple[Path, ...] = (),
+    seen_identities: set[tuple[int, int, int]] | None = None,
 ) -> dict[str, Any]:
-    """Stream an exact candidate tree without the FAST entry budget.
+    """Read one managed tree without following aliases or trusting stale stats.
 
-    Only regular files below the managed root are counted.  Directory entries
-    are consumed in small batches and no file list is retained, so the worker
-    can traverse large model/environment trees without blocking an API thread
-    or growing memory with every file.  Symlinks and Windows reparse points are
-    deliberately skipped; their target bytes are outside this root's safe,
-    server-owned accounting scope and therefore make the result partial.
+    FAST and DEEP_EXACT intentionally share the same no-follow walk.  The only
+    difference is the FAST entry/depth budget and whether the DEEP worker emits
+    progress checkpoints.  Every regular object is stat'ed before and after
+    its size is accepted; a replacement or mutation is therefore reported as
+    ``IDENTITY_CHANGED`` instead of being silently included in an exact total.
     """
 
     event = cancel_event or threading.Event()
+    allowlisted = tuple(Path(item) for item in allowlisted_roots) or (path,)
+    seen = seen_identities if seen_identities is not None else set()
+    category_counts = _empty_category_counts()
     total = 0
     entries_scanned = 0
     files_scanned = 0
     directories_scanned = 0
     reparse_entries = 0
     unreadable_entries = 0
+    deduplicated_entries = 0
+    truncated = False
     last_publish = time.monotonic()
     last_publish_entries = 0
-    stack: list[Path] = []
+
+    def add_category(category: str, amount: int = 1) -> None:
+        if category in category_counts:
+            category_counts[category] += max(0, int(amount))
 
     def report(*, status: str, complete: bool, reason: str, next_action: str) -> dict[str, Any]:
         value = {
@@ -369,6 +438,9 @@ def _deep_directory_size_report(
             "directories_scanned": directories_scanned,
             "reparse_entries": reparse_entries,
             "unreadable_entries": unreadable_entries,
+            "identity_changed_entries": category_counts["IDENTITY_CHANGED"],
+            "deduplicated_entries": deduplicated_entries,
+            "category_counts": dict(category_counts),
             "reason": reason,
             "next_action": next_action,
         }
@@ -390,81 +462,181 @@ def _deep_directory_size_report(
             next_action="Bấm Quét lại để bắt đầu một deep scan mới.",
         )
 
+    def post_read_identity_changed(before: os.stat_result, after: os.stat_result) -> bool:
+        return _stat_identity(before) != _stat_identity(after)
+
     try:
         root_stat = path.stat(follow_symlinks=False)
-        if getattr(root_stat, "st_file_attributes", 0) & 0x400 or path.is_symlink():
-            return report(
-                status="partial",
-                complete=False,
-                reason="Gốc storage là symlink/reparse point nên không thể xác nhận tổng chính xác.",
-                next_action="Kiểm tra gốc managed storage rồi quét lại.",
-            )
-        if path.is_file():
-            try:
-                size = path.stat(follow_symlinks=False).st_size
-            except OSError:
-                return report(
-                    status="partial",
-                    complete=False,
-                    reason="Không thể đọc kích thước tệp managed storage.",
-                    next_action="Kiểm tra quyền đọc rồi quét lại.",
-                )
-            total += size
-            entries_scanned = files_scanned = 1
-            return report(
-                status="available",
-                complete=True,
-                reason="Đã đọc chính xác tệp managed storage.",
-                next_action="Không cần thao tác; quét lại sau khi có thay đổi bên ngoài.",
-            )
-        if not path.is_dir():
-            return report(
-                status="partial",
-                complete=False,
-                reason="Gốc managed storage không phải thư mục đọc được.",
-                next_action="Kiểm tra gốc managed storage rồi quét lại.",
-            )
-        stack.append(path)
     except OSError:
+        add_category("UNREADABLE")
+        unreadable_entries += 1
+        return report(
+            status="unavailable",
+            complete=False,
+            reason="Managed storage root is unavailable or cannot be read.",
+            next_action="Review the managed storage root before retrying.",
+        )
+
+    if _reparse_from_stat(root_stat):
+        category = _classify_reparse_entry(path, allowlisted_roots=allowlisted, seen_identities=seen)
+        add_category(category)
+        reparse_entries += 1
         return report(
             status="partial",
             complete=False,
-            reason="Không thể mở gốc managed storage để xác nhận tổng chính xác.",
-            next_action="Kiểm tra quyền đọc rồi quét lại.",
+            reason="Gốc storage là symlink/reparse point nên không thể xác nhận tổng chính xác.",
+            next_action="Kiểm tra gốc managed storage rồi quét lại.",
         )
+
+    if stat.S_ISREG(root_stat.st_mode):
+        identity = _object_identity(root_stat)
+        if identity is not None and identity in seen:
+            add_category("INTERNAL_DUPLICATE_ALIAS")
+            deduplicated_entries += 1
+            return report(
+                status="available",
+                complete=True,
+                reason="Managed storage root đã được tính qua một allowlisted alias; không cộng lại.",
+                next_action="Không cần thao tác; bấm Quét lại sau khi có thay đổi bên ngoài.",
+            )
+        try:
+            after = path.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            add_category("IDENTITY_CHANGED")
+            return report(
+                status="partial",
+                complete=False,
+                reason="Tệp managed storage đã thay đổi trong lúc đọc nên tổng không được đánh dấu chính xác.",
+                next_action="Bấm Quét lại để xác nhận lại tổng managed.",
+            )
+        except OSError:
+            add_category("UNREADABLE")
+            unreadable_entries += 1
+            return report(
+                status="partial",
+                complete=False,
+                reason="Không thể đọc lại tệp managed storage sau khi lấy metadata.",
+                next_action="Kiểm tra quyền đọc rồi quét lại.",
+            )
+        if post_read_identity_changed(root_stat, after):
+            add_category("IDENTITY_CHANGED")
+            return report(
+                status="partial",
+                complete=False,
+                reason="Tệp managed storage đã thay đổi trong lúc đọc nên tổng không được đánh dấu chính xác.",
+                next_action="Bấm Quét lại để xác nhận lại tổng managed.",
+            )
+        if identity is not None:
+            seen.add(identity)
+        add_category("NORMAL_OWNED_ENTRY")
+        total = int(after.st_size)
+        entries_scanned = files_scanned = 1
+        return report(
+            status="available",
+            complete=True,
+            reason="Đã đọc chính xác tệp managed storage.",
+            next_action="Không cần thao tác; bấm Quét lại sau khi có thay đổi bên ngoài.",
+        )
+
+    if not stat.S_ISDIR(root_stat.st_mode):
+        add_category("UNREADABLE")
+        unreadable_entries += 1
+        return report(
+            status="unavailable",
+            complete=False,
+            reason="Managed storage root is not a regular directory.",
+            next_action="Review the managed storage root before retrying.",
+        )
+
+    root_identity = _object_identity(root_stat)
+    if root_identity is not None:
+        seen.add(root_identity)
+    # The final boolean records whether this directory itself was counted as a
+    # normal entry.  The managed root is not an entry in its own report.
+    stack: list[tuple[Path, int, os.stat_result, bool]] = [(path, 0, root_stat, False)]
 
     while stack:
         if event.is_set():
             return cancelled()
-        current = stack.pop()
+        current, depth, expected_stat, counted_entry = stack.pop()
         try:
             entries = os.scandir(current)
         except OSError:
             unreadable_entries += 1
+            add_category("UNREADABLE")
             if event.is_set():
                 return cancelled()
             continue
+
+        scan_completed = True
         with entries:
             for entry in entries:
                 if event.is_set():
                     return cancelled()
+                if not deep and entries_scanned >= _DIRECTORY_SCAN_MAX_ENTRIES:
+                    truncated = True
+                    break
                 entries_scanned += 1
                 try:
-                    if _is_reparse_point(entry):
+                    # On Windows, DirEntry.stat() can expose zeroed device and
+                    # inode fields even though os.stat(path) returns the NTFS
+                    # file identity.  Use the path-level no-follow stat for
+                    # hard-link and TOCTOU decisions.
+                    before = os.stat(entry.path, follow_symlinks=False)
+                    if _reparse_from_stat(before) or _is_reparse_point(entry):
+                        category = _classify_reparse_entry(
+                            Path(entry.path),
+                            allowlisted_roots=allowlisted,
+                            seen_identities=seen,
+                        )
+                        add_category(category)
                         reparse_entries += 1
-                    elif entry.is_dir(follow_symlinks=False):
-                        directories_scanned += 1
-                        stack.append(Path(entry.path))
-                    elif entry.is_file(follow_symlinks=False):
-                        files_scanned += 1
-                        total += entry.stat(follow_symlinks=False).st_size
+                        if category == "INTERNAL_DUPLICATE_ALIAS":
+                            deduplicated_entries += 1
                     else:
-                        unreadable_entries += 1
+                        identity = _object_identity(before)
+                        if identity is not None and identity in seen:
+                            add_category("INTERNAL_DUPLICATE_ALIAS")
+                            deduplicated_entries += 1
+                        elif stat.S_ISDIR(before.st_mode):
+                            if identity is not None:
+                                seen.add(identity)
+                            add_category("NORMAL_OWNED_ENTRY")
+                            directories_scanned += 1
+                            child = Path(entry.path)
+                            if depth < _DIRECTORY_SCAN_MAX_DEPTH:
+                                stack.append((child, depth + 1, before, True))
+                            else:
+                                truncated = True
+                        elif stat.S_ISREG(before.st_mode):
+                            try:
+                                after = os.stat(entry.path, follow_symlinks=False)
+                            except FileNotFoundError:
+                                add_category("IDENTITY_CHANGED")
+                                continue
+                            except OSError:
+                                add_category("UNREADABLE")
+                                unreadable_entries += 1
+                                continue
+                            if post_read_identity_changed(before, after):
+                                add_category("IDENTITY_CHANGED")
+                                continue
+                            if identity is not None:
+                                seen.add(identity)
+                            add_category("NORMAL_OWNED_ENTRY")
+                            files_scanned += 1
+                            total += int(after.st_size)
+                        else:
+                            add_category("UNREADABLE")
+                            unreadable_entries += 1
+                except FileNotFoundError:
+                    add_category("IDENTITY_CHANGED")
                 except OSError:
+                    add_category("UNREADABLE")
                     unreadable_entries += 1
 
                 now = time.monotonic()
-                if (
+                if deep and (
                     entries_scanned - last_publish_entries >= _DEEP_SCAN_YIELD_ENTRIES
                     or now - last_publish >= _DEEP_SCAN_YIELD_SECONDS
                 ):
@@ -477,25 +649,99 @@ def _deep_directory_size_report(
                     last_publish_entries = entries_scanned
                     last_publish = now
 
+        if scan_completed:
+            try:
+                after_current = current.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                add_category("IDENTITY_CHANGED")
+                if counted_entry:
+                    category_counts["NORMAL_OWNED_ENTRY"] = max(0, category_counts["NORMAL_OWNED_ENTRY"] - 1)
+                continue
+            except OSError:
+                add_category("UNREADABLE")
+                unreadable_entries += 1
+                continue
+            if post_read_identity_changed(expected_stat, after_current):
+                add_category("IDENTITY_CHANGED")
+                if counted_entry:
+                    category_counts["NORMAL_OWNED_ENTRY"] = max(0, category_counts["NORMAL_OWNED_ENTRY"] - 1)
+
+        if not deep and entries_scanned >= _DIRECTORY_SCAN_MAX_ENTRIES:
+            truncated = True
+            break
+
     if event.is_set():
         return cancelled()
-    if unreadable_entries or reparse_entries:
+
+    unsafe_reparse = category_counts["UNKNOWN_REPARSE"]
+    identity_changed = category_counts["IDENTITY_CHANGED"]
+    if truncated:
+        return report(
+            status="partial",
+            complete=False,
+            reason="Storage size is a bounded partial scan; deeper entries were not read.",
+            next_action="Refresh storage after external changes; the displayed total is not a full inventory.",
+        )
+    if unreadable_entries or identity_changed or unsafe_reparse:
         reasons: list[str] = []
         if unreadable_entries:
             reasons.append(f"{unreadable_entries} mục không đọc được")
-        if reparse_entries:
-            reasons.append(f"{reparse_entries} symlink/reparse point bị bỏ qua")
+        if identity_changed:
+            reasons.append(f"{identity_changed} mục thay đổi trong lúc đọc")
+        if unsafe_reparse:
+            reasons.append(f"{unsafe_reparse} reparse point không xác định")
         return report(
             status="partial",
             complete=False,
             reason="Không thể xác nhận tổng chính xác: " + "; ".join(reasons) + ".",
-            next_action="Sửa quyền hoặc loại trừ reparse point rồi quét lại.",
+            next_action="Sửa quyền/identity hoặc loại trừ reparse point rồi quét lại.",
         )
+
+    safe_reparse = reparse_entries
+    reason = "Đã đọc hết các thư mục managed bình thường; tổng bytes là chính xác."
+    if safe_reparse:
+        reason = "Đã đọc hết managed roots; reparse/alias an toàn được phân loại và không cộng lặp."
     return report(
         status="available",
         complete=True,
-        reason="Đã đọc hết các thư mục managed bình thường; tổng bytes là chính xác.",
+        reason=reason,
         next_action="Không cần thao tác; bấm Quét lại sau khi có thay đổi bên ngoài.",
+    )
+
+
+def _directory_size_report(
+    path: Path,
+    *,
+    allowlisted_roots: tuple[Path, ...] = (),
+    seen_identities: set[tuple[int, int, int]] | None = None,
+) -> dict[str, Any]:
+    """Return a bounded, path-free FAST projection for one managed root."""
+
+    return _directory_tree_report(
+        path,
+        deep=False,
+        allowlisted_roots=allowlisted_roots,
+        seen_identities=seen_identities,
+    )
+
+
+def _deep_directory_size_report(
+    path: Path,
+    *,
+    cancel_event: threading.Event | None = None,
+    on_progress: Any = None,
+    allowlisted_roots: tuple[Path, ...] = (),
+    seen_identities: set[tuple[int, int, int]] | None = None,
+) -> dict[str, Any]:
+    """Stream a cancellable DEEP_EXACT projection without an entry cap."""
+
+    return _directory_tree_report(
+        path,
+        deep=True,
+        cancel_event=cancel_event,
+        on_progress=on_progress,
+        allowlisted_roots=allowlisted_roots,
+        seen_identities=seen_identities,
     )
 
 
@@ -555,6 +801,22 @@ def _deduplicated_managed_target(path: Path, prior_paths: list[Path]) -> Path | 
     return None
 
 
+def _invoke_storage_report(function: Any, path: Path, **kwargs: Any) -> dict[str, Any]:
+    """Call a scanner while preserving compatibility with narrow test doubles."""
+
+    target = getattr(function, "side_effect", None)
+    if not callable(target):
+        target = function
+    try:
+        signature = inspect.signature(target)
+    except (TypeError, ValueError):
+        return function(path, **kwargs)
+    if not any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
+        accepted = set(signature.parameters)
+        kwargs = {key: value for key, value in kwargs.items() if key in accepted}
+    return function(path, **kwargs)
+
+
 def _storage_summary_from_reports(
     data_root: Path,
     reports: dict[str, dict[str, Any]],
@@ -569,6 +831,7 @@ def _storage_summary_from_reports(
     saved_at: str | None = None,
     scan_mode: str = "fast",
     deduplicated_targets: int = 0,
+    fingerprint: str | None = None,
 ) -> dict[str, Any]:
     areas = {
         name: {
@@ -588,6 +851,14 @@ def _storage_summary_from_reports(
     directories_scanned = sum(int(report.get("directories_scanned", 0) or 0) for report in reports.values())
     reparse_entries = sum(int(report.get("reparse_entries", 0) or 0) for report in reports.values())
     unreadable_entries = sum(int(report.get("unreadable_entries", 0) or 0) for report in reports.values())
+    deduplicated_entries = sum(int(report.get("deduplicated_entries", 0) or 0) for report in reports.values())
+    category_counts = _empty_category_counts()
+    for report in reports.values():
+        values = report.get("category_counts") if isinstance(report.get("category_counts"), dict) else {}
+        for category in _STORAGE_ENTRY_CATEGORIES:
+            value = values.get(category, 0)
+            if isinstance(value, int) and value >= 0:
+                category_counts[category] += value
     completed_roots = sum(report.get("complete") is True for report in reports.values())
     managed_root_counts = {}
     for name in _SCAN_AREA_NAMES:
@@ -601,6 +872,12 @@ def _storage_summary_from_reports(
             "reparse_entries": int(report.get("reparse_entries", 0) or 0),
             "unreadable_entries": int(report.get("unreadable_entries", 0) or 0),
             "deduplicated": report.get("deduplicated") is True,
+            "deduplicated_entries": int(report.get("deduplicated_entries", 0) or 0),
+            "identity_changed_entries": int(report.get("identity_changed_entries", 0) or 0),
+            "category_counts": {
+                category: int((report.get("category_counts") or {}).get(category, 0) or 0)
+                for category in _STORAGE_ENTRY_CATEGORIES
+            },
         }
     status = scan_status or ("completed" if exact else "partial")
     if status == "completed" and not exact:
@@ -653,6 +930,9 @@ def _storage_summary_from_reports(
             "owned_storage_exact": exact,
             "owned_storage_scope": "allowlisted managed roots only; external reparse targets excluded",
             "deduplicated_targets": max(0, int(deduplicated_targets)),
+            "deduplicated_entries": max(0, deduplicated_entries),
+            "category_counts": category_counts,
+            "fingerprint": fingerprint,
             "max_entries": _DIRECTORY_SCAN_MAX_ENTRIES if scan_mode == "fast" else None,
             "max_depth": _DIRECTORY_SCAN_MAX_DEPTH,
             "entries_scanned": entries_scanned,
@@ -677,6 +957,9 @@ def _storage_summary_from_reports(
         "owned_storage_exact": exact,
         "owned_storage_scope": "allowlisted managed roots only; external reparse targets excluded",
         "deduplicated_targets": max(0, int(deduplicated_targets)),
+        "deduplicated_entries": max(0, deduplicated_entries),
+        "category_counts": category_counts,
+        "fingerprint": fingerprint,
         "saved_at": saved_at if exact else None,
         "legacy": legacy,
         "legacy_counts": {
@@ -697,6 +980,7 @@ def _copy_scan_state() -> dict[str, Any]:
         state = dict(_scan_state)
         state["areas"] = {name: dict(value) for name, value in (_scan_state.get("areas") or {}).items()}
         state["managed_root_counts"] = {name: dict(value) for name, value in (_scan_state.get("managed_root_counts") or {}).items()}
+        state["category_counts"] = {name: int(value) for name, value in (_scan_state.get("category_counts") or {}).items() if isinstance(value, int) and value >= 0}
         return state
 
 
@@ -719,13 +1003,28 @@ def storage_scan_snapshot() -> dict[str, Any]:
     directories_scanned = aggregate_count("directories_scanned")
     reparse_entries = aggregate_count("reparse_entries")
     unreadable_entries = aggregate_count("unreadable_entries")
+    deduplicated_entries = aggregate_count("deduplicated_entries")
     completed_roots = sum(item.get("complete") is True for item in area_values.values() if isinstance(item, dict))
+    category_counts = _empty_category_counts()
+    for value in area_values.values():
+        if not isinstance(value, dict) or not isinstance(value.get("category_counts"), dict):
+            continue
+        for category in _STORAGE_ENTRY_CATEGORIES:
+            count = value["category_counts"].get(category, 0)
+            if isinstance(count, int) and count >= 0:
+                category_counts[category] += count
+    if state.get("category_counts"):
+        category_counts.update({
+            category: int(state["category_counts"].get(category, category_counts[category]) or 0)
+            for category in _STORAGE_ENTRY_CATEGORIES
+            if isinstance(state["category_counts"].get(category, category_counts[category]), int)
+        })
     scan = {
         key: state.get(key)
         for key in (
             "schema_version", "scan_id", "status", "execution", "progress", "current_area", "exact",
             "entries_scanned", "files_scanned", "total_bytes_counted", "started_at", "completed_at",
-            "saved_at", "owned_storage_total_bytes", "owned_storage_exact", "deduplicated_targets",
+            "saved_at", "owned_storage_total_bytes", "owned_storage_exact", "deduplicated_targets", "deduplicated_entries", "category_counts", "fingerprint",
             "reason", "next_action", "mode", "cancel_requested",
         )
     }
@@ -735,6 +1034,8 @@ def storage_scan_snapshot() -> dict[str, Any]:
         "directories_scanned": directories_scanned,
         "reparse_entries": reparse_entries,
         "unreadable_entries": unreadable_entries,
+        "deduplicated_entries": deduplicated_entries,
+        "category_counts": category_counts,
         "completed_roots": completed_roots,
         "total_roots": len(_SCAN_AREA_NAMES),
         "current_root": state.get("current_area"),
@@ -748,6 +1049,9 @@ def storage_scan_snapshot() -> dict[str, Any]:
         "owned_storage_total_bytes": state.get("owned_storage_total_bytes", 0),
         "owned_storage_exact": state.get("owned_storage_exact", False),
         "deduplicated_targets": state.get("deduplicated_targets", 0),
+        "deduplicated_entries": deduplicated_entries,
+        "category_counts": category_counts,
+        "fingerprint": state.get("fingerprint"),
         "saved_at": state.get("saved_at"),
         "disk": state.get("disk", {}),
         "volumes": state.get("volumes", []),
@@ -773,6 +1077,9 @@ def _empty_scan_area(*, mode: str) -> dict[str, Any]:
         "directories_scanned": 0,
         "reparse_entries": 0,
         "unreadable_entries": 0,
+        "identity_changed_entries": 0,
+        "deduplicated_entries": 0,
+        "category_counts": _empty_category_counts(),
         "progress": 0,
         "mode": mode,
         "reason": "Đang chờ vùng storage này được quét.",
@@ -799,12 +1106,20 @@ def _reports_are_exact(reports: dict[str, dict[str, Any]]) -> bool:
 
     if len(reports) != len(_SCAN_AREA_NAMES) or any(name not in reports for name in _SCAN_AREA_NAMES):
         return False
-    return all(
-        report.get("complete") is True
-        and int(report.get("reparse_entries", 0) or 0) == 0
-        and int(report.get("unreadable_entries", 0) or 0) == 0
-        for report in reports.values()
-    )
+    for report in reports.values():
+        if report.get("complete") is not True or int(report.get("unreadable_entries", 0) or 0) != 0:
+            return False
+        if int(report.get("identity_changed_entries", 0) or 0) != 0:
+            return False
+        categories = report.get("category_counts")
+        if isinstance(categories, dict):
+            if any(int(categories.get(category, 0) or 0) != 0 for category in ("UNREADABLE", "IDENTITY_CHANGED", "UNKNOWN_REPARSE")):
+                return False
+        elif int(report.get("reparse_entries", 0) or 0) != 0:
+            # A legacy report has no way to prove that a reparse was safely
+            # classified, so retain the conservative pre-remediation result.
+            return False
+    return True
 
 
 def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None:
@@ -815,6 +1130,8 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
     reports: dict[str, dict[str, Any]] = {}
     deep = mode == "deep_exact"
     prior_paths: list[Path] = []
+    allowlisted_roots = tuple(roots.values())
+    seen_identities: set[tuple[int, int, int]] = set()
     deduplicated_targets = 0
     previous_areas: dict[str, Any] = {}
     with _scan_lock:
@@ -836,6 +1153,11 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
             _scan_state["owned_storage_total_bytes"] = _scan_state["total_bytes_counted"]
             _scan_state["owned_storage_exact"] = False
             _scan_state["deduplicated_targets"] = deduplicated_targets
+            _scan_state["deduplicated_entries"] = sum(int(item.get("deduplicated_entries", 0) or 0) for item in reports.values())
+            _scan_state["category_counts"] = {
+                category: sum(int((item.get("category_counts") or {}).get(category, 0) or 0) for item in reports.values())
+                for category in _STORAGE_ENTRY_CATEGORIES
+            }
             _scan_state["managed_root_counts"] = {}
             for root_name in _SCAN_AREA_NAMES:
                 value = reports.get(root_name, {"status": "pending", "complete": False})
@@ -848,6 +1170,12 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
                     "reparse_entries": int(value.get("reparse_entries", 0) or 0),
                     "unreadable_entries": int(value.get("unreadable_entries", 0) or 0),
                     "deduplicated": value.get("deduplicated") is True,
+                    "deduplicated_entries": int(value.get("deduplicated_entries", 0) or 0),
+                    "identity_changed_entries": int(value.get("identity_changed_entries", 0) or 0),
+                    "category_counts": {
+                        category: int((value.get("category_counts") or {}).get(category, 0) or 0)
+                        for category in _STORAGE_ENTRY_CATEGORIES
+                    },
                 }
             _scan_state["progress"] = _scan_progress(index, len(roots), report, estimate) if deep else _scan_state.get("progress", 0)
             _scan_state["current_area"] = name
@@ -890,6 +1218,12 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
                         "reparse_entries": 0,
                         "unreadable_entries": 0,
                         "deduplicated": True,
+                        "deduplicated_entries": 1,
+                        "identity_changed_entries": 0,
+                        "category_counts": {
+                            **_empty_category_counts(),
+                            "INTERNAL_DUPLICATE_ALIAS": 1,
+                        },
                         "reason": "Managed root trùng hoặc nằm trong root đã được tính; không cộng lại.",
                         "next_action": "Không cần thao tác.",
                     }
@@ -898,18 +1232,25 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
                     # reparse/missing roots must remain visible as partial.
                     try:
                         root_stat = path.stat(follow_symlinks=False)
-                        if not path.is_symlink() and not (getattr(root_stat, "st_file_attributes", 0) & 0x400) and path.is_dir():
+                        if stat.S_ISDIR(root_stat.st_mode) and not _reparse_from_stat(root_stat):
                             prior_paths.append(path)
                     except OSError:
                         pass
                     publish_area(name, index, _empty_scan_area(mode=mode))
-                    report = _deep_directory_size_report(
+                    report = _invoke_storage_report(_deep_directory_size_report,
                         path,
                         cancel_event=cancel_event,
                         on_progress=lambda value, n=name, i=index: publish_area(n, i, value),
+                        allowlisted_roots=allowlisted_roots,
+                        seen_identities=seen_identities,
                     )
             else:
-                report = _directory_size_report(path)
+                report = _invoke_storage_report(
+                    _directory_size_report,
+                    path,
+                    allowlisted_roots=allowlisted_roots,
+                    seen_identities=seen_identities,
+                )
             publish_area(name, index, report)
             if cancel_event.is_set():
                 break
@@ -923,6 +1264,7 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
         else:
             final_status = "completed" if exact else "partial"
         saved_at = datetime.now(timezone.utc).isoformat(timespec="seconds") if exact else None
+        fingerprint = _fingerprint_roots(allowlisted_roots) if exact else None
         result = _storage_summary_from_reports(
             data_root,
             reports,
@@ -936,6 +1278,7 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
             saved_at=saved_at,
             scan_mode=mode,
             deduplicated_targets=deduplicated_targets,
+            fingerprint=fingerprint,
         )
         with _scan_lock:
             _scan_state = {
@@ -958,6 +1301,9 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
                 "owned_storage_total_bytes": result.get("owned_storage_total_bytes", 0),
                 "owned_storage_exact": result.get("owned_storage_exact", False),
                 "deduplicated_targets": result.get("deduplicated_targets", 0),
+                "deduplicated_entries": result.get("deduplicated_entries", 0),
+                "category_counts": dict(result.get("category_counts") or {}),
+                "fingerprint": result.get("fingerprint"),
                 "reason": result["reason"],
                 "next_action": result["next_action"],
                 "cancel_requested": cancelled_scan,
@@ -1024,6 +1370,9 @@ def start_storage_scan(*, force: bool = False, mode: str = "fast") -> dict[str, 
             "owned_storage_total_bytes": 0,
             "owned_storage_exact": False,
             "deduplicated_targets": 0,
+            "deduplicated_entries": 0,
+            "category_counts": _empty_category_counts(),
+            "fingerprint": None,
             "disk": initial_disk,
         }
         _scan_cache_loaded = True
@@ -1269,7 +1618,44 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
         "Temp": temp_root,
         "Logs": log_root,
     }
-    area_reports = {name: _directory_size_report(path) for name, path in roots.items()}
+    allowlisted_roots = tuple(roots.values())
+    seen_identities: set[tuple[int, int, int]] = set()
+    prior_paths: list[Path] = []
+    area_reports: dict[str, dict[str, Any]] = {}
+    for name, path in roots.items():
+        duplicate_of = _deduplicated_managed_target(path, prior_paths)
+        if duplicate_of is not None:
+            area_reports[name] = {
+                "bytes": 0,
+                "gb": 0.0,
+                "total_bytes_counted": 0,
+                "status": "available",
+                "complete": True,
+                "entries_scanned": 0,
+                "files_scanned": 0,
+                "directories_scanned": 0,
+                "reparse_entries": 0,
+                "unreadable_entries": 0,
+                "identity_changed_entries": 0,
+                "deduplicated_entries": 1,
+                "deduplicated": True,
+                "category_counts": {**_empty_category_counts(), "INTERNAL_DUPLICATE_ALIAS": 1},
+                "reason": "Managed root trùng hoặc nằm trong root đã được tính; không cộng lại.",
+                "next_action": "Không cần thao tác.",
+            }
+            continue
+        try:
+            root_stat = path.stat(follow_symlinks=False)
+            if stat.S_ISDIR(root_stat.st_mode) and not _reparse_from_stat(root_stat):
+                prior_paths.append(path)
+        except OSError:
+            pass
+        area_reports[name] = _invoke_storage_report(
+            _directory_size_report,
+            path,
+            allowlisted_roots=allowlisted_roots,
+            seen_identities=seen_identities,
+        )
     areas = {
         name: {
             **report,
@@ -1285,6 +1671,13 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
     fast_directories = sum(int(report.get("directories_scanned", 0) or 0) for report in area_reports.values())
     fast_reparse = sum(int(report.get("reparse_entries", 0) or 0) for report in area_reports.values())
     fast_unreadable = sum(int(report.get("unreadable_entries", 0) or 0) for report in area_reports.values())
+    fast_deduplicated_entries = sum(int(report.get("deduplicated_entries", 0) or 0) for report in area_reports.values())
+    fast_category_counts = _empty_category_counts()
+    for report in area_reports.values():
+        for category in _STORAGE_ENTRY_CATEGORIES:
+            value = (report.get("category_counts") or {}).get(category, 0)
+            if isinstance(value, int) and value >= 0:
+                fast_category_counts[category] += value
     fast_completed_roots = sum(report.get("complete") is True for report in area_reports.values())
     managed_root_counts = {
         name: {
@@ -1295,10 +1688,17 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
             "directories_scanned": int(report.get("directories_scanned", 0) or 0),
             "reparse_entries": int(report.get("reparse_entries", 0) or 0),
             "unreadable_entries": int(report.get("unreadable_entries", 0) or 0),
-            "deduplicated": False,
+            "deduplicated": report.get("deduplicated") is True,
+            "deduplicated_entries": int(report.get("deduplicated_entries", 0) or 0),
+            "identity_changed_entries": int(report.get("identity_changed_entries", 0) or 0),
+            "category_counts": {
+                category: int((report.get("category_counts") or {}).get(category, 0) or 0)
+                for category in _STORAGE_ENTRY_CATEGORIES
+            },
         }
         for name, report in area_reports.items()
     }
+    fingerprint = _fingerprint_roots(allowlisted_roots) if fast_exact else None
     legacy = _legacy_records()
     volumes = _volume_projection()
     result = {
@@ -1312,6 +1712,9 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
             "owned_storage_exact": fast_exact,
             "owned_storage_scope": "allowlisted managed roots only; external reparse targets excluded",
             "deduplicated_targets": 0,
+            "deduplicated_entries": fast_deduplicated_entries,
+            "category_counts": fast_category_counts,
+            "fingerprint": fingerprint,
             "max_entries": _DIRECTORY_SCAN_MAX_ENTRIES,
             "max_depth": _DIRECTORY_SCAN_MAX_DEPTH,
             "entries_scanned": fast_entries,
@@ -1324,6 +1727,7 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
             "total_bytes_counted": fast_owned_total,
             "saved_at": None,
             "reason": "All managed roots were scanned within the bounded budget." if all(report["complete"] for report in area_reports.values()) else "One or more managed roots exceeded the bounded scan budget; partial totals are shown.",
+            "next_action": "No action is required; refresh after external storage changes." if fast_exact else "Refresh storage after external changes; the displayed total is not a full inventory.",
         },
         "disk": {
             "total_bytes": total,
@@ -1341,6 +1745,9 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
         "owned_storage_exact": fast_exact,
         "owned_storage_scope": "allowlisted managed roots only; external reparse targets excluded",
         "deduplicated_targets": 0,
+        "deduplicated_entries": fast_deduplicated_entries,
+        "category_counts": fast_category_counts,
+        "fingerprint": fingerprint,
         "saved_at": None,
         "legacy": legacy,
         "legacy_counts": {
@@ -1350,6 +1757,8 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
         },
         "canonical_root": "LocalAIHub",
         "data_location_class": "persistent_configured" if data_root != get_paths().app_root else "app_root",
+        "reason": "All managed roots were scanned within the bounded budget." if fast_exact else "One or more managed roots exceeded the bounded scan budget; partial totals are shown.",
+        "next_action": "No action is required; refresh after external storage changes." if fast_exact else "Refresh storage after external changes; the displayed total is not a full inventory.",
     }
     with _cache_lock:
         _size_cache = (now, result)

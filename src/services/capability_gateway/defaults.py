@@ -28,7 +28,9 @@ def _section_records(section: str, source: Mapping[str, Any]) -> list[dict[str, 
             status = availability.get("status", "partial")
         if status not in {"operational", "partial", "planned", "unavailable"}:
             status = "partial"
-        records.append({"id": f"{section}:{identifier}", "version": str(version), "status": status, "type_summary": ["static"], "counts": {"items": 1}})
+        # Gateway IDs use the closed identifier alphabet (no colon).  The
+        # Module Manager keeps its own section:item identity separately.
+        records.append({"id": f"{section}.{identifier}", "version": str(version), "status": status, "type_summary": ["static"], "counts": {"items": 1}})
     return records
 
 
@@ -52,11 +54,32 @@ def build_server_owned_gateway_snapshot(*, include_plans: bool = False) -> dict[
         def load(selectors: tuple[str, ...], requested_plans: bool) -> dict[str, Any]:
             source = sources[section]()
             if not isinstance(source, Mapping):
-                return {"status": "unavailable", "records": [], "execution": "not_run", "dry_run": requested_plans}
+                return {
+                    "status": "unavailable",
+                    "reason_code": "section_unavailable",
+                    "action_code": "restore_managed_source",
+                    "records": [],
+                    "counts": {"items": 0},
+                    "type_summaries": [],
+                    "execution": "not_run",
+                    "dry_run": requested_plans,
+                }
             records = _section_records(section, source)
             if selectors:
                 records = [item for item in records if item["id"] in selectors]
-            return {"status": source.get("status", "partial"), "records": records, "execution": "not_run", "dry_run": requested_plans}
+            status = source.get("status", "partial")
+            if status not in {"operational", "partial", "planned", "unavailable"}:
+                status = "partial"
+            return {
+                "status": status,
+                "reason_code": "section_unavailable" if status == "unavailable" else "static_metadata_only",
+                "action_code": "restore_managed_source" if status == "unavailable" else "review_runtime_evidence",
+                "records": records,
+                "counts": {"items": len(records)},
+                "type_summaries": ["static"] if records else [],
+                "execution": "not_run",
+                "dry_run": requested_plans,
+            }
 
         return load
 

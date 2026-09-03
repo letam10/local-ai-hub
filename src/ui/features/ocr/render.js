@@ -59,7 +59,7 @@ export function createOcrRenderer(deps) {
     const toolState = tool(state, "ocr_document");
     const status = toolState.tool_status || item.component_status || "missing";
     const result = resultFor(model);
-    const job = renderWorkspaceJob(model.job, { escapeHtml, formatStatus, statusPill });
+    const job = renderWorkspaceJob(model.job, { escapeHtml, formatStatus, statusPill, staleJob: model.staleJob });
     const sourceLabel = model.sourceArtifact?.name || model.sourceFile?.name || "Chưa chọn tài liệu";
     const publishedOptions = toolState.supported_options && typeof toolState.supported_options === "object" ? toolState.supported_options : {};
     const languages = Array.isArray(publishedOptions.languages) ? publishedOptions.languages.filter((value) => ["auto", "vi", "en", "ja", "zh"].includes(value)) : [];
@@ -74,7 +74,7 @@ export function createOcrRenderer(deps) {
     const formatControl = `<select name="output_format"${formats.length ? "" : " disabled data-ocr-option-unavailable=\"output_format\""}>${formatOptions}</select>`;
     return heading("DOCUMENTS", "OCR", "Workspace OCR cho ảnh/PDF: xem preview, chọn trang/vùng, theo dõi job và nhận text/Markdown/bảng/JSON trong Hub.", statusPill(status, `OCR · ${formatStatus(status)}`)) + `
       <section class="m4-tool-workspace" data-m4-workspace="ocr" data-m4-workspace-key="ocr" data-ocr-region-supported="${String(regionSupported)}" data-ocr-page-supported="${String(pageSupported)}">
-        <div class="m4-workspace__inputs">
+        <div class="m4-workspace__inputs m4-workspace__toolbar">
           ${card("Đầu vào và thiết lập", `${file("Ảnh hoặc PDF", "source_artifact_id", "image/*,application/pdf")}<form data-job-form data-m4-job-form data-tool="ocr_document" class="stack" data-workspace-form="ocr"><div class="m4-readiness" data-m4-readiness><strong>${escapeHtml(formatStatus(status))}</strong><span>${escapeHtml(toolState.reason || item.reason || "Chưa có readiness snapshot cho OCR.")}</span><small>${escapeHtml(toolState.action || "Kiểm tra backend rồi thử lại.")}</small></div>${field("Ngôn ngữ OCR", languageControl)}${field("Định dạng đầu ra", formatControl)}<p class="small">Các option chỉ hiển thị khi capability server-owned của PaddleOCR helper công bố; page và vùng normalized cũng được kiểm tra trước khi submit.</p><div class="form-actions">${button("Chạy OCR", "button--primary")}</div>${formResult("ocr-result")}</form>`)}
           ${card("Vùng đã chọn", regionSupported ? `<div class="m4-selection-summary" data-ocr-selection-summary>Toàn trang · click và kéo trên ảnh để giới hạn vùng OCR.</div><button class="button button--compact" type="button" data-ocr-clear-region>Xóa vùng chọn</button><p class="small">Tọa độ vùng chỉ được gửi dưới dạng normalized [0,1]; không yêu cầu nhập x,y.</p>` : `<div class="m4-selection-summary">Server helper hiện không công bố hỗ trợ vùng OCR; control đã được tắt và không submit.</div>`)}
         </div>

@@ -59,10 +59,13 @@ def _record_from_source(
     result: Mapping[str, Any],
     tool: str | None = None,
     workflow: str | None = None,
+    version: str | None = None,
 ) -> dict[str, Any]:
     status = _status(result.get("status", "partial"))
-    contract = result.get("contract_version") or result.get("schema_version")
-    version = str(contract) if isinstance(contract, str) else None
+    source_version = version if isinstance(version, str) and version else result.get("version")
+    if not isinstance(source_version, str) or not source_version:
+        source_version = result.get("contract_version") or result.get("schema_version")
+    record_version = str(source_version) if isinstance(source_version, str) else None
     reason = result.get("reason") if isinstance(result.get("reason"), str) else "Static server-owned evidence is available without runtime execution."
     action = result.get("action") if isinstance(result.get("action"), str) else "Review the static evidence before requesting separately authorized runtime work."
     fingerprint = result.get("fingerprint") if isinstance(result.get("fingerprint"), str) and len(result["fingerprint"]) == 64 else _safe_digest(result)
@@ -72,7 +75,7 @@ def _record_from_source(
         "component": component,
         "tool": tool,
         "workflow": workflow,
-        "version": version,
+        "version": record_version,
         "dependencies": [],
         "observed": {"state": "observed", "fingerprint": fingerprint, "source": provider},
         "evidence": {"state": "static", "fingerprint": fingerprint},
@@ -128,6 +131,7 @@ def build_server_owned_records(sources: Mapping[str, Mapping[str, Any]] | None =
                     component=item_id,
                     result=availability if isinstance(availability, Mapping) else {"status": "partial"},
                     workflow=section,
+                    version=item.get("version") if isinstance(item.get("version"), str) else None,
                 ))
     return records
 
@@ -167,7 +171,7 @@ class CapabilityRegistry:
         records = [deepcopy(item) for item in self._records]
         counts = {status: sum(1 for item in records if item["status"] == status) for status in sorted(STATUS_ALLOWLIST)}
         status = max((item["status"] for item in records), key=lambda item: _STATUS_RANK[item], default="unavailable")
-        if self._errors and status == "operational":
+        if self._errors:
             status = "error"
         result: dict[str, Any] = {
             "schema_version": CAPABILITY_REGISTRY_SCHEMA_VERSION,

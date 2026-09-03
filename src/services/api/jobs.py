@@ -92,8 +92,9 @@ _RESULT_SCALAR_KEYS = {
     "rate_control",
     "target_fps",
     "scale",
-    "tool",
-    "reason",
+        "tool",
+        "source_artifact_id",
+        "reason",
     "next_action",
     "error",
     "message",
@@ -358,6 +359,7 @@ def _durable_record(record: dict[str, Any]) -> dict[str, Any]:
         "id",
         "contract_version",
         "tool",
+        "source_artifact_id",
         "output",
         "status",
         "progress",
@@ -376,6 +378,10 @@ def _durable_record(record: dict[str, Any]) -> dict[str, Any]:
     for key in allowed:
         value = record.get(key)
         if value is not None:
+            if key == "source_artifact_id" and (
+                not isinstance(value, str) or _MANAGED_ARTIFACT_ID.fullmatch(value) is None
+            ):
+                continue
             durable[key] = publicize(value, key=key)
     return durable
 
@@ -472,6 +478,9 @@ def _load() -> None:
             value.pop("input", None)
             value.pop("resume_data", None)
             value.pop("resume_available", None)
+            source_artifact_id = value.get("source_artifact_id")
+            if not isinstance(source_artifact_id, str) or _MANAGED_ARTIFACT_ID.fullmatch(source_artifact_id) is None:
+                value.pop("source_artifact_id", None)
             retry_of = value.get("retry_of")
             if retry_of is not None and (not isinstance(retry_of, str) or _JOB_OUTPUT_SCOPE_ID.fullmatch(retry_of) is None):
                 value.pop("retry_of", None)
@@ -518,6 +527,13 @@ def create_job(
             "contract_version": "job.v2",
             "id": job_id,
             "tool": tool,
+            "source_artifact_id": (
+                input_data.get("source_artifact_id")
+                if isinstance(input_data, dict)
+                and isinstance(input_data.get("source_artifact_id"), str)
+                and _MANAGED_ARTIFACT_ID.fullmatch(input_data["source_artifact_id"])
+                else None
+            ),
             "input": input_data,
             "output": output,
             "status": "queued",
@@ -566,6 +582,7 @@ def public_job(record: dict[str, Any]) -> dict[str, Any]:
         "id",
         "contract_version",
         "tool",
+        "source_artifact_id",
         "status",
         "progress",
         "created_at",
@@ -581,6 +598,17 @@ def public_job(record: dict[str, Any]) -> dict[str, Any]:
         "attempt",
     }
     result = {key: value for key, value in record.items() if key in allowed and value is not None}
+    source_artifact_id = result.get("source_artifact_id")
+    if not isinstance(source_artifact_id, str) or _MANAGED_ARTIFACT_ID.fullmatch(source_artifact_id) is None:
+        result.pop("source_artifact_id", None)
+        raw_result = record.get("result")
+        if isinstance(raw_result, dict):
+            for contract in ("annotation", "vision_annotation", "selection", "ocr_result", "transcript", "whisper_transcript"):
+                candidate = raw_result.get(contract)
+                candidate_id = candidate.get("source_artifact_id") if isinstance(candidate, dict) else None
+                if isinstance(candidate_id, str) and _MANAGED_ARTIFACT_ID.fullmatch(candidate_id):
+                    result["source_artifact_id"] = candidate_id
+                    break
     retry_of = result.get("retry_of")
     if not isinstance(retry_of, str) or _JOB_OUTPUT_SCOPE_ID.fullmatch(retry_of) is None:
         result.pop("retry_of", None)

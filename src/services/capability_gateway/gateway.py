@@ -132,7 +132,14 @@ def _aggregate_status(sections: Mapping[str, Mapping[str, Any]]) -> tuple[str, s
     statuses = [item.get("status", "unavailable") for item in sections.values()]
     if not statuses:
         return "unavailable", "section_unavailable", "fix_managed_descriptor"
-    status = max(statuses, key=lambda item: _STATUS_RANK.get(item, _STATUS_RANK["unavailable"]))
+    known = [item for item in statuses if item in _STATUS_RANK]
+    status = max(known, key=lambda item: _STATUS_RANK[item]) if known else "unavailable"
+    # A composed gateway remains usable as a partial static projection when
+    # at least one trusted section is present.  An unavailable optional/empty
+    # section must not hide valid records from the other sections.  Only an
+    # all-unavailable composition is unavailable as a whole.
+    if status == "unavailable" and any(item != "unavailable" for item in known):
+        status = "partial"
     if status == "unavailable":
         return status, "section_unavailable", "restore_managed_source"
     if status == "partial":

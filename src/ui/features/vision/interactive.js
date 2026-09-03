@@ -13,12 +13,43 @@ const MIN_ZOOM = 0.5;
 const MAX_FRAME_TIME_SECONDS = 86400;
 const SAM2_MODES = Object.freeze(["points", "box", "text", "track"]);
 const ARTIFACT_URL_RE = /^\/api\/artifacts\/artifact_[a-f0-9]{32}$/;
+const ARTIFACT_ID_RE = /^artifact_[a-f0-9]{32}$/;
 
 const clamp = (value, minimum = 0, maximum = 1) => Math.max(minimum, Math.min(maximum, Number(value) || 0));
 const finite = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
 const safePreviewUrl = (value) => {
   const candidate = String(value || "");
   return candidate.startsWith("blob:") || ARTIFACT_URL_RE.test(candidate) ? candidate : "";
+};
+
+export const sourceArtifactIdFor = (model = {}) => {
+  const candidate = model?.sourceArtifact?.id;
+  return typeof candidate === "string" && ARTIFACT_ID_RE.test(candidate) ? candidate : "";
+};
+
+export const jobSourceArtifactId = (job = {}) => {
+  const result = job?.result && typeof job.result === "object" ? job.result : {};
+  const candidates = [
+    job?.source_artifact_id,
+    result.source_artifact_id,
+    ...["annotation", "vision_annotation", "selection", "ocr_result", "transcript", "whisper_transcript"]
+      .map((key) => result[key]?.source_artifact_id),
+  ];
+  return candidates.find((candidate) => typeof candidate === "string" && ARTIFACT_ID_RE.test(candidate)) || "";
+};
+
+export const workspaceJobMatchesSource = (model, job) => {
+  const source = sourceArtifactIdFor(model);
+  const jobSource = jobSourceArtifactId(job);
+  return Boolean(source && jobSource && source === jobSource);
+};
+
+export const detachWorkspaceJob = (model) => {
+  if (!model || typeof model !== "object") return null;
+  const previous = model.job && typeof model.job === "object" ? model.job : null;
+  if (previous?.id) model.staleJob = previous;
+  model.job = null;
+  return previous;
 };
 
 export const normalizePoint = (point, label = 1) => ({
@@ -179,6 +210,7 @@ export const ensureM3State = (state) => {
   vision.thresholds = vision.thresholds && typeof vision.thresholds === "object" ? vision.thresholds : {};
   vision.selectedDetectionIndex = Number.isInteger(vision.selectedDetectionIndex) ? vision.selectedDetectionIndex : -1;
   vision.job = vision.job && typeof vision.job === "object" ? vision.job : null;
+  vision.staleJob = vision.staleJob && typeof vision.staleJob === "object" ? vision.staleJob : null;
   if (!state.m3.sam2 || typeof state.m3.sam2 !== "object") state.m3.sam2 = createSam2SelectionState();
   const sam2 = state.m3.sam2;
   if (!sam2.selection || typeof sam2.selection !== "object") sam2.selection = { points: [], box: null };
@@ -197,6 +229,7 @@ export const ensureM3State = (state) => {
   sam2.panX = finite(sam2.panX);
   sam2.panY = finite(sam2.panY);
   sam2.job = sam2.job && typeof sam2.job === "object" ? sam2.job : null;
+  sam2.staleJob = sam2.staleJob && typeof sam2.staleJob === "object" ? sam2.staleJob : null;
   return state.m3;
 };
 
@@ -459,6 +492,9 @@ export const syncM3WorkspaceDom = (workspace, state) => {
   if (!workspace) return;
   const key = workspace.dataset.m3Workspace;
   const model = modelFor(state, key);
+  if (model.job && sourceArtifactIdFor(model) && !workspaceJobMatchesSource(model, model.job)) {
+    detachWorkspaceJob(model);
+  }
   const source = sourceFor(model);
   updateFileControl(workspace, source);
   const image = workspace.querySelector("[data-m3-preview-image]");
@@ -489,6 +525,7 @@ export const rememberM3FileSelection = (input, state) => {
   if (!workspace || !input.files?.length) return false;
   const key = workspace.dataset.m3Workspace;
   const model = modelFor(state, key);
+  detachWorkspaceJob(model);
   const preview = input.closest(".field")?.querySelector("[data-file-preview]");
   const objectUrl = safePreviewUrl(preview?.dataset?.objectUrl) || safePreviewUrl(URL.createObjectURL(input.files[0]));
   if (model.localPreviewUrl && model.localPreviewUrl !== objectUrl && model.localPreviewUrl.startsWith("blob:")) {
@@ -499,6 +536,20 @@ export const rememberM3FileSelection = (input, state) => {
   model.localPreviewUrl = objectUrl;
   model.sourceError = "";
   delete input.dataset.uploadedArtifactId;
+  if (key === "vision") {
+    model.selectedDetectionIndex = -1;
+  } else {
+    model.selection = { points: [], box: null };
+    model.selectionHistory = [];
+    model.selectionHistoryIndex = -1;
+    model.selectedPointIndex = -1;
+    model.selectedBox = false;
+    model.resultTab = "original";
+    model.frameIndex = 0;
+    model.frameTimeSeconds = 0;
+    model.duration = 0;
+    model.framePrecisionUnavailable = false;
+  }
   syncM3WorkspaceDom(workspace, state);
   return true;
 };
@@ -506,6 +557,10 @@ export const rememberM3FileSelection = (input, state) => {
 export const setM3UploadedArtifact = (workspace, state, artifact) => {
   if (!workspace || !artifact || typeof artifact !== "object") return false;
   const model = modelFor(state, workspace.dataset.m3Workspace);
+  const currentSource = sourceArtifactIdFor(model);
+  if ((currentSource && currentSource !== artifact.id) || (model.job && currentSource !== artifact.id)) {
+    detachWorkspaceJob(model);
+  }
   model.sourceArtifact = { id: artifact.id, name: artifact.name, size_bytes: artifact.size_bytes, media_type: artifact.media_type, url: artifact.url };
   const input = workspace.querySelector("input[data-m3-source-input], input[data-asset-key]");
   if (input && typeof artifact.id === "string") input.dataset.uploadedArtifactId = artifact.id;

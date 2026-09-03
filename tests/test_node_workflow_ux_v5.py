@@ -93,6 +93,56 @@ assert.equal(normalized.pickerSearch, "typed");
         result = subprocess.run([node, "--input-type=module", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_node_acceptance_editor_geometry_and_picker_contract(self) -> None:
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "node is required for the pure adapter helper check")
+        source = (ROOT / "src" / "ui" / "features" / "node_studio" / "studio.js").read_text(encoding="utf-8")
+        self.assertIn("const NODE_MIN_WIDTH = 320", source)
+        self.assertIn('type: "hub-inline"', source)
+        self.assertNotIn("liteCanvas.prompt", source)
+        self.assertNotIn("this.addWidget(", source)
+        self.assertIn("data-graph-inline-editor", source)
+        self.assertIn("graph-connection-picker__candidate", source)
+        self.assertIn("graph-connection-picker__rejected", source)
+        self.assertIn("minimapWorldBounds", source)
+        self.assertIn("value.size = normalizeNodeSize", source)
+        self.assertIn("Output states", source)
+
+        script = r"""
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
+const source = readFileSync("src/ui/features/node_studio/studio.js", "utf8");
+const start = source.indexOf("const NODE_UI_STATE_VERSION");
+const end = source.indexOf("function inlineWidgetRawValue", start);
+const moduleSource = "const LOCAL_PREFIX = 'test';" + String.fromCharCode(10) + source.slice(start, end);
+const moduleUrl = "data:text/javascript;base64," + Buffer.from(moduleSource).toString("base64");
+const helpers = await import(moduleUrl);
+
+assert.deepEqual(helpers.normalizeNodeSize({ width: 100, height: 10 }), { width: 320, height: 96 });
+assert.deepEqual(helpers.normalizeNodeSize({ width: 9999, height: 9999 }), { width: 720, height: 1200 });
+const groups = helpers.orderedPropertyGroups([
+  { name: "second", kind: "text", ui: { control: "text", group: "Inputs", order: 2 } },
+  { name: "first", kind: "text", ui: { control: "text", group: "Inputs", order: 1 } },
+  { name: "advanced", kind: "text", ui: { control: "text", group: "Advanced", order: 0, advanced: true } },
+]);
+assert.deepEqual(groups.map((group) => [group.name, group.advanced, group.properties.map((item) => item.name)]), [
+  ["Inputs", false, ["first", "second"]],
+  ["Advanced", true, ["advanced"]],
+]);
+const bounds = helpers.minimapWorldBounds({
+  nodes: [{ id: "node", pos: [0, 0], size: [320, 96] }],
+  viewport: [100, 100],
+  offset: [-1000, -800],
+  scale: 1,
+  padding: 0,
+});
+assert.ok(bounds.right >= 1100);
+assert.ok(bounds.bottom >= 900);
+"""
+        result = subprocess.run([node, "--input-type=module", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_registry_open_uses_truthful_cached_encoder_snapshot_without_probe(self) -> None:
         from src.modules.media_editor.backend import adapter
         from src.services.node_studio import registry

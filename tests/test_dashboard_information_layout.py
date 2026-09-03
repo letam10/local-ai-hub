@@ -61,6 +61,13 @@ class DashboardInformationLayoutTests(unittest.TestCase):
         self.assertNotIn('class="metric-grid"', source)
         self.assertNotIn('workspace-grid workspace-grid--two', source)
 
+        css = (ROOT / "src" / "ui" / "styles.css").read_text(encoding="utf-8")
+        self.assertNotIn("Five dashboard metrics", css)
+        self.assertNotIn("repeat(10", css)
+        self.assertIn("grid-template-columns: repeat(4, minmax(0, 1fr))", css)
+        self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr))", css)
+        self.assertIn("grid-template-columns: 1fr", css)
+
     def test_dashboard_tiers_are_deterministic_and_do_not_mutate_components(self):
         state = {
             "health": {"status": "healthy"},

@@ -40,6 +40,8 @@ from src.shared.version import PRODUCT_VERSION
 MAX_FILES = 100_000
 MAX_RUNTIME_FILES = 50_000
 MAX_RUNTIME_BYTES = 1_000_000_000
+MAX_LAUNCHER_FILES = 10_000
+MAX_LAUNCHER_BYTES = 500_000_000
 CORE_RUNTIME_MANIFEST_SCHEMA = "v8.0.1-core-runtime.v1"
 BUILD_INFO_SCHEMA = "local-ai-hub-build-info.v1"
 RUNTIME_EXCLUDED_PREFIXES = ("Lib/site-packages/bin/",)
@@ -150,6 +152,47 @@ def _copy_runtime_tree(source_root: Path, destination_root: Path) -> list[dict[s
             records.append({"name": relative, "size": size, "sha256": _sha256(destination)})
     if not any(record["name"].casefold() == "pythonw.exe" for record in records):
         raise StableProductBuildError("BUNDLED_RUNTIME_REQUIRED")
+    return records
+
+
+def _copy_launcher_bundle(source_root: Path, destination_root: Path) -> int:
+    """Copy a PyInstaller onedir bundle without following reparse entries."""
+
+    source = source_root.absolute()
+    if not source.is_dir() or source.is_symlink() or source.name.casefold() != "localaihub":
+        raise StableProductBuildError("STABLE_LAUNCHER_BUNDLE_REQUIRED")
+    _reject_reparse(source, "LAUNCHER_REPARSE")
+    records = 0
+    total_bytes = 0
+    found_executable = False
+    for current, directories, filenames in os.walk(source, topdown=True, followlinks=False):
+        current_path = Path(current)
+        _reject_reparse(current_path, "LAUNCHER_REPARSE")
+        safe_directories: list[str] = []
+        for name in sorted(directories):
+            candidate = current_path / name
+            _reject_reparse(candidate, "LAUNCHER_REPARSE")
+            if not candidate.is_dir():
+                raise StableProductBuildError("LAUNCHER_DIRECTORY_INVALID")
+            safe_directories.append(name)
+        directories[:] = safe_directories
+        for name in sorted(filenames):
+            source_file = current_path / name
+            _reject_reparse(source_file, "LAUNCHER_REPARSE")
+            if not source_file.is_file():
+                raise StableProductBuildError("LAUNCHER_FILE_INVALID")
+            size = source_file.stat().st_size
+            records += 1
+            total_bytes += size
+            if records > MAX_LAUNCHER_FILES or total_bytes > MAX_LAUNCHER_BYTES:
+                raise StableProductBuildError("LAUNCHER_BOUNDS_EXCEEDED")
+            relative = source_file.relative_to(source)
+            destination = destination_root / relative
+            if relative.name.casefold() == "localaihub.exe" and relative.parent == Path("."):
+                found_executable = True
+            _copy_regular(source_file, destination)
+    if not found_executable:
+        raise StableProductBuildError("STABLE_LAUNCHER_REQUIRED")
     return records
 
 
@@ -272,6 +315,9 @@ def stage_product(
         raise StableProductBuildError("BUNDLED_RUNTIME_REQUIRED")
     if launcher.name.casefold() != "localaihub.exe" or not launcher.is_file():
         raise StableProductBuildError("STABLE_LAUNCHER_REQUIRED")
+    launcher_bundle = launcher.parent if launcher.parent.name.casefold() == "localaihub" else None
+    if launcher_bundle is not None:
+        _reject_reparse(launcher_bundle, "LAUNCHER_REPARSE")
     if data == output:
         raise StableProductBuildError("APP_DATA_ROOT_MUST_DIFFER")
 
@@ -289,7 +335,12 @@ def stage_product(
         runtime_inventory = _copy_runtime_tree(runtime_root, runtime_payload_root)
         if not runtime_payload.is_file():
             raise StableProductBuildError("BUNDLED_RUNTIME_REQUIRED")
-    _copy_regular(launcher, output / "LocalAIHub.exe")
+    launcher_format = "single_file"
+    if launcher_bundle is not None:
+        _copy_launcher_bundle(launcher_bundle, output)
+        launcher_format = "onedir"
+    else:
+        _copy_regular(launcher, output / "LocalAIHub.exe")
     icon = source / "distribution" / "assets" / ICON_NAME
     _copy_regular(icon, output / ICON_NAME)
 
@@ -364,6 +415,7 @@ def stage_product(
         "version": version,
         "source_commit": exact_commit,
         "identity": "exact_source_head" if exact_commit is not None else "legacy_stable_product",
+        "launcher_format": launcher_format,
         "pointer": pointer,
         "file_count": len(inventory),
         "inventory_sha256": hashlib.sha256(_canonical({"files": inventory})).hexdigest(),

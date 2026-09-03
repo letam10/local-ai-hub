@@ -81,6 +81,32 @@ class CapabilityGatewayTests(unittest.TestCase):
         first["sections"]["extensions"]["records"][0]["id"] = "mutated"
         self.assertEqual(second["sections"]["extensions"]["records"][0]["id"], "extensions-one")
 
+    def test_default_server_owned_snapshot_keeps_versioned_records_when_one_section_is_empty(self) -> None:
+        from src.services.capability_gateway.defaults import build_server_owned_gateway_snapshot
+
+        package_source = {
+            "status": "partial",
+            "records": [
+                {"id": "local-ai-hub.image-review", "version": "1.0.0"},
+                {"id": "local-ai-hub.image-review", "version": "1.1.0"},
+            ],
+        }
+        empty_source = {"status": "partial", "records": []}
+        with (
+            patch("src.services.workflow_packages.discover_managed_packages", return_value=package_source),
+            patch("src.services.extension_platform.discover_extensions", return_value=empty_source),
+            patch("src.services.asset_intelligence.discover_managed_asset_catalogs", return_value=empty_source),
+            patch("src.services.privacy_diagnostics.policy_catalog.discover_managed_privacy_policies", return_value=empty_source),
+        ):
+            snapshot = build_server_owned_gateway_snapshot(include_plans=True)
+
+        self.assertEqual(snapshot["status"], "partial")
+        package_records = snapshot["sections"]["workflow_packages"]["records"]
+        self.assertEqual({(item["id"], item["version"]) for item in package_records}, {
+            ("workflow_packages.local-ai-hub.image-review", "1.0.0"),
+            ("workflow_packages.local-ai-hub.image-review", "1.1.0"),
+        })
+
     def test_request_rejects_client_mapping_without_reflection(self) -> None:
         unsafe = {
             "schema_version": CAPABILITY_GATEWAY_SCHEMA_VERSION,
