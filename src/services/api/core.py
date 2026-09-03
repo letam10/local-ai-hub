@@ -189,6 +189,30 @@ TOOL_ACTIONS = {
     "generate_qwen_image": "Chọn ảnh input nếu edit; generation smoke hiện deferred nếu ComfyUI/GPU đang bận.",
 }
 
+# UI controls are projections of this server-owned helper contract.  A client
+# may render only these values and the adapter forwards the same bounded fields
+# to the PaddleOCR helper; unsupported options are never decorative submit
+# controls.
+TOOL_SUPPORTED_OPTIONS = {
+    "ocr_document": {
+        "output_formats": ["all", "text", "markdown", "json", "tables"],
+        "languages": ["auto", "vi", "en", "ja", "zh"],
+        "normalized_region": True,
+        "page_number": True,
+    },
+    # Hub-launched Whisper is a medium/heavy worker.  The server owns the
+    # device allowlist so an old UI cannot advertise a CPU fallback that the
+    # worker is required to reject.
+    "transcribe_media": {
+        "devices": ["cuda"],
+        "hardware": "nvidia_rtx4060",
+    },
+    "create_subtitled_video": {
+        "devices": ["cuda"],
+        "hardware": "nvidia_rtx4060",
+    },
+}
+
 # ``run_media_operation`` is intentionally generic at the control-plane level,
 # but selected video backends have stronger static prerequisites than FFmpeg
 # alone.  These checks inspect only server-owned registry/runtime leaves; they
@@ -609,7 +633,7 @@ def _tool_readiness(tool: str, statuses: dict[str, dict[str, Any]]) -> dict[str,
         elif tool_status == "operational":
             tool_status = "partial"
             reason = "Runtime hiện tại cần một bounded smoke mới khớp runtime fingerprint trước khi tool được xem là operational."
-    return {
+    result = {
         "component": component_id,
         "component_status": component_status,
         "tool_status": tool_status,
@@ -617,6 +641,12 @@ def _tool_readiness(tool: str, statuses: dict[str, dict[str, Any]]) -> dict[str,
         "operation_scope": operation_scope,
         "action": TOOL_ACTIONS.get(tool, "Kiểm tra trạng thái backend rồi thử lại trong Jobs."),
     }
+    if tool in TOOL_SUPPORTED_OPTIONS:
+        result["supported_options"] = {
+            key: list(value) if isinstance(value, list) else value
+            for key, value in TOOL_SUPPORTED_OPTIONS[tool].items()
+        }
+    return result
 
 
 def tool_catalog(component_items: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
@@ -636,6 +666,8 @@ def tool_catalog(component_items: list[dict[str, Any]] | None = None) -> list[di
         }
         if readiness.get("operation_scope") is not None:
             item["operation_scope"] = readiness["operation_scope"]
+        if readiness.get("supported_options") is not None:
+            item["supported_options"] = readiness["supported_options"]
         if name == "run_media_operation":
             item["backend_readiness"] = _media_backend_readiness()
         elif name == "upscale_anime_video":
@@ -955,6 +987,16 @@ def submit_tool(tool: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]
         request, whisper_error = normalize_whisper_payload(request)
         if whisper_error:
             return 400, {"status": "error", "error": whisper_error, "code": "whisper_payload_invalid"}
+        allowed_devices = TOOL_SUPPORTED_OPTIONS.get(tool, {}).get("devices", [])
+        if isinstance(allowed_devices, list) and allowed_devices:
+            requested_device = request.get("device", allowed_devices[0])
+            if requested_device not in allowed_devices:
+                return 400, {
+                    "status": "error",
+                    "code": "whisper_device_unsupported",
+                    "error": "Thiết bị Whisper không nằm trong capability server-owned; không fallback sang CPU/iGPU.",
+                }
+            request["device"] = requested_device
     with _submission_gate:
         if _submissions_quiesced:
             return _submission_closed_payload()

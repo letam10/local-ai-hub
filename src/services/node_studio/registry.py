@@ -19,6 +19,10 @@ from src.services.tool_smoke import runtime_evidence_operation_scope
 GRAPH_SCHEMA_VERSION = 1
 PORT_TYPES = ("IMAGE", "MASK", "VIDEO", "AUDIO", "TEXT", "NUMBER", "BOOLEAN", "MODEL", "METADATA")
 OPAQUE_ARTIFACT_ID = re.compile(r"^artifact_[a-f0-9]{32}$")
+_SAFE_NODE_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,79}$")
+_SAFE_PROPERTY_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,79}$")
+_HEX_COLOR = re.compile(r"^#[0-9a-f]{6}(?:[0-9a-f]{2})?$", re.IGNORECASE)
+_PROPERTY_KINDS = frozenset({"asset", "boolean", "color", "encoder", "number", "select", "text", "textarea"})
 _UNSAFE_PROPERTY_NAMES = {
     "command", "commands", "executable", "executable_path", "filter", "filter_complex",
     "font", "font_path", "path", "path_override", "secret", "token", "url", "vf",
@@ -184,6 +188,50 @@ def _node(
     )
 
 
+def _error_context(node_id: object, property_name: object | None = None) -> dict[str, Any]:
+    """Return only bounded identifiers in a validation error context."""
+
+    context: dict[str, Any] = {}
+    if isinstance(node_id, str) and _SAFE_NODE_ID.fullmatch(node_id):
+        context["node_id"] = node_id
+    if isinstance(property_name, str) and _SAFE_PROPERTY_NAME.fullmatch(property_name):
+        context["property"] = property_name
+    return context
+
+
+def _is_integer_property(property_definition: dict[str, Any]) -> bool:
+    ui = property_definition.get("ui")
+    control = ui.get("control") if isinstance(ui, dict) else None
+    if control in {"integer", "size"} or property_definition.get("integer") is True:
+        return True
+    name = str(property_definition.get("name") or "").casefold()
+    return name in {
+        "width", "height", "size", "steps", "seed", "fps", "frames", "tile",
+        "bitrate_kbps", "max_bitrate_kbps", "buffer_kbps", "audio_bitrate_kbps",
+    }
+
+
+def _number_step_valid(value: float, property_definition: dict[str, Any]) -> bool:
+    raw_step = property_definition.get("step")
+    if raw_step in (None, ""):
+        return True
+    try:
+        step = float(raw_step)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not math.isfinite(step) or step <= 0:
+        return False
+    raw_minimum = property_definition.get("min")
+    try:
+        base = float(raw_minimum) if raw_minimum is not None else 0.0
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not math.isfinite(base):
+        return False
+    quotient = (value - base) / step
+    return math.isfinite(quotient) and math.isclose(quotient, round(quotient), rel_tol=0.0, abs_tol=1e-9)
+
+
 def validate_node_data(graph: object) -> list[dict[str, Any]]:
     """Validate closed node properties without echoing unsafe values.
 
@@ -192,52 +240,100 @@ def validate_node_data(graph: object) -> list[dict[str, Any]]:
     IDs while rejecting command/filter/path-shaped client fields.
     """
 
-    if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), list):
-        return []
+    if not isinstance(graph, dict):
+        return [{"code": "graph_invalid", "message": "Graph node data phải là object."}]
+    if not isinstance(graph.get("nodes"), list):
+        return [{"code": "nodes_invalid", "message": "Graph nodes phải là danh sách."}]
     errors: list[dict[str, Any]] = []
-    for node in graph["nodes"]:
+    for node_index, node in enumerate(graph["nodes"]):
         if not isinstance(node, dict):
+            errors.append({"code": "node_invalid", "message": "Node phải là object.", "node_index": node_index})
             continue
         node_id = node.get("id")
         definition = get_definition(str(node.get("type") or ""))
         data = node.get("data")
-        if definition is None or not isinstance(data, dict):
+        if definition is None:
+            errors.append({"code": "unknown_node_type", "message": "Node type không có trong registry Hub.", **_error_context(node_id)})
+            continue
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            errors.append({"code": "node_data_invalid", "message": "Node data phải là object.", **_error_context(node_id)})
             continue
         properties = {str(item.get("name")): item for item in definition.properties}
         for name, value in data.items():
             key = str(name)
             lowered = key.casefold()
             if lowered in _UNSAFE_PROPERTY_NAMES or any(token in lowered for token in ("command", "executable", "filter", "font_path", "path_override", "secret")):
-                errors.append({"code": "unsafe_node_property", "message": "Node property khong nam trong allowlist an toan.", "node_id": node_id, "property": key})
+                errors.append({"code": "unsafe_node_property", "message": "Node property không nằm trong allowlist an toàn.", **_error_context(node_id, key)})
                 continue
             property_definition = properties.get(key)
             if property_definition is None:
+                errors.append({"code": "unknown_node_property", "message": "Node chỉ nhận property có trong registry Hub.", **_error_context(node_id, key)})
                 continue
             kind = property_definition.get("kind")
-            if kind == "asset" and value not in (None, "") and (not isinstance(value, str) or not OPAQUE_ARTIFACT_ID.fullmatch(value)):
-                errors.append({"code": "invalid_asset_id", "message": "Asset property phai dung opaque artifact ID cua Hub.", "node_id": node_id, "property": key})
-            elif kind == "number":
-                try:
-                    numeric_value = float(value)
-                except (TypeError, ValueError, OverflowError):
-                    numeric_value = math.nan
-                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(numeric_value):
-                    errors.append({"code": "invalid_number", "message": "Number property phai la gia tri huu han.", "node_id": node_id, "property": key})
+            context = _error_context(node_id, key)
+            if kind not in _PROPERTY_KINDS:
+                errors.append({"code": "unknown_property_kind", "message": "Property kind không được registry cho phép.", **context})
+                continue
+            if kind == "asset":
+                if value not in (None, "") and (not isinstance(value, str) or OPAQUE_ARTIFACT_ID.fullmatch(value) is None):
+                    errors.append({"code": "invalid_asset_id", "message": "Asset property phải dùng opaque artifact ID của Hub.", **context})
+                continue
+            if kind == "boolean":
+                if type(value) is not bool:
+                    errors.append({"code": "invalid_boolean", "message": "Boolean property phải là true hoặc false chính xác.", **context})
+                continue
+            if kind == "color":
+                if not isinstance(value, str) or _HEX_COLOR.fullmatch(value) is None:
+                    errors.append({"code": "invalid_color", "message": "Color property phải là #RRGGBB hoặc #RRGGBBAA.", **context})
+                continue
+            if kind in {"select", "encoder"}:
+                options = property_definition.get("options")
+                if not isinstance(options, list) or len(options) > 64 or any(isinstance(item, (dict, list, tuple, set)) for item in options):
+                    options = []
+                allowed = any(type(option) is type(value) and option == value for option in options)
+                if kind == "encoder" and not options and value == "auto":
+                    allowed = True
+                if not allowed:
+                    errors.append({"code": "invalid_option", "message": "Select property không nằm trong allowlist.", **context})
+                continue
+            if kind in {"text", "textarea"}:
+                if not isinstance(value, str):
+                    errors.append({"code": "invalid_text", "message": "Text property phải là chuỗi.", **context})
                     continue
-                if property_definition.get("min") is not None and numeric_value < float(property_definition["min"]):
-                    errors.append({"code": "number_below_minimum", "message": "Number property vuot gioi han toi thieu.", "node_id": node_id, "property": key})
-                if property_definition.get("max") is not None and numeric_value > float(property_definition["max"]):
-                    errors.append({"code": "number_above_maximum", "message": "Number property vuot gioi han toi da.", "node_id": node_id, "property": key})
-            elif kind in {"select", "encoder"}:
-                options = property_definition.get("options") if isinstance(property_definition.get("options"), list) else []
-                allowed_encoder_fallback = kind == "encoder" and not options and value == "auto"
-                allowed_values = {str(item) for item in options}
-                if str(value) not in allowed_values and not allowed_encoder_fallback:
-                    errors.append({"code": "invalid_option", "message": "Select property khong nam trong allowlist.", "node_id": node_id, "property": key})
-            elif kind in {"text", "textarea"} and not isinstance(value, str):
-                errors.append({"code": "invalid_text", "message": "Text property phai la chuoi.", "node_id": node_id, "property": key})
-            if isinstance(value, str) and property_definition.get("max_length") is not None and len(value) > int(property_definition["max_length"]):
-                errors.append({"code": "text_too_long", "message": "Text property vuot gioi han.", "node_id": node_id, "property": key})
+                raw_max_length = property_definition.get("max_length")
+                if raw_max_length is not None:
+                    try:
+                        max_length = int(raw_max_length)
+                    except (TypeError, ValueError, OverflowError):
+                        max_length = -1
+                    if max_length < 0 or len(value) > max_length:
+                        errors.append({"code": "text_too_long", "message": "Text property vượt giới hạn.", **context})
+                continue
+            # The only remaining closed kind is number.
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError, OverflowError):
+                numeric_value = math.nan
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(numeric_value):
+                errors.append({"code": "invalid_number", "message": "Number property phải là giá trị hữu hạn.", **context})
+                continue
+            if _is_integer_property(property_definition) and not float(numeric_value).is_integer():
+                errors.append({"code": "number_integer_required", "message": "Number property phải là số nguyên.", **context})
+                continue
+            try:
+                minimum = float(property_definition["min"]) if property_definition.get("min") is not None else None
+                maximum = float(property_definition["max"]) if property_definition.get("max") is not None else None
+            except (TypeError, ValueError, OverflowError):
+                errors.append({"code": "number_metadata_invalid", "message": "Giới hạn number của registry không hợp lệ.", **context})
+                continue
+            if minimum is not None and (not math.isfinite(minimum) or numeric_value < minimum):
+                errors.append({"code": "number_below_minimum", "message": "Number property vượt giới hạn tối thiểu.", **context})
+            if maximum is not None and (not math.isfinite(maximum) or numeric_value > maximum):
+                errors.append({"code": "number_above_maximum", "message": "Number property vượt giới hạn tối đa.", **context})
+            if not _number_step_valid(numeric_value, property_definition):
+                errors.append({"code": "number_step_invalid", "message": "Number property không khớp bước cho phép.", **context})
     return errors
 
 

@@ -293,7 +293,7 @@ class WhisperFirstPartyContractTests(unittest.TestCase):
         with patch.object(core, "component_statuses", return_value=[{"id": "whisper", "name": "Whisper", "component_status": "partial"}]), patch.object(core.job_manager, "submit", return_value={"id": "jobv5_" + "1" * 32}) as submit, patch.object(core, "get_job", return_value={"id": "jobv5_" + "1" * 32}):
             status, response = core.submit_tool("transcribe_media", {"source_artifact_id": artifact_id})
         self.assertEqual(status, 202)
-        self.assertEqual(submit.call_args.args[1], {"source_artifact_id": artifact_id})
+        self.assertEqual(submit.call_args.args[1], {"source_artifact_id": artifact_id, "device": "cuda"})
         self.assertEqual(response["status"], "queued")
 
         resolved, resolve_error = core._resolve_assets({"asset_id": artifact_id}, tool="transcribe_media")

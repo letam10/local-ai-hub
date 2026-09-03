@@ -268,6 +268,49 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(_path_impact_scope(path), "artifact_callsite")
 
+    def test_m3_m4_high_risk_adapter_paths_never_disappear_from_impact_mapping(self) -> None:
+        for path in (
+            "src/modules/sam2/backend/worker.py",
+            "src/modules/sam2/backend/adapter.py",
+            "src/modules/vision/backend/adapter.py",
+            "src/modules/ocr/backend/adapter.py",
+            "src/modules/whisper/backend/adapter.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(_path_impact_scope(path), "artifact_callsite")
+        self.assertEqual(_path_impact_scope("src/ui/features/vision/render.js"), "product_experience")
+
+    def test_acceptance_contract_change_blocks_every_reused_pass_report(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        origin = "c" * 40
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            evidence_path = self._write_bundle(repo, root)
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            report_path = root / "reports" / "windows_filesystem.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["source_commit"] = origin
+            raw = json.dumps(report, sort_keys=True).encode("utf-8")
+            report_path.write_bytes(raw)
+            evidence["gates"]["windows_filesystem"]["report_sha256"] = hashlib.sha256(raw).hexdigest()
+            evidence["gates"]["windows_filesystem"]["provenance"] = {
+                "schema_version": "v8-local-gate-provenance.v1",
+                "kind": "REUSED_UNAFFECTED_EVIDENCE",
+                "origin_source_commit": origin,
+                "reason_code": "source_change_scope_unaffected",
+                "unaffected_scopes": ["filesystem_transaction"],
+            }
+            evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+            with patch("scripts.v8_acceptance_gate.source_change_scopes", return_value={"acceptance_contract"}):
+                result = evaluate(evidence_path=evidence_path, repo_root=repo)
+        self.assertFalse(result["local_evidence"]["valid"])
+        self.assertIn("EVIDENCE_REUSED_GATE_AFFECTED_BY_SOURCE_CHANGE", result["blockers"])
+
+    def test_docs_and_tests_remain_unclassified_without_invalidating_reuse(self) -> None:
+        self.assertIsNone(_path_impact_scope("docs/architecture/review-note.md"))
+        self.assertIsNone(_path_impact_scope("tests/test_local_note.py"))
+        self.assertEqual(_path_impact_scope("scripts/v8_acceptance_gate.py"), "acceptance_contract")
+
     def test_project_manager_change_rejects_reused_windows_filesystem_evidence(self) -> None:
         repo = Path(__file__).resolve().parents[1]
         origin = "afc40e6dcdfdcb2fdb4ea822f1dd8da5cb0c8ab1"
@@ -321,7 +364,8 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
                 },
             }
             evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
-            result = evaluate(evidence_path=evidence_path, repo_root=repo)
+            with patch("scripts.v8_acceptance_gate.source_change_scopes", return_value={"filesystem_transaction"}):
+                result = evaluate(evidence_path=evidence_path, repo_root=repo)
         self.assertTrue(result["local_evidence"]["reports_verified"])
         self.assertIn("LOCAL_WINDOWS_GATES_INCOMPLETE", result["blockers"])
         self.assertNotIn("EVIDENCE_REUSED_GATE_AFFECTED_BY_SOURCE_CHANGE", result["blockers"])

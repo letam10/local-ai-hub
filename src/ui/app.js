@@ -764,6 +764,8 @@ const render = ({ background = false, focus = "" } = {}) => {
   }
   ensureM3State(state);
   ensureM4State(state);
+  stopAllM3JobPollers();
+  restoreWorkspaceJobReferences();
   disposeNodeStudios();
   disposeImageMaskCanvases();
   disposeM3Workspaces();
@@ -780,6 +782,7 @@ const render = ({ background = false, focus = "" } = {}) => {
   disposeM4Workspaces = mountM4InteractiveWorkspaces(view, state, {
     onStateChange: () => applyToolActionGates(),
   });
+  resumeVisibleWorkspaceJobPollers();
   restoreScrollContinuity(continuity.scroll);
   restoreFocusContinuity(continuity, focus);
   setSnapshotStatus(background ? (continuity.activeInside ? "preserved" : "received") : (continuity.activeInside && !focus ? "preserved" : "received"));
@@ -1267,7 +1270,10 @@ const toPayload = async (form) => {
     if (!sourceArtifactId) throw new Error("Upload không trả artifact ID opaque.");
     payload.source_artifact_id = sourceArtifactId;
     if (!isM4 && workspaceKey === "sam2") Object.assign(payload, selectionToPayload(workspaceState));
-    if (isM4 && workspaceKey === "ocr" && Array.isArray(workspaceState.region)) payload.normalized_box = workspaceState.region;
+    if (isM4 && workspaceKey === "ocr") {
+      if (workspace.dataset.ocrRegionSupported === "true" && Array.isArray(workspaceState.region)) payload.normalized_box = workspaceState.region;
+      if (workspace.dataset.ocrPageSupported === "true" && Number.isInteger(workspaceState.pdfPage) && workspaceState.pdfPage >= 1) payload.page_number = workspaceState.pdfPage;
+    }
   }
   if (payload.points_text) {
     payload.points = payload.points_text.split(";").map((token) => token.trim()).filter(Boolean).map((token) => {
@@ -1298,16 +1304,48 @@ const inlineResult = (form, text, kind = "") => {
   target.textContent = text;
 };
 
-const M3_TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "unavailable", "interrupted"]);
+const M3_TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "error", "cancelled", "unavailable", "interrupted"]);
 const M3_JOB_POLL_INTERVAL_MS = 1000;
 const M3_JOB_POLL_MAX_MS = 30 * 60 * 1000;
 const m3JobPollers = new Map();
+const WORKSPACE_JOB_TOOLS = Object.freeze({
+  vision: new Set(["parse_screen", "detect_objects", "ground_objects"]),
+  sam2: new Set(["segment_from_points", "segment_from_box", "segment_from_text", "track_video_object"]),
+  ocr: new Set(["ocr_document"]),
+  whisper: new Set(["transcribe_media"]),
+});
 
 const workspaceForKey = (workspaceKey) => view.querySelector(`[data-m3-workspace="${workspaceKey}"], [data-m4-workspace="${workspaceKey}"]`);
 const workspaceModelForKey = (workspaceKey) => {
   if (workspaceKey === "ocr" || workspaceKey === "whisper") return ensureM4State(state)[workspaceKey];
   return ensureM3State(state)[workspaceKey];
 };
+
+const workspaceKeys = () => ["vision", "sam2", "ocr", "whisper"];
+const restoreWorkspaceJobReferences = () => {
+  for (const workspaceKey of workspaceKeys()) {
+    const model = workspaceModelForKey(workspaceKey);
+    if (model?.job?.id) continue;
+    const tools = WORKSPACE_JOB_TOOLS[workspaceKey] || new Set();
+    const candidate = (Array.isArray(state.jobs) ? state.jobs : [])
+      .filter((job) => job && tools.has(job.tool))
+      .sort((left, right) => String(right.created_at || right.updated_at || right.id || "").localeCompare(String(left.created_at || left.updated_at || left.id || "")))[0];
+    if (candidate && model) model.job = candidate;
+  }
+};
+
+const resumeVisibleWorkspaceJobPollers = () => {
+  const route = routeId();
+  if (!workspaceKeys().includes(route)) return;
+  const model = workspaceModelForKey(route);
+  const job = model?.job;
+  if (job?.id && !M3_TERMINAL_JOB_STATUSES.has(String(job.status || ""))) {
+    updateM3JobDom(route, job);
+    startM3JobPoll(route, job.id);
+  }
+};
+
+const stopAllM3JobPollers = () => workspaceKeys().forEach((workspaceKey) => stopM3JobPoll(workspaceKey));
 
 const stopM3JobPoll = (workspaceKey) => {
   const entry = m3JobPollers.get(workspaceKey);
@@ -1340,11 +1378,11 @@ const updateM3JobDom = (workspaceKey, job) => {
 const startM3JobPoll = (workspaceKey, jobId) => {
   stopM3JobPoll(workspaceKey);
   const startedAt = Date.now();
-  const entry = { jobId, startedAt, timer: null };
+  const entry = { jobId, startedAt, timer: null, generation: Symbol(workspaceKey) };
   m3JobPollers.set(workspaceKey, entry);
   const poll = async () => {
     const current = m3JobPollers.get(workspaceKey);
-    if (!current || current.jobId !== jobId || routeId() !== workspaceKey) {
+    if (!current || current.jobId !== jobId || current.generation !== entry.generation || routeId() !== workspaceKey) {
       stopM3JobPoll(workspaceKey);
       return;
     }
@@ -1352,6 +1390,8 @@ const startM3JobPoll = (workspaceKey, jobId) => {
       const payload = await getJob(jobId);
       const job = payload?.job && typeof payload.job === "object" ? payload.job : payload;
       if (!job || typeof job !== "object") throw new Error("JOB_SNAPSHOT_INVALID");
+      const afterRead = m3JobPollers.get(workspaceKey);
+      if (!afterRead || afterRead !== entry || routeId() !== workspaceKey) return;
       workspaceModelForKey(workspaceKey).job = job;
       updateM3JobDom(workspaceKey, job);
       if (M3_TERMINAL_JOB_STATUSES.has(String(job.status || ""))) {
@@ -1363,6 +1403,15 @@ const startM3JobPoll = (workspaceKey, jobId) => {
       // A transient loopback failure does not turn a live background job into
       // failed.  Keep the last truthful snapshot and retry until the bounded
       // observation window expires.
+      const currentAfterError = m3JobPollers.get(workspaceKey);
+      if (!currentAfterError || currentAfterError !== entry || routeId() !== workspaceKey) return;
+      if (error?.status === 404 || error?.payload?.error === "job_not_found") {
+        const model = workspaceModelForKey(workspaceKey);
+        if (model) model.job = { id: jobId, status: "unavailable", progress: 0, message: "Snapshot job không còn khả dụng; mở Jobs để kiểm tra bản ghi canonical." };
+        stopM3JobPoll(workspaceKey);
+        render({ focus: "main" });
+        return;
+      }
       if (Date.now() - startedAt >= M3_JOB_POLL_MAX_MS) {
         const model = (workspaceKey === "ocr" || workspaceKey === "whisper" ? state.m4?.[workspaceKey] : state.m3?.[workspaceKey]);
         if (model?.job) {
@@ -1374,7 +1423,7 @@ const startM3JobPoll = (workspaceKey, jobId) => {
       }
     }
     const latest = m3JobPollers.get(workspaceKey);
-    if (latest && latest.jobId === jobId) latest.timer = setTimeout(poll, M3_JOB_POLL_INTERVAL_MS);
+    if (latest && latest === entry && latest.jobId === jobId && routeId() === workspaceKey) latest.timer = setTimeout(poll, M3_JOB_POLL_INTERVAL_MS);
   };
   void poll();
 };
@@ -2795,7 +2844,7 @@ document.addEventListener("keydown", async (event) => {
 window.addEventListener("resize", syncSidebarState);
 window.addEventListener("hashchange", async () => {
   storageScanPoller.stop();
-  for (const workspaceKey of ["vision", "sam2"]) if (routeId() !== workspaceKey) stopM3JobPoll(workspaceKey);
+  stopAllM3JobPollers();
   render({ focus: "main" });
   await loadRouteData();
 });

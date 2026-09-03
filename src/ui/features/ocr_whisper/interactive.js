@@ -113,6 +113,16 @@ const normalizedRegion = (start, end) => {
   return region[2] - region[0] > 0.002 && region[3] - region[1] > 0.002 ? region.map((value) => Number(value.toFixed(8))) : null;
 };
 
+const actualMediaRect = (stage, media) => {
+  if (!stage || !media || media.hidden) return null;
+  const stageRect = stage.getBoundingClientRect();
+  const mediaRect = media.getBoundingClientRect();
+  if (mediaRect.width <= 0 || mediaRect.height <= 0) return null;
+  return { left: mediaRect.left - stageRect.left, top: mediaRect.top - stageRect.top, width: mediaRect.width, height: mediaRect.height };
+};
+
+const activeWhisperMedia = (workspace) => workspace.querySelector("[data-m4-whisper-audio]:not([hidden]), [data-m4-whisper-video]:not([hidden])");
+
 const syncOcrDom = (workspace, model) => {
   const source = sourceFor(model);
   updateFileControl(workspace, source);
@@ -141,13 +151,15 @@ const syncOcrDom = (workspace, model) => {
   if (empty) empty.hidden = hasSupportedSource;
   const region = workspace.querySelector("[data-ocr-region]");
   const activeRegion = model.regionDraft || model.region;
+  const stage = workspace.querySelector("[data-m4-ocr-stage]");
+  const mediaRect = actualMediaRect(stage, image);
   if (region) {
-    region.hidden = !activeRegion || !image || image.hidden;
-    if (activeRegion) {
-      region.style.left = `${activeRegion[0] * 100}%`;
-      region.style.top = `${activeRegion[1] * 100}%`;
-      region.style.width = `${(activeRegion[2] - activeRegion[0]) * 100}%`;
-      region.style.height = `${(activeRegion[3] - activeRegion[1]) * 100}%`;
+    region.hidden = !activeRegion || !mediaRect;
+    if (activeRegion && mediaRect) {
+      region.style.left = `${mediaRect.left + activeRegion[0] * mediaRect.width}px`;
+      region.style.top = `${mediaRect.top + activeRegion[1] * mediaRect.height}px`;
+      region.style.width = `${(activeRegion[2] - activeRegion[0]) * mediaRect.width}px`;
+      region.style.height = `${(activeRegion[3] - activeRegion[1]) * mediaRect.height}px`;
     }
   }
   const selectionSummary = workspace.querySelector("[data-ocr-selection-summary]");
@@ -156,6 +168,13 @@ const syncOcrDom = (workspace, model) => {
     : "Toàn trang · click và kéo trên ảnh để giới hạn vùng OCR.";
   const resultOverlay = workspace.querySelector("[data-ocr-result-overlay]");
   if (resultOverlay) {
+    resultOverlay.style.display = mediaRect ? "block" : "none";
+    if (mediaRect) {
+      resultOverlay.style.left = `${mediaRect.left}px`;
+      resultOverlay.style.top = `${mediaRect.top}px`;
+      resultOverlay.style.width = `${mediaRect.width}px`;
+      resultOverlay.style.height = `${mediaRect.height}px`;
+    }
     resultOverlay.replaceChildren();
     const page = resultPages.find((item) => Number(item?.page_number) === model.pdfPage) || resultPages[0];
     const blocks = Array.isArray(page?.blocks) ? page.blocks : [];
@@ -173,18 +192,19 @@ const syncOcrDom = (workspace, model) => {
     });
   }
   const pageInput = workspace.querySelector("[data-ocr-page-number]");
+  const pageSupported = workspace.dataset.ocrPageSupported === "true";
   if (pageInput) {
     pageInput.value = String(model.pdfPage);
     pageInput.max = String(model.pdfPageCount || MAX_PDF_PAGE);
-    pageInput.disabled = !Boolean(source.url && isPdf);
+    pageInput.disabled = !pageSupported || !Boolean(source.url && isPdf);
   }
   const pageValue = workspace.querySelector("[data-ocr-page-value]");
   if (pageValue) pageValue.textContent = model.pdfPageCount ? `Trang ${model.pdfPage} / ${model.pdfPageCount}` : `Trang ${model.pdfPage} / chưa xác định`;
   const previous = workspace.querySelector("[data-ocr-page-action=previous]");
   const next = workspace.querySelector("[data-ocr-page-action=next]");
   const hasPdfSource = Boolean(source.url && isPdf);
-  if (previous) previous.disabled = !hasPdfSource || model.pdfPage <= 1;
-  if (next) next.disabled = !hasPdfSource || model.pdfPage >= (model.pdfPageCount || MAX_PDF_PAGE);
+  if (previous) previous.disabled = !pageSupported || !hasPdfSource || model.pdfPage <= 1;
+  if (next) next.disabled = !pageSupported || !hasPdfSource || model.pdfPage >= (model.pdfPageCount || MAX_PDF_PAGE);
   syncResultTabs(workspace, model);
 };
 
@@ -317,7 +337,7 @@ export const mountM4InteractiveWorkspaces = (root, state, callbacks = {}) => {
           notify(workspace);
           return;
         }
-        if (event.target.closest("[data-ocr-clear-region]")) {
+        if (event.target.closest("[data-ocr-clear-region]") && workspace.dataset.ocrRegionSupported === "true") {
           model.region = null;
           notify(workspace);
           return;
@@ -328,7 +348,7 @@ export const mountM4InteractiveWorkspaces = (root, state, callbacks = {}) => {
         if (seek && workspace.contains(seek)) {
           const seconds = Math.max(0, numberValue(seek.dataset.whisperSeek) / 1000);
           model.currentTime = seconds;
-          const media = workspace.querySelector("[data-m4-whisper-audio]:not([hidden]), [data-m4-whisper-video]:not([hidden])");
+           const media = activeWhisperMedia(workspace);
           if (media && Number.isFinite(media.duration)) media.currentTime = Math.min(seconds, media.duration);
           syncWhisperDom(workspace, model);
         }
@@ -354,9 +374,10 @@ export const mountM4InteractiveWorkspaces = (root, state, callbacks = {}) => {
       }
       syncWhisperDom(workspace, model);
     }, { signal });
-    const media = workspace.querySelector("[data-m4-whisper-audio], [data-m4-whisper-video]");
-    if (media) {
+    const mediaElements = [...workspace.querySelectorAll("[data-m4-whisper-audio], [data-m4-whisper-video]")];
+    mediaElements.forEach((media) => {
       ["loadedmetadata", "durationchange"].forEach((eventName) => media.addEventListener(eventName, () => {
+        if (media !== activeWhisperMedia(workspace)) return;
         if (Number.isFinite(media.duration) && media.duration > 0) {
           model.duration = Math.min(MAX_DURATION_SECONDS, media.duration);
           model.currentTime = Math.min(model.currentTime, model.duration);
@@ -365,6 +386,7 @@ export const mountM4InteractiveWorkspaces = (root, state, callbacks = {}) => {
         }
       }, { signal }));
       media.addEventListener("timeupdate", () => {
+        if (media !== activeWhisperMedia(workspace)) return;
         if (Number.isFinite(media.currentTime)) {
           model.currentTime = Math.max(0, media.currentTime);
           const current = workspace.querySelector("[data-whisper-current]");
@@ -375,12 +397,13 @@ export const mountM4InteractiveWorkspaces = (root, state, callbacks = {}) => {
           if (progress) progress.style.width = `${model.duration > 0 ? clamp(model.currentTime / model.duration, 0, 1) * 100 : 0}%`;
         }
       }, { signal });
-    }
+    });
     const stage = workspace.querySelector("[data-m4-ocr-stage]");
     const image = workspace.querySelector("[data-m4-ocr-image]");
     if (key === "ocr" && stage && image) {
+      ["load", "error"].forEach((eventName) => image.addEventListener(eventName, () => syncOcrDom(workspace, model), { signal }));
       stage.addEventListener("pointerdown", (event) => {
-        if (event.button !== 0 || image.hidden) return;
+        if (event.button !== 0 || image.hidden || workspace.dataset.ocrRegionSupported !== "true") return;
         const draft = { start: normalizedPoint(event.clientX, event.clientY, image.getBoundingClientRect()) };
         if (!draft.start) return;
         regionDrafts.set(stage, draft);

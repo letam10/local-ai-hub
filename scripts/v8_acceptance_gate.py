@@ -101,8 +101,13 @@ _GATE_IMPACT_SCOPES: dict[str, frozenset[str]] = {
 # affected gate is rerun.  Documentation/tests outside these roots remain
 # intentionally unclassified and do not block reuse.
 _UNCLASSIFIED_ACCEPTANCE_RELEVANT = "unclassified_acceptance_relevant"
+# These scopes are not gate-local.  A changed verifier/required-check
+# contract can change the meaning of every reused report, while an unmapped
+# high-risk source path has not earned any reuse permission yet.
+_REUSE_ALWAYS_BLOCKING_SCOPES = frozenset({"acceptance_contract", _UNCLASSIFIED_ACCEPTANCE_RELEVANT})
 _HIGH_RISK_UNCLASSIFIED_PREFIXES = (
     "src/app/",
+    "src/modules/",
     "src/services/",
     "src/shared/",
     "src/ui/",
@@ -124,7 +129,20 @@ def _path_impact_scope(path: str) -> str | None:
     if normalized.startswith("src/services/workflow_runtime_v2/"):
         return "workflow_runtime"
     if normalized.startswith("src/services/node_studio/"):
-        return "workflow_runtime"
+        # Node Studio registry/state changes are rendered by the desktop
+        # WebView.  Keep this scope on the required product-UX gate instead of
+        # returning workflow_runtime, which has no required Windows consumer.
+        return "product_experience"
+    if normalized.startswith((
+        "src/modules/sam2/",
+        "src/modules/vision/",
+        "src/modules/ocr/",
+        "src/modules/whisper/",
+    )):
+        # These adapters/workers publish the M3/M4 opaque result contracts.
+        # Keep their known callsites on the artifact gate; an unrelated new
+        # module still falls through to the finite high-risk sentinel below.
+        return "artifact_callsite"
     if normalized.startswith("src/services/provider_adapters_v2/"):
         return "provider_adapters"
     if normalized.startswith("src/services/project_manager/"):
@@ -158,9 +176,13 @@ def _path_impact_scope(path: str) -> str | None:
         return "artifact_callsite"
     if normalized.startswith("src/services/runtime"):
         return "runtime"
-    if normalized.startswith(("scripts/v8_acceptance_gate.py", "architecture/v8_acceptance_gates.json")):
-        return "acceptance_contract"
-    if normalized.startswith("architecture/"):
+    if normalized in {
+        "scripts/v8_acceptance_gate.py",
+        "scripts/v8_legacy_test_baseline.py",
+        "scripts/v8_release_provenance.py",
+        "architecture/v8_acceptance_gates.json",
+        "architecture/v8_release_policy.json",
+    }:
         return "acceptance_contract"
     if normalized.startswith("src/services/capability_graph/"):
         return "loopback_api"
@@ -580,7 +602,7 @@ def _verify_pass_reports(evidence: Mapping[str, Any], evidence_path: Path, contr
                 origin_source_commit=report_source_commit,
                 final_source_commit=str(evidence["source_commit"]),
             )
-            if _UNCLASSIFIED_ACCEPTANCE_RELEVANT in changed_scopes or changed_scopes & _GATE_IMPACT_SCOPES[gate_id]:
+            if changed_scopes & _REUSE_ALWAYS_BLOCKING_SCOPES or changed_scopes & _GATE_IMPACT_SCOPES[gate_id]:
                 raise AcceptanceGateError("EVIDENCE_REUSED_GATE_AFFECTED_BY_SOURCE_CHANGE")
         _validate_pass_report(
             reports_dir / f"{gate_id}.json",
