@@ -10,11 +10,22 @@ The native restart bridge is the only phase-2 owner. After the desktop close
 gate has verified that all jobs owned by this desktop are idle, it revalidates
 the staged payload under the installer update lock, records the previous
 pointer, writes `pending-health.json`, and atomically switches `current.json`.
-It then writes a nonce-bound `restart-session.json`, starts the watchdog from
-the old verified runtime, authorizes the controller's
+It then writes a nonce-bound `restart-session.json`, resolves the newly
+activated candidate, starts the watchdog from that candidate's verified
+bundled runtime/script, authorizes the controller's
 `update_restart_committed` state, and performs exactly one native window
 destroy. A failed watchdog launch, close authorization, or window destroy
 rolls the pointer back immediately and clears pending state.
+
+`LocalAIHub.exe` remains the ordinary shortcut/Desktop/Start Menu entrypoint.
+During this narrow watchdog recovery window, the watchdog still validates the
+stable installation root, `current.json`, the selected payload manifest and
+the reparse-safe runtime through `resolve_launch_plan`; it then launches the
+selected payload's exact bundled `runtime/Python312/pythonw.exe -m
+src.app.launcher` with the payload app directory as `cwd`. This deliberately
+avoids re-entering the one-file PyInstaller stub and its transient `_MEI`
+extraction dependency while preserving the same installation, data-root,
+manifest, restart-session and build-identity checks.
 
 The watchdog waits for the exact old desktop PID. The new desktop publishes its
 selected loopback API port, payload ID, source commit, API PID and frontend

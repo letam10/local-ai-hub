@@ -177,6 +177,8 @@ _ERROR_REASON_CODES = {
     "DESKTOP_RESTART_TRANSACTION_UNAVAILABLE": "pointer_commit_failed",
     "STABLE_LAUNCHER_UNAVAILABLE": "new_payload_process_failed",
     "UPDATE_WATCHDOG_UNAVAILABLE": "new_payload_process_failed",
+    "CANDIDATE_LAUNCH_PLAN_INVALID": "new_payload_process_failed",
+    "CANDIDATE_LAUNCH_IDENTITY_MISMATCH": "new_payload_process_failed",
     "WATCHDOG_LAUNCH_FAILED": "new_payload_process_failed",
     "WATCHDOG_LAUNCH_FAILED_ROLLBACK": "new_payload_process_failed",
     "WATCHDOG_PARENT_TIMEOUT_ROLLBACK": "watchdog_rollback_failed",
