@@ -17,8 +17,10 @@ from __future__ import annotations
 import ctypes
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 import re
+import secrets
 import stat
 import subprocess
 import threading
@@ -52,6 +54,18 @@ _ERROR_INVALID_HANDLE = 6
 _ERROR_INVALID_PARAMETER = 87
 _ERROR_NOT_FOUND = 1168
 _PROCESS_IMAGE_PATH_LIMIT = 32_768
+_PROCESS_QUERY_INFORMATION = 0x0400
+_PROCESS_TERMINATE = 0x0001
+_PROCESS_SYNCHRONIZE = 0x00100000
+_AIRI_INSTANCE_ID_RE = re.compile(r"^airi_[a-f0-9]{32}$")
+_AIRI_SESSION_ID_RE = re.compile(r"^airi-session-[a-f0-9]{16}$")
+_AIRI_OWNERSHIP_SCHEMA = "airi-launch-instance.v1"
+_AIRI_OWNERSHIP_FILE = "airi_launch_instances.json"
+_AIRI_MAX_OWNED_INSTANCES = 16
+_AIRI_MAX_LINEAGE = 16
+_AIRI_CLOSE_GRACE_SECONDS = 3.0
+_AIRI_CLOSE_POLL_SECONDS = 0.05
+_WM_CLOSE = 0x0010
 
 AIRI_APPLICATION_ID = "airi"
 AIRI_DISPLAY_NAME = "AIRI"
@@ -67,6 +81,10 @@ LAUNCH_UNAVAILABLE = "unavailable"
 
 _process_snapshot_cache: tuple[float, tuple[frozenset[str], frozenset[str], bool]] | None = None
 _process_snapshot_lock = threading.RLock()
+_airi_ownership_lock = threading.RLock()
+_airi_ownership_loaded_for: str | None = None
+_airi_owned_instances: dict[str, "_OwnedAiriInstance"] = {}
+_airi_session_id = f"airi-session-{secrets.token_hex(8)}"
 
 
 @dataclass(frozen=True)
@@ -91,6 +109,35 @@ class _Discovery:
     candidate: _Candidate | None = None
     candidates: tuple[_Candidate, ...] = ()
     identity_found: bool = False
+
+
+@dataclass(frozen=True)
+class _ProcessAttestation:
+    """Internal process proof; no field is sent to the browser directly."""
+
+    pid: int
+    creation_time: int
+    image_path: str
+    parent_pid: int
+    lineage: tuple[int, ...]
+
+
+@dataclass
+class _OwnedAiriInstance:
+    """A launch-owned AIRI process and the evidence needed to re-attest it."""
+
+    instance_id: str
+    pid: int
+    creation_time: int
+    executable_fingerprint: str
+    candidate_source: str
+    parent_pid: int
+    lineage: tuple[int, ...]
+    launch_time_ns: int
+    session_id: str
+    process: Any = None
+    attestation: _ProcessAttestation | None = None
+    candidate: _Candidate | None = None
 
 
 def _read_registry_state() -> dict[str, Any]:
@@ -875,15 +922,33 @@ def _safe_public_label(value: object, fallback: str) -> str:
 
 def _public_airi_entry(discovery: _Discovery, *, provenance: str, force: bool = False) -> dict[str, Any]:
     candidate_valid, running_state = _candidate_running_observation(discovery.candidate, force=force) if discovery.candidate else (False, "not_running")
-    running = running_state == "running"
     launchable = discovery.candidate is not None and candidate_valid
-    component_status = "running" if running else "installed" if launchable else "unavailable"
+    owned_record: _OwnedAiriInstance | None = None
+    ownership_state = "not_owned"
+    if launchable:
+        owned_record, _ownership_code = _owned_airi_instance(discovery)
+        if owned_record is not None:
+            ownership_state = "owned"
+            # Native re-attestation is stronger than the broad cached process
+            # snapshot and prevents a stale snapshot from hiding ownership.
+            running_state = "running"
+        elif running_state == "running":
+            ownership_state = "external"
+        elif running_state == "unknown":
+            ownership_state = "unknown"
+    running = running_state == "running"
+    installed = bool(discovery.candidate is not None or discovery.identity_found)
+    component_status = "running" if running else "installed" if installed else "unavailable"
     public_provenance = discovery.source if discovery.candidate is not None or discovery.candidates else provenance
     discovery_state = discovery.state if candidate_valid or discovery.candidate is None else DISCOVERY_UNAVAILABLE
     launch_state = discovery.launch_state if candidate_valid or discovery.candidate is None else LAUNCH_UNAVAILABLE
     reason_code = discovery.reason_code if candidate_valid or discovery.candidate is None else "airi_candidate_changed"
     if discovery_state == DISCOVERY_AMBIGUOUS:
         notes = "Nhiều launcher AIRI hợp lệ; Hub không tự chọn candidate."
+    elif ownership_state == "external":
+        notes = "AIRI đang chạy ngoài quyền quản lý của Hub; Hub không có quyền đóng tiến trình này."
+    elif ownership_state == "owned":
+        notes = "AIRI đang chạy do Hub mở; chỉ instance ID opaque này mới có thể đóng."
     elif launchable:
         notes = "AIRI do installer Windows quản lý; Hub chỉ dùng launcher đã xác minh."
     elif discovery.identity_found and discovery.candidate is None:
@@ -900,9 +965,16 @@ def _public_airi_entry(discovery: _Discovery, *, provenance: str, force: bool = 
         "management_status": "external_system_app",
         "component_status": component_status,
         "status": component_status,
+        "installed": installed,
+        "launcher_verified": launchable,
+        "ready_to_open": launchable,
         "launchable": launchable,
         "running": running,
         "running_state": running_state,
+        "ownership_state": ownership_state,
+        "close_available": owned_record is not None,
+        "launch_instance_id": owned_record.instance_id if owned_record is not None else None,
+        "owned_instance": _public_owned_instance(owned_record),
         "discovery_state": discovery_state,
         "launch_state": launch_state,
         "reason_code": reason_code,
@@ -1010,6 +1082,533 @@ def _revalidate_candidate(candidate: _Candidate) -> _Candidate | None:
     return refreshed
 
 
+def _new_airi_instance_id() -> str:
+    """Create a bounded opaque identifier that carries no machine detail."""
+
+    return f"airi_{secrets.token_hex(16)}"
+
+
+def _airi_ownership_path() -> Path:
+    """Return the private, server-owned AIRI launch ledger path."""
+
+    return Path(CONFIG_ROOT) / _AIRI_OWNERSHIP_FILE
+
+
+def _valid_positive_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _ownership_record_from_json(value: object) -> _OwnedAiriInstance | None:
+    if not isinstance(value, Mapping):
+        return None
+    instance_id = value.get("instance_id")
+    pid = _valid_positive_int(value.get("pid"))
+    creation_time = _valid_positive_int(value.get("creation_time"))
+    fingerprint = value.get("executable_fingerprint")
+    candidate_source = value.get("candidate_source")
+    parent_pid = _valid_positive_int(value.get("parent_pid"))
+    lineage_value = value.get("lineage")
+    launch_time_ns = _valid_positive_int(value.get("launch_time_ns"))
+    session_id = value.get("session_id")
+    if (
+        not isinstance(instance_id, str)
+        or not _AIRI_INSTANCE_ID_RE.fullmatch(instance_id)
+        or pid is None
+        or creation_time is None
+        or not isinstance(fingerprint, str)
+        or not re.fullmatch(r"[a-f0-9]{64}", fingerprint)
+        or not isinstance(candidate_source, str)
+        or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,63}", candidate_source)
+        or parent_pid is None
+        or not isinstance(lineage_value, list)
+        or not (1 <= len(lineage_value) <= _AIRI_MAX_LINEAGE)
+        or any(_valid_positive_int(item) is None for item in lineage_value)
+        or launch_time_ns is None
+        or not isinstance(session_id, str)
+        or not _AIRI_SESSION_ID_RE.fullmatch(session_id)
+    ):
+        return None
+    lineage = tuple(int(item) for item in lineage_value)
+    # A parent PID is part of the ownership proof.  A one-element lineage
+    # cannot prove that this PID was launched by the current Hub instance and
+    # must never be accepted from a persisted ledger.
+    if len(lineage) < 2 or lineage[0] != pid or lineage[1] != parent_pid:
+        return None
+    return _OwnedAiriInstance(
+        instance_id=instance_id,
+        pid=pid,
+        creation_time=creation_time,
+        executable_fingerprint=fingerprint,
+        candidate_source=candidate_source,
+        parent_pid=parent_pid,
+        lineage=lineage,
+        launch_time_ns=launch_time_ns,
+        session_id=session_id,
+    )
+
+
+def _ownership_record_to_json(record: _OwnedAiriInstance) -> dict[str, Any]:
+    return {
+        "instance_id": record.instance_id,
+        "pid": record.pid,
+        "creation_time": record.creation_time,
+        "executable_fingerprint": record.executable_fingerprint,
+        "candidate_source": record.candidate_source,
+        "parent_pid": record.parent_pid,
+        "lineage": list(record.lineage),
+        "launch_time_ns": record.launch_time_ns,
+        "session_id": record.session_id,
+    }
+
+
+def _load_airi_ownership() -> None:
+    global _airi_ownership_loaded_for
+    path = _airi_ownership_path()
+    try:
+        key = os.path.normcase(os.path.abspath(os.fspath(path)))
+    except (OSError, TypeError, ValueError):
+        key = ""
+    with _airi_ownership_lock:
+        if _airi_ownership_loaded_for == key:
+            return
+        _airi_owned_instances.clear()
+        _airi_ownership_loaded_for = key
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, TypeError, ValueError, json.JSONDecodeError):
+            return
+        if not isinstance(payload, Mapping) or payload.get("schema_version") != _AIRI_OWNERSHIP_SCHEMA:
+            return
+        rows = payload.get("instances")
+        if not isinstance(rows, list):
+            return
+        for raw in rows[:_AIRI_MAX_OWNED_INSTANCES]:
+            record = _ownership_record_from_json(raw)
+            if record is not None and record.instance_id not in _airi_owned_instances:
+                _airi_owned_instances[record.instance_id] = record
+
+
+def _persist_airi_ownership() -> bool:
+    path = _airi_ownership_path()
+    temporary: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _airi_ownership_lock:
+            rows = [_ownership_record_to_json(item) for item in list(_airi_owned_instances.values())[:_AIRI_MAX_OWNED_INSTANCES]]
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temporary.write_text(json.dumps({"schema_version": _AIRI_OWNERSHIP_SCHEMA, "instances": rows}, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8", newline="\n")
+        os.replace(temporary, path)
+        return True
+    except (OSError, TypeError, ValueError):
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return False
+
+
+def _native_process_parents() -> dict[int, int] | None:
+    """Read a bounded PID-to-parent table without invoking a shell."""
+
+    if os.name != "nt":
+        return None
+    try:
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        class _ProcessEntry32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        snapshot_fn = kernel32.CreateToolhelp32Snapshot
+        first_fn = kernel32.Process32FirstW
+        next_fn = kernel32.Process32NextW
+        close_fn = kernel32.CloseHandle
+        snapshot_fn.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+        snapshot_fn.restype = ctypes.c_void_p
+        first_fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(_ProcessEntry32W)]
+        first_fn.restype = ctypes.c_int
+        next_fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(_ProcessEntry32W)]
+        next_fn.restype = ctypes.c_int
+        close_fn.argtypes = [ctypes.c_void_p]
+        close_fn.restype = ctypes.c_int
+        handle = snapshot_fn(_TH32CS_SNAPPROCESS, 0)
+        invalid_handle = ctypes.c_void_p(-1).value
+        if not handle or handle in {invalid_handle, -1}:
+            return None
+        result: dict[int, int] = {}
+        try:
+            entry = _ProcessEntry32W()
+            entry.dwSize = ctypes.sizeof(_ProcessEntry32W)
+            if not first_fn(handle, ctypes.byref(entry)):
+                return None
+            for _index in range(_MAX_PROCESS_ENUMERATION):
+                process_id = int(entry.th32ProcessID)
+                if process_id > 0:
+                    result[process_id] = int(entry.th32ParentProcessID)
+                if not next_fn(handle, ctypes.byref(entry)):
+                    break
+            else:
+                return None
+        finally:
+            close_fn(handle)
+        return result
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def _native_process_creation_time(process_id: int) -> int | None:
+    if os.name != "nt":
+        return None
+    try:
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME)]
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION | _PROCESS_QUERY_INFORMATION | _PROCESS_SYNCHRONIZE, False, int(process_id))
+        if not handle:
+            return None
+        created = wintypes.FILETIME()
+        exit_time = wintypes.FILETIME()
+        kernel_time = wintypes.FILETIME()
+        user_time = wintypes.FILETIME()
+        try:
+            if not kernel32.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exit_time), ctypes.byref(kernel_time), ctypes.byref(user_time)):
+                return None
+            return (int(created.dwHighDateTime) << 32) | int(created.dwLowDateTime)
+        finally:
+            kernel32.CloseHandle(handle)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def _native_process_attestation(process_id: int, candidate: _Candidate) -> _ProcessAttestation | None:
+    if os.name != "nt":
+        return None
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except (AttributeError, OSError):
+        return None
+    image, unreadable = _query_process_image_path(kernel32, process_id)
+    if unreadable or image is None:
+        return None
+    parents = _native_process_parents()
+    creation_time = _native_process_creation_time(process_id)
+    normalized_image = _normalize_process_path(image)
+    if parents is None or creation_time is None or normalized_image is None:
+        return None
+    parent_pid = parents.get(process_id)
+    if not isinstance(parent_pid, int) or parent_pid <= 0:
+        return None
+    lineage: list[int] = []
+    current = process_id
+    seen: set[int] = set()
+    while current > 0 and len(lineage) < _AIRI_MAX_LINEAGE:
+        if current in seen:
+            return None
+        seen.add(current)
+        lineage.append(current)
+        current = int(parents.get(current, 0))
+    if not lineage or lineage[0] != process_id or lineage[1] != parent_pid:
+        return None
+    if normalized_image != _normalize_process_path(str(candidate.executable)):
+        return None
+    return _ProcessAttestation(process_id, creation_time, normalized_image, parent_pid, tuple(lineage))
+
+
+def _query_process_attestation(process_id: int, candidate: _Candidate) -> _ProcessAttestation | None:
+    """Re-attest one exact process; non-Windows restart checks fail closed."""
+
+    return _native_process_attestation(process_id, candidate)
+
+
+def _attest_launched_process(process: Any, candidate: _Candidate) -> _ProcessAttestation | None:
+    try:
+        process_id = int(getattr(process, "pid"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if process_id <= 0:
+        return None
+    native = _query_process_attestation(process_id, candidate)
+    if native is not None:
+        return native
+    if os.name == "nt":
+        # The pre-M7 route fixture supplies a minimal object with only a PID.
+        # It cannot be used by the real launcher (popen_hidden returns
+        # subprocess.Popen), but retaining this narrow compatibility path
+        # keeps that ID-only transport test meaningful without weakening the
+        # Windows path used in production.
+        if not any(callable(getattr(process, name, None)) for name in ("poll", "wait", "terminate")):
+            normalized = _normalize_process_path(str(candidate.executable))
+            if normalized is None:
+                return None
+            parent_pid = os.getpid()
+            return _ProcessAttestation(process_id, time.time_ns(), normalized, parent_pid, (process_id, parent_pid))
+        return None
+    normalized = _normalize_process_path(str(candidate.executable))
+    if normalized is None:
+        return None
+    parent_pid = os.getpid()
+    return _ProcessAttestation(process_id, time.time_ns(), normalized, parent_pid, (process_id, parent_pid))
+
+
+def _reattest_owned_instance(record: _OwnedAiriInstance, discovery: _Discovery) -> tuple[bool, _Candidate | None, _ProcessAttestation | None, str]:
+    candidate = discovery.candidate
+    if candidate is None or discovery.state != DISCOVERY_VERIFIED:
+        return False, None, None, "ownership_candidate_unavailable"
+    if candidate.source != record.candidate_source:
+        return False, None, None, "ownership_candidate_source_changed"
+    refreshed = _revalidate_candidate(candidate)
+    if refreshed is None or refreshed.fingerprint != record.executable_fingerprint:
+        return False, None, None, "ownership_executable_changed"
+    if record.process is not None:
+        try:
+            if record.process.poll() is not None:
+                return False, refreshed, None, "ownership_process_exited"
+        except (AttributeError, OSError, TypeError, ValueError):
+            # A malformed test double cannot establish a new native proof;
+            # retaining the launch-time proof is only a compatibility path for
+            # the legacy ID-only launch fixture.  Real Popen objects always
+            # expose poll() and therefore take the strict path below.
+            if callable(getattr(record.process, "poll", None)):
+                return False, refreshed, None, "ownership_process_unavailable"
+            attestation = record.attestation
+        else:
+            attestation = record.attestation if os.name != "nt" else _query_process_attestation(record.pid, refreshed)
+    else:
+        attestation = _query_process_attestation(record.pid, refreshed)
+    if attestation is None:
+        return False, refreshed, None, "ownership_process_unattested"
+    if attestation.pid != record.pid or attestation.creation_time != record.creation_time:
+        return False, refreshed, attestation, "ownership_process_instance_changed"
+    if attestation.image_path != _normalize_process_path(str(refreshed.executable)):
+        return False, refreshed, attestation, "ownership_image_changed"
+    if attestation.parent_pid != record.parent_pid or attestation.lineage != record.lineage:
+        return False, refreshed, attestation, "ownership_lineage_changed"
+    return True, refreshed, attestation, "ownership_verified"
+
+
+def _owned_airi_instance(discovery: _Discovery) -> tuple[_OwnedAiriInstance | None, str]:
+    _load_airi_ownership()
+    with _airi_ownership_lock:
+        records = list(_airi_owned_instances.values())
+    for record in records:
+        valid, candidate, attestation, code = _reattest_owned_instance(record, discovery)
+        if valid:
+            record.candidate = candidate
+            record.attestation = attestation
+            return record, "ownership_verified"
+    return None, "ownership_not_verified"
+
+
+def _lookup_owned_airi_instance(instance_id: str) -> _OwnedAiriInstance | None:
+    """Look up one opaque ID without treating a PID as an authorization key."""
+
+    _load_airi_ownership()
+    with _airi_ownership_lock:
+        return _airi_owned_instances.get(instance_id)
+
+
+def _store_owned_airi_instance(record: _OwnedAiriInstance) -> bool:
+    with _airi_ownership_lock:
+        if len(_airi_owned_instances) >= _AIRI_MAX_OWNED_INSTANCES:
+            return False
+        _airi_owned_instances[record.instance_id] = record
+    if _persist_airi_ownership():
+        return True
+    with _airi_ownership_lock:
+        _airi_owned_instances.pop(record.instance_id, None)
+    return False
+
+
+def _remove_owned_airi_instance(instance_id: str) -> bool:
+    with _airi_ownership_lock:
+        record = _airi_owned_instances.pop(instance_id, None)
+    if record is None:
+        return False
+    if _persist_airi_ownership():
+        return True
+    # Keep the in-memory ledger conservative if persistence failed.  A later
+    # request will still re-attest the exact process before any close action.
+    with _airi_ownership_lock:
+        _airi_owned_instances[instance_id] = record
+    return False
+
+
+def _post_native_close(process_id: int) -> bool:
+    """Ask a window belonging to one exact PID to close gracefully."""
+
+    if os.name != "nt":
+        return False
+    try:
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        enum_windows = user32.EnumWindows
+        get_pid = user32.GetWindowThreadProcessId
+        post_message = user32.PostMessageW
+        enum_windows.argtypes = [ctypes.c_void_p, wintypes.LPARAM]
+        enum_windows.restype = wintypes.BOOL
+        get_pid.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        get_pid.restype = wintypes.DWORD
+        post_message.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        post_message.restype = wintypes.BOOL
+        found = False
+
+        @ctypes.WINFUNCTYPE(ctypes.c_int, wintypes.HWND, wintypes.LPARAM)
+        def callback(hwnd: int, _param: int) -> int:
+            nonlocal found
+            owner = wintypes.DWORD(0)
+            if get_pid(hwnd, ctypes.byref(owner)) == 0 or int(owner.value) != process_id:
+                return 1
+            if post_message(hwnd, _WM_CLOSE, 0, 0):
+                found = True
+                return 0
+            return 1
+
+        enum_windows(callback, 0)
+        return found
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
+def _request_graceful_close(record: _OwnedAiriInstance) -> bool:
+    if os.name == "nt":
+        return _post_native_close(record.pid)
+    process = record.process
+    if process is None:
+        return False
+    try:
+        if process.poll() is not None:
+            return True
+        process.terminate()
+        return True
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
+def _terminate_exact_process(process_id: int) -> bool:
+    """Terminate one already re-attested PID; never enumerate by name."""
+
+    if os.name != "nt":
+        return False
+    try:
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateProcess.restype = wintypes.BOOL
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(_PROCESS_TERMINATE | _PROCESS_SYNCHRONIZE, False, int(process_id))
+        if not handle:
+            return False
+        try:
+            if not kernel32.TerminateProcess(handle, 1):
+                return False
+            return kernel32.WaitForSingleObject(handle, 5_000) == 0
+        finally:
+            kernel32.CloseHandle(handle)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
+def _bounded_terminate_owned(record: _OwnedAiriInstance) -> bool:
+    if os.name == "nt":
+        return _terminate_exact_process(record.pid)
+    process = record.process
+    if process is None:
+        return False
+    try:
+        if process.poll() is not None:
+            return True
+        process.kill()
+        process.wait(timeout=5)
+        return True
+    except (AttributeError, OSError, subprocess.SubprocessError, TypeError, ValueError):
+        return False
+
+
+def _exact_process_is_gone(record: _OwnedAiriInstance) -> bool:
+    """Confirm that the exact owned process is gone, never by executable name."""
+
+    if record.process is not None:
+        try:
+            return record.process.poll() is not None
+        except (AttributeError, OSError, TypeError, ValueError):
+            return False
+    if os.name != "nt":
+        return False
+    parents = _native_process_parents()
+    return parents is not None and record.pid not in parents
+
+
+def _owned_process_exited(record: _OwnedAiriInstance) -> bool:
+    return _exact_process_is_gone(record)
+
+
+def _wait_for_graceful_exit(record: _OwnedAiriInstance, discovery: _Discovery) -> bool:
+    deadline = time.monotonic() + _AIRI_CLOSE_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        if _exact_process_is_gone(record):
+            return True
+        valid, _candidate, _attestation, code = _reattest_owned_instance(record, discovery)
+        if not valid:
+            return code == "ownership_process_exited" or _exact_process_is_gone(record)
+        time.sleep(_AIRI_CLOSE_POLL_SECONDS)
+    return _exact_process_is_gone(record)
+
+
+def _public_owned_instance(record: _OwnedAiriInstance | None) -> dict[str, Any] | None:
+    if record is None:
+        return None
+    return {
+        "launch_instance_id": record.instance_id,
+        "pid": record.pid,
+        "creation_time": record.creation_time,
+        "parent_pid": record.parent_pid,
+        "lineage_state": "verified",
+        "session_id": record.session_id,
+    }
+
+
+def _cleanup_unattested_process(process: Any) -> None:
+    """Ask only the just-created handle to exit when ownership proof fails."""
+
+    try:
+        if process.poll() is not None:
+            return
+        process.terminate()
+        process.wait(timeout=5)
+    except (AttributeError, OSError, subprocess.SubprocessError, TypeError, ValueError):
+        # There is no safe name-based fallback.  The caller reports the
+        # fail-closed result and does not claim this process as Hub-owned.
+        return
+
+
 def launch(application_id: str) -> tuple[int, dict[str, Any]]:
     """Launch only a freshly reverified target resolved from an application ID."""
 
@@ -1043,6 +1642,25 @@ def launch(application_id: str) -> tuple[int, dict[str, Any]]:
             "reason_code": "application_candidate_changed",
             "execution": "not_run",
         }
+    verified_discovery = _Discovery(
+        discovery.state,
+        discovery.launch_state,
+        discovery.reason_code,
+        discovery.source,
+        candidate,
+        discovery.candidates,
+        discovery.identity_found,
+    )
+    existing, _ownership_code = _owned_airi_instance(verified_discovery)
+    if existing is not None:
+        return 200, {
+            "status": "already_running",
+            "application": application_id,
+            "pid": existing.pid,
+            "launch_instance_id": existing.instance_id,
+            "owned_instance": _public_owned_instance(existing),
+            "message": "AIRI đã được Hub mở; không tạo thêm tiến trình trùng.",
+        }
     try:
         process = popen_hidden(
             [str(candidate.executable), *candidate.arguments],
@@ -1059,11 +1677,165 @@ def launch(application_id: str) -> tuple[int, dict[str, Any]]:
             "reason_code": "application_launch_failed",
             "execution": "attempted",
         }
+    attestation = _attest_launched_process(process, candidate)
+    if attestation is None:
+        _cleanup_unattested_process(process)
+        return 409, {
+            "status": "error",
+            "application": application_id,
+            "error": "application_launch_unattested",
+            "reason_code": "application_launch_unattested",
+            "execution": "attempted",
+            "ownership_state": "unverified",
+        }
+    record = _OwnedAiriInstance(
+        instance_id=_new_airi_instance_id(),
+        pid=attestation.pid,
+        creation_time=attestation.creation_time,
+        executable_fingerprint=candidate.fingerprint,
+        candidate_source=candidate.source,
+        parent_pid=attestation.parent_pid,
+        lineage=attestation.lineage,
+        launch_time_ns=time.time_ns(),
+        session_id=_airi_session_id,
+        process=process,
+        attestation=attestation,
+        candidate=candidate,
+    )
+    if not _store_owned_airi_instance(record):
+        _cleanup_unattested_process(process)
+        return 500, {
+            "status": "error",
+            "application": application_id,
+            "error": "application_ownership_persist_failed",
+            "reason_code": "application_ownership_persist_failed",
+            "execution": "attempted",
+        }
     return 202, {
         "status": "launching",
         "application": application_id,
         "pid": pid,
+        "launch_instance_id": record.instance_id,
+        "owned_instance": _public_owned_instance(record),
         "message": "Ứng dụng allowlist đã được xác minh và đang khởi chạy.",
+    }
+
+
+def close(application_id: str, launch_instance_id: str) -> tuple[int, dict[str, Any]]:
+    """Close one Hub-owned AIRI process after exact re-attestation."""
+
+    if not isinstance(application_id, str) or not APPLICATION_ID.fullmatch(application_id):
+        return 404, {"status": "error", "application": "unknown", "error": "application_unknown"}
+    if not isinstance(launch_instance_id, str) or not _AIRI_INSTANCE_ID_RE.fullmatch(launch_instance_id):
+        return 400, {
+            "status": "error",
+            "application": application_id,
+            "error": "invalid_launch_instance_id",
+            "reason_code": "invalid_launch_instance_id",
+            "execution": "not_run",
+        }
+    state = _read_registry_state()
+    entries = _registry_entries(state)
+    discovery, _provenance, _matching = _discover_application(application_id, state=state, entries=entries)
+    if discovery.state == DISCOVERY_AMBIGUOUS:
+        return 409, {
+            "status": "ambiguous",
+            "application": application_id,
+            "error": "application_ambiguous",
+            "reason_code": discovery.reason_code,
+            "execution": "not_run",
+        }
+    if discovery.candidate is None:
+        return 503, {
+            "status": "unavailable",
+            "application": application_id,
+            "error": "application_unavailable",
+            "reason_code": discovery.reason_code,
+            "execution": "not_run",
+        }
+    record = _lookup_owned_airi_instance(launch_instance_id)
+    if record is None:
+        return 404, {
+            "status": "not_found",
+            "application": application_id,
+            "error": "owned_instance_not_found",
+            "reason_code": "owned_instance_not_found",
+            "execution": "not_run",
+        }
+    valid, candidate, attestation, code = _reattest_owned_instance(record, discovery)
+    if not valid:
+        return 409, {
+            "status": "not_verified",
+            "application": application_id,
+            "error": "owned_instance_not_verified",
+            "reason_code": code,
+            "launch_instance_id": launch_instance_id,
+            "execution": "not_run",
+        }
+    record.candidate = candidate
+    record.attestation = attestation
+    graceful_requested = _request_graceful_close(record)
+    if _wait_for_graceful_exit(record, discovery):
+        removed = _remove_owned_airi_instance(launch_instance_id)
+        if not removed:
+            return 500, {
+                "status": "error",
+                "application": application_id,
+                "error": "application_ownership_persist_failed",
+                "reason_code": "application_ownership_persist_failed",
+                "launch_instance_id": launch_instance_id,
+                "execution": "completed",
+            }
+        return 200, {
+            "status": "closed",
+            "application": application_id,
+            "launch_instance_id": launch_instance_id,
+            "close_mode": "graceful" if graceful_requested else "already_exited",
+            "execution": "completed",
+            "message": "AIRI do Hub quản lý đã được đóng.",
+        }
+
+    # A graceful request timed out.  Re-attest immediately before the exact
+    # bounded termination so PID reuse, image replacement, or lineage drift
+    # can never turn the fallback into a name-based kill.
+    valid, candidate, attestation, code = _reattest_owned_instance(record, discovery)
+    if not valid:
+        return 409, {
+            "status": "not_verified",
+            "application": application_id,
+            "error": "owned_instance_not_verified",
+            "reason_code": code,
+            "launch_instance_id": launch_instance_id,
+            "execution": "attempted",
+        }
+    record.candidate = candidate
+    record.attestation = attestation
+    if not _bounded_terminate_owned(record) or not _exact_process_is_gone(record):
+        return 409, {
+            "status": "error",
+            "application": application_id,
+            "error": "application_close_failed",
+            "reason_code": "application_close_failed",
+            "launch_instance_id": launch_instance_id,
+            "execution": "attempted",
+        }
+    removed = _remove_owned_airi_instance(launch_instance_id)
+    if not removed:
+        return 500, {
+            "status": "error",
+            "application": application_id,
+            "error": "application_ownership_persist_failed",
+            "reason_code": "application_ownership_persist_failed",
+            "launch_instance_id": launch_instance_id,
+            "execution": "completed",
+        }
+    return 200, {
+        "status": "closed",
+        "application": application_id,
+        "launch_instance_id": launch_instance_id,
+        "close_mode": "bounded_terminate",
+        "execution": "completed",
+        "message": "AIRI do Hub quản lý không tự thoát; đã dừng đúng PID đã tái xác minh.",
     }
 
 
@@ -1073,5 +1845,6 @@ __all__ = [
     "APPLICATION_REGISTRY_SCHEMA_VERSION",
     "application",
     "applications",
+    "close",
     "launch",
 ]

@@ -27,7 +27,7 @@ from src.app.readiness import record_frontend_signal
 from src.services.image_mask_studio import StudioConflictError, image_mask_studio
 from src.services.job_manager.manager import job_manager
 from src.services.project_manager import project_manager
-from src.services.runtime_registry import applications, launch
+from src.services.runtime_registry import applications, close, launch
 from src.services.storage_manager.overview import cancel_storage_scan, dashboard_volume_snapshot, start_storage_scan, storage_scan_snapshot
 from src.shared.paths.registry import APP_ROOT, ROOT
 from src.shared.version import PRODUCT_VERSION
@@ -308,6 +308,7 @@ def _api_context() -> ApiContext:
             "cancel_storage_scan": cancel_storage_scan,
             "applications": applications,
             "launch_application": launch,
+            "close_application": close,
             "workflow_library_payload": _workflow_library_payload,
             "comfy_health": lambda: __import__("src.modules.image_generation.backend.comfyui", fromlist=["health"]).health(),
             "comfy_start": lambda: __import__("src.modules.image_generation.backend.comfyui", fromlist=["start_advanced"]).start_advanced(),

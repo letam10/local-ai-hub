@@ -31,7 +31,7 @@ rules:
   - id: no-global-scan
     text: Model/runtime discovery is bounded to configured roots and known catalog leaves; no drive-wide scan is allowed.
   - id: application-launch-identity-boundary
-    text: Managed application launch accepts only an application ID, resolves exact local/Windows registry targets, verifies product/publisher/reparse safety and fingerprint again before Popen, and never exposes a path or command line.
+    text: Managed application launch accepts only an application ID, resolves exact local/Windows registry targets, verifies product/publisher/reparse safety and fingerprint again before Popen, attests PID/creation-time/parent lineage before claiming ownership, closes only an exact opaque launch instance after re-attestation, and never exposes a path or command line.
   - id: final-catalog-disposition
     text: A catalog source is not downloadable unless its explicit disposition and pinned source policy allow it.
   - id: no-fake-operational

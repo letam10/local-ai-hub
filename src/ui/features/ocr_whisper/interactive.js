@@ -28,6 +28,9 @@ const createOcrState = (initial = {}) => ({
   sourceArtifact: initial.sourceArtifact || null,
   localPreviewUrl: safePreviewUrl(initial.localPreviewUrl),
   sourceError: "",
+  settingsExpanded: initial.settingsExpanded === true,
+  previewGeneration: Number.isInteger(initial.previewGeneration) && initial.previewGeneration >= 0 ? initial.previewGeneration : 0,
+  previewState: ["empty", "loading", "loaded", "error"].includes(initial.previewState) ? initial.previewState : "empty",
   job: initial.job && typeof initial.job === "object" ? initial.job : null,
   staleJob: initial.staleJob && typeof initial.staleJob === "object" ? initial.staleJob : null,
 });
@@ -42,6 +45,9 @@ const createWhisperState = (initial = {}) => ({
   sourceArtifact: initial.sourceArtifact || null,
   localPreviewUrl: safePreviewUrl(initial.localPreviewUrl),
   sourceError: "",
+  settingsExpanded: initial.settingsExpanded === true,
+  previewGeneration: Number.isInteger(initial.previewGeneration) && initial.previewGeneration >= 0 ? initial.previewGeneration : 0,
+  previewState: ["empty", "loading", "loaded", "error"].includes(initial.previewState) ? initial.previewState : "empty",
   job: initial.job && typeof initial.job === "object" ? initial.job : null,
   staleJob: initial.staleJob && typeof initial.staleJob === "object" ? initial.staleJob : null,
 });
@@ -55,6 +61,9 @@ export const ensureM4State = (state) => {
   ocr.pdfPage = Math.max(1, Math.min(MAX_PDF_PAGE, Math.trunc(numberValue(ocr.pdfPage, 1))));
   ocr.pdfPageCount = Math.max(0, Math.min(MAX_PDF_PAGE, Math.trunc(numberValue(ocr.pdfPageCount))));
   ocr.region = Array.isArray(ocr.region) && ocr.region.length === 4 ? ocr.region.map((value) => clamp(value, 0, 1)) : null;
+  ocr.settingsExpanded = ocr.settingsExpanded === true;
+  ocr.previewGeneration = Number.isInteger(ocr.previewGeneration) && ocr.previewGeneration >= 0 ? ocr.previewGeneration : 0;
+  ocr.previewState = ["empty", "loading", "loaded", "error"].includes(ocr.previewState) ? ocr.previewState : "empty";
   ocr.job = ocr.job && typeof ocr.job === "object" ? ocr.job : null;
   ocr.staleJob = ocr.staleJob && typeof ocr.staleJob === "object" ? ocr.staleJob : null;
   const whisper = state.m4.whisper;
@@ -64,6 +73,9 @@ export const ensureM4State = (state) => {
   whisper.start = clamp(whisper.start, 0, whisper.duration || MAX_DURATION_SECONDS);
   whisper.end = clamp(whisper.end, whisper.start, whisper.duration || MAX_DURATION_SECONDS);
   if (whisper.end <= whisper.start) whisper.end = Math.min(MAX_DURATION_SECONDS, whisper.start + 0.1);
+  whisper.settingsExpanded = whisper.settingsExpanded === true;
+  whisper.previewGeneration = Number.isInteger(whisper.previewGeneration) && whisper.previewGeneration >= 0 ? whisper.previewGeneration : 0;
+  whisper.previewState = ["empty", "loading", "loaded", "error"].includes(whisper.previewState) ? whisper.previewState : "empty";
   whisper.job = whisper.job && typeof whisper.job === "object" ? whisper.job : null;
   whisper.staleJob = whisper.staleJob && typeof whisper.staleJob === "object" ? whisper.staleJob : null;
   return state.m4;
@@ -131,9 +143,37 @@ const actualMediaRect = (stage, media) => {
 
 const activeWhisperMedia = (workspace) => workspace.querySelector("[data-m4-whisper-audio]:not([hidden]), [data-m4-whisper-video]:not([hidden])");
 
+const syncM4CommandStrip = (workspace, model) => {
+  const source = sourceFor(model);
+  const sourceLabel = workspace.querySelector("[data-m4-source-label]");
+  if (sourceLabel) sourceLabel.textContent = source.name || "Chưa chọn tệp";
+  const settings = workspace.querySelector("[data-m4-settings-toggle]");
+  const panel = workspace.querySelector("[data-m4-settings]");
+  if (settings && panel) {
+    const expanded = model.settingsExpanded === true;
+    panel.hidden = !expanded;
+    settings.setAttribute("aria-expanded", String(expanded));
+    settings.textContent = expanded ? "Thu gọn thiết lập" : "Thiết lập";
+  }
+};
+
+const syncM4PreviewMessages = (workspace, model, { hasSource = false, supported = false } = {}) => {
+  const previewState = hasSource ? (model.previewState || "loading") : "empty";
+  const loading = workspace.querySelector("[data-m4-preview-loading]");
+  if (loading) loading.hidden = !supported || previewState !== "loading" || Boolean(model.sourceError);
+  const error = workspace.querySelector("[data-m4-preview-error]");
+  const message = model.sourceError || (hasSource && !supported ? "Định dạng này không được preview trong workspace." : "");
+  if (error) error.hidden = !message;
+  const errorText = workspace.querySelector("[data-m4-preview-error-text]");
+  if (errorText && message) errorText.textContent = message;
+};
+
 const syncOcrDom = (workspace, model) => {
   const source = sourceFor(model);
+  if (source.url && model.previewState === "empty") model.previewState = "loading";
+  if (!source.url) model.previewState = "empty";
   updateFileControl(workspace, source);
+  syncM4CommandStrip(workspace, model);
   const isPdf = source.mediaType === "application/pdf" || /\.pdf$/i.test(source.name);
   const ocrResult = model.job?.result?.ocr_result || model.job?.result?.ocr;
   const resultPages = Array.isArray(ocrResult?.pages) ? ocrResult.pages : [];
@@ -143,11 +183,15 @@ const syncOcrDom = (workspace, model) => {
   const hasSupportedSource = Boolean(source.url) && (isPdf || source.mediaType.startsWith("image/"));
   if (image) {
     image.hidden = !source.url || isPdf || !source.mediaType.startsWith("image/");
+    image.dataset.previewGeneration = String(model.previewGeneration || 0);
+    image.dataset.previewSource = source.url;
     if (source.url && !isPdf && image.src !== source.url) image.src = source.url;
     if (source.name) image.alt = `Xem trước ${source.name}`;
   }
   if (pdf) {
     pdf.hidden = !source.url || !isPdf;
+    pdf.dataset.previewGeneration = String(model.previewGeneration || 0);
+    pdf.dataset.previewSource = source.url;
     if (source.url && isPdf) {
       const page = Math.max(1, Math.min(MAX_PDF_PAGE, model.pdfPage));
       const separator = source.url.includes("#") ? "&" : "#";
@@ -156,7 +200,8 @@ const syncOcrDom = (workspace, model) => {
     }
   }
   const empty = workspace.querySelector("[data-m4-media-empty]");
-  if (empty) empty.hidden = hasSupportedSource;
+  if (empty) empty.hidden = hasSupportedSource && (model.previewState || "loading") !== "empty";
+  syncM4PreviewMessages(workspace, model, { hasSource: Boolean(source.url), supported: hasSupportedSource });
   const region = workspace.querySelector("[data-ocr-region]");
   const activeRegion = model.regionDraft || model.region;
   const stage = workspace.querySelector("[data-m4-ocr-stage]");
@@ -225,7 +270,10 @@ const timeLabel = (seconds) => {
 
 const syncWhisperDom = (workspace, model) => {
   const source = sourceFor(model);
+  if (source.url && model.previewState === "empty") model.previewState = "loading";
+  if (!source.url) model.previewState = "empty";
   updateFileControl(workspace, source);
+  syncM4CommandStrip(workspace, model);
   const isVideo = source.mediaType.startsWith("video/") || /\.(mp4|webm|mov|mkv)$/i.test(source.name);
   const audio = workspace.querySelector("[data-m4-whisper-audio]");
   const video = workspace.querySelector("[data-m4-whisper-video]");
@@ -233,25 +281,33 @@ const syncWhisperDom = (workspace, model) => {
   if (audio) audio.hidden = !source.url || isVideo;
   if (video) video.hidden = !source.url || !isVideo;
   if (media) {
+    media.dataset.previewGeneration = String(model.previewGeneration || 0);
+    media.dataset.previewSource = source.url;
     if (source.url && media.src !== source.url) {
       media.src = source.url;
       media.load?.();
     }
   }
   const empty = workspace.querySelector("[data-m4-media-empty]");
-  if (empty) empty.hidden = Boolean(source.url && (isVideo || source.mediaType.startsWith("audio/")));
+  const supported = Boolean(source.url && (isVideo || source.mediaType.startsWith("audio/")));
+  if (empty) empty.hidden = supported && (model.previewState || "loading") !== "empty";
+  syncM4PreviewMessages(workspace, model, { hasSource: Boolean(source.url), supported });
   const duration = model.duration > 0 ? model.duration : MAX_DURATION_SECONDS;
   const current = workspace.querySelector("[data-whisper-current]");
   const startRange = workspace.querySelector("[data-whisper-start-range]");
   const endRange = workspace.querySelector("[data-whisper-end-range]");
   const startNumber = workspace.querySelector("[data-whisper-start-number]");
   const endNumber = workspace.querySelector("[data-whisper-end-number]");
+  const submitStart = workspace.querySelector("[data-whisper-submit-start]");
+  const submitEnd = workspace.querySelector("[data-whisper-submit-end]");
   [current, startRange, endRange].forEach((input) => { if (input) input.max = String(duration); });
   if (current) current.value = String(Math.min(model.currentTime, duration));
   if (startRange) startRange.value = String(Math.min(model.start, duration));
   if (endRange) endRange.value = String(Math.min(model.end, duration));
   if (startNumber) startNumber.value = String(Number(model.start.toFixed(2)));
   if (endNumber) endNumber.value = String(Number(model.end.toFixed(2)));
+  if (submitStart) submitStart.value = String(Number(model.start.toFixed(6)));
+  if (submitEnd) submitEnd.value = String(Number(model.end.toFixed(6)));
   const currentLabel = workspace.querySelector("[data-whisper-current-time]");
   const durationLabel = workspace.querySelector("[data-whisper-duration]");
   if (currentLabel) currentLabel.textContent = timeLabel(model.currentTime);
@@ -289,6 +345,8 @@ export const rememberM4FileSelection = (input, state) => {
   model.sourceArtifact = null;
   model.localPreviewUrl = objectUrl;
   model.sourceError = "";
+  model.previewGeneration = Number(model.previewGeneration || 0) + 1;
+  model.previewState = "loading";
   if (key === "ocr") {
     model.resultTab = "text";
     model.pdfPage = 1;
@@ -319,6 +377,9 @@ export const setM4UploadedArtifact = (workspace, state, artifact) => {
     media_type: artifact.media_type,
     url: artifact.url,
   };
+  model.sourceError = "";
+  model.previewGeneration = Number(model.previewGeneration || 0) + 1;
+  model.previewState = "loading";
   const input = workspace.querySelector("input[data-m4-source-input], input[data-asset-key]");
   if (input && typeof artifact.id === "string") input.dataset.uploadedArtifactId = artifact.id;
   syncM4WorkspaceDom(workspace, state);
@@ -341,6 +402,13 @@ export const mountM4InteractiveWorkspaces = (root, state, callbacks = {}) => {
     const model = modelFor(state, key);
     syncM4WorkspaceDom(workspace, state);
     workspace.addEventListener("click", (event) => {
+      const settingsToggle = event.target.closest("[data-m4-settings-toggle]");
+      if (settingsToggle && workspace.contains(settingsToggle)) {
+        model.settingsExpanded = !model.settingsExpanded;
+        syncM4WorkspaceDom(workspace, state);
+        callbacks.onStateChange?.(workspace.dataset.m4Workspace, state);
+        return;
+      }
       const resultTab = event.target.closest("[data-m4-result-tab]");
       if (resultTab && workspace.contains(resultTab)) {
         model.resultTab = resultTab.dataset.m4ResultTab || model.resultTab;
@@ -395,6 +463,9 @@ export const mountM4InteractiveWorkspaces = (root, state, callbacks = {}) => {
     const mediaElements = [...workspace.querySelectorAll("[data-m4-whisper-audio], [data-m4-whisper-video]")];
     mediaElements.forEach((media) => {
       ["loadedmetadata", "durationchange"].forEach((eventName) => media.addEventListener(eventName, () => {
+        if (media.dataset.previewGeneration !== String(model.previewGeneration || 0)) return;
+        model.previewState = "loaded";
+        model.sourceError = "";
         if (media !== activeWhisperMedia(workspace)) return;
         if (Number.isFinite(media.duration) && media.duration > 0) {
           model.duration = Math.min(MAX_DURATION_SECONDS, media.duration);
@@ -403,6 +474,12 @@ export const mountM4InteractiveWorkspaces = (root, state, callbacks = {}) => {
           syncWhisperDom(workspace, model);
         }
       }, { signal }));
+      media.addEventListener("error", () => {
+        if (media.dataset.previewGeneration !== String(model.previewGeneration || 0)) return;
+        model.previewState = "error";
+        model.sourceError = "Artifact hoặc media không thể tải trong player hiện tại.";
+        syncWhisperDom(workspace, model);
+      }, { signal });
       media.addEventListener("timeupdate", () => {
         if (media !== activeWhisperMedia(workspace)) return;
         if (Number.isFinite(media.currentTime)) {
@@ -419,7 +496,31 @@ export const mountM4InteractiveWorkspaces = (root, state, callbacks = {}) => {
     const stage = workspace.querySelector("[data-m4-ocr-stage]");
     const image = workspace.querySelector("[data-m4-ocr-image]");
     if (key === "ocr" && stage && image) {
-      ["load", "error"].forEach((eventName) => image.addEventListener(eventName, () => syncOcrDom(workspace, model), { signal }));
+      image.addEventListener("load", () => {
+        if (image.dataset.previewGeneration !== String(model.previewGeneration || 0)) return;
+        model.previewState = "loaded";
+        model.sourceError = "";
+        syncOcrDom(workspace, model);
+      }, { signal });
+      image.addEventListener("error", () => {
+        if (image.dataset.previewGeneration !== String(model.previewGeneration || 0)) return;
+        model.previewState = "error";
+        model.sourceError = "Artifact hoặc ảnh không thể tải trong preview hiện tại.";
+        syncOcrDom(workspace, model);
+      }, { signal });
+      const pdf = workspace.querySelector("[data-m4-ocr-pdf]");
+      pdf?.addEventListener("load", () => {
+        if (pdf.dataset.previewGeneration !== String(model.previewGeneration || 0)) return;
+        model.previewState = "loaded";
+        model.sourceError = "";
+        syncOcrDom(workspace, model);
+      }, { signal });
+      pdf?.addEventListener("error", () => {
+        if (pdf.dataset.previewGeneration !== String(model.previewGeneration || 0)) return;
+        model.previewState = "error";
+        model.sourceError = "PDF không thể tải trong preview hiện tại.";
+        syncOcrDom(workspace, model);
+      }, { signal });
       stage.addEventListener("pointerdown", (event) => {
         if (event.button !== 0 || image.hidden || workspace.dataset.ocrRegionSupported !== "true") return;
         const draft = { start: normalizedPoint(event.clientX, event.clientY, image.getBoundingClientRect()) };

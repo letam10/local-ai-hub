@@ -88,6 +88,7 @@ import {
   importProject,
   importRecipePack,
   importImageMask,
+  closeApplication,
   launchApplication,
   openArtifact,
   resumeJob,
@@ -740,6 +741,35 @@ const renderApiState = () => {
 const TOOL_EXECUTION_READY = new Set(["operational"]);
 const applyToolActionGates = () => {
   const tools = new Map((Array.isArray(state.tools) ? state.tools : []).map((item) => [String(item?.name || ""), item]));
+  const gate = (button, form) => {
+    if (!form) {
+      button.disabled = true;
+      button.dataset.readinessGate = "true";
+      button.setAttribute("aria-disabled", "true");
+      button.title = "Chưa tìm thấy form thao tác an toàn.";
+      return;
+    }
+    let toolId = String(form.dataset.tool || "");
+    if (form.dataset.toolByField && form.dataset.toolMap) {
+      const control = form.elements?.[form.dataset.toolByField];
+      try { toolId = JSON.parse(form.dataset.toolMap)[control?.value] || toolId; } catch { /* keep the declared fallback */ }
+    }
+    const item = tools.get(toolId) || {};
+    const status = String(item.tool_status || item.status || "unavailable").toLowerCase();
+    const ready = TOOL_EXECUTION_READY.has(status);
+    const reason = String(item.reason || "Backend chưa có bằng chứng chạy an toàn trong snapshot hiện tại.").slice(0, 240);
+    if (!ready) {
+      button.disabled = true;
+      button.dataset.readinessGate = "true";
+      button.setAttribute("aria-disabled", "true");
+      button.title = reason;
+    } else if (button.dataset.readinessGate === "true") {
+      button.disabled = false;
+      delete button.dataset.readinessGate;
+      button.removeAttribute("aria-disabled");
+      button.removeAttribute("title");
+    }
+  };
   view.querySelectorAll("form[data-job-form]").forEach((form) => {
     let toolId = String(form.dataset.tool || "");
     if (form.dataset.toolByField && form.dataset.toolMap) {
@@ -753,18 +783,11 @@ const applyToolActionGates = () => {
     form.dataset.readinessStatus = status;
     form.querySelectorAll("button[type=submit]").forEach((button) => {
       if (button.hasAttribute("disabled") && button.dataset.readinessGate !== "true") return;
-      if (!ready) {
-        button.disabled = true;
-        button.dataset.readinessGate = "true";
-        button.setAttribute("aria-disabled", "true");
-        button.title = reason;
-      } else if (button.dataset.readinessGate === "true") {
-        button.disabled = false;
-        delete button.dataset.readinessGate;
-        button.removeAttribute("aria-disabled");
-        button.removeAttribute("title");
-      }
+      gate(button, form);
     });
+  });
+  view.querySelectorAll("[data-m3-primary-action], [data-m4-primary-action]").forEach((button) => {
+    gate(button, document.getElementById(button.getAttribute("form") || ""));
   });
 };
 
@@ -1939,7 +1962,8 @@ document.addEventListener("submit", async (event) => {
   const form = event.target.closest("form[data-job-form]");
   if (!form) return;
   event.preventDefault();
-  const submit = form.querySelector("button[type=submit]"); if (submit) submit.disabled = true;
+  const submitButtons = [...view.querySelectorAll("button[type=submit]")].filter((button) => button.form === form || button.getAttribute("form") === form.id);
+  submitButtons.forEach((button) => { button.disabled = true; });
   inlineResult(form, "Đang tải input và tạo job…");
   try {
     const payload = await toPayload(form); const tool = toolForForm(form, payload); const result = await submitJob(tool, payload);
@@ -1959,7 +1983,7 @@ document.addEventListener("submit", async (event) => {
       inlineResult(form, `Đã tạo ${result.job?.id || "job"}. Theo dõi ở Jobs.`, "success"); showToast(`Đã thêm ${tool} vào hàng đợi Hub.`); await refreshFast({ quiet: true });
     }
   } catch (error) { inlineResult(form, error.message, "error"); showToast(error.message, "error"); }
-  finally { if (submit) submit.disabled = false; }
+  finally { submitButtons.forEach((button) => { button.disabled = false; }); applyToolActionGates(); }
 });
 
 document.addEventListener("click", async (event) => {
@@ -2831,6 +2855,7 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const launchButton = event.target.closest("[data-launch]");
+  const closeApplicationButton = event.target.closest("[data-close-application]");
   const refreshApplicationsButton = event.target.closest("[data-refresh-applications]");
   if (refreshApplicationsButton) {
     refreshApplicationsButton.disabled = true;
@@ -2848,9 +2873,33 @@ document.addEventListener("click", async (event) => {
   }
   if (launchButton) {
     launchButton.disabled = true;
-    try { const result = await launchApplication(launchButton.dataset.launch); showToast(`${result.application || "AIRI"}: đang khởi chạy.`); }
+    try {
+      const result = await launchApplication(launchButton.dataset.launch);
+      const refreshed = await Promise.allSettled([getApplications(), getExternalIntegrationsV2()]);
+      if (refreshed[0].status === "fulfilled") state.applications = refreshed[0].value?.applications || state.applications;
+      if (refreshed[1].status === "fulfilled") state.externalIntegrationsV2 = refreshed[1].value || state.externalIntegrationsV2;
+      render();
+      showToast(result.status === "already_running" ? "AIRI đã được Hub quản lý và đang chạy." : `${result.application || "AIRI"}: đang khởi chạy.`);
+    }
     catch (error) { showToast(`Không thể mở AIRI: ${error.message}`, "error"); }
     finally { launchButton.disabled = false; }
+    return;
+  }
+  if (closeApplicationButton) {
+    closeApplicationButton.disabled = true;
+    try {
+      const result = await closeApplication(
+        closeApplicationButton.dataset.closeApplication || "",
+        closeApplicationButton.dataset.launchInstanceId || "",
+      );
+      const refreshed = await Promise.allSettled([getApplications(), getExternalIntegrationsV2()]);
+      if (refreshed[0].status === "fulfilled") state.applications = refreshed[0].value?.applications || state.applications;
+      if (refreshed[1].status === "fulfilled") state.externalIntegrationsV2 = refreshed[1].value || state.externalIntegrationsV2;
+      render();
+      showToast(result.message || "AIRI đã được đóng.", "success");
+    } catch (error) {
+      showToast(error?.message || "Không thể đóng AIRI.", "error");
+    } finally { closeApplicationButton.disabled = false; }
     return;
   }
   const workspaceCancel = event.target.closest("[data-cancel-workspace-job]");

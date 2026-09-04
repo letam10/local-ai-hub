@@ -128,6 +128,7 @@ export const cancelJob = (id) => request(`/jobs/${encodeURIComponent(id)}/cancel
 export const resumeJob = (id) => request(`/jobs/${encodeURIComponent(id)}/resume`, { method: "POST" });
 export const openArtifact = (id) => request(`/api/artifacts/${encodeURIComponent(id)}/open`, { method: "POST" });
 export const launchApplication = (id) => request(`/api/applications/${encodeURIComponent(id)}/launch`, { method: "POST" });
+export const closeApplication = (id, instanceId) => request(`/api/applications/${encodeURIComponent(id)}/instances/${encodeURIComponent(instanceId)}/close`, { method: "POST" });
 export const closeOwnedBackends = () => request("/api/lifecycle/close", { method: "POST" });
 export const scanStorage = () => request("/api/storage/scan", { method: "POST" });
 export const getStorageScan = () => request("/api/storage/scan");

@@ -2473,6 +2473,26 @@
       "transport_class": "JSON"
     },
     {
+      "route_id": "applications.close",
+      "method": "POST",
+      "path": "/api/applications/{application_id}/instances/{instance_id}/close",
+      "domain": "applications",
+      "owner": "src/services/api/routes/compatibility.py",
+      "service": "applications",
+      "streaming": false,
+      "body_limit": "json_default",
+      "status_codes": [
+        200,
+        400,
+        404,
+        409,
+        500,
+        503
+      ],
+      "transport": "router",
+      "transport_class": "JSON"
+    },
+    {
       "route_id": "applications.launch",
       "method": "POST",
       "path": "/api/applications/{application_id}/launch",

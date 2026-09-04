@@ -507,7 +507,7 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         "storage_summary": get("storage_summary"), "dashboard_volume_snapshot": get("dashboard_volume_snapshot"),
         "start_storage_scan": get("start_storage_scan"), "storage_scan_snapshot": get("storage_scan_snapshot"),
         "cancel_storage_scan": get("cancel_storage_scan"),
-        "applications": get("applications"), "launch_application": get("launch_application"),
+        "applications": get("applications"), "launch_application": get("launch_application"), "close_application": get("close_application"),
         "workflow_library_payload": get("workflow_library_payload"),
         "comfy_health": get("comfy_health"), "comfy_start": get("comfy_start"),
         "comfy_workflows": get("comfy_workflows"), "comfy_workflow": get("comfy_workflow"), "comfy_save_workflow": get("comfy_save_workflow"),
