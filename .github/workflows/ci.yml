@@ -89,10 +89,28 @@ jobs:
           $info = [ordered]@{
             schema_version = "local-ai-hub-stable-launcher-build.v1"
             source_commit = (git rev-parse HEAD).Trim()
+            workflow_run_id = [int]$env:GITHUB_RUN_ID
             format = "onedir"
             executable_sha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
           }
-          $info | ConvertTo-Json -Compress | Set-Content -LiteralPath "dist/stable-launcher/launcher-build.json" -Encoding utf8
+          $rows = @(
+            Get-ChildItem -LiteralPath $bundle -File -Recurse | Sort-Object FullName | ForEach-Object {
+              $relative = $_.FullName.Substring($bundle.Length + 1).Replace('\', '/')
+              [ordered]@{
+                name = $relative
+                size = [int64]$_.Length
+                sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              }
+            }
+          )
+          $info.files = $rows
+          $info.file_count = $rows.Count
+          $info.total_bytes = ($rows | Measure-Object -Property size -Sum).Sum
+          $canonical = $rows | ConvertTo-Json -Compress -Depth 6
+          $bytes = [Text.Encoding]::UTF8.GetBytes($canonical + "`n")
+          $sha = [Security.Cryptography.SHA256]::Create()
+          $info.tree_manifest_sha256 = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+          $info | ConvertTo-Json -Compress -Depth 8 | Set-Content -LiteralPath "dist/stable-launcher/launcher-build.json" -Encoding utf8
           Compress-Archive -Path "$bundle/*" -DestinationPath "dist/LocalAIHub-stable-launcher-onedir.zip" -CompressionLevel Optimal
       - name: Upload stable launcher artifact
         uses: actions/upload-artifact@v4
@@ -122,6 +140,41 @@ jobs:
       - name: Build deterministic APP_ONLY payload
         run: python scripts/build_main_update.py --output dist/main-update
       - name: Upload main update artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-ai-hub-app-payload
+          path: |
+            dist/main-update/LocalAIHub-main-update.zip
+            dist/main-update/update-manifest.json
+            dist/main-update/update-contract.json
+            dist/main-update/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  assemble-main-update:
+    name: Assemble same-run composite product update
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build-main-update, build-stable-launcher-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Check out exact validated main source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download exact app payload artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: local-ai-hub-app-payload
+          path: dist/app-payload
+      - name: Download exact Windows launcher artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: local-ai-hub-stable-launcher-windows
+          path: dist/stable-launcher
+      - name: Assemble composite product artifact
+        run: python scripts/assemble_product_update.py --app-artifact-dir dist/app-payload --launcher-artifact-dir dist/stable-launcher --output dist/main-update --workflow-run-id "${{ github.run_id }}"
+      - name: Upload composite product artifact
         uses: actions/upload-artifact@v4
         with:
           name: local-ai-hub-main-update

@@ -229,19 +229,19 @@ def load_current_pointer(app_root: Path) -> dict[str, Any]:
     return value
 
 
-def resolve_launch_plan(app_root: Path, *, allow_test_root: bool = False) -> LaunchPlan:
+def resolve_launch_plan(app_root: Path, *, allow_test_root: bool = False, version: str | None = None) -> LaunchPlan:
     root = app_root.absolute()
     installation = load_installation_config(root, allow_test_root=allow_test_root)
     product = load_product_manifest(root)
-    pointer = load_current_pointer(root)
-    version = str(pointer["version"])
-    payload_root = _under(root, str(pointer["payload_relative"]))
+    pointer = load_current_pointer(root) if version is None else None
+    selected_version = str(pointer["version"]) if pointer is not None else _safe_version(version)
+    payload_root = _under(root, f"versions/{selected_version}")
     manifest_path = _under(payload_root, "manifest.json", require_file=True)
-    if _sha256(manifest_path) != pointer["manifest_sha256"]:
+    if pointer is not None and _sha256(manifest_path) != pointer["manifest_sha256"]:
         raise StableShellError("CURRENT_MANIFEST_HASH_MISMATCH")
     manifest = _load_json(manifest_path)
     expected = {"schema_version", "product_id", "version", "app_relative", "runtime_relative", "entrypoint"}
-    if set(manifest) != expected or manifest.get("schema_version") != VERSION_MANIFEST_SCHEMA or manifest.get("product_id") != PRODUCT_ID or manifest.get("version") != version:
+    if set(manifest) != expected or manifest.get("schema_version") != VERSION_MANIFEST_SCHEMA or manifest.get("product_id") != PRODUCT_ID or manifest.get("version") != selected_version:
         raise StableShellError("VERSION_MANIFEST_INVALID")
     if manifest.get("entrypoint") != "src.app.launcher":
         raise StableShellError("ENTRYPOINT_INVALID")
@@ -273,11 +273,19 @@ def resolve_launch_plan(app_root: Path, *, allow_test_root: bool = False) -> Lau
         source_commit = build.get("source_commit") if isinstance(build, dict) else None
         if isinstance(source_commit, str) and re.fullmatch(r"[0-9a-f]{40}", source_commit) and source_commit == source_commit.lower():
             expected_payload = f"main-{source_commit[:12]}"
-            if version == expected_payload:
-                environment.update({"LOCALAIHUB_BUILD_SHA": source_commit, "LOCALAIHUB_BUILD_PAYLOAD": version})
+            if selected_version == expected_payload:
+                environment.update({"LOCALAIHUB_BUILD_SHA": source_commit, "LOCALAIHUB_BUILD_PAYLOAD": selected_version})
     except (OSError, StableShellError, UnicodeError, json.JSONDecodeError):
         pass
-    return LaunchPlan(root, installation.data_root, version, payload_root, app_payload, runtime_pythonw, (str(runtime_pythonw), "-m", "src.app.launcher"), environment)
+    return LaunchPlan(root, installation.data_root, selected_version, payload_root, app_payload, runtime_pythonw, (str(runtime_pythonw), "-m", "src.app.launcher"), environment)
+
+
+def resolve_payload_launch_plan(app_root: Path, version: str, *, allow_test_root: bool = False) -> LaunchPlan:
+    """Resolve a verified side-by-side payload without changing ``current``."""
+
+    if not isinstance(version, str):
+        raise StableShellError("VERSION_INVALID")
+    return resolve_launch_plan(app_root, allow_test_root=allow_test_root, version=version)
 
 
 def resolve_verified_running_plan(app_root: Path, running_app_root: Path, *, allow_test_root: bool = False) -> LaunchPlan:
@@ -374,5 +382,5 @@ def atomic_activate_pointer(app_root: Path, *, version: str, manifest_sha256: st
 __all__ = [
     "APP_USER_MODEL_ID", "CURRENT_NAME", "ICON_NAME", "InstallationConfig", "LaunchPlan",
     "StableShellError", "atomic_activate_pointer", "load_current_pointer", "load_installation_config",
-    "load_product_manifest", "resolve_launch_plan", "resolve_verified_running_plan",
+    "load_product_manifest", "resolve_launch_plan", "resolve_payload_launch_plan", "resolve_verified_running_plan",
 ]

@@ -27,6 +27,11 @@ from src.app.stable_shell import (
     load_current_pointer,
     resolve_launch_plan,
 )
+from src.app.launcher_migration import (
+    LauncherMigrationError,
+    activate_launcher_bundle,
+    restore_launcher_bundle,
+)
 from src.services.process_manager.managed import terminate_owned_process
 from src.services.app_update import _try_write_update_state, _update_serialization_lock, reason_code_for
 from src.shared.runtime_identity import API_PROTOCOL_VERSION, api_identity
@@ -35,6 +40,7 @@ from src.shared.version import PRODUCT_VERSION
 
 WATCHDOG_TIMEOUT_SECONDS = 30.0
 RESTART_SESSION_SCHEMA = "local-ai-hub-restart-session.v1"
+RESTART_TRANSACTION_SCHEMA = "local-ai-hub-restart-transaction.v1"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PAYLOAD_RE = re.compile(r"^main-[0-9a-f]{12}$")
 _TRANSACTION_RE = re.compile(r"^txn-[0-9a-f]{32}$")
@@ -142,6 +148,102 @@ def _session_port() -> int | None:
 
 def _pending_health_path(app_root: Path) -> Path:
     return app_root / "update-state" / "pending-health.json"
+
+
+def _restart_transaction_path(app_root: Path) -> Path:
+    return app_root / "update-state" / "restart-transaction.json"
+
+
+def _read_restart_transaction(app_root: Path) -> dict[str, object] | None:
+    path = _restart_transaction_path(app_root)
+    if not path.is_file() or path.is_symlink():
+        return None
+    value = _json(path, limit=128 * 1024)
+    required = {"schema_version", "transaction_id", "payload_id", "source_commit", "update_kind", "previous", "manifest_sha256"}
+    if set(value) - (required | {"workflow_run_id", "launcher_format", "launcher_executable_sha256", "launcher_tree_manifest_sha256", "launcher_file_count", "launcher_total_bytes", "status", "created_at"}) or not required.issubset(value):
+        raise StableShellError("RESTART_TRANSACTION_INVALID")
+    if value.get("schema_version") != RESTART_TRANSACTION_SCHEMA or value.get("update_kind") != "APP_AND_LAUNCHER":
+        raise StableShellError("RESTART_TRANSACTION_INVALID")
+    payload_id = value.get("payload_id")
+    source_commit = value.get("source_commit")
+    transaction_id = value.get("transaction_id")
+    if not isinstance(payload_id, str) or not _PAYLOAD_RE.fullmatch(payload_id) or not isinstance(source_commit, str) or not _SHA_RE.fullmatch(source_commit) or payload_id != f"main-{source_commit[:12]}" or not isinstance(transaction_id, str) or not _TRANSACTION_RE.fullmatch(transaction_id):
+        raise StableShellError("RESTART_TRANSACTION_INVALID")
+    if not isinstance(value.get("previous"), dict) or not isinstance(value.get("manifest_sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", str(value.get("manifest_sha256"))):
+        raise StableShellError("RESTART_TRANSACTION_INVALID")
+    return value
+
+
+def _atomic_restart_transaction_state(app_root: Path, value: dict[str, object]) -> None:
+    _atomic_json(_restart_transaction_path(app_root), value)
+
+
+def _activate_deferred_product(app_root: Path, transaction: dict[str, object]) -> bool:
+    """Switch the verified shell and pointer only after the old desktop exits."""
+
+    payload_id = str(transaction["payload_id"])
+    source_commit = str(transaction["source_commit"])
+    previous = transaction.get("previous")
+    if not isinstance(previous, dict):
+        raise StableShellError("RESTART_TRANSACTION_INVALID")
+    current = load_current_pointer(app_root)
+    if current != previous:
+        raise StableShellError("RESTART_CURRENT_POINTER_CHANGED")
+    payload_root = app_root / "versions" / payload_id
+    candidate_bundle = payload_root / "launcher" / "LocalAIHub"
+    activation = activate_launcher_bundle(
+        app_root,
+        candidate_bundle,
+        transaction_id=str(transaction["transaction_id"]),
+        payload_id=payload_id,
+        source_commit=source_commit,
+    )
+    try:
+        pointer = atomic_activate_pointer(app_root, version=payload_id, manifest_sha256=str(transaction["manifest_sha256"]))
+        _atomic_json(_pending_health_path(app_root), {
+            "schema_version": "local-ai-hub-pending-health.v1",
+            "payload_id": payload_id,
+            "source_commit": source_commit,
+            "previous": previous,
+            "transaction_id": str(transaction["transaction_id"]),
+            "launcher_format": activation.get("format", "onedir"),
+            "launcher_executable_sha256": activation.get("executable_sha256"),
+            "launcher_tree_manifest_sha256": activation.get("tree_manifest_sha256"),
+        })
+        _atomic_restart_transaction_state(app_root, {**transaction, "status": "pointer_activated"})
+        return pointer.get("version") == payload_id
+    except Exception:
+        try:
+            restore_launcher_bundle(app_root, transaction_id=str(transaction["transaction_id"]), _allow_state_status=True)
+        except Exception as rollback_error:
+            raise LauncherMigrationError("LAUNCHER_ROLLBACK_FAILED") from rollback_error
+        raise
+
+
+def _rollback_deferred_product(app_root: Path, transaction: dict[str, object] | None, *, reason: str) -> bool:
+    if not isinstance(transaction, dict):
+        return False
+    previous = transaction.get("previous")
+    if not isinstance(previous, dict):
+        return False
+    try:
+        current = load_current_pointer(app_root)
+        if current != previous:
+            atomic_activate_pointer(app_root, version=str(previous["version"]), manifest_sha256=str(previous["manifest_sha256"]))
+        transaction_id = transaction.get("transaction_id")
+        if isinstance(transaction_id, str) and (app_root / "update-state" / "launcher-rollback" / transaction_id).is_dir():
+            restore_launcher_bundle(app_root, transaction_id=transaction_id, _allow_state_status=True)
+        _atomic_json(app_root / "update-state" / "last-rollback.json", {
+            "schema_version": "local-ai-hub-pending-health.v1", "status": "rollback", "reason": reason, "payload_id": previous.get("version"),
+        })
+        for path in (_pending_health_path(app_root), _restart_transaction_path(app_root)):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        return True
+    except (OSError, StableShellError, ValueError, TypeError, json.JSONDecodeError):
+        return False
 
 
 def _target_identity(app_root: Path, *, require_build: bool = False) -> tuple[str, str | None, dict[str, str]]:
@@ -349,11 +451,15 @@ def run(*, app_root: Path, wait_pid: int, timeout_seconds: float = WATCHDOG_TIME
     if wait_pid and not _wait_for_pid_exit(wait_pid, deadline):
         rolled_back = _rollback_previous(app_root, reason="WATCHDOG_PARENT_TIMEOUT_ROLLBACK")
         return {"status": "rolled_back" if rolled_back else "failed", "code": "WATCHDOG_PARENT_TIMEOUT_ROLLBACK" if rolled_back else "WATCHDOG_PARENT_TIMEOUT"}
+    deferred: dict[str, object] | None = None
     try:
+        deferred = _read_restart_transaction(app_root)
+        if deferred is not None:
+            _activate_deferred_product(app_root, deferred)
         target_version, target_commit, target_identity = _target_identity(app_root, require_build=True)
         child = _launch_stable(app_root)
     except (OSError, StableShellError, ValueError, TypeError, json.JSONDecodeError) as exc:
-        rolled_back = _rollback_previous(app_root, reason="WATCHDOG_LAUNCH_FAILED_ROLLBACK")
+        rolled_back = _rollback_deferred_product(app_root, deferred, reason="WATCHDOG_LAUNCH_FAILED_ROLLBACK") if deferred is not None else _rollback_previous(app_root, reason="WATCHDOG_LAUNCH_FAILED_ROLLBACK")
         return {"status": "rolled_back" if rolled_back else "failed", "code": "WATCHDOG_LAUNCH_FAILED_ROLLBACK" if rolled_back else "WATCHDOG_LAUNCH_FAILED", "detail": type(exc).__name__}
     if _wait_for_target_health(app_root, version=target_version, source_commit=target_commit, expected=target_identity, deadline=deadline, process=child):
         session = _session_path()
@@ -371,6 +477,11 @@ def run(*, app_root: Path, wait_pid: int, timeout_seconds: float = WATCHDOG_TIME
             current_payload_id=target_version,
             candidate_payload_id=target_version,
         )
+        if deferred is not None:
+            try:
+                _restart_transaction_path(app_root).unlink()
+            except FileNotFoundError:
+                pass
         return {"status": "healthy", "payload_id": target_version, "source_commit": target_commit}
     # Preserve the distinction between an API that never became healthy and a
     # healthy API whose frontend handshake remained pending.  The normal
@@ -392,11 +503,12 @@ def run(*, app_root: Path, wait_pid: int, timeout_seconds: float = WATCHDOG_TIME
         terminate_owned_process(child)
     except Exception:
         pass
-    if not _rollback_previous(
+    rolled_back = _rollback_deferred_product(app_root, deferred, reason="WATCHDOG_POST_RESTART_HEALTH_FAILED") if deferred is not None else _rollback_previous(
         app_root,
         reason="WATCHDOG_POST_RESTART_HEALTH_FAILED",
         reason_code=candidate_failure_reason,
-    ):
+    )
+    if not rolled_back:
         return {"status": "failed", "code": "WATCHDOG_ROLLBACK_FAILED"}
     try:
         # The rollback relaunch targets the previous payload, so the candidate

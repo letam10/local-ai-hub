@@ -17,7 +17,7 @@ import secrets
 import subprocess
 from typing import Any
 
-from src.app.stable_shell import StableShellError, _is_reparse, resolve_launch_plan, resolve_verified_running_plan
+from src.app.stable_shell import StableShellError, _is_reparse, resolve_launch_plan, resolve_payload_launch_plan, resolve_verified_running_plan
 from src.services.app_update import AppUpdateError, app_update_service, reason_code_for, update_error_projection
 from src.services.process_manager.managed import terminate_owned_process
 
@@ -99,6 +99,7 @@ def _restart_after_update(self: Any) -> dict[str, object]:
         )
 
     committed = False
+    deferred_composite = staged.get("update_kind") == "APP_AND_LAUNCHER" and callable(getattr(service, "prepare_staged_restart", None))
     rollback_failed = False
     watchdog: subprocess.Popen[object] | None = None
     nonce = secrets.token_hex(16)
@@ -106,8 +107,8 @@ def _restart_after_update(self: Any) -> dict[str, object]:
         # The service revalidates the staged bytes and current pointer under a
         # cross-process lock.  Nothing changes in current.json before this
         # point, so a close veto leaves the running payload untouched.
-        commit = service.commit_staged_restart()
-        committed = commit.get("status") == "activated"
+        commit = service.prepare_staged_restart() if deferred_composite else service.commit_staged_restart()
+        committed = commit.get("status") in {"activated", "restart_prepared"}
         if not committed:
             raise AppUpdateError("UPDATE_COMMIT_FAILED")
         service.create_restart_session(payload_id=payload_id, source_commit=source_commit, nonce=nonce, parent_pid=os.getpid())
@@ -117,7 +118,7 @@ def _restart_after_update(self: Any) -> dict[str, object]:
         # before spawning the watchdog so the first update after the fix does
         # not fall back to the old payload's PyInstaller-stub watchdog.
         try:
-            candidate_plan = resolve_launch_plan(install_root)
+            candidate_plan = resolve_payload_launch_plan(install_root, payload_id) if deferred_composite else resolve_launch_plan(install_root)
         except (OSError, ValueError, StableShellError) as exc:
             raise AppUpdateError("CANDIDATE_LAUNCH_PLAN_INVALID") from exc
         if (
@@ -168,7 +169,10 @@ def _restart_after_update(self: Any) -> dict[str, object]:
                 pass
         if committed:
             try:
-                service.rollback_pending_restart(reason=getattr(exc, "code", "RESTART_TRANSACTION_FAILED"))
+                if deferred_composite and callable(getattr(service, "abort_restart_transaction", None)):
+                    service.abort_restart_transaction(reason=getattr(exc, "code", "RESTART_TRANSACTION_FAILED"))
+                else:
+                    service.rollback_pending_restart(reason=getattr(exc, "code", "RESTART_TRANSACTION_FAILED"))
             except Exception:
                 # Keep the original failure visible; the watchdog still has
                 # the pending marker if rollback itself needs manual review.

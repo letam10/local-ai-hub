@@ -38,6 +38,11 @@ from src.app.stable_shell import (
     load_current_pointer,
     resolve_launch_plan,
 )
+from src.app.launcher_migration import (
+    LauncherMigrationError,
+    launcher_projection,
+    launcher_tree_manifest,
+)
 from src.app.payload_bootstrap import api_server_command
 from src.shared.runtime_identity import API_PROTOCOL_VERSION, api_identity
 from src.shared.version import PRODUCT_VERSION
@@ -48,16 +53,20 @@ REPOSITORY = "letam10/local-ai-hub"
 WORKFLOW_FILE = "ci.yml"
 UPDATE_ARTIFACT_NAME = "local-ai-hub-main-update"
 UPDATE_SCHEMA = "local-ai-hub-main-update.v1"
+COMPOSITE_UPDATE_SCHEMA = "local-ai-hub-composite-update.v1"
 UPDATE_CONTRACT_SCHEMA = "local-ai-hub-update-contract.v1"
 UPDATE_CONTRACT_NAME = "update-contract.json"
 BUILD_INFO_SCHEMA = "local-ai-hub-build-info.v1"
 PENDING_HEALTH_SCHEMA = "local-ai-hub-pending-health.v1"
 STAGED_UPDATE_SCHEMA = "local-ai-hub-staged-update.v1"
 RESTART_SESSION_SCHEMA = "local-ai-hub-restart-session.v1"
+RESTART_TRANSACTION_SCHEMA = "local-ai-hub-restart-transaction.v1"
 RUNTIME_STRATEGY = "reuse-current"
 RUNTIME_STRATEGY_BUNDLED = "bundled"
 UPDATE_KIND_APP_ONLY = "APP_ONLY"
 UPDATE_KIND_FULL = "FULL"
+UPDATE_KIND_APP_AND_LAUNCHER = "APP_AND_LAUNCHER"
+PRODUCT_UPDATE_CONTRACT_SCHEMA = "local-ai-hub-product-update-contract.v1"
 RUNTIME_CONTRACT_BUNDLED = "bundled"
 RUNTIME_CONTRACT_REUSE_CURRENT = "reuse-current"
 MINIMUM_LAUNCHER_VERSION = "v8.0.1"
@@ -119,6 +128,7 @@ STABLE_UPDATE_REASON_CODES = frozenset({
     "rollback_unavailable",
     "state_unavailable",
     "update_failed",
+    "launcher_migration_required",
 })
 
 _ERROR_REASON_CODES = {
@@ -136,6 +146,14 @@ _ERROR_REASON_CODES = {
     "UPDATE_ARCHIVE_IDENTITY_INVALID": "artifact_identity_mismatch",
     "UPDATE_CONTRACT_INVALID": "artifact_identity_mismatch",
     "UPDATE_KIND_UNSUPPORTED": "artifact_identity_mismatch",
+    "UPDATE_RUN_MISMATCH": "artifact_identity_mismatch",
+    "UPDATE_PRODUCT_CONTRACT_INVALID": "artifact_identity_mismatch",
+    "UPDATE_LAUNCHER_REQUIRED": "artifact_identity_mismatch",
+    "UPDATE_LAUNCHER_MANIFEST_MISMATCH": "manifest_hash_mismatch",
+    "UPDATE_LAUNCHER_INTERNAL_MISSING": "artifact_identity_mismatch",
+    "UPDATE_LAUNCHER_STAGING_FAILED": "pointer_commit_failed",
+    "LAUNCHER_ROLLBACK_FAILED": "watchdog_rollback_failed",
+    "LAUNCHER_CANDIDATE_INVALID": "artifact_identity_mismatch",
     "UPDATE_APP_PROTOCOL_INCOMPATIBLE": "artifact_identity_mismatch",
     "UPDATE_RUNTIME_CONTRACT_MISMATCH": "artifact_identity_mismatch",
     "UPDATE_RUNTIME_STRATEGY_UNSUPPORTED": "artifact_identity_mismatch",
@@ -221,6 +239,7 @@ _STATUS_REASON_CODES = {
     "oauth_configuration_required": "authentication_required",
     "unavailable": "state_unavailable",
     "no_artifact": "artifact_not_found",
+    "launcher_migration_required": "launcher_migration_required",
 }
 
 
@@ -381,6 +400,11 @@ def update_error_projection(
         "reason_code": reason_code_for(code),
         "last_error_code": code if re.fullmatch(r"[A-Z][A-Z0-9_]{2,95}", code) else "UPDATE_FAILED",
         "execution": "not_run",
+        "payload_status": "unavailable" if current_payload_id is None else "blocked",
+        "launcher_status": "unknown",
+        "launcher_format": "unknown",
+        "launcher_migration_required": True,
+        "restart_state": "idle",
     }
     if active_jobs is not None:
         value["active_jobs"] = active_jobs
@@ -393,6 +417,10 @@ def _staged_update_path(root: Path) -> Path:
 
 def _restart_session_path(root: Path) -> Path:
     return root / "update-state" / "restart-session.json"
+
+
+def _restart_transaction_path(root: Path) -> Path:
+    return root / "update-state" / "restart-transaction.json"
 
 
 def _unlink_state(path: Path) -> None:
@@ -575,7 +603,10 @@ def _read_staged_update(root: Path) -> dict[str, Any] | None:
         "schema_version", "payload_id", "source_commit", "payload_relative",
         "manifest_sha256", "previous", "staged_at", "update_kind",
     }
-    allowed = expected | {"transaction_id"}
+    allowed = expected | {
+        "transaction_id", "workflow_run_id", "launcher_format", "launcher_executable_sha256",
+        "launcher_tree_manifest_sha256", "launcher_file_count", "launcher_total_bytes",
+    }
     if not expected.issubset(value) or not set(value).issubset(allowed) or value.get("schema_version") != STAGED_UPDATE_SCHEMA:
         raise AppUpdateError("STAGED_UPDATE_INVALID")
     payload_id = value.get("payload_id")
@@ -590,12 +621,31 @@ def _read_staged_update(root: Path) -> dict[str, Any] | None:
         or not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None
         or not isinstance(value.get("previous"), dict)
         or not isinstance(value.get("staged_at"), str)
-        or value.get("update_kind") not in {UPDATE_KIND_APP_ONLY, UPDATE_KIND_FULL}
+        or value.get("update_kind") not in {UPDATE_KIND_APP_ONLY, UPDATE_KIND_FULL, UPDATE_KIND_APP_AND_LAUNCHER}
         or (
             value.get("transaction_id") is not None
             and (
                 not isinstance(value.get("transaction_id"), str)
                 or _TRANSACTION_RE.fullmatch(str(value.get("transaction_id"))) is None
+            )
+        )
+        or (
+            value.get("update_kind") == UPDATE_KIND_APP_AND_LAUNCHER
+            and (
+                isinstance(value.get("workflow_run_id"), bool)
+                or not isinstance(value.get("workflow_run_id"), int)
+                or value.get("workflow_run_id") <= 0
+                or value.get("launcher_format") != "onedir"
+                or not isinstance(value.get("launcher_executable_sha256"), str)
+                or _SHA256_RE.fullmatch(value.get("launcher_executable_sha256")) is None
+                or not isinstance(value.get("launcher_tree_manifest_sha256"), str)
+                or _SHA256_RE.fullmatch(value.get("launcher_tree_manifest_sha256")) is None
+                or isinstance(value.get("launcher_file_count"), bool)
+                or not isinstance(value.get("launcher_file_count"), int)
+                or value.get("launcher_file_count") < 2
+                or isinstance(value.get("launcher_total_bytes"), bool)
+                or not isinstance(value.get("launcher_total_bytes"), int)
+                or value.get("launcher_total_bytes") < 1
             )
         )
     ):
@@ -715,14 +765,24 @@ def _safe_update_manifest(value: object, *, expected_commit: str | None = None) 
         "schema_version", "product_id", "product_version", "channel", "source_commit",
         "payload_id", "runtime_strategy", "archive", "archive_sha256", "file_count",
     }
-    if set(value) != required:
+    schema = value.get("schema_version")
+    composite_optional = {
+        "workflow_run_id", "app_file_count", "app_total_bytes", "app_manifest_sha256",
+        "launcher_format", "launcher_file_count", "launcher_total_bytes",
+        "launcher_manifest_sha256", "launcher_executable_sha256",
+    }
+    if schema == COMPOSITE_UPDATE_SCHEMA:
+        allowed = required | composite_optional
+        if not required.issubset(value) or not set(value).issubset(allowed):
+            raise AppUpdateError("UPDATE_MANIFEST_INVALID")
+    elif set(value) != required:
         raise AppUpdateError("UPDATE_MANIFEST_INVALID")
     source_commit = str(value.get("source_commit") or "")
     payload_id = str(value.get("payload_id") or "")
     digest = str(value.get("archive_sha256") or "")
     archive = str(value.get("archive") or "")
     count = value.get("file_count")
-    if value.get("schema_version") != UPDATE_SCHEMA or value.get("product_id") != PRODUCT_ID:
+    if schema not in {UPDATE_SCHEMA, COMPOSITE_UPDATE_SCHEMA} or value.get("product_id") != PRODUCT_ID:
         raise AppUpdateError("UPDATE_IDENTITY_MISMATCH")
     if value.get("product_version") != PRODUCT_VERSION or value.get("channel") != "main":
         raise AppUpdateError("UPDATE_PRODUCT_VERSION_MISMATCH")
@@ -736,6 +796,21 @@ def _safe_update_manifest(value: object, *, expected_commit: str | None = None) 
         raise AppUpdateError("UPDATE_ARCHIVE_IDENTITY_INVALID")
     if isinstance(count, bool) or not isinstance(count, int) or count < 1 or count > MAX_ARCHIVE_FILES:
         raise AppUpdateError("UPDATE_FILE_COUNT_INVALID")
+    if schema == COMPOSITE_UPDATE_SCHEMA:
+        run_id = value.get("workflow_run_id")
+        if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id <= 0:
+            raise AppUpdateError("UPDATE_RUN_MISMATCH")
+        for key in ("app_manifest_sha256", "launcher_manifest_sha256", "launcher_executable_sha256"):
+            if not isinstance(value.get(key), str) or _SHA256_RE.fullmatch(value[key]) is None:
+                raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+        if value.get("launcher_format") != "onedir":
+            raise AppUpdateError("UPDATE_LAUNCHER_REQUIRED")
+        for key, minimum in (("app_file_count", 1), ("launcher_file_count", 2), ("app_total_bytes", 0), ("launcher_total_bytes", 1)):
+            item = value.get(key)
+            if isinstance(item, bool) or not isinstance(item, int) or item < minimum:
+                raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+        if expected_commit is not None and run_id <= 0:
+            raise AppUpdateError("UPDATE_RUN_MISMATCH")
     return dict(value)
 
 
@@ -748,7 +823,19 @@ def _safe_update_contract(value: object, *, expected_commit: str | None = None) 
         "schema_version", "update_kind", "app_protocol", "runtime_contract",
         "runtime_version", "runtime_hash", "minimum_launcher_version", "source_commit",
     }
-    if set(value) != required or value.get("schema_version") != UPDATE_CONTRACT_SCHEMA:
+    schema = value.get("schema_version")
+    if schema == PRODUCT_UPDATE_CONTRACT_SCHEMA:
+        product_required = required | {
+            "product_id", "product_version", "workflow_run_id", "app_payload_id",
+            "app_manifest_sha256", "app_file_count", "app_total_bytes", "launcher_format",
+            "launcher_executable_sha256", "launcher_tree_manifest_sha256", "launcher_file_count",
+            "launcher_total_bytes",
+        }
+        if set(value) != product_required:
+            raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+        if value.get("product_id") != PRODUCT_ID or value.get("product_version") != PRODUCT_VERSION:
+            raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+    elif set(value) != required or schema != UPDATE_CONTRACT_SCHEMA:
         raise AppUpdateError("UPDATE_CONTRACT_INVALID")
     source_commit = value.get("source_commit")
     if not isinstance(source_commit, str) or not _SHA_RE.fullmatch(source_commit) or (expected_commit is not None and source_commit != expected_commit):
@@ -765,6 +852,23 @@ def _safe_update_contract(value: object, *, expected_commit: str | None = None) 
     elif kind == UPDATE_KIND_FULL:
         if runtime_contract != RUNTIME_CONTRACT_BUNDLED or not isinstance(runtime_version, str) or not runtime_version or not isinstance(runtime_hash, str) or not _RUNTIME_HASH_RE.fullmatch(runtime_hash):
             raise AppUpdateError("UPDATE_CONTRACT_INVALID")
+    elif kind == UPDATE_KIND_APP_AND_LAUNCHER:
+        if schema != PRODUCT_UPDATE_CONTRACT_SCHEMA or runtime_contract != RUNTIME_CONTRACT_REUSE_CURRENT or runtime_version is not None or runtime_hash is not None:
+            raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+        run_id = value.get("workflow_run_id")
+        if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id <= 0:
+            raise AppUpdateError("UPDATE_RUN_MISMATCH")
+        if value.get("app_payload_id") != f"main-{source_commit[:12]}":
+            raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+        for key in ("app_manifest_sha256", "launcher_executable_sha256", "launcher_tree_manifest_sha256"):
+            if not isinstance(value.get(key), str) or _SHA256_RE.fullmatch(value[key]) is None:
+                raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+        if value.get("launcher_format") != "onedir":
+            raise AppUpdateError("UPDATE_LAUNCHER_REQUIRED")
+        for key, minimum in (("app_file_count", 1), ("launcher_file_count", 2), ("app_total_bytes", 0), ("launcher_total_bytes", 1)):
+            item = value.get(key)
+            if isinstance(item, bool) or not isinstance(item, int) or item < minimum:
+                raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
     else:
         raise AppUpdateError("UPDATE_KIND_UNSUPPORTED")
     return dict(value)
@@ -786,7 +890,11 @@ def _safe_extract_app_archive(archive: Path, destination: Path, *, expected_file
             raise AppUpdateError("UPDATE_ARCHIVE_FILE_COUNT_MISMATCH")
         for info in members:
             name = info.filename
-            allowed_prefix = name.startswith("app/") or (update_kind == UPDATE_KIND_FULL and name.startswith("runtime/"))
+            allowed_prefix = (
+                name.startswith("app/")
+                or (update_kind == UPDATE_KIND_FULL and name.startswith("runtime/"))
+                or (update_kind == UPDATE_KIND_APP_AND_LAUNCHER and name.startswith("launcher/"))
+            )
             if (
                 not allowed_prefix
                 or name.startswith(("/", "\\"))
@@ -1051,7 +1159,7 @@ class AppUpdateService:
             can_prepare = False
             can_restart = True
             requires_restart = True
-        elif status == "available":
+        elif status in {"available", "launcher_migration_required"}:
             phase = "update_available"
             progress = 0
             can_prepare = True
@@ -1135,6 +1243,16 @@ class AppUpdateService:
             last_error = persisted.get("last_error_code")
         if transaction_id is None and self._retry_attempt is not None and phase == "checking":
             transaction_id = None
+        launcher = launcher_projection(root) if root is not None else {"status": "unavailable", "format": "unknown", "migration_required": True}
+        launcher_status = str(launcher.get("status") or "unavailable")
+        launcher_format = str(launcher.get("format") or "unknown")
+        launcher_migration_required = launcher.get("migration_required") is True
+        if isinstance(staged, dict) and staged.get("update_kind") == UPDATE_KIND_APP_AND_LAUNCHER:
+            launcher_status = "candidate_verified" if phase in {"staged", "confirm_restart", "restarting"} else launcher_status
+            launcher_format = "onedir"
+            launcher_migration_required = False if phase in {"staged", "confirm_restart", "restarting", "succeeded"} else launcher_migration_required
+        payload_status = "unavailable" if current_payload is None else "satisfied" if status == "up_to_date" else "candidate_ready" if staged is not None else "available" if candidate_payload and candidate_payload != current_payload else "satisfied"
+        restart_state = "pending" if pending_exists else "awaiting_restart" if staged is not None else "idle"
         value.update({
             "transaction_id": transaction_id,
             "phase": phase,
@@ -1149,6 +1267,14 @@ class AppUpdateService:
             "rollback_mode": rollback_mode,
             "reason_code": reason,
             "last_error_code": last_error,
+            # Product-level status deliberately keeps payload and shell
+            # contracts separate.  A legacy single-file shell therefore
+            # cannot be reported as a complete up_to_date product.
+            "payload_status": payload_status,
+            "launcher_status": launcher_status,
+            "launcher_format": launcher_format,
+            "launcher_migration_required": launcher_migration_required,
+            "restart_state": restart_state,
         })
         return value
 
@@ -1267,7 +1393,8 @@ class AppUpdateService:
                                     "action": "Không xác minh được ancestry của payload; Hub không tự cài đặt.",
                                 }
                             else:
-                                available = relation == "forward_update_available" or (relation == "legacy_or_unbound" and current["commit"] != candidate.source_commit)
+                                shell_migration_required = launcher_projection(root).get("migration_required") is True
+                                available = relation == "forward_update_available" or (relation == "legacy_or_unbound" and current["commit"] != candidate.source_commit) or (relation == "same" and shell_migration_required)
                                 result = {
                                     "status": "available" if available else "up_to_date", "available": available,
                                     "product_version": PRODUCT_VERSION, "current_build": current["commit"],
@@ -1276,6 +1403,13 @@ class AppUpdateService:
                                     "artifact_id": candidate.artifact_id, "transport": auth.transport,
                                     "action": "Cập nhật Local AI Hub" if available else "Bạn đang dùng build main mới nhất.",
                                 }
+                                if relation == "same" and shell_migration_required:
+                                    result.update({
+                                        "status": "launcher_migration_required",
+                                        "code": "UPDATE_LAUNCHER_REQUIRED",
+                                        "reason_code": "launcher_migration_required",
+                                        "action": "Shell Local AI Hub legacy cần được nâng cấp cùng payload trong một composite update.",
+                                    })
             except AppUpdateError as exc:
                 result = {
                     "status": "unavailable", "available": False, "product_version": PRODUCT_VERSION,
@@ -1323,6 +1457,17 @@ class AppUpdateService:
         contract_path = folder / UPDATE_CONTRACT_NAME
         if contract_path.is_file() and not contract_path.is_symlink():
             contract = _safe_update_contract(_safe_json_file(contract_path), expected_commit=candidate.source_commit)
+            if contract.get("update_kind") == UPDATE_KIND_APP_AND_LAUNCHER:
+                if manifest.get("schema_version") != COMPOSITE_UPDATE_SCHEMA:
+                    raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+                if manifest.get("workflow_run_id") != candidate.run_id or contract.get("workflow_run_id") != candidate.run_id:
+                    raise AppUpdateError("UPDATE_RUN_MISMATCH")
+                if manifest.get("payload_id") != contract.get("app_payload_id"):
+                    raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+                if manifest.get("launcher_format") != contract.get("launcher_format") or manifest.get("launcher_executable_sha256") != contract.get("launcher_executable_sha256") or manifest.get("launcher_manifest_sha256") != contract.get("launcher_tree_manifest_sha256"):
+                    raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+                if manifest.get("app_manifest_sha256") != contract.get("app_manifest_sha256") or manifest.get("app_file_count") != contract.get("app_file_count") or manifest.get("app_total_bytes") != contract.get("app_total_bytes"):
+                    raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
             sums_path = folder / "SHA256SUMS.txt"
             if not sums_path.is_file() or sums_path.is_symlink():
                 raise AppUpdateError("UPDATE_CHECKSUM_MANIFEST_MISSING")
@@ -1575,6 +1720,20 @@ class AppUpdateService:
         app = payload / "app"
         if app.is_symlink() or not app.is_dir() or runtime.is_symlink() or not runtime.is_file():
             raise AppUpdateError("STAGED_RUNTIME_UNAVAILABLE")
+        if staged.get("update_kind") == UPDATE_KIND_APP_AND_LAUNCHER:
+            try:
+                launcher = launcher_tree_manifest(payload / "launcher" / "LocalAIHub")
+            except LauncherMigrationError as exc:
+                raise AppUpdateError("UPDATE_LAUNCHER_MANIFEST_MISMATCH") from exc
+            if (
+                staged.get("workflow_run_id") is None
+                or launcher.get("format") != staged.get("launcher_format")
+                or launcher.get("executable_sha256") != staged.get("launcher_executable_sha256")
+                or launcher.get("tree_manifest_sha256") != staged.get("launcher_tree_manifest_sha256")
+                or launcher.get("file_count") != staged.get("launcher_file_count")
+                or launcher.get("total_bytes") != staged.get("launcher_total_bytes")
+            ):
+                raise AppUpdateError("UPDATE_LAUNCHER_MANIFEST_MISMATCH")
 
     def create_restart_session(self, *, payload_id: str, source_commit: str, nonce: str, parent_pid: int) -> dict[str, Any]:
         """Atomically publish the session contract consumed by the watchdog."""
@@ -1599,6 +1758,87 @@ class AppUpdateService:
             value["transaction_id"] = self._transaction_id
         _write_restart_session(root, value)
         return {key: value[key] for key in ("schema_version", "payload_id", "source_commit", "nonce", "parent_pid", "status", "transaction_id") if key in value}
+
+    def prepare_staged_restart(self) -> dict[str, Any]:
+        """Reserve a composite shell/payload restart without switching yet.
+
+        Legacy ``commit_staged_restart`` remains available for older payloads
+        and tests.  A composite product must follow the stricter ordering:
+        close-preflight -> old desktop exit -> shell switch -> pointer
+        activation.  This journal is the hand-off consumed by the candidate
+        watchdog and contains only bounded identities and the previous
+        pointer, never paths or commands in public projections.
+        """
+
+        with self._lock:
+            root = self._install_root()
+            with _update_serialization_lock(root):
+                staged = _read_staged_update(root)
+                if staged is None:
+                    raise AppUpdateError("STAGED_UPDATE_UNAVAILABLE")
+                self._verify_staged_payload(root, staged)
+                if staged.get("update_kind") != UPDATE_KIND_APP_AND_LAUNCHER:
+                    raise AppUpdateError("UPDATE_LAUNCHER_REQUIRED")
+                current = load_current_pointer(root)
+                previous = staged.get("previous")
+                if not isinstance(previous, dict) or current != previous:
+                    raise AppUpdateError("STAGED_CURRENT_POINTER_CHANGED")
+                transaction_id = staged.get("transaction_id") if isinstance(staged.get("transaction_id"), str) else self._transaction_id
+                if transaction_id is None or _TRANSACTION_RE.fullmatch(transaction_id) is None:
+                    transaction_id = _new_transaction_id()
+                value = {
+                    "schema_version": RESTART_TRANSACTION_SCHEMA,
+                    "transaction_id": transaction_id,
+                    "payload_id": staged["payload_id"],
+                    "source_commit": staged["source_commit"],
+                    "update_kind": staged["update_kind"],
+                    "previous": previous,
+                    "manifest_sha256": staged["manifest_sha256"],
+                    "workflow_run_id": staged.get("workflow_run_id"),
+                    "launcher_format": staged.get("launcher_format"),
+                    "launcher_executable_sha256": staged.get("launcher_executable_sha256"),
+                    "launcher_tree_manifest_sha256": staged.get("launcher_tree_manifest_sha256"),
+                    "launcher_file_count": staged.get("launcher_file_count"),
+                    "launcher_total_bytes": staged.get("launcher_total_bytes"),
+                    "status": "awaiting_old_exit",
+                    "created_at": _utc_now(),
+                }
+                _write_json_atomic(_restart_transaction_path(root), value)
+                self._transaction_id = transaction_id
+                self._remember_update_state(
+                    root,
+                    phase="restarting",
+                    progress=80,
+                    transaction_id=transaction_id,
+                    requires_restart=True,
+                    current_payload_id=current.get("version"),
+                    candidate_payload_id=staged.get("payload_id"),
+                    rollback_payload_id=previous.get("version"),
+                )
+                return {
+                    "status": "restart_prepared",
+                    "source_commit": staged["source_commit"],
+                    "payload_id": staged["payload_id"],
+                    "transaction_id": transaction_id,
+                    "previous_payload": previous.get("version"),
+                    "restart_required": True,
+                    "launcher_changed": True,
+                    "update_kind": staged["update_kind"],
+                    "commit_phase": "awaiting_old_exit",
+                }
+
+    def abort_restart_transaction(self, *, reason: str = "RESTART_TRANSACTION_FAILED") -> dict[str, Any]:
+        """Cancel a deferred composite restart before pointer activation."""
+
+        with self._lock:
+            root = self._install_root()
+            with _update_serialization_lock(root):
+                path = _restart_transaction_path(root)
+                if path.is_file() and not path.is_symlink():
+                    _unlink_state(path)
+                    _try_write_update_state(root, phase="error", progress=0, transaction_id=self._transaction_id, reason_code=reason_code_for(reason), last_error_code=reason if re.fullmatch(r"[A-Z][A-Z0-9_]{2,95}", reason) else "RESTART_TRANSACTION_FAILED")
+                    return {"status": "aborted", "reason": str(reason)[:96]}
+                return {"status": "not_pending"}
 
     def commit_staged_restart(self) -> dict[str, Any]:
         """Commit a staged candidate after the native close gate is ready.
@@ -1819,7 +2059,8 @@ class AppUpdateService:
         if candidate is None:
             raise AppUpdateError("UPDATE_ARTIFACT_NOT_FOUND")
         current = self._current_build(root)
-        if current["commit"] == candidate.source_commit:
+        shell_migration_required = launcher_projection(root).get("migration_required") is True
+        if current["commit"] == candidate.source_commit and not shell_migration_required:
             self._remember_update_state(
                 root,
                 phase="succeeded",
@@ -1918,6 +2159,25 @@ class AppUpdateService:
             update_kind = str(contract["update_kind"])
             stage_payload.mkdir(parents=False, exist_ok=False)
             _safe_extract_app_archive(archive, stage_payload, expected_files=int(manifest["file_count"]), update_kind=update_kind)
+            launcher_manifest: dict[str, Any] | None = None
+            if update_kind == UPDATE_KIND_APP_AND_LAUNCHER:
+                try:
+                    launcher_manifest = launcher_tree_manifest(stage_payload / "launcher" / "LocalAIHub")
+                except LauncherMigrationError as exc:
+                    raise AppUpdateError("UPDATE_LAUNCHER_MANIFEST_MISMATCH") from exc
+                if (
+                    launcher_manifest.get("format") != contract.get("launcher_format")
+                    or launcher_manifest.get("executable_sha256") != contract.get("launcher_executable_sha256")
+                    or launcher_manifest.get("tree_manifest_sha256") != contract.get("launcher_tree_manifest_sha256")
+                    or launcher_manifest.get("file_count") != contract.get("launcher_file_count")
+                    or launcher_manifest.get("total_bytes") != contract.get("launcher_total_bytes")
+                ):
+                    raise AppUpdateError("UPDATE_LAUNCHER_MANIFEST_MISMATCH")
+            elif shell_migration_required and str(manifest.get("archive") or "") == "LocalAIHub-main-update.zip":
+                # APP_ONLY remains a valid payload-only contract for already
+                # migrated installations.  It is not sufficient to migrate a
+                # legacy single-file product shell.
+                raise AppUpdateError("UPDATE_LAUNCHER_REQUIRED")
             runtime_source = plan.payload_root / "runtime"
             if update_kind == UPDATE_KIND_APP_ONLY:
                 if not runtime_source.is_dir() or runtime_source.is_symlink():
@@ -1991,6 +2251,24 @@ class AppUpdateService:
                 "staged_at": _utc_now(),
                 "update_kind": update_kind,
             })
+            if update_kind == UPDATE_KIND_APP_AND_LAUNCHER and launcher_manifest is not None:
+                _write_json_atomic(_staged_update_path(root), {
+                    "schema_version": STAGED_UPDATE_SCHEMA,
+                    "payload_id": version,
+                    "source_commit": candidate.source_commit,
+                    "transaction_id": self._transaction_id,
+                    "payload_relative": f"versions/{version}",
+                    "manifest_sha256": manifest_hash,
+                    "previous": previous,
+                    "staged_at": _utc_now(),
+                    "update_kind": update_kind,
+                    "workflow_run_id": contract.get("workflow_run_id"),
+                    "launcher_format": launcher_manifest.get("format"),
+                    "launcher_executable_sha256": launcher_manifest.get("executable_sha256"),
+                    "launcher_tree_manifest_sha256": launcher_manifest.get("tree_manifest_sha256"),
+                    "launcher_file_count": launcher_manifest.get("file_count"),
+                    "launcher_total_bytes": launcher_manifest.get("total_bytes"),
+                })
             self._remember_update_state(
                 root,
                 phase="staged",
@@ -2007,7 +2285,7 @@ class AppUpdateService:
                 "status": "staged", "source_commit": candidate.source_commit,
                 "payload_id": version, "previous_payload": previous.get("version"),
                 "transaction_id": self._transaction_id,
-                "restart_required": True, "staged": True, "launcher_changed": False, "data_root_changed": False,
+                "restart_required": True, "staged": True, "launcher_changed": update_kind == UPDATE_KIND_APP_AND_LAUNCHER, "data_root_changed": False,
                 "update_kind": update_kind, "runtime_contract": contract["runtime_contract"],
                 "commit_phase": "awaiting_restart",
             }
@@ -2073,6 +2351,7 @@ def app_update_service() -> AppUpdateService:
 
 __all__ = [
     "AppUpdateError", "AppUpdateService", "BUILD_INFO_SCHEMA", "REPOSITORY", "UPDATE_ARTIFACT_NAME",
-    "UPDATE_CONTRACT_NAME", "UPDATE_CONTRACT_SCHEMA", "UPDATE_KIND_APP_ONLY", "UPDATE_KIND_FULL",
-    "PENDING_HEALTH_SCHEMA", "STAGED_UPDATE_SCHEMA", "RESTART_SESSION_SCHEMA", "UPDATE_STATE_SCHEMA", "UPDATE_STATE_FILE", "UPDATE_PHASES", "STABLE_UPDATE_REASON_CODES", "CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS", "CANDIDATE_BOOTSTRAP_PREFLIGHT_TIMEOUT_SECONDS", "UPDATE_SCHEMA", "app_update_service", "mark_startup_health", "reason_code_for", "update_error_projection", "_runtime_inventory_hash", "_safe_extract_app_archive", "_safe_update_contract", "_safe_update_manifest", "_read_staged_update", "_read_update_state", "_try_write_update_state", "_write_restart_session",
+    "UPDATE_CONTRACT_NAME", "UPDATE_CONTRACT_SCHEMA", "COMPOSITE_UPDATE_SCHEMA", "PRODUCT_UPDATE_CONTRACT_SCHEMA",
+    "UPDATE_KIND_APP_ONLY", "UPDATE_KIND_FULL", "UPDATE_KIND_APP_AND_LAUNCHER",
+    "PENDING_HEALTH_SCHEMA", "STAGED_UPDATE_SCHEMA", "RESTART_SESSION_SCHEMA", "RESTART_TRANSACTION_SCHEMA", "UPDATE_STATE_SCHEMA", "UPDATE_STATE_FILE", "UPDATE_PHASES", "STABLE_UPDATE_REASON_CODES", "CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS", "CANDIDATE_BOOTSTRAP_PREFLIGHT_TIMEOUT_SECONDS", "UPDATE_SCHEMA", "app_update_service", "mark_startup_health", "reason_code_for", "update_error_projection", "_runtime_inventory_hash", "_safe_extract_app_archive", "_safe_update_contract", "_safe_update_manifest", "_read_staged_update", "_read_update_state", "_try_write_update_state", "_write_restart_session",
 ]
