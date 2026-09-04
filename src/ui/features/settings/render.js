@@ -17,7 +17,7 @@ export function createSettingsRenderer(deps) {
   return heading("SYSTEM", "Settings", "Cấu hình startup, chính sách GPU, lưu trữ và sao lưu / khôi phục dữ liệu machine-local an toàn.") + `
     ${recoveryBanner}${dirtyBanner}
     <div class="settings-layout">
-    <details class="advanced settings-advanced" open>
+    <details class="advanced settings-advanced">
       <summary>Readiness & Module Plan · Chẩn đoán nâng cao</summary>
     <section class="readiness-page" aria-labelledby="readiness-page-title" data-readiness-source="server-snapshot">
       <section class="readiness-summary card" aria-labelledby="readiness-page-title" data-readiness-status="${escapeHtml(snapshot.status)}">

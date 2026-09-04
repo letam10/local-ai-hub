@@ -105,6 +105,15 @@ class UiPolishTests(unittest.TestCase):
         self.assertNotIn("LocalAIHub.vbs", shortcut_script)
         self.assertNotIn("LocalAIHub.cmd", shortcut_script)
 
+    def test_settings_user_controls_precede_collapsed_advanced_evidence(self) -> None:
+        settings = (UI / "features" / "settings" / "render.js").read_text(encoding="utf-8")
+        css = self.css
+        self.assertIn('<div class="settings-layout">', settings)
+        self.assertIn('<details class="advanced settings-advanced">', settings)
+        self.assertNotIn('<details class="advanced settings-advanced" open>', settings)
+        self.assertIn(".settings-layout > .workspace-grid { order: 1;", css)
+        self.assertIn(".settings-layout > .settings-advanced { order: 2;", css)
+
 
 if __name__ == "__main__":
     unittest.main()

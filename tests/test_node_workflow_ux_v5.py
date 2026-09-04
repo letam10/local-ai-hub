@@ -143,6 +143,43 @@ assert.ok(bounds.bottom >= 900);
         result = subprocess.run([node, "--input-type=module", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_litegraph_selection_compatibility_cleans_toggles_and_preserves_group_drag(self) -> None:
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "node is required for the selection compatibility check")
+        source = (ROOT / "src" / "ui" / "features" / "node_studio" / "studio.js").read_text(encoding="utf-8")
+        start = source.index("export function installLiteGraphSelectionCompatibility")
+        end = source.index("export function inlineControlMetadata", start)
+        script = f"""
+import assert from "node:assert/strict";
+const moduleSource = {json.dumps(source[start:end])};
+const moduleUrl = "data:text/javascript;base64," + Buffer.from(moduleSource).toString("base64");
+const {{ installLiteGraphSelectionCompatibility }} = await import(moduleUrl);
+const first = {{ id: 1, is_selected: true }};
+const second = {{ id: 2, is_selected: true }};
+const third = {{ id: 3, is_selected: false }};
+const nativeCalls = [];
+const canvas = {{
+  multi_select: false,
+  selected_nodes: {{ 1: first, 2: second }},
+  deselectNode(node) {{ node.is_selected = false; }},
+  processNodeSelected(node, event) {{ nativeCalls.push([node.id, event]); }},
+}};
+installLiteGraphSelectionCompatibility(canvas);
+canvas.deselectNode(first);
+assert.equal(canvas.selected_nodes[1], undefined);
+assert.equal(canvas.selected_nodes[2], second);
+canvas.selected_nodes[1] = first;
+first.is_selected = true;
+canvas.current_node = null;
+canvas.processNodeSelected(first, {{ shiftKey: false, ctrlKey: false, metaKey: false }});
+assert.equal(canvas.current_node, first);
+assert.equal(nativeCalls.length, 0);
+canvas.processNodeSelected(third, {{ shiftKey: false, ctrlKey: false, metaKey: false }});
+assert.equal(nativeCalls.length, 1);
+"""
+        result = subprocess.run([node, "--input-type=module", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_registry_open_uses_truthful_cached_encoder_snapshot_without_probe(self) -> None:
         from src.modules.media_editor.backend import adapter
         from src.services.node_studio import registry

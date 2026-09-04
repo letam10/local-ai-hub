@@ -501,6 +501,38 @@ export function normalizeNodeSize(value, fallback = { width: NODE_MIN_WIDTH, hei
 }
 
 /**
+ * Keep the Hub authoring contract stable across the bundled LiteGraph build.
+ * The upstream selection helpers leave deselected nodes in selected_nodes and
+ * collapse a multi-selection before a drag starts.  Both cases make the
+ * visible selection disagree with the nodes that would be moved.
+ */
+export function installLiteGraphSelectionCompatibility(canvas) {
+  if (!canvas || canvas.__hubSelectionCompatibilityInstalled) return canvas;
+  canvas.__hubSelectionCompatibilityInstalled = true;
+  const nativeDeselectNode = typeof canvas.deselectNode === "function" ? canvas.deselectNode.bind(canvas) : null;
+  if (nativeDeselectNode) {
+    canvas.deselectNode = (node) => {
+      const result = nativeDeselectNode(node);
+      if (node?.id !== undefined && canvas.selected_nodes) delete canvas.selected_nodes[node.id];
+      return result;
+    };
+  }
+  const nativeProcessNodeSelected = typeof canvas.processNodeSelected === "function" ? canvas.processNodeSelected.bind(canvas) : null;
+  if (nativeProcessNodeSelected) {
+    canvas.processNodeSelected = (node, event) => {
+      const additive = Boolean(event?.shiftKey || event?.ctrlKey || event?.metaKey || canvas.multi_select);
+      const selectedCount = Object.keys(canvas.selected_nodes || {}).length;
+      if (node?.is_selected && !additive && selectedCount > 1) {
+        canvas.current_node = node;
+        return;
+      }
+      return nativeProcessNodeSelected(node, event);
+    };
+  }
+  return canvas;
+}
+
+/**
  * Resolve the server-owned UI metadata without inventing a fallback for an
  * explicitly unknown control.  ``kind`` remains the graph/schema authority;
  * ``ui`` only projects that same property into a canvas widget.
@@ -2681,6 +2713,7 @@ class HubGraphEditor {
     this.liteGraph = new globalThis.LiteGraph.LGraph();
     const pointereventsMethod = globalThis.LiteGraph.getPointerEventsMethod?.(this.canvasElement, "pointer") || "mouse";
     this.liteCanvas = new globalThis.LiteGraph.LGraphCanvas(this.canvasElement, this.liteGraph, { autoresize: false, pointerevents_method: pointereventsMethod });
+    installLiteGraphSelectionCompatibility(this.liteCanvas);
     this.liteCanvas.allow_dragcanvas = true;
     this.liteCanvas.allow_dragnodes = true;
     this.liteCanvas.allow_reconnect_links = true;
