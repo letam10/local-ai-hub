@@ -207,13 +207,13 @@ class HubJobManager:
             if heavy:
                 while not acquired:
                     if context.cancelled:
-                        artifact_store.finalize_job_output_scope(job_id, terminal_state="cancelled")
+                        self._safe_finalize_output_scope(job_id, terminal_state="cancelled")
                         record_failed(tool, failure_code="CANCELLED")
                         update_job(job_id, status="cancelled", finished_at=_now(), message="Tác vụ đã được hủy trước khi chạy.")
                         return
                     acquired = self._heavy_slot.acquire(timeout=0.2)
             if context.cancelled:
-                artifact_store.finalize_job_output_scope(job_id, terminal_state="cancelled")
+                self._safe_finalize_output_scope(job_id, terminal_state="cancelled")
                 record_failed(tool, failure_code="CANCELLED")
                 update_job(job_id, status="cancelled", finished_at=_now(), message="Tác vụ đã được hủy trước khi chạy.")
                 return
@@ -250,10 +250,12 @@ class HubJobManager:
                 record = get_job_internal(job_id) or {"id": job_id, "tool": tool}
                 scope_state = artifact_store.inspect_job_output_scope(job_id)
                 if context.cancelled:
-                    cleanup = artifact_store.finalize_job_output_scope(job_id, raw_result, terminal_state="cancelled")
+                    cleanup = self._safe_finalize_output_scope(job_id, raw_result, terminal_state="cancelled")
                     result = {"status": "cancelled"}
                     if cleanup.get("status") == "manual_review":
                         result["cleanup_status"] = "manual_review"
+                    elif cleanup.get("status") == "cleanup_failed":
+                        result["cleanup_status"] = "failed"
                     publish_error = None
                 else:
                     scope_result = artifact_store.prepare_job_output_scope(job_id, raw_result) if scope_state is not None else {"status": "no_scope"}
@@ -267,15 +269,19 @@ class HubJobManager:
                         result, publish_error = _publish_result(raw_result, record)
                 if context.cancelled or result.get("status") == "cancelled":
                     if not context.cancelled:
-                        cleanup = artifact_store.finalize_job_output_scope(job_id, raw_result, terminal_state="cancelled")
-                        if cleanup.get("status") == "manual_review":
+                        cleanup = self._safe_finalize_output_scope(job_id, raw_result, terminal_state="cancelled")
+                        if cleanup.get("status") in {"manual_review", "cleanup_failed"}:
                             result["cleanup_status"] = "manual_review"
+                            if cleanup.get("status") == "cleanup_failed":
+                                result["cleanup_status"] = "failed"
                     record_failed(tool, failure_code="CANCELLED")
                     update_job(job_id, status="cancelled", progress=0, finished_at=_now(), result=result, message="Tác vụ đã được hủy.")
                 elif publish_error is not None:
-                    cleanup = artifact_store.finalize_job_output_scope(job_id, raw_result, terminal_state="failed")
-                    if cleanup.get("status") == "manual_review":
+                    cleanup = self._safe_finalize_output_scope(job_id, raw_result, terminal_state="failed")
+                    if cleanup.get("status") in {"manual_review", "cleanup_failed"}:
                         result["cleanup_status"] = "manual_review"
+                        if cleanup.get("status") == "cleanup_failed":
+                            result["cleanup_status"] = "failed"
                     record_failed(tool, failure_code="OUTPUT_PUBLISH_FAILED")
                     update_job(
                         job_id,
@@ -289,9 +295,11 @@ class HubJobManager:
                     )
                 elif result.get("status") == "completed":
                     if requires_published_artifact(tool) and not has_published_artifact(result):
-                        cleanup = artifact_store.finalize_job_output_scope(job_id, raw_result, terminal_state="failed")
-                        if cleanup.get("status") == "manual_review":
+                        cleanup = self._safe_finalize_output_scope(job_id, raw_result, terminal_state="failed")
+                        if cleanup.get("status") in {"manual_review", "cleanup_failed"}:
                             result["cleanup_status"] = "manual_review"
+                            if cleanup.get("status") == "cleanup_failed":
+                                result["cleanup_status"] = "failed"
                         record_failed(tool, failure_code="OUTPUT_MISSING")
                         update_job(
                             job_id,
@@ -308,11 +316,32 @@ class HubJobManager:
                             next_action="Kiểm tra output contract rồi tạo lại job.",
                         )
                     else:
-                        artifact_store.finalize_job_output_scope(job_id, raw_result, terminal_state="completed", published=True)
-                        update_job(job_id, status="completed", progress=100, finished_at=_now(), result=result, message="Hoàn tất.", next_action=result.get("next_action"))
-                        record_completed(tool)
+                        cleanup = self._safe_finalize_output_scope(job_id, raw_result, terminal_state="completed", published=True)
+                        if cleanup.get("status") == "cleanup_failed" and requires_published_artifact(tool):
+                            failed_result = {
+                                "status": "failed",
+                                "failure_code": "OUTPUT_PUBLISH_FAILED",
+                                "error": "Không thể xác nhận hoàn tất output Hub sau khi worker kết thúc.",
+                                "cleanup_status": "failed",
+                            }
+                            self._safe_record_failed(tool, failure_code="OUTPUT_PUBLISH_FAILED")
+                            update_job(
+                                job_id,
+                                status="failed",
+                                progress=0,
+                                finished_at=_now(),
+                                result=failed_result,
+                                error="Output publication finalization failed; capability evidence was not recorded.",
+                                message="Không thể xác nhận output Hub.",
+                                next_action="Kiểm tra output authority rồi tạo lại job.",
+                            )
+                        else:
+                            if cleanup.get("status") == "cleanup_failed":
+                                result = {**result, "cleanup_status": "failed"}
+                            update_job(job_id, status="completed", progress=100, finished_at=_now(), result=result, message="Hoàn tất.", next_action=result.get("next_action"))
+                            record_completed(tool)
                 elif result.get("status") == "unavailable":
-                    artifact_store.finalize_job_output_scope(job_id, raw_result, terminal_state="unavailable")
+                    self._safe_finalize_output_scope(job_id, raw_result, terminal_state="unavailable")
                     record_unavailable(tool, failure_code="BACKEND_UNAVAILABLE")
                     update_job(
                         job_id,
@@ -325,7 +354,7 @@ class HubJobManager:
                         next_action=result.get("next_action"),
                     )
                 else:
-                    artifact_store.finalize_job_output_scope(job_id, raw_result, terminal_state="failed")
+                    self._safe_finalize_output_scope(job_id, raw_result, terminal_state="failed")
                     record_failed(tool, failure_code="WORKER_FAILED")
                     update_job(job_id, status="failed", progress=0, finished_at=_now(), result=result, error=result.get("error") or result.get("reason") or "Worker không hoàn tất.", message="Không thể hoàn tất tác vụ.", next_action=result.get("next_action"))
         except Exception as exc:  # pragma: no cover - guards background threads
