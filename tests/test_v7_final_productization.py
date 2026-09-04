@@ -123,8 +123,11 @@ class FinalProductizationTests(unittest.TestCase):
 
     def test_models_surface_has_bounded_search_and_install_state_filters(self) -> None:
         source = (ROOT / "src" / "ui" / "features" / "models" / "models.js").read_text(encoding="utf-8")
-        for marker in ("data-model-search", "data-model-category", "data-model-installed", "data-model-count", "Download & Install", "Import Model"):
+        for marker in ("data-model-manager-v2", "data-model-filters", "data-model-search", "data-model-category", "data-model-installed", "data-model-count", "data-model-v2-count"):
             self.assertIn(marker, source)
+        self.assertNotIn("catalogRows", source)
+        self.assertNotIn("legacyRows", source)
+        self.assertNotIn("<table", source)
 
 
 if __name__ == "__main__":

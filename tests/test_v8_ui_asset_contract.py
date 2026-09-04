@@ -44,10 +44,12 @@ class UiAssetContractTests(unittest.TestCase):
 
     def test_models_and_resource_fit_use_localized_fixed_labels(self) -> None:
         models = (ROOT / "src" / "ui" / "features" / "models" / "models.js").read_text(encoding="utf-8")
+        model_manager = (ROOT / "src" / "ui" / "features" / "models" / "v2_inventory.js").read_text(encoding="utf-8")
         pages = (ROOT / "src" / "ui" / "pages.js").read_text(encoding="utf-8")
         rendering = (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
-        self.assertIn("uiTextHtml(action)", models)
-        self.assertIn('uiTextHtml("Check Update")', models)
+        self.assertIn("data-model-filters", models)
+        self.assertIn("data-model-v2-actions", model_manager)
+        self.assertIn("actionLabel", model_manager)
         self.assertIn("uiTextHtml });", pages)
         self.assertIn("uiTextHtml(item.kind)", rendering)
         self.assertIn("uiTextHtml(readinessFitLabel(item.fit))", rendering)
