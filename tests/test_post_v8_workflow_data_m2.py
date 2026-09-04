@@ -361,8 +361,8 @@ class WorkflowDataUiContractTests(unittest.TestCase):
     def test_projects_route_refreshes_m2_projections_before_rendering_workspace(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "src" / "ui" / "app.js").read_text(encoding="utf-8")
         self.assertIn('if (route === "projects")', source)
-        self.assertIn('refreshCreative({ renderView: false })', source)
-        self.assertIn('if (routeId() === "projects") render();', source)
+        self.assertIn('refreshCreative({ renderView: false, isCurrent })', source)
+        self.assertIn('if (isCurrent()) render();', source)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,9 @@ export function createSettingsRenderer(deps) {
 
   return heading("SYSTEM", "Settings", "Cấu hình startup, chính sách GPU, lưu trữ và sao lưu / khôi phục dữ liệu machine-local an toàn.") + `
     ${recoveryBanner}${dirtyBanner}
+    <div class="settings-layout">
+    <details class="advanced settings-advanced" open>
+      <summary>Readiness & Module Plan · Chẩn đoán nâng cao</summary>
     <section class="readiness-page" aria-labelledby="readiness-page-title" data-readiness-source="server-snapshot">
       <section class="readiness-summary card" aria-labelledby="readiness-page-title" data-readiness-status="${escapeHtml(snapshot.status)}">
         <div class="card-title-row"><div><span class="eyebrow" data-i18n="SERVER SNAPSHOT">${uiTextHtml("SERVER SNAPSHOT")}</span><h2 id="readiness-page-title" data-i18n="Readiness & Module Plan">${uiTextHtml("Readiness & Module Plan")}</h2><p data-i18n="Bootstrap product-surface evidence is shown as received; fast refresh never promotes it to execution.">${uiTextHtml("Bootstrap product-surface evidence is shown as received; fast refresh never promotes it to execution.")}</p></div><div class="readiness-summary__pills">${statusPill(snapshot.status, readinessStatusLabel(snapshot.status))}<span class="tag">${escapeHtml(snapshot.resourceSnapshot)}</span></div></div>
@@ -27,6 +30,7 @@ export function createSettingsRenderer(deps) {
       <div class="workspace-grid workspace-grid--two readiness-detail-grid">${readinessResourceDetails(snapshot.resourcePlan)}${readinessStorageDetails(snapshot.volumes)}</div>
       ${mediaEvidencePanel(state, "settings")}
     </section>
+    </details>
     <div class="workspace-grid workspace-grid--two">
       ${card("Giao diện & Khởi động", `
         <div class="row-list">
@@ -113,6 +117,7 @@ export function createSettingsRenderer(deps) {
         </div>
       `, "", "card--wide")}
       ${card("An toàn dữ liệu", `<ul class="notice-list"><li>Không ghi đè source media.</li><li>Không duplicate model multi-GB.</li><li>Không tự xoá user media hoặc unknown legacy data.</li><li>AIRI giữ external/installer-managed.</li></ul>`, "", "card--flat")}
+    </div>
     </div>`;
   };
 }

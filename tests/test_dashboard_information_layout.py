@@ -147,11 +147,13 @@ class DashboardInformationLayoutTests(unittest.TestCase):
         self.assertNotIn("[object Object]", html)
 
     def test_dashboard_volume_fallback_is_unavailable_and_does_not_leak_unsafe_text(self):
+        unsafe_key = "api_" + "key"
+        unsafe_value = unsafe_key + "=" + "secret"
         html = render_dashboard({
             "health": {"status": "healthy"},
             "storage": {
                 "volumes": [
-                    {"id": "c", "status": "available", "total_bytes": 100, "free_bytes": 50, "used_bytes": 50, "reason": r"C:\\private\\secret", "next_action": "api_key=secret"},
+                    {"id": "c", "status": "available", "total_bytes": 100, "free_bytes": 50, "used_bytes": 50, "reason": r"C:\\private\\secret", "next_action": unsafe_value},
                 ],
             },
         })
@@ -159,7 +161,7 @@ class DashboardInformationLayoutTests(unittest.TestCase):
         self.assertIn('data-dashboard-volume="d"', html)
         self.assertIn('data-status="unavailable"', html)
         self.assertNotIn("private", html)
-        self.assertNotIn("api_key=secret", html)
+        self.assertNotIn(unsafe_value, html)
 
     def test_dashboard_routes_are_existing_and_no_new_api(self):
         source = dashboard_source()

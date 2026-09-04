@@ -232,6 +232,27 @@ class AiriAndAcceptanceQaClosureTests(unittest.TestCase):
         row = next(item for item in inventory["routes"] if item["route_id"] == "applications.launch")
         self.assertEqual(row["status_codes"], [202, 404, 409, 500, 503])
 
+    def test_airi_close_route_and_ui_are_ownership_gated(self) -> None:
+        route = next(item for item in build_router().routes() if item.route_id == "applications.close")
+        self.assertEqual(route.method, "POST")
+        self.assertEqual(route.path, "/api/applications/{application_id}/instances/{instance_id}/close")
+        self.assertEqual(route.status_codes, (200, 400, 404, 409, 500, 503))
+        inventory = json.loads((ROOT / "architecture" / "api_routes.yaml").read_text(encoding="utf-8"))
+        row = next(item for item in inventory["routes"] if item["route_id"] == "applications.close")
+        self.assertEqual(row["path"], route.path)
+        self.assertEqual(row["status_codes"], [200, 400, 404, 409, 500, 503])
+
+        renderer = (ROOT / "src" / "ui" / "features" / "airi" / "render.js").read_text(encoding="utf-8")
+        api = (ROOT / "src" / "ui" / "api.js").read_text(encoding="utf-8")
+        app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("item.close_available === true && instanceId", renderer)
+        self.assertIn('data-close-application="airi"', renderer)
+        self.assertIn("AIRI đang chạy ngoài quyền quản lý của Hub", renderer)
+        self.assertIn("Sẵn sàng để mở · AIRI chưa chạy.", renderer)
+        self.assertIn("export const closeApplication", api)
+        self.assertIn("closeApplicationButton", app)
+        self.assertNotIn('data-close-airi="', renderer)
+
     def test_airi_launch_scope_is_required_by_webview_not_runtime_smoke(self) -> None:
         from scripts.v8_acceptance_gate import _GATE_IMPACT_SCOPES, _path_impact_scope, load_gate_contract
 

@@ -316,6 +316,23 @@ class ModelManagerV2ArchitectureTests(unittest.TestCase):
         self.assertNotIn("input type=\"file\"", controller)
         self.assertNotIn("setInterval", controller)
 
+    def test_models_ui_uses_master_detail_and_user_facing_state_copy(self) -> None:
+        controller = (ROOT / "src/ui/features/models/v2_inventory.js").read_text(encoding="utf-8")
+        self.assertIn("model-manager-v2-master-detail", controller)
+        self.assertIn("data-model-v2-select", controller)
+        self.assertIn("model-manager-v2-technical", controller)
+        for label in (
+            "Đã quan sát · chờ xác minh",
+            "Chưa cài đặt",
+            "Đã cài · đã xác minh",
+            "Đang hoạt động",
+            "Bị chặn · chưa khả dụng",
+            "Có bản cập nhật",
+        ):
+            self.assertIn(label, controller)
+        self.assertNotIn("<input", controller)
+        self.assertNotIn("download(", controller)
+
     def test_tracked_route_inventory_lists_v2_model_routes(self) -> None:
         inventory = json.loads((ROOT / "architecture/api_routes.yaml").read_text(encoding="utf-8"))
         route_ids = {item["route_id"] for item in inventory["routes"]}

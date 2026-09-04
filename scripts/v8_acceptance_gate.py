@@ -116,7 +116,7 @@ _HIGH_RISK_UNCLASSIFIED_PREFIXES = (
 )
 
 
-def _path_impact_scope(path: str) -> str | None:
+def _path_impact_scope_single(path: str) -> str | None:
     normalized = path.replace("\\", "/")
     if normalized in {"src/services/runtime_registry.py", "src/services/local_registry_recovery.py"} or normalized.startswith("src/modules/airi/") or normalized.startswith("src/ui/features/airi/"):
         # AIRI's installer-managed application discovery/launch boundary is
@@ -216,6 +216,41 @@ def _path_impact_scope(path: str) -> str | None:
     if normalized.startswith(_HIGH_RISK_UNCLASSIFIED_PREFIXES):
         return _UNCLASSIFIED_ACCEPTANCE_RELEVANT
     return None
+
+
+def _path_impact_scopes(path: str) -> frozenset[str]:
+    """Return every conservative acceptance scope affected by one path.
+
+    A path can be consumed by more than one physical gate.  The legacy helper
+    below remains as a compatibility projection for older reports/tests, while
+    source reuse decisions use this complete set so a primary mapping cannot
+    silently hide a downstream consumer.
+    """
+
+    normalized = path.replace("\\", "/")
+    primary = _path_impact_scope_single(normalized)
+    scopes = {primary} if primary is not None else set()
+    if normalized.startswith("src/ui/"):
+        scopes.add("product_experience")
+    if normalized.startswith("src/services/api/"):
+        scopes.update({"loopback_api", "product_experience"})
+    if normalized in {"src/app/main.py", "src/app/desktop_lifecycle.py", "src/app/payload_bootstrap.py"}:
+        scopes.update({"desktop_startup", "product_experience"})
+    if normalized.startswith("src/app/update_") or normalized in {"src/app/stable_launcher.py", "src/app/stable_shell.py"}:
+        scopes.update({"updater", "desktop_startup"})
+    if normalized in {"src/services/runtime_registry.py", "src/services/local_registry_recovery.py"} or normalized.startswith("src/modules/airi/") or normalized.startswith("src/ui/features/airi/"):
+        scopes.update({"application_launch", "product_experience"})
+    if normalized.startswith("src/services/component_"):
+        scopes.add("product_experience")
+    if normalized.startswith("src/services/storage"):
+        scopes.add("product_experience")
+    return frozenset(scopes)
+
+
+def _path_impact_scope(path: str) -> str | None:
+    """Compatibility projection retained for pre-set-based callers."""
+
+    return _path_impact_scope_single(path)
 
 
 class AcceptanceGateError(ValueError):
@@ -448,7 +483,10 @@ def source_change_scopes(repo_root: Path, *, origin_source_commit: str, final_so
         paths = result.stdout.decode("utf-8").splitlines()
     except UnicodeDecodeError:
         raise AcceptanceGateError("EVIDENCE_PROVENANCE_SCOPE_UNAVAILABLE") from None
-    return {scope for path in paths if (scope := _path_impact_scope(path)) is not None}
+    changed: set[str] = set()
+    for path in paths:
+        changed.update(_path_impact_scopes(path))
+    return changed
 
 
 def _validate_evidence(value: Any, contract: Mapping[str, Any]) -> dict[str, Any]:

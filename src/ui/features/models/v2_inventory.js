@@ -71,9 +71,22 @@ const safeModel = (value) => {
   };
 };
 
+const MODEL_STATE_COPY = Object.freeze({
+  DISCOVERED: { label: "Đã quan sát · chờ xác minh", semantic: "partial" },
+  NOT_INSTALLED: { label: "Chưa cài đặt", semantic: "unavailable" },
+  INSTALLED_UNVERIFIED: { label: "Đã quan sát · chưa xác minh", semantic: "partial" },
+  INSTALLED_VERIFIED: { label: "Đã cài · đã xác minh", semantic: "available" },
+  OPERATIONAL: { label: "Đang hoạt động", semantic: "available" },
+  PARTIAL: { label: "Cài đặt một phần", semantic: "partial" },
+  UNAVAILABLE: { label: "Bị chặn · chưa khả dụng", semantic: "unavailable" },
+  BROKEN: { label: "Bị chặn · cần sửa", semantic: "unavailable" },
+  UPDATE_AVAILABLE: { label: "Có bản cập nhật", semantic: "partial" },
+});
+
+const stateCopy = (state) => MODEL_STATE_COPY[state] || { label: "Chưa rõ trạng thái", semantic: "partial" };
 const statePill = (state) => {
-  const semantic = state === "OPERATIONAL" ? "available" : ["UNAVAILABLE", "BROKEN"].includes(state) ? "unavailable" : "partial";
-  return `<span class="status-pill" data-status="${semantic}" data-technical-status="${escapeHtml(state)}"><code>${escapeHtml(state)}</code></span>`;
+  const copy = stateCopy(state);
+  return `<span class="status-pill" data-status="${copy.semantic}" data-technical-status="${escapeHtml(state)}" aria-label="${escapeHtml(copy.label)}">${escapeHtml(copy.label)}</span>`;
 };
 
 const actionLabel = (action) => ({
@@ -85,7 +98,11 @@ const actionLabel = (action) => ({
 
 const plannedActions = new Set(["PLAN_INSTALL", "VERIFY_CHECKSUM", "REGISTER_EXISTING", "SAFE_REMOVE"]);
 
+let selectedModelId = "";
+let lastPayload = null;
+
 const render = (target, payload) => {
+  lastPayload = payload;
   const records = payload && payload.schema_version === "model-manager.v2" && Array.isArray(payload.records)
     ? payload.records.map(safeModel).filter(Boolean)
     : [];
@@ -93,10 +110,12 @@ const render = (target, payload) => {
     target.innerHTML = `<div class="empty-state"><strong>Chưa có Model Manager V2 record hợp lệ</strong><span>Giữ trạng thái chưa khả dụng cho tới khi server publish catalog metadata hợp lệ.</span></div>`;
     return;
   }
-  target.innerHTML = `<div class="component-manager-list">${records.slice(0, 32).map((item) => {
-    const buttons = item.actions.filter((action) => plannedActions.has(action)).map((action) => `<button class="button button--compact" type="button" data-model-v2-plan="${escapeHtml(item.model_id)}" data-model-v2-action="${escapeHtml(action)}">${escapeHtml(actionLabel(action))}</button>`).join("");
-    return `<article class="component-plan-preview" data-model-v2-record="${escapeHtml(item.model_id)}"><div class="split"><div><strong>${escapeHtml(item.display_name)}</strong><p class="small"><code>${escapeHtml(item.model_id)}</code> · ${escapeHtml(item.category)} · ${escapeHtml(item.format)} · ${escapeHtml(item.precision)}</p></div>${statePill(item.state)}</div><div class="component-manager-grid"><div><span>Đã cài</span><strong>${item.installed ? "Có" : "Chưa"}</strong></div><div><span>Đã xác minh</span><strong>${item.verified ? "Có" : "Chưa"}</strong></div><div><span>Dung lượng</span><strong>${escapeHtml(formatBytes(item.size_bytes))}</strong></div><div><span>VRAM ước tính</span><strong>${item.vram_estimate_mb === null ? "Chưa rõ" : `${escapeHtml(String(item.vram_estimate_mb))} MiB`}</strong></div></div><p class="small">Checksum: <code>${escapeHtml(item.checksum_state)}</code> · duplicate: <code>${escapeHtml(item.duplicate_state)}</code> · moved: <code>${escapeHtml(item.moved_state)}</code> · runtime: <code>${escapeHtml(item.runtime_id)}</code> (<code>${escapeHtml(item.runtime_status)}</code>)</p><p>${escapeHtml(item.reason)}</p><div class="form-actions">${buttons}</div><div class="workspace-state__action"><strong>Bước tiếp theo</strong><span>${escapeHtml(item.next_action)}</span></div></article>`;
-  }).join("")}</div>`;
+  const selected = records.find((item) => item.model_id === selectedModelId) || records[0];
+  selectedModelId = selected.model_id;
+  const master = records.slice(0, 32).map((item) => `<button class="model-manager-v2-master-row${item.model_id === selected.model_id ? " is-selected" : ""}" type="button" data-model-v2-select="${escapeHtml(item.model_id)}" aria-controls="model-manager-v2-detail" aria-current="${item.model_id === selected.model_id ? "true" : "false"}"><span><strong>${escapeHtml(item.display_name)}</strong><small>${escapeHtml(item.category)} · ${escapeHtml(item.model_id)}</small></span>${statePill(item.state)}</button>`).join("");
+  const buttons = selected.actions.filter((action) => plannedActions.has(action)).map((action) => `<button class="button button--compact" type="button" data-model-v2-plan="${escapeHtml(selected.model_id)}" data-model-v2-action="${escapeHtml(action)}">${escapeHtml(actionLabel(action))}</button>`).join("");
+  const technical = `<details class="advanced model-manager-v2-technical"><summary>Chi tiết kỹ thuật</summary><p class="small">Mã trạng thái: <code>${escapeHtml(selected.state)}</code> · checksum: <code>${escapeHtml(selected.checksum_state)}</code> · duplicate: <code>${escapeHtml(selected.duplicate_state)}</code> · moved: <code>${escapeHtml(selected.moved_state)}</code> · runtime: <code>${escapeHtml(selected.runtime_id)}</code> (<code>${escapeHtml(selected.runtime_status)}</code>).</p></details>`;
+  target.innerHTML = `<div class="model-manager-v2-master-detail"><nav class="model-manager-v2-master" aria-label="Danh sách model" role="list">${master || `<div class="empty-state compact">Chưa có model hợp lệ.</div>`}</nav><section class="model-manager-v2-detail" id="model-manager-v2-detail" aria-live="polite" data-model-v2-record="${escapeHtml(selected.model_id)}"><div class="split"><div><strong>${escapeHtml(selected.display_name)}</strong><p class="small">${escapeHtml(selected.category)} · ${escapeHtml(selected.format)} · ${escapeHtml(selected.precision)}</p></div>${statePill(selected.state)}</div><div class="component-manager-grid"><div><span>Đã cài</span><strong>${selected.installed ? "Có" : "Chưa"}</strong></div><div><span>Đã xác minh</span><strong>${selected.verified ? "Có" : "Chưa"}</strong></div><div><span>Dung lượng</span><strong>${escapeHtml(formatBytes(selected.size_bytes))}</strong></div><div><span>VRAM ước tính</span><strong>${selected.vram_estimate_mb === null ? "Chưa rõ" : `${escapeHtml(String(selected.vram_estimate_mb))} MiB`}</strong></div></div><p>${escapeHtml(selected.reason)}</p><div class="workspace-state__action"><strong>Bước tiếp theo</strong><span>${escapeHtml(selected.next_action)}</span></div><div class="form-actions">${buttons}</div>${technical}</section></div>`;
 };
 
 let mounted = false;
@@ -156,6 +175,13 @@ const createPlan = async (button) => {
 
 const onClick = (event) => {
   if (event.target.closest("[data-model-manager-v2-refresh]")) { refresh(); return; }
+  const selectButton = event.target.closest("[data-model-v2-select]");
+  if (selectButton && lastPayload) {
+    selectedModelId = String(selectButton.dataset.modelV2Select || "");
+    const target = document.querySelector("[data-model-manager-v2-list]");
+    if (target) render(target, lastPayload);
+    return;
+  }
   const planButton = event.target.closest("[data-model-v2-plan]");
   if (planButton) createPlan(planButton);
 };
