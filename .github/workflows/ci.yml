@@ -89,7 +89,7 @@ jobs:
           $info = [ordered]@{
             schema_version = "local-ai-hub-stable-launcher-build.v1"
             source_commit = (git rev-parse HEAD).Trim()
-            workflow_run_id = [int]$env:GITHUB_RUN_ID
+            workflow_run_id = [int64]$env:GITHUB_RUN_ID
             format = "onedir"
             executable_sha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
           }
