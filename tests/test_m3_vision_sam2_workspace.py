@@ -105,7 +105,10 @@ assert.equal(provenance.staleJob.id, "job_a");
         self.assertIn("afterRead !== entry", app)
         self.assertIn('if (M3_TERMINAL_JOB_STATUSES.has(String(job.status || "")))', app)
         self.assertIn("render({ focus: \"main\" });", app)
-        self.assertIn("window.addEventListener(\"hashchange\", async () => {\n  storageScanPoller.stop();\n  stopAllM3JobPollers();", app)
+        self.assertIn('window.addEventListener("hashchange", async () => {', app)
+        self.assertIn("routeRenderGeneration += 1;", app)
+        self.assertIn("storageScanPoller.stop();", app)
+        self.assertIn("stopAllM3JobPollers();", app)
 
     def test_public_geometry_is_normalized_and_bounded(self) -> None:
         normalized, error = normalize_tool_payload(

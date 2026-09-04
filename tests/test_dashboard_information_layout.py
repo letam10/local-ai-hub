@@ -47,6 +47,9 @@ class DashboardInformationLayoutTests(unittest.TestCase):
             "dashboard-hero__copy",
             "dashboard-tier",
             "dashboard-tier--summary",
+            "dashboard-storage",
+            "dashboard-storage-grid",
+            "dashboard-storage-volume",
             "dashboard-tier--attention",
             "dashboard-tier--actions",
             "dashboard-metric-grid",
@@ -80,7 +83,7 @@ class DashboardInformationLayoutTests(unittest.TestCase):
         first = render_dashboard(state)
         second = render_dashboard(state)
         self.assertEqual(first, second)
-        self.assertEqual(re.findall(r'data-dashboard-tier="([^\"]+)"', first), ["summary", "attention", "actions"])
+        self.assertEqual(re.findall(r'data-dashboard-tier="([^\"]+)"', first), ["summary", "volumes", "attention", "actions"])
         self.assertNotIn("Alpha partial", first)
         self.assertNotIn("Zeta unavailable", first)
 
@@ -115,7 +118,7 @@ class DashboardInformationLayoutTests(unittest.TestCase):
         self.assertNotIn("undefined", empty)
         self.assertNotIn("[object Object]", empty)
 
-    def test_dashboard_routes_storage_detail_to_models_page(self):
+    def test_dashboard_renders_server_owned_volume_detail_without_directory_traversal(self):
         html = render_dashboard({
             "health": {"status": "healthy"},
             "storage": {
@@ -128,12 +131,35 @@ class DashboardInformationLayoutTests(unittest.TestCase):
             },
         })
         self.assertIn('data-route="models"', html)
-        self.assertNotIn("dashboard-storage", html)
-        self.assertNotIn("C:/", html)
-        self.assertNotIn("D:/", html)
-        self.assertNotIn("Review cache.", html)
+        self.assertIn('data-dashboard-volume="c"', html)
+        self.assertIn('data-dashboard-volume="d"', html)
+        self.assertIn('data-dashboard-volume-percent="90"', html)
+        self.assertIn('data-dashboard-volume-total="107374182400"', html)
+        self.assertIn('data-dashboard-volume-used="96636764160"', html)
+        self.assertIn('data-dashboard-volume-free="10737418240"', html)
+        self.assertIn("C:", html)
+        self.assertIn("D:", html)
+        self.assertIn("Tổng", html)
+        self.assertIn("Đã dùng", html)
+        self.assertIn("Trống", html)
+        self.assertIn("Review cache.", html)
         self.assertNotIn("undefined", html)
         self.assertNotIn("[object Object]", html)
+
+    def test_dashboard_volume_fallback_is_unavailable_and_does_not_leak_unsafe_text(self):
+        html = render_dashboard({
+            "health": {"status": "healthy"},
+            "storage": {
+                "volumes": [
+                    {"id": "c", "status": "available", "total_bytes": 100, "free_bytes": 50, "used_bytes": 50, "reason": r"C:\\private\\secret", "next_action": "api_key=secret"},
+                ],
+            },
+        })
+        self.assertIn('data-dashboard-volume="c"', html)
+        self.assertIn('data-dashboard-volume="d"', html)
+        self.assertIn('data-status="unavailable"', html)
+        self.assertNotIn("private", html)
+        self.assertNotIn("api_key=secret", html)
 
     def test_dashboard_routes_are_existing_and_no_new_api(self):
         source = dashboard_source()

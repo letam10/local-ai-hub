@@ -62,6 +62,7 @@ export function createDashboardRenderer(deps) {
     not_run: 7,
     unknown: 8,
   });
+  const UNSAFE_VOLUME_TEXT = /(?:[a-z]:[\\/]|\\\\|(?:file|data|https?):|(?:api[_-]?key|password|secret|token)\s*[:=])/i;
 
   const rankOf = (value) => {
     const status = String(value || "unknown");
@@ -75,6 +76,10 @@ export function createDashboardRenderer(deps) {
   };
 
   const finiteBytes = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const safeVolumeText = (value, fallback) => {
+    const candidate = typeof value === "string" ? value.trim().slice(0, 240) : "";
+    return candidate && !UNSAFE_VOLUME_TEXT.test(candidate) ? candidate : fallback;
+  };
 
   return function renderDashboard(state) {
     const source = state && typeof state === "object" ? state : {};
@@ -190,7 +195,26 @@ export function createDashboardRenderer(deps) {
     const gpuDetail = gpu.memory_free_mib != null ? `${gpu.memory_free_mib} MiB VRAM trống` : "Snapshot GPU chưa sẵn sàng";
     const diskValue = freeBytes === null ? "—" : formatGb(freeBytes);
     const activeJobExtra = ` data-dashboard-active-count="${escapeHtml(String(activeJobs))}"`;
+    const volumeValues = Array.isArray(readinessView.volumes) ? readinessView.volumes : [];
+    const volumeLabel = (value) => ({ available: "Sẵn sàng", unavailable: "Chưa khả dụng", partial: "Một phần" }[String(value || "").toLowerCase()] || "Chưa rõ");
+    const serverVolumes = volumeValues.filter((item) => item && ["c", "d"].includes(String(item.id || "").toLowerCase()));
+    const volumeCards = serverVolumes.map((item) => {
+      const total = finiteBytes(item.totalBytes);
+      const used = finiteBytes(item.usedBytes);
+      const free = finiteBytes(item.freeBytes);
+      const percent = total !== null && total > 0 && used !== null
+        ? Math.max(0, Math.min(100, Math.round((used / total) * 1000) / 10))
+        : null;
+      const status = ["available", "unavailable", "partial"].includes(String(item.status || "").toLowerCase()) ? String(item.status).toLowerCase() : "unavailable";
+      const volumeId = String(item.id || "").toLowerCase();
+      const safeLabel = safeVolumeText(item.label, volumeId.toUpperCase());
+      const reason = safeVolumeText(item.reason, percent === null ? "Chưa có số liệu volume." : `${percent}% đã dùng`);
+      const nextAction = safeVolumeText(item.nextAction, "Làm mới snapshot để cập nhật số liệu.");
+      const progressValue = percent === null ? 0 : percent;
+      return `<article class="dashboard-storage-volume" data-dashboard-volume="${escapeHtml(volumeId)}" data-status="${escapeHtml(status)}" data-low-space="${item.lowSpace === true}" data-dashboard-volume-total="${total === null ? "" : total}" data-dashboard-volume-used="${used === null ? "" : used}" data-dashboard-volume-free="${free === null ? "" : free}" data-dashboard-volume-percent="${percent === null ? "" : percent}"><div class="card-title-row"><div><span class="eyebrow">Ổ ĐĨA DO MÁY CHỦ SỞ HỮU</span><h3>${escapeHtml(safeLabel)}</h3></div>${statusPill(status, volumeLabel(status))}</div><div class="dashboard-storage-values"><div><span>Tổng</span><strong>${total === null ? "—" : escapeHtml(formatGb(total))}</strong></div><div><span>Đã dùng</span><strong>${used === null ? "—" : escapeHtml(formatGb(used))}</strong></div><div><span>Trống</span><strong>${free === null ? "—" : escapeHtml(formatGb(free))}</strong></div></div><div class="progress-track"><progress class="progress-bar" data-dashboard-volume-progress value="${progressValue}" max="100" aria-label="${escapeHtml(`Phần trăm đã dùng ${safeLabel}`)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progressValue}">${progressValue}%</progress></div><p class="dashboard-storage-reason">${escapeHtml(reason)}</p><p class="dashboard-storage-action"><strong>${item.lowSpace === true ? "Sắp hết dung lượng" : "Trạng thái"}</strong><span>${escapeHtml(nextAction)}</span></p></article>`;
+    }).join("");
+    const volumeSection = `<section class="dashboard-tier dashboard-storage card" data-dashboard-tier="volumes" aria-labelledby="dashboard-storage-title"><div class="card-title-row"><div><span class="eyebrow">LƯU TRỮ</span><h2 id="dashboard-storage-title">Tổng quan ổ lưu trữ</h2><p class="small">Chỉ metadata volume từ allowlist server-owned; làm mới Dashboard không quét thư mục.</p></div><span class="tag">${escapeHtml(String(serverVolumes.length))} volume</span></div><div class="dashboard-storage-grid">${volumeCards || `<p class="small muted">Chưa có volume server-owned khả dụng.</p>`}</div></section>`;
 
-    return `<section class="dashboard-page" aria-labelledby="dashboard-title" data-dashboard-simplified="true"><header class="dashboard-hero"><div class="dashboard-hero__copy"><span class="eyebrow">TRUNG TÂM ĐIỀU KHIỂN</span><h1 id="dashboard-title">Dashboard</h1><p>${escapeHtml(readinessNote)}</p></div>${statusPill(readiness, formatStatus(readiness))}</header><section class="dashboard-tier dashboard-tier--summary card" data-dashboard-tier="summary" aria-labelledby="dashboard-summary-title"><div class="card-title-row"><div><span class="eyebrow">TÓM TẮT</span><h2 id="dashboard-summary-title">Tóm tắt hệ thống</h2></div><span class="tag">4 chỉ số</span></div><div class="dashboard-metric-grid">${metric("api", "Hub API", formatStatus(transport), transportReady ? "Loopback API đang phản hồi" : "Kiểm tra trạng thái kết nối")}${metric("gpu", "GPU", gpuValue, gpuDetail)}${metric("disk-free", "Dung lượng trống", diskValue, "Dung lượng còn lại trên volume chính")}${metric("active-jobs", "Jobs hoạt động", activeJobs, `${jobs.length} bản ghi trong queue`, activeJobExtra)}</div></section><section class="dashboard-tier dashboard-tier--attention card" data-dashboard-tier="attention" aria-labelledby="dashboard-attention-title"><div class="card-title-row"><div><span class="eyebrow">CẦN CHÚ Ý</span><h2 id="dashboard-attention-title">Cần chú ý</h2></div><span class="tag" data-dashboard-attention-count="${escapeHtml(String(attentionItems.length))}">Tối đa 4 mục</span></div><div class="dashboard-attention-list">${attentionRows}</div></section><section class="dashboard-tier dashboard-tier--actions card" data-dashboard-tier="actions" aria-labelledby="dashboard-actions-title"><div class="card-title-row"><div><span class="eyebrow">THAO TÁC</span><h2 id="dashboard-actions-title">Thao tác nhanh và tác vụ gần đây</h2></div></div><div class="dashboard-quick-actions">${quickActions}</div><div class="dashboard-recent-jobs-wrap"><h3>Tác vụ gần đây</h3><ul class="dashboard-recent-jobs">${recentJobsHtml}</ul></div></section></section>`;
+    return `<section class="dashboard-page" aria-labelledby="dashboard-title" data-dashboard-simplified="true"><header class="dashboard-hero"><div class="dashboard-hero__copy"><span class="eyebrow">TRUNG TÂM ĐIỀU KHIỂN</span><h1 id="dashboard-title">Dashboard</h1><p>${escapeHtml(readinessNote)}</p></div>${statusPill(readiness, formatStatus(readiness))}</header><section class="dashboard-tier dashboard-tier--summary card" data-dashboard-tier="summary" aria-labelledby="dashboard-summary-title"><div class="card-title-row"><div><span class="eyebrow">TÓM TẮT</span><h2 id="dashboard-summary-title">Tóm tắt hệ thống</h2></div><span class="tag">4 chỉ số</span></div><div class="dashboard-metric-grid">${metric("api", "Hub API", formatStatus(transport), transportReady ? "Loopback API đang phản hồi" : "Kiểm tra trạng thái kết nối")}${metric("gpu", "GPU", gpuValue, gpuDetail)}${metric("disk-free", "Dung lượng trống", diskValue, "Dung lượng còn lại trên volume chính")}${metric("active-jobs", "Jobs hoạt động", activeJobs, `${jobs.length} bản ghi trong queue`, activeJobExtra)}</div></section>${volumeSection}<section class="dashboard-tier dashboard-tier--attention card" data-dashboard-tier="attention" aria-labelledby="dashboard-attention-title"><div class="card-title-row"><div><span class="eyebrow">CẦN CHÚ Ý</span><h2 id="dashboard-attention-title">Cần chú ý</h2></div><span class="tag" data-dashboard-attention-count="${escapeHtml(String(attentionItems.length))}">Tối đa 4 mục</span></div><div class="dashboard-attention-list">${attentionRows}</div></section><section class="dashboard-tier dashboard-tier--actions card" data-dashboard-tier="actions" aria-labelledby="dashboard-actions-title"><div class="card-title-row"><div><span class="eyebrow">THAO TÁC</span><h2 id="dashboard-actions-title">Thao tác nhanh và tác vụ gần đây</h2></div></div><div class="dashboard-quick-actions">${quickActions}</div><div class="dashboard-recent-jobs-wrap"><h3>Tác vụ gần đây</h3><ul class="dashboard-recent-jobs">${recentJobsHtml}</ul></div></section></section>`;
   };
 }

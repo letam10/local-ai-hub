@@ -46,6 +46,12 @@ class UiRefreshIntegrationTests(unittest.TestCase):
             "dashboard-hero__copy",
             "dashboard-tier",
             "dashboard-tier--summary",
+            "dashboard-storage",
+            "dashboard-storage-grid",
+            "dashboard-storage-volume",
+            "dashboard-storage-values",
+            "dashboard-storage-reason",
+            "dashboard-storage-action",
             "dashboard-tier--attention",
             "dashboard-tier--actions",
             "dashboard-metric-grid",
@@ -92,6 +98,18 @@ class UiRefreshIntegrationTests(unittest.TestCase):
         self.assertIn("data-artifact-mask", self.pages)
         self.assertNotIn("arrayBuffer()", self.app)
         self.assertNotIn("FileReader", self.app)
+
+    def test_route_generation_invalidates_stale_async_render_and_load_ownership(self) -> None:
+        for marker in (
+            "let routeLoadKey = \"\";",
+            "let routeRenderGeneration = 0;",
+            "const routeIsCurrent = (route, generation)",
+            "const beginRouteLoad = (key, factory)",
+            "if (!isCurrent()) return;",
+            "routeLoad = null;",
+            "routeLoadKey = \"\";",
+        ):
+            self.assertIn(marker, self.app)
 
 
 if __name__ == "__main__":

@@ -234,6 +234,7 @@ const workflowLibraryAdapter = createWorkflowLibraryAdapter(null, {
   confirm_migration: ({ entries, expected_revision }) => confirmWorkflowLibraryMigration(entries, expected_revision),
 });
 let routeLoad = null;
+let routeLoadKey = "";
 let desktopCloseLayer = null;
 let artifactPreviewOpener = null;
 let disposeImageMaskCanvases = () => {};
@@ -468,6 +469,22 @@ const isRoutableRoute = (value) => NAVIGATION.flatMap((group) => group.items).so
 const routeId = () => {
   const value = window.location.hash.replace(/^#\/?/, "").split("/")[0];
   return isRoutableRoute(value) ? value : "dashboard";
+};
+let lastRenderedRoute = null;
+let routeRenderGeneration = 0;
+
+const routeIsCurrent = (route, generation) => routeId() === route && routeRenderGeneration === generation;
+const beginRouteLoad = (key, factory) => {
+  let promise;
+  promise = Promise.resolve().then(factory).finally(() => {
+    if (routeLoad === promise) {
+      routeLoad = null;
+      routeLoadKey = "";
+    }
+  });
+  routeLoad = promise;
+  routeLoadKey = key;
+  return promise;
 };
 
 const focusComponentMaster = (id = state.selectedComponentId) => {
@@ -771,7 +788,9 @@ const updateTopbar = () => {
 };
 
 const render = ({ background = false, focus = "" } = {}) => {
-  const continuity = captureFocusContinuity();
+  const activeRoute = routeId();
+  const sameRoute = lastRenderedRoute === activeRoute;
+  const continuity = sameRoute ? captureFocusContinuity() : { activeInside: false, token: "", ordinal: 0, scroll: null };
   if (background && continuity.token) {
     setSnapshotStatus("deferred");
     updateTopbar();
@@ -789,7 +808,7 @@ const render = ({ background = false, focus = "" } = {}) => {
   renderGlobalSearch();
   renderCommandPalette();
   syncSidebarState();
-  view.innerHTML = `${renderApiState()}${renderPage(routeId(), state)}`;
+  view.innerHTML = `${renderApiState()}${renderPage(activeRoute, state)}`;
   applyToolActionGates();
   disposeM3Workspaces = mountM3InteractiveWorkspaces(view, state, {
     onStateChange: () => applyToolActionGates(),
@@ -798,7 +817,15 @@ const render = ({ background = false, focus = "" } = {}) => {
     onStateChange: () => applyToolActionGates(),
   });
   resumeVisibleWorkspaceJobPollers();
-  restoreScrollContinuity(continuity.scroll);
+  if (sameRoute) restoreScrollContinuity(continuity.scroll);
+  else {
+    // A navigation boundary must never inherit the previous route's deep
+    // scroll position. Same-route background refreshes still use the
+    // continuity snapshot above.
+    if (mainContent) mainContent.scrollTop = 0;
+    if (view) view.scrollTop = 0;
+    if (typeof window.scrollTo === "function") window.scrollTo(0, 0);
+  }
   restoreFocusContinuity(continuity, focus);
   setSnapshotStatus(background ? (continuity.activeInside ? "preserved" : "received") : (continuity.activeInside && !focus ? "preserved" : "received"));
   updateTopbar();
@@ -831,6 +858,7 @@ const render = ({ background = false, focus = "" } = {}) => {
   if (languageSelect) languageSelect.value = currentLanguage();
   localizeDocument(document);
   void recordFrontendEvent("route_rendered", routeId());
+  lastRenderedRoute = activeRoute;
   return true;
 };
 
@@ -874,7 +902,11 @@ const confirmFrontendReady = async () => {
 };
 
 const refreshFast = async ({ quiet = false, renderView = true } = {}) => {
+  const requestedRoute = routeId();
+  const requestedGeneration = routeRenderGeneration;
+  const isCurrent = () => routeIsCurrent(requestedRoute, requestedGeneration);
   const [health, jobs, capabilities, durableJobs] = await Promise.allSettled([getHealth(), getJobs(), getCapabilities(), getDurableJobs()]);
+  if (!isCurrent()) return false;
   let failed = false;
   if (health.status === "fulfilled") state.health = health.value || {};
   else failed = true;
@@ -884,14 +916,17 @@ const refreshFast = async ({ quiet = false, renderView = true } = {}) => {
   else failed = true;
   if (durableJobs.status === "fulfilled") state.durableJobs = durableJobs.value?.records || [];
   else failed = true;
-  const rendered = ["dashboard", "settings", "jobs"].includes(routeId()) ? render({ background: true }) : false;
+  const rendered = ["dashboard", "settings", "jobs"].includes(requestedRoute) ? render({ background: true }) : false;
   if (failed && state.apiStatus === "ready") state.apiStatus = "degraded";
   if (failed && !quiet) showToast("API đang khởi động hoặc một snapshot nhanh chưa sẵn sàng.", "warning");
   if (failed && rendered !== false) setSnapshotStatus("unavailable");
   return rendered;
 };
 
-const refreshCreative = async ({ renderView = true } = {}) => {
+const refreshCreative = async ({ renderView = true, isCurrent } = {}) => {
+  const requestedRoute = routeId();
+  const requestedGeneration = routeRenderGeneration;
+  const isActive = typeof isCurrent === "function" ? isCurrent : () => routeIsCurrent(requestedRoute, requestedGeneration);
   state.creativeLoading = true;
   try {
     const [creativeResult, workspaceResult, artifactsResult] = await Promise.allSettled([
@@ -900,6 +935,7 @@ const refreshCreative = async ({ renderView = true } = {}) => {
       getArtifactLibraryV2(120),
     ]);
     if (creativeResult.status !== "fulfilled") throw creativeResult.reason;
+    if (!isActive()) return state.creative;
     state.creative = creativeResult.value || {};
     if (workspaceResult.status === "fulfilled") state.projectWorkspaceV2 = workspaceResult.value || {};
     if (artifactsResult.status === "fulfilled") state.artifactLibraryV2 = artifactsResult.value || {};
@@ -912,18 +948,23 @@ const refreshCreative = async ({ renderView = true } = {}) => {
       try { state.creativeProject = await getProject(selected); }
       catch { state.creativeProject = null; state.selectedProjectId = ""; }
     } else state.creativeProject = null;
+    if (!isActive()) return state.creative;
     return state.creative;
   } finally {
     state.creativeLoading = false;
-    if (renderView && routeId() === "projects") render();
+    if (renderView && isActive() && routeId() === "projects") render();
   }
 };
 
-const refreshImageMaskStudio = async ({ renderView = true, before = "", after = "" } = {}) => {
+const refreshImageMaskStudio = async ({ renderView = true, before = "", after = "", isCurrent } = {}) => {
+  const requestedRoute = routeId();
+  const requestedGeneration = routeRenderGeneration;
+  const isActive = typeof isCurrent === "function" ? isCurrent : () => routeIsCurrent(requestedRoute, requestedGeneration);
   state.imageMaskLoading = true;
   try {
     const [overviewResult, creativeResult] = await Promise.allSettled([getImageMaskStudioOverview(), getCreativeOverview()]);
     if (overviewResult.status !== "fulfilled") throw overviewResult.reason;
+    if (!isActive()) return state.imageMaskStudio;
     state.imageMaskStudio = overviewResult.value || {};
     if (creativeResult.status === "fulfilled") state.creative = creativeResult.value || state.creative;
     const sessions = state.imageMaskStudio.sessions || [];
@@ -938,6 +979,7 @@ const refreshImageMaskStudio = async ({ renderView = true, before = "", after = 
       return state.imageMaskStudio;
     }
     const detail = await getImageMaskSession(selected);
+    if (!isActive()) return state.imageMaskStudio;
     state.imageMaskSession = detail || null;
     const layers = detail?.session?.layers || [];
     if (!layers.some((layer) => layer.id === state.selectedImageMaskLayerId)) {
@@ -945,10 +987,11 @@ const refreshImageMaskStudio = async ({ renderView = true, before = "", after = 
     }
     try { state.imageMaskCompare = await getImageMaskCompare(selected, before, after); }
     catch { state.imageMaskCompare = null; }
+    if (!isActive()) return state.imageMaskStudio;
     return state.imageMaskStudio;
   } finally {
     state.imageMaskLoading = false;
-    if (renderView && routeId() === "image" && state.workspaceTabs.image === "studio") render();
+    if (renderView && isActive() && routeId() === "image" && state.workspaceTabs.image === "studio") render();
   }
 };
 
@@ -1126,20 +1169,32 @@ const pollStorageScan = (scanId = "") => storageScanPoller.start(scanId);
 
 const loadRouteData = async ({ scan = false } = {}) => {
   const route = routeId();
+  const generation = routeRenderGeneration;
+  const loadKey = `${generation}:${route}`;
+  const isCurrent = () => routeIsCurrent(route, generation);
+  if (routeLoad && routeLoadKey !== loadKey) {
+    // A navigation boundary invalidates the old promise.  Its finally block
+    // cannot clear a newer route load because beginRouteLoad compares identity.
+    routeLoad = null;
+    routeLoadKey = "";
+  }
+  const existingLoad = routeLoad && routeLoadKey === loadKey ? routeLoad : null;
   if (route === "dashboard") {
-    if (routeLoad) return routeLoad;
-    routeLoad = getProductExperienceV2().then((value) => {
+    if (existingLoad) return existingLoad;
+    return beginRouteLoad(loadKey, () => getProductExperienceV2().then((value) => {
+      if (!isCurrent()) return;
       state.productExperienceV2 = value || {};
-      if (routeId() === "dashboard") render();
+      render();
     }).catch(() => {
+      if (!isCurrent()) return;
       state.productExperienceV2 = { status: "unavailable", execution: "not_run", dry_run: true };
-      if (routeId() === "dashboard") render();
-    }).finally(() => { routeLoad = null; });
-    return routeLoad;
+      render();
+    }));
   }
   if (route === "models") {
-    if (routeLoad) return routeLoad;
-    routeLoad = Promise.allSettled([getModels(), scan ? scanStorage() : getStorage(), getProductionCatalog(), getUpdateSettings()]).then((results) => {
+    if (existingLoad) return existingLoad;
+    return beginRouteLoad(loadKey, () => Promise.allSettled([getModels(), scan ? scanStorage() : getStorage(), getProductionCatalog(), getUpdateSettings()]).then(async (results) => {
+      if (!isCurrent()) return;
       if (results[0].status === "fulfilled") state.models = results[0].value.models || [];
       if (results[1].status === "fulfilled") {
         const storageResult = results[1].value || {};
@@ -1152,92 +1207,116 @@ const loadRouteData = async ({ scan = false } = {}) => {
       }
       if (results[2].status === "fulfilled") state.productionCatalog = results[2].value || state.productionCatalog;
       if (results[3].status === "fulfilled") state.updateCenter = { ...state.updateCenter, settings: results[3].value || state.updateCenter.settings };
+      if (!isCurrent()) return;
       render();
-      if (STORAGE_SCAN_ACTIVE_STATES.includes(String(state.storageScan?.status || ""))) pollStorageScan(state.storageScan.scan_id || "");
-    }).catch(() => {}).finally(() => { routeLoad = null; });
-    return routeLoad;
+      if (STORAGE_SCAN_ACTIVE_STATES.includes(String(state.storageScan?.status || ""))) {
+        pollStorageScan(state.storageScan.scan_id || "");
+      } else {
+        // FAST is only a first-paint placeholder. Queue DEEP_EXACT
+        // automatically after the page is visible, attaching to the
+        // server-owned worker if another view already started it.
+        try {
+          const deep = await scanStorage();
+          if (!isCurrent()) return;
+          state.storage = { ...(state.storage || {}), ...(deep || {}), disk: deep?.disk || state.storage?.disk || {} };
+          state.storageScan = deep?.scan || state.storageScan;
+          render({ background: true });
+          if (STORAGE_SCAN_ACTIVE_STATES.includes(String(state.storageScan?.status || ""))) pollStorageScan(state.storageScan.scan_id || "");
+        } catch {
+          // The visible FAST snapshot remains truthful; the scan route will
+          // retry on the next user navigation/refresh.
+        }
+      }
+    }).catch(() => {}));
   }
   if (route === "components") {
-    if (routeLoad) return routeLoad;
-    routeLoad = Promise.allSettled([getComponents(), getProductionCatalog()]).then((results) => {
+    if (existingLoad) return existingLoad;
+    return beginRouteLoad(loadKey, () => Promise.allSettled([getComponents(), getProductionCatalog()]).then((results) => {
+      if (!isCurrent()) return;
       const payload = results[0].status === "fulfilled" ? results[0].value : {};
       state.componentManager = payload || {};
       syncComponentSelection();
       if (results[1].status === "fulfilled") state.productionCatalog = results[1].value || state.productionCatalog;
       render();
     }).catch((error) => {
-      showToast(error.message || "Không thể tải Component Manager.", "error");
-    }).finally(() => { routeLoad = null; });
-    return routeLoad;
+      if (isCurrent()) showToast(error.message || "Không thể tải Component Manager.", "error");
+    }));
   }
   if (route === "airi") {
-    if (routeLoad) return routeLoad;
+    if (existingLoad) return existingLoad;
     // The legacy bootstrap is kept for fast paint and the existing
     // server-owned launch action.  M3 integration state is loaded explicitly
     // here; the browser never probes AIRI, reads a path/key, or embeds it.
-    routeLoad = Promise.allSettled([getExternalIntegrationsV2(), getApplications()]).then((results) => {
+    return beginRouteLoad(loadKey, () => Promise.allSettled([getExternalIntegrationsV2(), getApplications()]).then((results) => {
+      if (!isCurrent()) return;
       if (results[0].status === "fulfilled") state.externalIntegrationsV2 = results[0].value || {};
       if (results[1].status === "fulfilled") state.applications = results[1].value?.applications || state.applications;
       render();
     }).catch((error) => {
-      if (routeId() === "airi") showToast(error.message || "Không thể tải trạng thái tích hợp AIRI.", "error");
-    }).finally(() => { routeLoad = null; });
-    return routeLoad;
+      if (isCurrent()) showToast(error.message || "Không thể tải trạng thái tích hợp AIRI.", "error");
+    }));
   }
   if (route === "image") {
-    const results = await Promise.allSettled([getLifecycle(), getComfyAdvanced(), getComfyBridgeWorkflows()]);
-    if (results[0].status === "fulfilled") state.lifecycle = results[0].value;
-    if (results[1].status === "fulfilled") state.comfyAdvanced = results[1].value;
-    if (results[2].status === "fulfilled") state.comfyWorkflows = results[2].value.workflows || [];
-    try { await refreshImageMaskStudio({ renderView: false }); }
-    catch (error) {
-      state.imageMaskStudio = { ...state.imageMaskStudio, recovery: { status: "recovery_required", reason: error.message || "Không thể tải Image & Mask Studio.", action: "Kiểm tra API Hub rồi thử lại." } };
-      if (state.workspaceTabs.image === "studio") showToast(error.message || "Không thể tải Image & Mask Studio.", "error");
-    }
-    render();
+    if (existingLoad) return existingLoad;
+    return beginRouteLoad(loadKey, async () => {
+      const results = await Promise.allSettled([getLifecycle(), getComfyAdvanced(), getComfyBridgeWorkflows()]);
+      if (!isCurrent()) return;
+      if (results[0].status === "fulfilled") state.lifecycle = results[0].value;
+      if (results[1].status === "fulfilled") state.comfyAdvanced = results[1].value;
+      if (results[2].status === "fulfilled") state.comfyWorkflows = results[2].value.workflows || [];
+      try { await refreshImageMaskStudio({ renderView: false, isCurrent }); }
+      catch (error) {
+        if (isCurrent()) {
+          state.imageMaskStudio = { ...state.imageMaskStudio, recovery: { status: "recovery_required", reason: error.message || "Không thể tải Image & Mask Studio.", action: "Kiểm tra API Hub rồi thử lại." } };
+          if (state.workspaceTabs.image === "studio") showToast(error.message || "Không thể tải Image & Mask Studio.", "error");
+        }
+      }
+      if (isCurrent()) render();
+    });
   }
   if (route === "media" || route === "video" || route === "animesr") {
-    if (routeLoad) return routeLoad;
-    routeLoad = Promise.allSettled([getMediaPipelineV2(), getArtifactLibraryV2(120)]).then((results) => {
+    if (existingLoad) return existingLoad;
+    return beginRouteLoad(loadKey, () => Promise.allSettled([getMediaPipelineV2(), getArtifactLibraryV2(120)]).then((results) => {
+      if (!isCurrent()) return;
       if (results[0].status === "fulfilled") state.mediaPipelineV2 = results[0].value || {};
       else state.mediaPipelineV2 = { status: "unavailable", execution: "not_run", dry_run: true };
       if (results[1].status === "fulfilled") state.artifactLibraryV2 = results[1].value || state.artifactLibraryV2;
       render();
     }).catch(() => {
+      if (!isCurrent()) return;
       state.mediaPipelineV2 = { status: "unavailable", execution: "not_run", dry_run: true };
       render();
-    }).finally(() => { routeLoad = null; });
-    return routeLoad;
+    }));
   }
   if (route === "projects") {
-    if (routeLoad) return routeLoad;
+    if (existingLoad) return existingLoad;
     // The bootstrap contains the legacy Creative overview for a fast first
     // paint, but M2 project/artifact projections are route data.  Fetch them
     // when Projects is selected rather than rendering a false unavailable
     // fallback until the user happens to press the manual refresh button.
-    routeLoad = refreshCreative({ renderView: false }).then(() => {
-      if (routeId() === "projects") render();
+    return beginRouteLoad(loadKey, () => refreshCreative({ renderView: false, isCurrent }).then(() => {
+      if (isCurrent()) render();
     }).catch((error) => {
-      if (routeId() === "projects") showToast(error.message || "Không thể tải Creative Workspace.", "error");
-    }).finally(() => { routeLoad = null; });
-    return routeLoad;
+      if (isCurrent()) showToast(error.message || "Không thể tải Creative Workspace.", "error");
+    }));
   }
   if (route === "diagnostics") {
-    if (routeLoad) return routeLoad;
-    routeLoad = Promise.allSettled([getDiagnosticsSnapshot(), getPlatformHardeningV2(), getPlatformExtensibilityV2()]).then(([diagnosticsResult, hardeningResult, extensibilityResult]) => {
+    if (existingLoad) return existingLoad;
+    return beginRouteLoad(loadKey, () => Promise.allSettled([getDiagnosticsSnapshot(), getPlatformHardeningV2(), getPlatformExtensibilityV2()]).then(([diagnosticsResult, hardeningResult, extensibilityResult]) => {
+      if (!isCurrent()) return;
       const res = diagnosticsResult.status === "fulfilled" ? diagnosticsResult.value : { status: "unavailable", snapshot: {} };
       state.diagnostics = res;
       state.platformHardeningV2 = hardeningResult.status === "fulfilled" ? hardeningResult.value : { status: "unavailable", areas: [], execution: "not_run", dry_run: true };
       state.platformExtensibilityV2 = extensibilityResult.status === "fulfilled" ? extensibilityResult.value : { status: "unavailable", execution: "not_run", dry_run: true };
       render();
     }).catch((err) => {
-      showToast(err.message || "Không thể tải Diagnostics snapshot.", "error");
-    }).finally(() => { routeLoad = null; });
-    return routeLoad;
+      if (isCurrent()) showToast(err.message || "Không thể tải Diagnostics snapshot.", "error");
+    }));
   }
   if (route === "settings") {
-    if (routeLoad) return routeLoad;
-    routeLoad = Promise.allSettled([getSettings(), listBackups()]).then(([setRes, backRes]) => {
+    if (existingLoad) return existingLoad;
+    return beginRouteLoad(loadKey, () => Promise.allSettled([getSettings(), listBackups()]).then(([setRes, backRes]) => {
+      if (!isCurrent()) return;
       if (setRes.status === "fulfilled" && setRes.value?.settings) {
         state.settings = setRes.value.settings;
         state.settings_revision = setRes.value.settings_revision;
@@ -1248,8 +1327,7 @@ const loadRouteData = async ({ scan = false } = {}) => {
         state.backups = backRes.value.backups;
       }
       render();
-    }).catch(() => {}).finally(() => { routeLoad = null; });
-    return routeLoad;
+    }).catch(() => {}));
   }
   return undefined;
 };
@@ -2978,6 +3056,9 @@ document.addEventListener("keydown", async (event) => {
 
 window.addEventListener("resize", syncSidebarState);
 window.addEventListener("hashchange", async () => {
+  routeRenderGeneration += 1;
+  routeLoad = null;
+  routeLoadKey = "";
   storageScanPoller.stop();
   stopAllM3JobPollers();
   render({ focus: "main" });
