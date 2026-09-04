@@ -3859,7 +3859,10 @@ class HubGraphEditor {
     const nodes = this.liteGraph._nodes;
     if (!nodes.length) return;
     const bounds = graphBounds(nodes, 32);
-    const usableWidth = Math.max(240, this.canvasElement.width - 210);
+    // The minimap is an overlay, not a reserved column.  Reserving its width
+    // here pushes the left-most node outside the canvas at the native 1280px
+    // layout and makes Fit fail its promise to keep the graph usable.
+    const usableWidth = Math.max(240, this.canvasElement.width - 24);
     const usableHeight = Math.max(240, this.canvasElement.height - 150);
     const zoom = Math.max(0.35, Math.min(1.15, Math.min(usableWidth / Math.max(1, bounds.width), usableHeight / Math.max(1, bounds.height))));
     this.liteCanvas.ds.scale = zoom;
