@@ -240,9 +240,10 @@ td { color: var(--text); }
 .workspace-state p { font-size: 11px; line-height: 1.5; }
 .workspace-state__action, .global-state { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--muted); font-size: 11px; }
 .workspace-state__action strong, .global-state strong { color: var(--text); }
-.m3-tool-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; align-items: start; }
+.m3-tool-workspace, .m4-tool-workspace { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 14px; align-items: stretch; min-height: 0; height: min(760px, calc(100dvh - 250px)); }
 .m3-workspace__inputs, .m3-workspace__canvas, .m3-workspace__results { display: grid; gap: 12px; min-width: 0; align-content: start; }
 .m3-workspace__results { grid-template-columns: minmax(0, 1fr); }
+.m3-workspace__body, .m4-workspace__body { display: grid; gap: 14px; min-width: 0; min-height: 0; overflow: auto; overflow-x: hidden; align-content: start; padding-right: 4px; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .m3-command-strip { position: sticky; top: 0; z-index: 6; display: grid; grid-template-columns: minmax(170px, .9fr) minmax(180px, 1.2fr) minmax(0, 1.5fr) auto; align-items: center; gap: 9px; box-sizing: border-box; min-height: 66px; max-height: 96px; overflow: hidden; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-card); color: var(--text); background: var(--panel-raised); box-shadow: 0 8px 22px rgba(4, 8, 18, .22); }
 .m3-command-strip__source, .m3-command-strip__tool, .m3-command-strip__readiness, .m3-command-strip__actions { min-width: 0; }
 .m3-command-strip__source .field { display: grid; gap: 3px; min-width: 0; }
@@ -324,7 +325,6 @@ td { color: var(--text); }
 .sam2-composite__mask { mix-blend-mode: screen; pointer-events: none; }
 .m3-result-media { display: block; max-width: 100%; max-height: 280px; margin: 0 auto; border-radius: 9px; background: var(--panel-soft); object-fit: contain; }
 .sam2-opacity-control { margin-top: 2px; }
-.m4-tool-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; align-items: start; }
 .m4-workspace__inputs, .m4-workspace__canvas, .m4-workspace__results { display: grid; gap: 12px; min-width: 0; align-content: start; }
 .m4-workspace__results { grid-template-columns: minmax(0, 1fr); }
 .m4-command-strip { position: sticky; top: 0; z-index: 6; display: grid; grid-template-columns: minmax(170px, .9fr) minmax(170px, 1.2fr) minmax(0, 1.7fr) auto; align-items: center; gap: 9px; box-sizing: border-box; min-height: 66px; max-height: 96px; overflow: hidden; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-card); color: var(--text); background: var(--panel-raised); box-shadow: 0 8px 22px rgba(4, 8, 18, .22); }

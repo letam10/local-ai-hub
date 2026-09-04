@@ -119,16 +119,18 @@ export function createVisionRenderer(deps) {
           <div class="m3-command-strip__readiness"><strong data-m3-readiness>${escapeHtml(selectedDefinition.statusLabel)}</strong><span data-m3-readiness-reason>${escapeHtml(selectedDefinition.reason)}</span></div>
           <div class="m3-command-strip__actions"><button class="button button--primary" type="submit" form="vision-job-form-${escapeHtml(selected)}" data-m3-primary-action${primaryDisabled}>${escapeHtml(selectedDefinition.runLabel)}</button><button class="button button--compact" type="button" data-m3-settings-toggle="vision" aria-controls="m3-vision-settings" aria-expanded="${String(settingsExpanded)}">${settingsExpanded ? "Thu gọn thiết lập" : "Thiết lập"}</button></div>
         </div>
-        <div class="m3-workspace__canvas">
-          ${card("Canvas / preview", `${renderMediaStage(source, { vision: true })}<p class="small m3-canvas-hint">Preview chỉ xem tại route hiện tại. Chọn detection để highlight box; click ảnh không mở file picker. Result contract: <code>vision.annotation.v1</code>.</p>`)}
-        </div>
-        <div class="m3-workspace__results">
-          <section class="m3-workspace__settings" id="m3-vision-settings" data-m3-settings="vision"${settingsExpanded ? "" : " hidden"}>
-            <div class="m3-selected-tool-settings" data-vision-active-settings="${escapeHtml(selectedDefinition.id)}">${definitions.map((definition) => renderVisionPanel(definition, model, { ...deps, formResult, escapeHtml })).join("")}</div>
-          </section>
-          ${card("Tiến trình, kết quả và artifact", `<div data-workspace-job-result>${results}</div>`)}
-          ${card("Detections", `<div data-vision-detection-result>${renderDetectionList(annotation, model, escapeHtml)}</div>`, "", "card--flat")}
-          ${annotation ? card("Projection opaque", `<dl class="m3-contract-summary"><div><dt>Contract</dt><dd>${escapeHtml(annotation.schema_version || "vision.annotation.v1")}</dd></div><div><dt>Source artifact</dt><dd>${escapeHtml(annotation.source_artifact_id || "—")}</dd></div><div><dt>Detections</dt><dd>${escapeHtml(String((annotation.detections || []).length))}</dd></div></dl>${artifactList(model.job?.result || {})}`) : ""}
+        <div class="m3-workspace__body" data-m3-scroll-region>
+          <div class="m3-workspace__canvas">
+            ${card("Canvas / preview", `${renderMediaStage(source, { vision: true })}<p class="small m3-canvas-hint">Preview chỉ xem tại route hiện tại. Chọn detection để highlight box; click ảnh không mở file picker. Result contract: <code>vision.annotation.v1</code>.</p>`)}
+          </div>
+          <div class="m3-workspace__results">
+            <section class="m3-workspace__settings" id="m3-vision-settings" data-m3-settings="vision"${settingsExpanded ? "" : " hidden"}>
+              <div class="m3-selected-tool-settings" data-vision-active-settings="${escapeHtml(selectedDefinition.id)}">${definitions.map((definition) => renderVisionPanel(definition, model, { ...deps, formResult, escapeHtml })).join("")}</div>
+            </section>
+            ${card("Tiến trình, kết quả và artifact", `<div data-workspace-job-result>${results}</div>`)}
+            ${card("Detections", `<div data-vision-detection-result>${renderDetectionList(annotation, model, escapeHtml)}</div>`, "", "card--flat")}
+            ${annotation ? card("Projection opaque", `<dl class="m3-contract-summary"><div><dt>Contract</dt><dd>${escapeHtml(annotation.schema_version || "vision.annotation.v1")}</dd></div><div><dt>Source artifact</dt><dd>${escapeHtml(annotation.source_artifact_id || "—")}</dd></div><div><dt>Detections</dt><dd>${escapeHtml(String((annotation.detections || []).length))}</dd></div></dl>${artifactList(model.job?.result || {})}`) : ""}
+          </div>
         </div>
       </section>`;
   };
