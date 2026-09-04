@@ -106,6 +106,7 @@ assert.equal(normalized.pickerSearch, "typed");
         self.assertIn("graph-connection-picker__rejected", source)
         self.assertIn("minimapWorldBounds", source)
         self.assertIn("this.canvasElement.width - 24", source)
+        self.assertIn("Math.max(0.25", source)
         self.assertIn("value.size = normalizeNodeSize", source)
         self.assertIn("Output states", source)
 

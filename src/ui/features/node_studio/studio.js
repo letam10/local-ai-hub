@@ -3864,7 +3864,12 @@ class HubGraphEditor {
     // layout and makes Fit fail its promise to keep the graph usable.
     const usableWidth = Math.max(240, this.canvasElement.width - 24);
     const usableHeight = Math.max(240, this.canvasElement.height - 150);
-    const zoom = Math.max(0.35, Math.min(1.15, Math.min(usableWidth / Math.max(1, bounds.width), usableHeight / Math.max(1, bounds.height))));
+    // At the native 1280px layout the five-node preset is wider than the
+    // canvas.  A 0.35 floor leaves the first node clipped even after reserving
+    // only a small overlay margin, so allow Fit to enter the compact semantic
+    // zoom band while keeping node dimensions and the readable normal zoom
+    // unchanged.
+    const zoom = Math.max(0.25, Math.min(1.15, Math.min(usableWidth / Math.max(1, bounds.width), usableHeight / Math.max(1, bounds.height))));
     this.liteCanvas.ds.scale = zoom;
     this.liteCanvas.ds.offset[0] = usableWidth / (2 * zoom) - (bounds.left + bounds.right) / 2;
     this.liteCanvas.ds.offset[1] = usableHeight / (2 * zoom) - (bounds.top + bounds.bottom) / 2;
