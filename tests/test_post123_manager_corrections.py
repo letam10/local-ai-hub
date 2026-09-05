@@ -484,6 +484,30 @@ class Post123ManagerCorrectionTests(unittest.TestCase):
             self.assertTrue((root / "_internal" / "legacy-support.dll").is_file())
             self.assertEqual(launcher_projection(root)["format"], "onedir")
 
+        with self.subTest(status="old_exe_moved_onedir"), TemporaryDirectory(dir=REPO / "Temp", prefix="post123-fault-old-exe-onedir-") as temporary:
+            fixture = self._deferred_fixture(Path(temporary) / "install", previous_format="onedir")
+            root = fixture["root"]
+            candidate = fixture["candidate"]
+            original_write = launcher_migration._write_json
+            injected = {"done": False}
+
+            def fail_old_exe(path: Path, value: dict[str, object]):
+                if value.get("status") == "old_exe_moved" and not injected["done"]:
+                    injected["done"] = True
+                    raise LauncherMigrationError("fixture_old_exe_moved_onedir")
+                return original_write(path, value)
+
+            with patch.object(launcher_migration, "_write_json", side_effect=fail_old_exe):
+                with self.assertRaises(LauncherMigrationError):
+                    activate_launcher_bundle(
+                        root, candidate, transaction_id="txn-" + "b" * 32,
+                        payload_id=fixture["payload_id"], source_commit=fixture["source_commit"], workflow_run_id=123,
+                    )
+            self.assertTrue(injected["done"])
+            self.assertTrue((root / "LocalAIHub.exe").is_file())
+            self.assertTrue((root / "_internal" / "legacy-support.dll").is_file())
+            self.assertEqual(launcher_projection(root)["format"], "onedir")
+
         with self.subTest(status="old_manifest_moved"), TemporaryDirectory(dir=REPO / "Temp", prefix="post123-fault-old-manifest-") as temporary:
             fixture = self._deferred_fixture(Path(temporary) / "install", previous_format="onedir")
             root = fixture["root"]
@@ -726,6 +750,58 @@ class Post123ManagerCorrectionTests(unittest.TestCase):
             self.assertEqual(restore_launcher_bundle(root, transaction_id=transaction)["status"], "already_restored")
             self.assertEqual(restore_launcher_bundle(root, transaction_id=transaction)["status"], "already_restored")
             self.assertEqual(legacy.read_bytes(), b"legacy")
+
+    def test_restore_reconciles_previous_internal_tree_when_state_write_fails(self) -> None:
+        with TemporaryDirectory(dir=REPO / "Temp", prefix="post123-fault-previous-internal-") as temporary:
+            fixture = self._deferred_fixture(Path(temporary) / "install", previous_format="onedir")
+            root = fixture["root"]
+            _activate_deferred_product(root, fixture["transaction"])
+            original_write = launcher_migration._write_json
+            injected = {"done": False}
+
+            def fail_previous_internal(path: Path, value: dict[str, object]):
+                if value.get("status") == "previous__internal_moved" and not injected["done"]:
+                    injected["done"] = True
+                    raise LauncherMigrationError("fixture_previous_internal_state_write")
+                return original_write(path, value)
+
+            with patch.object(launcher_migration, "_write_json", side_effect=fail_previous_internal):
+                result = restore_launcher_bundle(root, transaction_id=str(fixture["transaction"]["transaction_id"]))
+            self.assertTrue(injected["done"])
+            self.assertEqual(result["status"], "restored")
+            self.assertEqual(launcher_projection(root)["format"], "onedir")
+            self.assertTrue((root / "LocalAIHub.exe").is_file())
+            self.assertTrue((root / "_internal" / "legacy-support.dll").is_file())
+            self.assertEqual(
+                restore_launcher_bundle(root, transaction_id=str(fixture["transaction"]["transaction_id"]))["status"],
+                "already_restored",
+            )
+
+    def test_restore_does_not_move_complete_previous_shell_after_exe_state_write_failure(self) -> None:
+        with TemporaryDirectory(dir=REPO / "Temp", prefix="post123-fault-previous-exe-") as temporary:
+            fixture = self._deferred_fixture(Path(temporary) / "install", previous_format="onedir")
+            root = fixture["root"]
+            _activate_deferred_product(root, fixture["transaction"])
+            original_write = launcher_migration._write_json
+            injected = {"done": False}
+
+            def fail_previous_exe(path: Path, value: dict[str, object]):
+                if value.get("status") == "previous_LocalAIHub_exe_moved" and not injected["done"]:
+                    injected["done"] = True
+                    raise LauncherMigrationError("fixture_previous_exe_state_write")
+                return original_write(path, value)
+
+            with patch.object(launcher_migration, "_write_json", side_effect=fail_previous_exe):
+                result = restore_launcher_bundle(root, transaction_id=str(fixture["transaction"]["transaction_id"]))
+            self.assertTrue(injected["done"])
+            self.assertEqual(result["status"], "restored")
+            self.assertEqual(launcher_projection(root)["format"], "onedir")
+            self.assertTrue((root / "LocalAIHub.exe").is_file())
+            self.assertTrue((root / "_internal" / "legacy-support.dll").is_file())
+            self.assertEqual(
+                restore_launcher_bundle(root, transaction_id=str(fixture["transaction"]["transaction_id"]))["status"],
+                "already_restored",
+            )
 
     def test_shortcut_fixture_contract_is_explicit_and_non_mutating(self) -> None:
         root = r"D:\LocalAIHub\fixture-install"

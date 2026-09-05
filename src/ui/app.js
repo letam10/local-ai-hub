@@ -236,6 +236,10 @@ const workflowLibraryAdapter = createWorkflowLibraryAdapter(null, {
 });
 let routeLoad = null;
 let routeLoadKey = "";
+// A Models navigation may bootstrap one server-owned DEEP_EXACT worker per
+// frontend session.  Keep this guard outside route state so returning to the
+// route attaches to the same worker instead of starting another wide scan.
+let storageAutoDeepRequested = false;
 let desktopCloseLayer = null;
 let artifactPreviewOpener = null;
 let disposeImageMaskCanvases = () => {};
@@ -721,7 +725,7 @@ const COMMANDS = Object.freeze([
   { id: "open-diagnostics", label: "Mở Diagnostics", detail: "Xem chẩn đoán sanitized", route: "diagnostics" },
   { id: "new-workflow", label: "New Workflow", detail: "Mở workspace dự án; chưa tạo dữ liệu", route: "projects" },
   { id: "check-update", label: "Check Update", detail: "Mở nơi kiểm tra update thủ công", route: "models" },
-  { id: "scan-storage", label: "Scan Storage", detail: "Mở Storage; bạn tự bấm Quét chính xác", route: "models" },
+  { id: "scan-storage", label: "Scan Storage", detail: "Mở Storage; FAST trước, tự xếp DEEP_EXACT một lần mỗi phiên", route: "models" },
   { id: "search-artifact", label: "Search Artifact", detail: "Tìm artifact trong metadata Hub", route: "" },
 ]);
 
@@ -1190,6 +1194,15 @@ const storageScanPoller = createStorageScanPoller({
 });
 const pollStorageScan = (scanId = "") => storageScanPoller.start(scanId);
 
+const storageScanNeedsAutomaticDeep = (scan) => {
+  if (!scan || typeof scan !== "object") return true;
+  const status = String(scan.status || "");
+  const mode = String(scan.mode || scan.scan_mode || "");
+  if (STORAGE_SCAN_ACTIVE_STATES.includes(status)) return mode === "fast";
+  if (mode === "deep_exact" && scan.current_exact === true && scan.fresh_validation_required !== true) return false;
+  return true;
+};
+
 const loadRouteData = async ({ scan = false } = {}) => {
   const route = routeId();
   const generation = routeRenderGeneration;
@@ -1216,6 +1229,7 @@ const loadRouteData = async ({ scan = false } = {}) => {
   }
   if (route === "models") {
     if (existingLoad) return existingLoad;
+    if (scan) storageAutoDeepRequested = true;
     return beginRouteLoad(loadKey, () => Promise.allSettled([getModels(), scan ? scanStorage() : getStorage(), getProductionCatalog(), getUpdateSettings()]).then(async (results) => {
       if (!isCurrent()) return;
       if (results[0].status === "fulfilled") state.models = results[0].value.models || [];
@@ -1232,10 +1246,35 @@ const loadRouteData = async ({ scan = false } = {}) => {
       if (results[3].status === "fulfilled") state.updateCenter = { ...state.updateCenter, settings: results[3].value || state.updateCenter.settings };
       if (!isCurrent()) return;
       render();
-      // Normal route navigation only attaches to an existing server-owned
-      // worker.  DEEP_EXACT is started by the explicit Quét chính xác action.
-      if (STORAGE_SCAN_ACTIVE_STATES.includes(String(state.storageScan?.status || ""))) {
+      const storageStatus = String(state.storageScan?.status || "");
+      const storageMode = String(state.storageScan?.mode || state.storageScan?.scan_mode || "");
+      // A DEEP_EXACT worker may have been started by an earlier view/session;
+      // this session attaches to it and must not queue a second one after a
+      // partial terminal result.  FAST is different: ask the server-owned
+      // coordinator to transition that worker to DEEP_EXACT once.
+      if (storageMode === "deep_exact" && STORAGE_SCAN_ACTIVE_STATES.includes(storageStatus)) {
+        storageAutoDeepRequested = true;
+      }
+      if (STORAGE_SCAN_ACTIVE_STATES.includes(storageStatus)) {
         pollStorageScan(state.storageScan.scan_id || "");
+      }
+      if (!scan && !storageAutoDeepRequested && storageScanNeedsAutomaticDeep(state.storageScan)) {
+        // FAST is the first-paint snapshot. Queue the unbounded, cancellable
+        // DEEP_EXACT worker once for this frontend session, then attach the
+        // lightweight poller to its server-owned state. Route navigation only
+        // observes the worker and never starts a second one.
+        storageAutoDeepRequested = true;
+        try {
+          const deep = await scanStorage();
+          if (!isCurrent()) return;
+          state.storage = { ...(state.storage || {}), ...(deep || {}), disk: deep?.disk || state.storage?.disk || {} };
+          state.storageScan = deep?.scan || state.storageScan;
+          render({ background: true });
+          if (STORAGE_SCAN_ACTIVE_STATES.includes(String(state.storageScan?.status || ""))) pollStorageScan(state.storageScan.scan_id || "");
+        } catch {
+          // Keep the visible FAST snapshot truthful; the explicit button can
+          // retry when the server reports the scan as unavailable.
+        }
       }
     }).catch(() => {}));
   }

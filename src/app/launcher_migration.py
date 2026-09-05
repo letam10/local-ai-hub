@@ -616,6 +616,58 @@ def restore_launcher_bundle(root: Path, *, transaction_id: str, _allow_state_sta
             # previous hash/format and still remain a no-op.
             pass
 
+    def assert_transaction_ready() -> None:
+        live = _current_activation_state(state_path, transaction_id)
+        if live.get("status") == "restored":
+            raise LauncherMigrationError("LAUNCHER_ALREADY_RESTORED")
+
+    def move_known(source: Path, destination: Path) -> None:
+        assert_transaction_ready()
+        if _is_reparse(source) or _is_reparse(destination.parent):
+            raise LauncherMigrationError("LAUNCHER_REPARSE")
+        if destination.exists() or destination.is_symlink():
+            raise LauncherMigrationError("LAUNCHER_DESTINATION_OCCUPIED")
+        os.replace(source, destination)
+
+    previous_exe = backup / LAUNCHER_EXECUTABLE_NAME
+    previous_internal = backup / LAUNCHER_INTERNAL_NAME
+    previous_manifest = backup / LAUNCHER_SHELL_MANIFEST_NAME
+
+    def restore_partial_previous_onedir() -> bool:
+        """Finish the narrow old-exe-only move before candidate activation.
+
+        Onedir activation moves the previous executable before its internal
+        tree.  A crash or state-write failure in that window leaves the
+        previous internal tree at the root and the executable in the backup;
+        requiring a complete backup here would reject a recoverable shell.
+        The absence of a backup internal tree is used only for this exact
+        partial shape; a candidate internal tree has a complete previous
+        internal backup and follows the normal forensic path below.
+        """
+
+        if previous_format != "onedir":
+            return False
+        if not backup.is_dir() or backup.is_symlink() or _is_reparse(backup):
+            return False
+        current_exe = install / LAUNCHER_EXECUTABLE_NAME
+        current_internal = install / LAUNCHER_INTERNAL_NAME
+        if (
+            previous_internal.exists() or previous_internal.is_symlink()
+            or not previous_exe.is_file() or previous_exe.is_symlink() or _is_reparse(previous_exe)
+            or current_exe.exists() or current_exe.is_symlink()
+            or not current_internal.is_dir() or current_internal.is_symlink() or _is_reparse(current_internal)
+        ):
+            return False
+        move_known(previous_exe, current_exe)
+        if not previous_shell_is_verified():
+            raise LauncherMigrationError("LAUNCHER_ROLLBACK_FAILED")
+        state["status"] = f"previous_{LAUNCHER_EXECUTABLE_NAME.replace('.', '_')}_moved"
+        try:
+            _write_json(state_path, state)
+        except LauncherMigrationError:
+            pass
+        return True
+
     # This check intentionally precedes any backup existence or move check.
     # It covers the second/third/post-crash watchdog call and the case where a
     # previous restore completed but its state write was interrupted.
@@ -624,11 +676,12 @@ def restore_launcher_bundle(root: Path, *, transaction_id: str, _allow_state_sta
             mark_restored()
         return {"status": "already_restored", "transaction_id": transaction_id}
 
+    if restore_partial_previous_onedir():
+        mark_restored()
+        return {"status": "restored", "transaction_id": transaction_id}
+
     if not backup.is_dir() or backup.is_symlink() or _is_reparse(backup):
         raise LauncherMigrationError("LAUNCHER_ROLLBACK_UNAVAILABLE")
-    previous_exe = backup / LAUNCHER_EXECUTABLE_NAME
-    previous_internal = backup / LAUNCHER_INTERNAL_NAME
-    previous_manifest = backup / LAUNCHER_SHELL_MANIFEST_NAME
     if (
         not previous_exe.is_file()
         or previous_exe.is_symlink()
@@ -644,23 +697,29 @@ def restore_launcher_bundle(root: Path, *, transaction_id: str, _allow_state_sta
 
     failed = _forensic_destination(backup)
 
-    def assert_transaction_ready() -> None:
-        live = _current_activation_state(state_path, transaction_id)
-        if live.get("status") == "restored":
-            raise LauncherMigrationError("LAUNCHER_ALREADY_RESTORED")
-
-    def move_known(source: Path, destination: Path) -> None:
-        assert_transaction_ready()
-        if _is_reparse(source) or _is_reparse(destination.parent):
-            raise LauncherMigrationError("LAUNCHER_REPARSE")
-        if destination.exists() or destination.is_symlink():
-            raise LauncherMigrationError("LAUNCHER_DESTINATION_OCCUPIED")
-        os.replace(source, destination)
-
     def reconcile_previous_shell() -> bool:
         """Finish a partially interrupted restore without broad cleanup."""
 
         try:
+            # A state-write failure can happen after the final previous shell
+            # component was moved successfully.  Verify that complete shell
+            # first; moving any of its bytes into forensic storage would turn
+            # a recoverable transaction into a launcher outage.
+            if previous_shell_is_verified():
+                return True
+            # If the previous onedir internal tree was already restored but
+            # its executable move/state write failed, it is the recovery
+            # source, not a candidate byte set.  Keep it at root while the
+            # preserved executable is returned below.
+            previous_internal_at_root = (
+                previous_format == "onedir"
+                and not (previous_internal.exists() or previous_internal.is_symlink())
+                and previous_exe.is_file()
+                and not (install / LAUNCHER_EXECUTABLE_NAME).exists()
+                and (install / LAUNCHER_INTERNAL_NAME).is_dir()
+                and not (install / LAUNCHER_INTERNAL_NAME).is_symlink()
+                and not _is_reparse(install / LAUNCHER_INTERNAL_NAME)
+            )
             # Remove any remaining candidate component into the same unique
             # forensic directory before putting the preserved shell back.
             for name in (LAUNCHER_INTERNAL_NAME, LAUNCHER_EXECUTABLE_NAME, LAUNCHER_SHELL_MANIFEST_NAME):
@@ -668,9 +727,11 @@ def restore_launcher_bundle(root: Path, *, transaction_id: str, _allow_state_sta
                 if current.exists() or current.is_symlink():
                     if _is_reparse(current):
                         return False
+                    if name == LAUNCHER_INTERNAL_NAME and previous_internal_at_root:
+                        continue
                     target = failed / name
                     if not target.exists() and not target.is_symlink():
-                        os.replace(current, target)
+                        move_known(current, target)
             # Restore internal files before the executable so an onedir shell
             # is complete as soon as its root executable is switched back.
             for name in (LAUNCHER_INTERNAL_NAME, LAUNCHER_EXECUTABLE_NAME, LAUNCHER_SHELL_MANIFEST_NAME):
@@ -678,7 +739,7 @@ def restore_launcher_bundle(root: Path, *, transaction_id: str, _allow_state_sta
                 if source.exists() or source.is_symlink():
                     if name == LAUNCHER_INTERNAL_NAME and previous_format != "onedir":
                         continue
-                    os.replace(source, install / name)
+                    move_known(source, install / name)
             return previous_shell_is_verified()
         except (OSError, LauncherMigrationError):
             return False

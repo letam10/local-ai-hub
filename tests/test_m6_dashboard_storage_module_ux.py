@@ -223,10 +223,16 @@ class M6DashboardStorageModuleUxTests(unittest.TestCase):
             {"scheduled": 2, "afterRestart": 1, "afterStop": 2, "firstCancelled": True, "secondCancelled": True},
         )
 
-    def test_models_route_does_not_start_a_new_deep_scan_after_a_terminal_snapshot(self) -> None:
+    def test_models_route_queues_one_deep_scan_per_frontend_session(self) -> None:
         app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
-        self.assertNotIn("Queue DEEP_EXACT automatically after the page is visible", app)
-        self.assertNotIn("const deep = await scanStorage()", app)
+        self.assertIn("let storageAutoDeepRequested = false", app)
+        self.assertIn("const storageScanNeedsAutomaticDeep", app)
+        self.assertIn('if (STORAGE_SCAN_ACTIVE_STATES.includes(status)) return mode === "fast";', app)
+        self.assertIn("if (!scan && !storageAutoDeepRequested", app)
+        self.assertIn("const deep = await scanStorage()", app)
+        self.assertIn("Route navigation only", app)
+        self.assertIn("observes the worker and never starts a second one.", app)
+        self.assertIn('if (storageMode === "deep_exact" && STORAGE_SCAN_ACTIVE_STATES.includes(storageStatus))', app)
         self.assertIn("await loadRouteData({ scan: true })", app)
 
     def test_models_storage_projection_separates_disk_free_and_owned_scan(self) -> None:
