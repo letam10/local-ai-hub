@@ -450,6 +450,9 @@ def _write_bootstrap_pending(
     workflow_run_id: int,
     status: str = "pending",
     reason_code: str | None = None,
+    transaction_id: str | None = None,
+    payload_id: str | None = None,
+    restart_authorized: bool = False,
 ) -> dict[str, Any]:
     """Persist the legacy-client hand-off without storing paths or commands."""
 
@@ -457,9 +460,15 @@ def _write_bootstrap_pending(
         raise AppUpdateError("UPDATE_COMMIT_MISMATCH")
     if isinstance(workflow_run_id, bool) or not isinstance(workflow_run_id, int) or not 0 < workflow_run_id <= MAX_WORKFLOW_RUN_ID:
         raise AppUpdateError("UPDATE_RUN_MISMATCH")
-    if status not in {"pending", "staged", "blocked", "completed"}:
+    if status not in {"pending", "downloading", "verifying", "staged", "restarting", "blocked", "failed", "completed"}:
         raise AppUpdateError("UPDATE_STATE_INVALID")
     if reason_code is not None and reason_code not in STABLE_UPDATE_REASON_CODES:
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if transaction_id is not None and (not isinstance(transaction_id, str) or _TRANSACTION_RE.fullmatch(transaction_id) is None):
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if payload_id is not None and (not isinstance(payload_id, str) or _PAYLOAD_RE.fullmatch(payload_id) is None or payload_id != f"main-{source_commit[:12]}"):
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if type(restart_authorized) is not bool:
         raise AppUpdateError("UPDATE_STATE_INVALID")
     value: dict[str, Any] = {
         "schema_version": BOOTSTRAP_PENDING_SCHEMA,
@@ -469,6 +478,9 @@ def _write_bootstrap_pending(
         "composite_artifact_name": COMPOSITE_UPDATE_ARTIFACT_NAME,
         "status": status,
         "reason_code": reason_code,
+        "transaction_id": transaction_id,
+        "payload_id": payload_id,
+        "restart_authorized": restart_authorized,
         "updated_at": _utc_now(),
     }
     _write_json_atomic(_bootstrap_pending_path(root), value)
@@ -483,10 +495,13 @@ def _read_bootstrap_pending(root: Path) -> dict[str, Any] | None:
         value = _safe_json_file(path, max_bytes=16 * 1024)
     except (OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError, AppUpdateError) as exc:
         raise AppUpdateError("UPDATE_STATE_INVALID") from exc
-    expected = {
+    legacy_expected = {
         "schema_version", "source_commit", "workflow_run_id", "legacy_artifact_name",
         "composite_artifact_name", "status", "reason_code", "updated_at",
     }
+    expected = legacy_expected | {"transaction_id", "payload_id", "restart_authorized"}
+    if set(value) == legacy_expected:
+        value = {**value, "transaction_id": None, "payload_id": None, "restart_authorized": False}
     if set(value) != expected or value.get("schema_version") != BOOTSTRAP_PENDING_SCHEMA:
         raise AppUpdateError("UPDATE_STATE_INVALID")
     source_commit = value.get("source_commit")
@@ -499,12 +514,46 @@ def _read_bootstrap_pending(root: Path) -> dict[str, Any] | None:
         or not 0 < run_id <= MAX_WORKFLOW_RUN_ID
         or value.get("legacy_artifact_name") != LEGACY_UPDATE_ARTIFACT_NAME
         or value.get("composite_artifact_name") != COMPOSITE_UPDATE_ARTIFACT_NAME
-        or value.get("status") not in {"pending", "staged", "blocked", "completed"}
+        or value.get("status") not in {"pending", "downloading", "verifying", "staged", "restarting", "blocked", "failed", "completed"}
         or (value.get("reason_code") is not None and value.get("reason_code") not in STABLE_UPDATE_REASON_CODES)
+        or (value.get("transaction_id") is not None and (not isinstance(value.get("transaction_id"), str) or _TRANSACTION_RE.fullmatch(str(value.get("transaction_id"))) is None))
+        or (value.get("payload_id") is not None and (not isinstance(value.get("payload_id"), str) or _PAYLOAD_RE.fullmatch(str(value.get("payload_id"))) is None or value.get("payload_id") != f"main-{source_commit[:12]}"))
+        or type(value.get("restart_authorized")) is not bool
         or not isinstance(value.get("updated_at"), str)
     ):
         raise AppUpdateError("UPDATE_STATE_INVALID")
     return dict(value)
+
+
+def _complete_bootstrap_marker(root: Path, pending: dict[str, Any], *, current: dict[str, Any]) -> dict[str, Any]:
+    """Commit a matching stale bootstrap marker to one terminal state."""
+
+    if pending.get("status") in {"blocked", "failed"}:
+        return {"status": "blocked", "code": pending.get("reason_code") or "UPDATE_BOOTSTRAP_BLOCKED", "bootstrap_pending": True}
+    if (
+        pending.get("source_commit") != current.get("commit")
+        or pending.get("workflow_run_id") != current.get("workflow_run_id")
+        or pending.get("payload_id") not in {None, current.get("payload_id")}
+    ):
+        return {"status": "blocked", "code": "UPDATE_BOOTSTRAP_IDENTITY_MISMATCH", "bootstrap_pending": True}
+    completed = _write_bootstrap_pending(
+        root,
+        source_commit=str(pending["source_commit"]),
+        workflow_run_id=int(pending["workflow_run_id"]),
+        status="completed",
+        transaction_id=pending.get("transaction_id") if isinstance(pending.get("transaction_id"), str) else None,
+        payload_id=str(current.get("payload_id")) if _PAYLOAD_RE.fullmatch(str(current.get("payload_id") or "")) else None,
+        restart_authorized=False,
+    )
+    _write_json_atomic(root / "update-state" / "bootstrap-completed.json", {
+        "schema_version": "local-ai-hub-bootstrap-completed.v1",
+        "source_commit": completed["source_commit"],
+        "workflow_run_id": completed["workflow_run_id"],
+        "transaction_id": completed.get("transaction_id"),
+        "payload_id": completed.get("payload_id"),
+        "status": "completed",
+    })
+    return {"status": "completed", "bootstrap_pending": False, "source_commit": completed["source_commit"], "workflow_run_id": completed["workflow_run_id"]}
 
 
 def _unlink_state(path: Path) -> None:
@@ -672,6 +721,32 @@ def _record_pending_health(
     _write_json_atomic(_pending_health_path(root), value)
 
 
+def _commit_restart_health_admission(root: Path, *, transaction_id: str | None, payload_id: str, source_commit: str) -> None:
+    """Durably commit health admission before clearing restart journals."""
+
+    restart_path = _restart_transaction_path(root)
+    transaction: dict[str, Any] | None = None
+    if transaction_id is not None and restart_path.is_file() and not restart_path.is_symlink():
+        transaction = _safe_json_file(restart_path, max_bytes=128 * 1024)
+        if (
+            transaction.get("schema_version") != RESTART_TRANSACTION_SCHEMA
+            or transaction.get("transaction_id") != transaction_id
+            or transaction.get("payload_id") != payload_id
+            or transaction.get("source_commit") != source_commit
+        ):
+            raise AppUpdateError("UPDATE_RESTART_TRANSACTION_MISMATCH")
+        _write_json_atomic(restart_path, {**transaction, "status": "health_admitted"})
+    _write_json_atomic(root / "update-state" / "restart-completed.json", {
+        "schema_version": "local-ai-hub-restart-completed.v1",
+        "transaction_id": transaction_id,
+        "payload_id": payload_id,
+        "source_commit": source_commit,
+        "status": "completed",
+    })
+    if transaction is not None:
+        _write_json_atomic(restart_path, {**transaction, "status": "completed"})
+
+
 def _write_restart_session(root: Path, value: dict[str, Any]) -> None:
     """Publish bounded candidate-session identity for the watchdog.
 
@@ -804,12 +879,31 @@ def mark_startup_health(
         and health.get("build_source_commit") == pending.get("source_commit")
         and health.get("build_payload_id") == pending.get("payload_id")
     )
+    launcher_admission = True
+    if pending.get("launcher_tree_manifest_sha256") is not None:
+        launcher = launcher_projection(root)
+        launcher_admission = launcher.get("status") == "verified"
+        if pending.get("launcher_retained") is not True:
+            launcher_admission = launcher_admission and (
+                launcher.get("format") == pending.get("launcher_format", "onedir")
+                and launcher.get("executable_sha256") == pending.get("launcher_executable_sha256")
+                and launcher.get("tree_manifest_sha256") == pending.get("launcher_tree_manifest_sha256")
+            )
+    healthy = healthy and launcher_admission
     if healthy:
         try:
+            _commit_restart_health_admission(
+                root,
+                transaction_id=transaction_id,
+                payload_id=str(current["version"]),
+                source_commit=str(build["source_commit"]),
+            )
             pending_path.unlink()
         except OSError as exc:
             raise AppUpdateError("UPDATE_STATE_CLEAR_FAILED") from exc
         _unlink_state(_staged_update_path(root))
+        _unlink_state(_restart_transaction_path(root))
+        _unlink_state(_restart_session_path(root))
         _try_write_update_state(
             root,
             phase="succeeded",
@@ -1446,8 +1540,11 @@ class AppUpdateService:
             "launcher_format": launcher_format,
             "launcher_migration_required": launcher_migration_required,
             "restart_state": restart_state,
-            "bootstrap_pending": bool(bootstrap and bootstrap.get("status") in {"pending", "staged"}),
+            "bootstrap_pending": bool(bootstrap and bootstrap.get("status") in {"pending", "downloading", "verifying", "staged", "restarting"}),
             "bootstrap_status": bootstrap.get("status") if isinstance(bootstrap, dict) else None,
+            "bootstrap_transaction_id": bootstrap.get("transaction_id") if isinstance(bootstrap, dict) else None,
+            "bootstrap_payload_id": bootstrap.get("payload_id") if isinstance(bootstrap, dict) else None,
+            "bootstrap_restart_authorized": bool(bootstrap and bootstrap.get("restart_authorized") is True),
         })
         return value
 
@@ -1889,10 +1986,12 @@ class AppUpdateService:
         with self._lock:
             root = self._install_root()
             with _update_serialization_lock(root):
-                if launcher_projection(root).get("migration_required") is not True:
-                    return {"status": "not_required", "bootstrap_pending": False}
                 metadata = self._current_build_metadata(root)
                 pending = _read_bootstrap_pending(root)
+                if launcher_projection(root).get("migration_required") is not True:
+                    if pending is not None and pending.get("status") != "completed":
+                        return _complete_bootstrap_marker(root, pending, current=metadata)
+                    return {"status": "not_required", "bootstrap_pending": False}
                 if pending is None:
                     commit = metadata.get("commit")
                     run_id = metadata.get("workflow_run_id")
@@ -1908,13 +2007,17 @@ class AppUpdateService:
                         source_commit=commit,
                         workflow_run_id=run_id,
                         status="pending",
+                        transaction_id=self._transaction_id,
                     )
-                if pending.get("status") in {"staged", "completed"}:
+                if pending.get("status") in {"staged", "restarting", "completed"}:
                     return {
                         "status": pending["status"],
-                        "bootstrap_pending": pending["status"] == "staged",
+                        "bootstrap_pending": pending["status"] in {"staged", "restarting"},
                         "source_commit": pending["source_commit"],
                         "workflow_run_id": pending["workflow_run_id"],
+                        "transaction_id": pending.get("transaction_id"),
+                        "payload_id": pending.get("payload_id"),
+                        "restart_authorized": pending.get("restart_authorized") is True,
                     }
                 if pending.get("status") == "blocked":
                     return {
@@ -1935,6 +2038,8 @@ class AppUpdateService:
                         workflow_run_id=int(pending["workflow_run_id"]),
                         status="blocked",
                         reason_code="artifact_identity_mismatch",
+                        transaction_id=pending.get("transaction_id") if isinstance(pending.get("transaction_id"), str) else None,
+                        payload_id=pending.get("payload_id") if isinstance(pending.get("payload_id"), str) else None,
                     )
                     return {
                         "status": "blocked",
@@ -1950,8 +2055,13 @@ class AppUpdateService:
                         source_commit=str(pending["source_commit"]),
                         workflow_run_id=int(pending["workflow_run_id"]),
                         status="staged",
+                        transaction_id=result.get("transaction_id") if isinstance(result.get("transaction_id"), str) else pending.get("transaction_id"),
+                        payload_id=result.get("payload_id") if isinstance(result.get("payload_id"), str) else pending.get("payload_id"),
+                        restart_authorized=pending.get("restart_authorized") is True,
                     )
                     result["bootstrap_pending"] = True
+                    result["bootstrap_status"] = "staged"
+                    result["bootstrap_restart_authorized"] = pending.get("restart_authorized") is True
                 return self._public_projection(result, root=root)
 
     @staticmethod
@@ -2141,6 +2251,21 @@ class AppUpdateService:
                         source_commit=source_commit,
                         transaction_id=transaction_id,
                     )
+                    bootstrap_marker = _read_bootstrap_pending(root)
+                    if (
+                        isinstance(bootstrap_marker, dict)
+                        and bootstrap_marker.get("source_commit") == source_commit
+                        and bootstrap_marker.get("status") in {"pending", "restarting"}
+                    ):
+                        _write_bootstrap_pending(
+                            root,
+                            source_commit=source_commit,
+                            workflow_run_id=int(bootstrap_marker["workflow_run_id"]),
+                            status="restarting",
+                            transaction_id=transaction_id,
+                            payload_id=payload_id,
+                            restart_authorized=True,
+                        )
                     atomic_activate_pointer(root, version=payload_id, manifest_sha256=manifest_hash)
                     activated = True
                 except (OSError, UnicodeError, json.JSONDecodeError, StableShellError, AppUpdateError) as exc:
@@ -2421,6 +2546,9 @@ class AppUpdateService:
                         source_commit=candidate.source_commit,
                         workflow_run_id=candidate.run_id,
                         status="pending",
+                        transaction_id=transaction_id,
+                        payload_id=existing_staged.get("payload_id") if isinstance(existing_staged.get("payload_id"), str) else None,
+                        restart_authorized=False,
                     )
                 return {
                     "status": "staged",
@@ -2584,6 +2712,9 @@ class AppUpdateService:
                     source_commit=candidate.source_commit,
                     workflow_run_id=candidate.run_id,
                     status="pending",
+                    transaction_id=self._transaction_id,
+                    payload_id=version,
+                    restart_authorized=False,
                 )
             if update_kind == UPDATE_KIND_APP_AND_LAUNCHER and launcher_manifest is not None:
                 _write_json_atomic(_staged_update_path(root), {

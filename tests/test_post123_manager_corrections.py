@@ -33,6 +33,8 @@ from src.services.app_update import (
     _write_bootstrap_pending,
 )
 from src.services.shortcut_migration import (
+    LEGACY_VBS_CONTENT_SHA256,
+    LEGACY_VBS_MARKER,
     MIGRATION_ADMIN_REQUIRED,
     MIGRATION_AMBIGUOUS,
     MIGRATION_ALREADY_CORRECT,
@@ -150,11 +152,14 @@ class Post123ManagerCorrectionTests(unittest.TestCase):
         if previous_format == "onedir":
             (root / "_internal").mkdir()
             (root / "_internal" / "legacy-support.dll").write_bytes(b"legacy-support")
+            shell_manifest = launcher_migration._shell_tree_manifest(root)
             cls._write_json(root / "launcher-manifest.json", {
                 "schema_version": "local-ai-hub-launcher-bundle.v1", "product_id": "LocalAIHub",
                 "payload_id": "main-bbbbbbbbbbbb", "source_commit": "b" * 40, "format": "onedir",
-                "executable_sha256": hashlib.sha256((root / "LocalAIHub.exe").read_bytes()).hexdigest(),
-                "tree_manifest_sha256": "0" * 64, "file_count": 2, "total_bytes": 0,
+                "executable": "LocalAIHub.exe", "workflow_run_id": 123,
+                "executable_sha256": shell_manifest["executable_sha256"],
+                "tree_manifest_sha256": shell_manifest["tree_manifest_sha256"],
+                "file_count": shell_manifest["file_count"], "total_bytes": shell_manifest["total_bytes"],
             })
         previous_payload = root / "versions" / "main-bbbbbbbbbbbb"
         (previous_payload / "app").mkdir(parents=True)
@@ -809,11 +814,16 @@ class Post123ManagerCorrectionTests(unittest.TestCase):
         root = r"D:\LocalAIHub\fixture-install"
         correct = {"target_path": root + r"\LocalAIHub.exe", "arguments": "", "scope": "per_user"}
         stale = {"target_path": r"C:\Windows\System32\wscript.exe", "arguments": root + r"\LocalAIHub.vbs", "scope": "per_user"}
-        stale_all_users = {**stale, "scope": "all_users"}
+        stale_all_users = {
+            "name": "Local AI Hub.lnk", "target_path": r"C:\Windows\System32\wscript.exe",
+            "arguments": r"D:\LocalAIHub\Temp\legacy\LocalAIHub.vbs", "scope": "all_users",
+            "location_class": "all_users_start_menu", "legacy_vbs_path": r"D:\LocalAIHub\Temp\legacy\LocalAIHub.vbs",
+            "legacy_script_marker": LEGACY_VBS_MARKER, "legacy_script_sha256": LEGACY_VBS_CONTENT_SHA256,
+        }
         ambiguous = {"name": "Local AI Hub.lnk", "target_path": r"C:\Windows\System32\wscript.exe", "arguments": "LocalAIHub.vbs --unknown"}
         unowned = {"name": "Other.lnk", "target_path": r"C:\Tools\other.exe", "arguments": ""}
         self.assertEqual(plan_shortcut_migration(correct, root)["status"], MIGRATION_ALREADY_CORRECT)
-        self.assertEqual(plan_shortcut_migration(stale, root)["status"], MIGRATION_UPDATE_REQUIRED)
+        self.assertEqual(plan_shortcut_migration(stale, root)["status"], MIGRATION_AMBIGUOUS)
         self.assertEqual(plan_shortcut_migration(stale_all_users, root)["status"], MIGRATION_ADMIN_REQUIRED)
         self.assertEqual(plan_shortcut_migration(ambiguous, root)["status"], MIGRATION_AMBIGUOUS)
         self.assertEqual(plan_shortcut_migration(unowned, root)["status"], MIGRATION_UNOWNED)

@@ -34,6 +34,7 @@ from src.app.launcher_migration import (
     LauncherMigrationError,
     activate_launcher_bundle,
     launcher_tree_manifest,
+    reconcile_launcher_transaction,
     restore_launcher_bundle,
 )
 from src.services.process_manager.managed import terminate_owned_process
@@ -51,6 +52,13 @@ _TRANSACTION_RE = re.compile(r"^txn-[0-9a-f]{32}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _MAX_WORKFLOW_RUN_ID = (1 << 63) - 1
+
+
+def _hard_crash_checkpoint(name: str) -> None:
+    """Test-only hard termination hook for pointer/recovery fault injection."""
+
+    if os.environ.get("LOCALAIHUB_TEST_HARD_CRASH_BOUNDARY") == name:
+        os._exit(198)
 
 
 def _json(path: Path, *, limit: int = 64 * 1024) -> dict[str, object]:
@@ -187,6 +195,70 @@ def _remove_owned_pending_health(app_root: Path, *, transaction_id: str, payload
         pass
 
 
+def _read_pending_health(app_root: Path) -> dict[str, object] | None:
+    path = _pending_health_path(app_root)
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        value = _json(path, limit=64 * 1024)
+    except (OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise StableShellError("RESTART_PENDING_HEALTH_INVALID") from None
+    if (
+        value.get("schema_version") != "local-ai-hub-pending-health.v1"
+        or not isinstance(value.get("transaction_id"), str)
+        or not _TRANSACTION_RE.fullmatch(str(value["transaction_id"]))
+        or not isinstance(value.get("payload_id"), str)
+        or not _PAYLOAD_RE.fullmatch(str(value["payload_id"]))
+        or not isinstance(value.get("source_commit"), str)
+        or not _SHA_RE.fullmatch(str(value["source_commit"]))
+        or not isinstance(value.get("previous"), dict)
+    ):
+        raise StableShellError("RESTART_PENDING_HEALTH_INVALID")
+    return value
+
+
+def reconcile_restart_transaction(app_root: Path) -> dict[str, object]:
+    """Recover pointer/pending ordering from a fresh watchdog process."""
+
+    transaction = _read_restart_transaction(app_root)
+    if transaction is None:
+        return {"status": "not_pending"}
+    previous = transaction.get("previous")
+    if not isinstance(previous, dict):
+        raise StableShellError("RESTART_TRANSACTION_INVALID")
+    current = load_current_pointer(app_root)
+    pending = _read_pending_health(app_root)
+    transaction_id = str(transaction["transaction_id"])
+    payload_id = str(transaction["payload_id"])
+    if transaction.get("status") in {"health_admitted", "completed"} and pending is None and current.get("version") == payload_id:
+        try:
+            _restart_transaction_path(app_root).unlink()
+        except FileNotFoundError:
+            pass
+        return {"status": "completed", "transaction_id": transaction_id}
+    if pending is not None and (
+        pending.get("transaction_id") != transaction_id
+        or pending.get("payload_id") != payload_id
+        or pending.get("source_commit") != transaction.get("source_commit")
+        or pending.get("previous") != previous
+    ):
+        raise StableShellError("RESTART_PENDING_HEALTH_MISMATCH")
+    candidate_visible = current.get("version") == payload_id
+    previous_visible = current == previous
+    if candidate_visible and pending is None:
+        # The exact manager-reproduced crash window: current.json selected an
+        # unproven candidate while the recovery intent was absent.  Refuse it
+        # and restore the exact old pointer/shell before any relaunch.
+        if not _rollback_deferred_product(app_root, transaction, reason="RESTART_CANDIDATE_WITHOUT_HEALTH_INTENT"):
+            raise LauncherMigrationError("LAUNCHER_ROLLBACK_FAILED")
+        return {"status": "rolled_back", "transaction_id": transaction_id}
+    if candidate_visible and pending is not None:
+        return {"status": "candidate_pending_health", "transaction_id": transaction_id}
+    if previous_visible:
+        return {"status": "prepared", "transaction_id": transaction_id, "pending_health": pending is not None}
+    raise StableShellError("RESTART_CURRENT_POINTER_CHANGED")
+
+
 def _rollback_deferred_activation(app_root: Path, transaction: dict[str, object], previous: dict[str, object]) -> None:
     """Restore pointer first, then the shell, preserving pair consistency."""
 
@@ -196,15 +268,19 @@ def _rollback_deferred_activation(app_root: Path, transaction: dict[str, object]
         raise LauncherMigrationError("LAUNCHER_ROLLBACK_FAILED")
     current = load_current_pointer(app_root)
     if current != previous:
+        _hard_crash_checkpoint("rollback_before_pointer_restore")
         atomic_activate_pointer(
             app_root,
             version=str(previous["version"]),
             manifest_sha256=str(previous["manifest_sha256"]),
         )
-    _remove_owned_pending_health(app_root, transaction_id=transaction_id, payload_id=payload_id)
+        _hard_crash_checkpoint("rollback_after_pointer_restore")
     rollback_root = app_root / "update-state" / "launcher-rollback" / transaction_id
     if rollback_root.is_dir() and not rollback_root.is_symlink():
+        _hard_crash_checkpoint("rollback_before_shell_restore")
         restore_launcher_bundle(app_root, transaction_id=transaction_id, _allow_state_status=True)
+        _hard_crash_checkpoint("rollback_after_shell_restore")
+    _remove_owned_pending_health(app_root, transaction_id=transaction_id, payload_id=payload_id)
 
 
 def _validate_restart_transaction(value: object) -> dict[str, object]:
@@ -267,7 +343,8 @@ def _validate_restart_transaction(value: object) -> dict[str, object]:
         or value.get("status") not in {
             "awaiting_old_exit", "activation_copy_complete", "old_exe_moved", "old_internal_moved",
             "old_manifest_moved", "candidate_exe_moved", "candidate_internal_moved",
-            "shell_manifest_written", "shell_switched", "pointer_activated",
+            "shell_manifest_written", "shell_switched", "pointer_activated", "health_intent_written",
+            "health_admitted", "completed", "rollback_in_progress", "rolled_back",
         }
     ):
         raise StableShellError("RESTART_TRANSACTION_INVALID")
@@ -323,15 +400,25 @@ def _activate_deferred_product(app_root: Path, transaction: dict[str, object]) -
     transaction = live_transaction
     payload_id = str(transaction["payload_id"])
     source_commit = str(transaction["source_commit"])
+    transaction_id = str(transaction["transaction_id"])
     previous = transaction.get("previous")
     if not isinstance(previous, dict):
         raise StableShellError("RESTART_TRANSACTION_INVALID")
     current = load_current_pointer(app_root)
+    pending = _read_pending_health(app_root)
+    if pending is not None and (
+        pending.get("transaction_id") != transaction_id
+        or pending.get("payload_id") != payload_id
+        or pending.get("source_commit") != source_commit
+        or pending.get("previous") != previous
+    ):
+        raise StableShellError("RESTART_PENDING_HEALTH_MISMATCH")
+    if current.get("version") == payload_id:
+        if pending is None:
+            raise StableShellError("RESTART_CANDIDATE_WITHOUT_HEALTH_INTENT")
+        return True
     if current != previous:
         raise StableShellError("RESTART_CURRENT_POINTER_CHANGED")
-    pending_path = _pending_health_path(app_root)
-    if pending_path.exists() or pending_path.is_symlink():
-        raise StableShellError("RESTART_PENDING_HEALTH_EXISTS")
     _validate_deferred_payload_identity(app_root, transaction)
     payload_root = app_root / "versions" / payload_id
     candidate_bundle = payload_root / "launcher" / "LocalAIHub"
@@ -352,37 +439,63 @@ def _activate_deferred_product(app_root: Path, transaction: dict[str, object]) -
         "total_bytes": transaction["launcher_total_bytes"],
         "files": candidate_manifest.get("files"),
     }
-    # Compare all transaction values, including the complete file rows.  The
-    # row list is not persisted in public state, but it is checked in memory
-    # before the shell switch and again by the migration copier.
     if any(candidate_manifest.get(key) != expected_manifest.get(key) for key in expected_manifest):
         raise StableShellError("RESTART_LAUNCHER_MANIFEST_MISMATCH")
-    activation = activate_launcher_bundle(
-        app_root,
-        candidate_bundle,
-        transaction_id=str(transaction["transaction_id"]),
-        payload_id=payload_id,
-        source_commit=source_commit,
-        workflow_run_id=int(transaction["workflow_run_id"]),
-        expected_manifest=candidate_manifest,
-    )
-    for key in ("format", "executable_sha256", "tree_manifest_sha256", "file_count", "total_bytes"):
-        transaction_key = "launcher_" + ("tree_manifest_sha256" if key == "tree_manifest_sha256" else key)
-        if activation.get(key) != transaction.get(transaction_key):
-            raise StableShellError("RESTART_LAUNCHER_MANIFEST_MISMATCH")
     try:
+        # The recovery intent is durable before current.json can select the
+        # candidate.  A process death here leaves the old pointer and shell.
+        if pending is None:
+            _atomic_json(_pending_health_path(app_root), {
+                "schema_version": "local-ai-hub-pending-health.v1",
+                "payload_id": payload_id,
+                "source_commit": source_commit,
+                "previous": previous,
+                "transaction_id": transaction_id,
+                "launcher_format": "onedir",
+                "launcher_executable_sha256": transaction["launcher_executable_sha256"],
+                "launcher_tree_manifest_sha256": transaction["launcher_tree_manifest_sha256"],
+            })
+            _hard_crash_checkpoint("during_pending_health_write")
+        _atomic_restart_transaction_state(app_root, {**transaction, "status": "health_intent_written"})
+        _hard_crash_checkpoint("after_health_intent_before_shell")
+        shell_recovery = reconcile_launcher_transaction(app_root, transaction_id=transaction_id)
+        if shell_recovery.get("status") in {"shell_switched", "already_reconciled", "shell_retained"}:
+            activation = {
+                "format": "onedir",
+                "executable_sha256": transaction["launcher_executable_sha256"],
+                "tree_manifest_sha256": transaction["launcher_tree_manifest_sha256"],
+                "file_count": transaction["launcher_file_count"],
+                "total_bytes": transaction["launcher_total_bytes"],
+                "shell_retained": shell_recovery.get("status") == "shell_retained",
+            }
+        elif shell_recovery.get("status") == "restored":
+            raise StableShellError("RESTART_SHELL_ROLLED_BACK")
+        else:
+            activation = activate_launcher_bundle(
+                app_root,
+                candidate_bundle,
+                transaction_id=transaction_id,
+                payload_id=payload_id,
+                source_commit=source_commit,
+                workflow_run_id=int(transaction["workflow_run_id"]),
+                expected_manifest=candidate_manifest,
+            )
+        for key in ("format", "executable_sha256", "tree_manifest_sha256", "file_count", "total_bytes"):
+            transaction_key = "launcher_" + ("tree_manifest_sha256" if key == "tree_manifest_sha256" else key)
+            if activation.get(key) != transaction.get(transaction_key):
+                raise StableShellError("RESTART_LAUNCHER_MANIFEST_MISMATCH")
+        pending_after_shell = _read_pending_health(app_root)
+        if pending_after_shell is not None:
+            _atomic_json(_pending_health_path(app_root), {
+                **pending_after_shell,
+                "launcher_retained": activation.get("shell_retained") is True,
+            })
+        _atomic_restart_transaction_state(app_root, {**transaction, "status": "shell_switched"})
+        _hard_crash_checkpoint("before_pointer_switch")
         pointer = atomic_activate_pointer(app_root, version=payload_id, manifest_sha256=str(transaction["manifest_sha256"]))
-        _atomic_json(_pending_health_path(app_root), {
-            "schema_version": "local-ai-hub-pending-health.v1",
-            "payload_id": payload_id,
-            "source_commit": source_commit,
-            "previous": previous,
-            "transaction_id": str(transaction["transaction_id"]),
-            "launcher_format": activation.get("format", "onedir"),
-            "launcher_executable_sha256": activation.get("executable_sha256"),
-            "launcher_tree_manifest_sha256": activation.get("tree_manifest_sha256"),
-        })
+        _hard_crash_checkpoint("after_pointer_switch")
         _atomic_restart_transaction_state(app_root, {**transaction, "status": "pointer_activated"})
+        _hard_crash_checkpoint("after_pointer_before_health_cleanup")
         return pointer.get("version") == payload_id
     except Exception:
         try:
@@ -625,6 +738,7 @@ def run(*, app_root: Path, wait_pid: int, timeout_seconds: float = WATCHDOG_TIME
         return {"status": "rolled_back" if rolled_back else "failed", "code": "WATCHDOG_PARENT_TIMEOUT_ROLLBACK" if rolled_back else "WATCHDOG_PARENT_TIMEOUT"}
     deferred: dict[str, object] | None = None
     try:
+        reconcile_restart_transaction(app_root)
         deferred = _read_restart_transaction(app_root)
         if deferred is not None:
             _activate_deferred_product(app_root, deferred)
@@ -731,4 +845,4 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["WATCHDOG_TIMEOUT_SECONDS", "_health_matches", "_rollback_previous", "_wait_for_pid_exit", "run"]
+__all__ = ["WATCHDOG_TIMEOUT_SECONDS", "_health_matches", "_rollback_previous", "_wait_for_pid_exit", "reconcile_restart_transaction", "run"]
