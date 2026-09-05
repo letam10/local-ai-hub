@@ -178,6 +178,14 @@ def _run_onedir_cold_start_smoke(plan: object) -> int:
             time.sleep(0.1)
         if child.poll() is None and stop_path.exists():
             terminate_owned_process(child)
+            try:
+                # ``terminate_owned_process`` waits for the OS tree, but a
+                # Popen wrapper can briefly retain a stale poll result.  Make
+                # the normal-close evidence deterministic without extending
+                # the bounded smoke deadline indefinitely.
+                child.wait(timeout=5.0)
+            except (OSError, subprocess.SubprocessError):
+                pass
         result["normal_close"] = child.poll() is not None
         _write_smoke_result(result_path, result)
         return 0 if result["normal_close"] else 1
