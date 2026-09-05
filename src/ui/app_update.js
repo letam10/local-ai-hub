@@ -5,6 +5,8 @@
  * restart bridge. Dynamic GitHub values are written with textContent.
  */
 
+import { bootstrapIdentity, isBootstrapPending } from "./app_update_bootstrap.js";
+
 const API = Object.freeze({
   status: "/api/app-update/status",
   changes: "/api/app-update/changes",
@@ -13,6 +15,24 @@ const API = Object.freeze({
 
 let lastStatus = null;
 let checking = false;
+let bootstrapPollTimer = null;
+let bootstrapPollCount = 0;
+let bootstrapCountdownTimer = null;
+let bootstrapCountdownKey = "";
+let bootstrapRestartInFlight = false;
+
+const bootstrapSession = () => {
+  try { return window.sessionStorage; } catch { return null; }
+};
+const bootstrapKey = (value) => bootstrapIdentity(value);
+const bootstrapMarked = (key, value) => {
+  const storage = bootstrapSession();
+  try { return storage?.getItem(`local-ai-hub-bootstrap:${key}`) === value; } catch { return false; }
+};
+const markBootstrap = (key, value) => {
+  const storage = bootstrapSession();
+  try { if (storage && key) storage.setItem(`local-ai-hub-bootstrap:${key}`, value); } catch { /* session storage is advisory only */ }
+};
 
 const css = `
 .app-update-card{margin:0 0 18px;padding:18px 20px;border:1px solid var(--border-color,#334155);border-radius:16px;background:linear-gradient(135deg,rgba(77,125,255,.12),rgba(128,170,255,.04));display:grid;gap:14px}
@@ -88,6 +108,8 @@ const statusLabel = (value) => ({
 
 const statusMessage = (value) => {
   if (value?.phase === "preparing" && Number.isFinite(Number(value?.progress))) return `Đang chuẩn bị payload cập nhật (${Number(value.progress)}%).`;
+  if (value?.bootstrap_status === "staged" && value?.bootstrap_restart_authorized === true) return "Đang hoàn tất cập nhật launcher. Candidate composite đã stage; Hub sẽ tự khởi động lại trong thời gian ngắn, hoặc chọn Để sau.";
+  if (value?.bootstrap_status === "restarting") return "Đang hoàn tất cập nhật launcher sau lần khởi động lại đầu tiên…";
   if (value?.phase === "restarting") return `Đang khởi động lại Local AI Hub (${Number.isFinite(Number(value?.progress)) ? Number(value.progress) : 0}%).`;
   if (value?.status === "available" || value?.phase === "update_available") return "Main CI đã xanh và có payload mới đã được đóng gói. Bạn có thể xem thay đổi trước khi cập nhật.";
   if (value?.status === "up_to_date") return "Local AI Hub đang chạy đúng build main mới nhất đã có artifact.";
@@ -181,9 +203,10 @@ const ensureCard = () => {
   const changes = make("button", "button button--compact"); changes.type = "button"; changes.dataset.appUpdateChanges = "true"; changes.textContent = "Xem thay đổi"; changes.disabled = true;
   const update = make("button", "button button--compact"); update.type = "button"; update.dataset.appUpdateApply = "true"; update.textContent = "Cập nhật Local AI Hub"; update.disabled = true;
   const restart = make("button", "button button--compact"); restart.type = "button"; restart.dataset.appUpdateRestart = "true"; restart.textContent = "Khởi động lại để áp dụng"; restart.hidden = true;
+  const defer = make("button", "button button--compact"); defer.type = "button"; defer.dataset.appUpdateDefer = "true"; defer.textContent = "Để sau"; defer.hidden = true;
   const auth = make("button", "button button--compact"); auth.type = "button"; auth.dataset.appUpdateAuth = "true"; auth.textContent = "Đăng nhập GitHub"; auth.hidden = true;
   const authCancel = make("button", "button button--compact"); authCancel.type = "button"; authCancel.dataset.appUpdateAuthCancel = "true"; authCancel.textContent = "Hủy đăng nhập"; authCancel.hidden = true;
-  actions.append(refresh, changes, update, restart, auth, authCancel);
+  actions.append(refresh, changes, update, restart, defer, auth, authCancel);
   const authDetail = make("p", "app-update-card__message"); authDetail.dataset.updateAuth = "true"; authDetail.hidden = true; card.append(authDetail);
 
   const changeList = make("ol", "app-update-card__changes"); changeList.dataset.updateChangesList = "true"; changeList.hidden = true;
@@ -207,12 +230,68 @@ const render = (card, value) => {
   card.querySelector("[data-app-update-apply]").disabled = !(value?.can_prepare === true || value?.available === true);
   const restartButton = card.querySelector("[data-app-update-restart]");
   restartButton.hidden = !((value?.can_restart === true || ["staged", "activated", "ready_to_restart", "confirm_restart"].includes(state)) && value?.requires_restart !== false && value?.restart_required !== false);
+  restartButton.textContent = value?.bootstrap_pending === true ? "Khởi động lại để hoàn tất launcher" : "Khởi động lại để áp dụng";
+  const deferButton = card.querySelector("[data-app-update-defer]");
+  const isBootstrapStaged = value?.bootstrap_status === "staged" && value?.bootstrap_pending === true;
+  deferButton.hidden = !isBootstrapStaged;
   const authButton = card.querySelector("[data-app-update-auth]");
   const needsAuth = value?.status === "auth_required" || value?.status === "oauth_configuration_required";
   authButton.hidden = !needsAuth;
   authButton.disabled = value?.status === "oauth_configuration_required";
   authButton.textContent = value?.status === "oauth_configuration_required" ? "OAuth cần cấu hình" : "Đăng nhập GitHub";
   card.querySelector("[data-app-update-auth-cancel]").hidden = !card.dataset.authSession;
+  monitorBootstrap(card, value);
+};
+
+const deferBootstrap = (card) => {
+  const key = bootstrapKey(lastStatus);
+  if (bootstrapCountdownTimer) window.clearTimeout(bootstrapCountdownTimer);
+  bootstrapCountdownTimer = null;
+  bootstrapCountdownKey = "";
+  if (key) markBootstrap(key, "deferred");
+  const value = { ...(lastStatus || {}), bootstrap_restart_authorized: false, bootstrap_deferred: true };
+  render(card, value);
+  card.querySelector("[data-update-message]").textContent = "Đã để sau. Launcher composite vẫn được giữ nguyên; bạn có thể khởi động lại khi không còn job hoạt động.";
+};
+
+const scheduleBootstrapRestart = (card, value) => {
+  const key = bootstrapKey(value);
+  if (!key || value?.bootstrap_restart_authorized !== true || bootstrapMarked(key, "deferred") || bootstrapMarked(key, "attempted")) return;
+  if (bootstrapCountdownKey === key && bootstrapCountdownTimer) return;
+  bootstrapCountdownKey = key;
+  let remaining = 5;
+  const tick = () => {
+    if (!bootstrapCountdownKey || bootstrapCountdownKey !== key) return;
+    const currentCard = ensureCard();
+    if (!currentCard || !lastStatus || bootstrapKey(lastStatus) !== key) { bootstrapCountdownTimer = null; return; }
+    currentCard.querySelector("[data-update-message]").textContent = `Đang hoàn tất cập nhật launcher — tự khởi động lại sau ${remaining}s. Chọn “Để sau” nếu đang có job cần giữ nguyên.`;
+    if (remaining <= 0) {
+      bootstrapCountdownTimer = null;
+      markBootstrap(key, "attempted");
+      restart(currentCard, { automatic: true });
+      return;
+    }
+    remaining -= 1;
+    bootstrapCountdownTimer = window.setTimeout(tick, 1000);
+  };
+  tick();
+};
+
+const monitorBootstrap = (card, value) => {
+  const pending = isBootstrapPending(value);
+  if (!pending) {
+    if (bootstrapPollTimer) window.clearTimeout(bootstrapPollTimer);
+    bootstrapPollTimer = null;
+    bootstrapPollCount = 0;
+    return;
+  }
+  if (value?.bootstrap_status === "staged") scheduleBootstrapRestart(card, value);
+  if (bootstrapPollTimer || bootstrapPollCount >= 20) return;
+  bootstrapPollTimer = window.setTimeout(async () => {
+    bootstrapPollTimer = null;
+    bootstrapPollCount += 1;
+    try { render(ensureCard(), await api(API.status)); } catch { /* the durable marker remains visible for the next bounded poll */ }
+  }, 1500);
 };
 
 const check = async (refresh = false) => {
@@ -298,7 +377,9 @@ const applyUpdate = async (card) => {
   }
 };
 
-const restart = async (card) => {
+const restart = async (card, { automatic = false } = {}) => {
+  if (bootstrapRestartInFlight) return;
+  bootstrapRestartInFlight = true;
   const button = card.querySelector("[data-app-update-restart]");
   button.disabled = true;
   render(card, { ...(lastStatus || {}), status: "restarting", phase: "restarting", available: false, can_prepare: false, can_restart: false, progress: 85 });
@@ -306,8 +387,19 @@ const restart = async (card) => {
   try {
     const bridge = window.pywebview?.api;
     if (!bridge?.restart_after_update) throw new Error("Native restart bridge chưa khả dụng trong payload này.");
-    const value = await bridge.restart_after_update();
-    if (value?.status !== "completed") throw new Error(value?.code || "Restart bị chặn.");
+    let value = null;
+    let failure = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        value = await bridge.restart_after_update();
+        if (value?.status === "completed") { failure = null; break; }
+        failure = new Error(value?.code || "Restart bị chặn.");
+      } catch (error) {
+        failure = error;
+        if (attempt === 0) await new Promise((resolve) => window.setTimeout(resolve, 250));
+      }
+    }
+    if (failure) throw failure;
   } catch (error) {
     const failed = {
       ...(lastStatus || {}),
@@ -320,6 +412,8 @@ const restart = async (card) => {
     render(card, failed);
     card.querySelector("[data-update-message]").textContent = `${error.message} Mã lỗi: ${error.payload?.reason_code || error.payload?.code || "restart_failed"}. Payload mới vẫn được stage an toàn; bạn có thể thử lại.`;
     button.disabled = false;
+  } finally {
+    bootstrapRestartInFlight = false;
   }
 };
 
@@ -383,6 +477,7 @@ document.addEventListener("click", (event) => {
   if (event.target.closest("[data-app-update-changes]")) { showChanges(card); return; }
   if (event.target.closest("[data-app-update-apply]")) { applyUpdate(card); return; }
   if (event.target.closest("[data-app-update-restart]")) { restart(card); return; }
+  if (event.target.closest("[data-app-update-defer]")) { deferBootstrap(card); return; }
   if (event.target.closest("[data-app-update-auth]")) { startAuth(card); }
   if (event.target.closest("[data-app-update-auth-cancel]")) { cancelAuth(card); }
 });

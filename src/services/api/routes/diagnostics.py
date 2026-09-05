@@ -23,6 +23,14 @@ def snapshot(request: ApiRequest, context: ApiContext, params: Mapping[str, str]
     return ApiResponse(200, {"status": "completed", "snapshot": _snapshot(context)})
 
 
+def shortcut_migration(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    try:
+        value = context.call("shortcut_migration_snapshot")
+    except Exception:
+        value = {"status": "not_run", "execution": "not_run", "real_shortcuts_mutated": False}
+    return ApiResponse(200, {"status": "completed", "shortcut_migration": value})
+
+
 def export(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
     try:
         value = context.call("diagnostics_export")
@@ -87,6 +95,7 @@ def clear_recovery_drafts(request: ApiRequest, context: ApiContext, params: Mapp
 def register(router: Router) -> None:
     owner = "src/services/api/routes/diagnostics.py"
     router.register(route_id="diagnostics.snapshot", method="GET", path="/api/diagnostics/snapshot", domain="diagnostics", owner=owner, handler=snapshot)
+    router.register(route_id="diagnostics.shortcut_migration", method="GET", path="/api/diagnostics/shortcut-migration", domain="diagnostics", owner=owner, handler=shortcut_migration)
     router.register(route_id="diagnostics.export", method="GET", path="/api/diagnostics/export", domain="diagnostics", owner=owner, handler=export)
     router.register(route_id="diagnostics.subsystem", method="GET", path="/api/diagnostics/subsystem/{subsystem}", domain="diagnostics", owner=owner, handler=subsystem)
     router.register(route_id="diagnostics.recovery_drafts", method="GET", path="/api/diagnostics/repair/recovery-drafts", domain="diagnostics", owner=owner, handler=recovery_drafts)

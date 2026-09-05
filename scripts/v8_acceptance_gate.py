@@ -704,7 +704,10 @@ def evaluate(
         },
     }
     evidence_blockers: list[str] = []
-    native_unavailable = evidence_path is None
+    # Missing evidence is a missing execution, not proof that the host lacks
+    # native WebView2 capability.  Only an exact-head Windows capability report
+    # may produce NOT_AVAILABLE_ON_TEST_HOST.
+    native_unavailable = False
     if evidence_path is None:
         evidence_blockers.append("LOCAL_WINDOWS_EVIDENCE_REQUIRED")
     else:
@@ -720,6 +723,10 @@ def evaluate(
                     for status in (webview_evidence.get("check_statuses") or {}).values()
                 )
             )
+            capability = webview_evidence.get("capabilities") if isinstance(webview_evidence, dict) else None
+            native_statuses = capability.get("native_host_dpi") if isinstance(capability, dict) else None
+            if isinstance(native_statuses, dict) and any(status == "NOT_AVAILABLE_ON_TEST_HOST" for status in native_statuses.values()):
+                native_unavailable = True
             required_check_map = {
                 item["gate_id"]: list(item["required_checks"])
                 for item in contract["gates"] if item["required"] is True
@@ -770,7 +777,7 @@ def evaluate(
         "execution": "not_run",
         "dry_run": True,
         "strict_acceptance": strict_acceptance,
-        "native_webview_automation": "NOT_AVAILABLE_ON_TEST_HOST" if native_unavailable else "PASS",
+        "native_webview_automation": ("NOT_AVAILABLE_ON_TEST_HOST" if native_unavailable else "PASS") if evidence_summary["valid"] is True else "NOT_RUN",
         "report_integrity_verified": report_integrity_verified,
         "technical_merge_ready": technical_ready,
         "full_acceptance_merge_ready": bool(merge_ready and not native_unavailable),

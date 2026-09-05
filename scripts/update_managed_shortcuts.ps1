@@ -55,17 +55,29 @@ function Get-ShortcutLocations {
 }
 
 function Test-ShortcutOwned {
-    param([object]$Shortcut, [string]$Root)
+    param([object]$Shortcut, [string]$Root, [string]$LinkPath)
     $target = [string]$Shortcut.TargetPath
     $expected = [IO.Path]::GetFullPath((Join-Path $Root 'LocalAIHub.exe'))
     try { $targetFull = [IO.Path]::GetFullPath($target) } catch { $targetFull = $target }
     if ($targetFull.TrimEnd('\').Equals($expected.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) { return $true }
-    # Historical all-users launchers are an explicit allowlist entry.  Build
-    # the legacy names in pieces so they cannot become a new normal launcher
-    # or be copied into a user-facing report.
+    # Historical all-users launchers require the same bounded provenance as the
+    # Python classifier: exact common Start Menu shape, external D:\LocalAIHub\Temp
+    # VBS, and an approved marker/content fingerprint.  A random wscript/VBS
+    # shortcut is therefore review-only and never mutated.
     $legacyHost = 'w' + 'script.exe'
     $legacyScript = 'LocalAIHub' + '.vbs'
-    return ([IO.Path]::GetFileName($targetFull)).Equals($legacyHost, [StringComparison]::OrdinalIgnoreCase) -and ([string]$Shortcut.Arguments).IndexOf($legacyScript, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    if (-not ([IO.Path]::GetFileName($targetFull)).Equals($legacyHost, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    if (-not ([string]$Shortcut.Arguments).ToLowerInvariant().Contains($legacyScript.ToLowerInvariant())) { return $false }
+    if (-not $LinkPath -or $LinkPath -notmatch '(?i)\\Microsoft\\Windows\\Start Menu\\Programs\\Local AI Hub\.lnk$') { return $false }
+    if ($LinkPath -notmatch '(?i)ProgramData') { return $false }
+    $legacyPathMatch = [regex]::Match([string]$Shortcut.Arguments, '(?i)(D:\\LocalAIHub\\Temp\\[^" ]*LocalAIHub\.vbs)')
+    if (-not $legacyPathMatch.Success) { return $false }
+    $legacyPath = $legacyPathMatch.Groups[1].Value
+    if (-not (Test-Path -LiteralPath $legacyPath -PathType Leaf)) { return $false }
+    $content = Get-Content -LiteralPath $legacyPath -Raw -ErrorAction SilentlyContinue
+    if (-not $content -or $content.IndexOf('LOCALAIHUB_LEGACY_VBS_V1', [StringComparison]::Ordinal) -lt 0) { return $false }
+    try { $digest = (Get-FileHash -LiteralPath $legacyPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() } catch { return $false }
+    return $digest -eq '53e0d08791c9eaa4cea0e59c6faaad98e0ba6e97d3207103277c0b19a0423090'
 }
 
 $root = Get-InstalledRoot -Value $AppRoot
@@ -75,10 +87,10 @@ $shell = New-Object -ComObject WScript.Shell
 foreach ($location in $locationsToRepair) {
     if ([string]::IsNullOrWhiteSpace($location)) { continue }
     $link = Join-Path $location 'Local AI Hub.lnk'
-    if (-not (Test-Path -LiteralPath $link -PathType Leaf)) { Write-Output "MISSING $link"; continue }
-    try { $shortcut = $shell.CreateShortcut($link) } catch { Write-Output "UNREADABLE $link"; continue }
-    if (-not (Test-ShortcutOwned -Shortcut $shortcut -Root $root)) { Write-Output "SKIPPED_UNOWNED $link"; continue }
-    if (-not $Apply) { Write-Output "DRYRUN $link -> $($product.Launcher)"; continue }
+    if (-not (Test-Path -LiteralPath $link -PathType Leaf)) { Write-Output "MISSING"; continue }
+    try { $shortcut = $shell.CreateShortcut($link) } catch { Write-Output "UNREADABLE"; continue }
+    if (-not (Test-ShortcutOwned -Shortcut $shortcut -Root $root -LinkPath $link)) { Write-Output "SKIPPED_UNOWNED_OR_AMBIGUOUS"; continue }
+    if (-not $Apply) { Write-Output "DRYRUN"; continue }
     try {
         $shortcut.TargetPath = $product.Launcher
         $shortcut.Arguments = ''
@@ -86,9 +98,9 @@ foreach ($location in $locationsToRepair) {
         $shortcut.Description = 'Local AI Hub stable installed product'
         $shortcut.IconLocation = "$($product.Launcher),0"
         $shortcut.Save()
-        Write-Output "UPDATED $link -> $($product.Launcher)"
+        Write-Output "UPDATED"
     } catch {
-        if ($location -match '(?i)ProgramData') { Write-Output "ADMIN_REQUIRED $link :: Mở Diagnostics bằng quyền Administrator rồi chọn Sửa shortcut dùng chung." }
-        else { Write-Output "SHORTCUT_REPAIR_FAILED $link" }
+        if ($location -match '(?i)ProgramData') { Write-Output "ADMIN_REQUIRED" }
+        else { Write-Output "SHORTCUT_REPAIR_FAILED" }
     }
 }

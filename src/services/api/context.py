@@ -76,6 +76,25 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         value = get(name)
         return value() if callable(value) else default if value is None else value
 
+    def shortcut_migration_snapshot() -> dict[str, Any]:
+        """Expose only sanitized shortcut ownership state to Diagnostics."""
+
+        raw = bound_value("shortcut_migration_snapshot", {})
+        if not isinstance(raw, Mapping):
+            raw = {}
+        status = str(raw.get("status") or "not_run")
+        if status not in {"not_run", "completed", "partial", "blocked"}:
+            status = "not_run"
+        return {
+            "status": status,
+            "execution": "not_run" if status == "not_run" else "completed",
+            "ambiguous_count": max(0, int(raw.get("ambiguous_count", 0) or 0)) if isinstance(raw.get("ambiguous_count", 0), int) else 0,
+            "owned_stale_count": max(0, int(raw.get("owned_stale_count", 0) or 0)) if isinstance(raw.get("owned_stale_count", 0), int) else 0,
+            "admin_required_count": max(0, int(raw.get("admin_required_count", 0) or 0)) if isinstance(raw.get("admin_required_count", 0), int) else 0,
+            "real_shortcuts_mutated": False,
+            "next_action": "Review shortcut ownership before any repair; ambiguous links are never changed automatically.",
+        }
+
     def catalog_snapshot() -> tuple[dict[str, Any], str]:
         raw = productization().catalog.snapshot()
         catalog = dict(raw) if isinstance(raw, Mapping) else {"models": [], "runtimes": []}
@@ -529,6 +548,7 @@ def build_default_context(bindings: Mapping[str, Any]) -> ApiContext:
         "settings_save": lambda payload, expected_revision=None: SettingsPersistence().save(payload, expected_revision=expected_revision),
         "settings_reset": lambda section: SettingsPersistence().reset_section(section), "settings_reset_all": lambda: SettingsPersistence().save(SETTINGS_SECTION_DEFAULTS),
         "diagnostics_snapshot": diagnostics_center.snapshot, "diagnostics_export": diagnostics_center.export_diagnostics_bundle,
+        "shortcut_migration_snapshot": shortcut_migration_snapshot,
         "diagnostics_config_registry": diagnostics_center.config_registry_state, "diagnostics_recovery_state": diagnostics_center.recovery_forensic_state,
         "diagnostics_recovery_drafts": lambda: {"status": "completed", "drafts": diagnostics_center.recovery_forensic_state().get("files", []), "recovery": diagnostics_center.recovery_forensic_state()},
         "diagnostics_subsystem": lambda subsystem: _diagnostic_subsystem(diagnostics_center, subsystem), "clear_recovery_drafts": clear_drafts,

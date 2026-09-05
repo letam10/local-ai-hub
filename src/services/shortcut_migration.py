@@ -9,6 +9,7 @@ states with isolated dictionaries and never touch a user's shortcuts.
 from __future__ import annotations
 
 import os
+import hashlib
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -22,6 +23,8 @@ MIGRATION_UPDATE_REQUIRED = "UPDATE_REQUIRED"
 MIGRATION_ADMIN_REQUIRED = "ADMIN_REQUIRED"
 MIGRATION_UNOWNED = "UNOWNED_UNTOUCHED"
 MIGRATION_AMBIGUOUS = "AMBIGUOUS_REVIEW_REQUIRED"
+LEGACY_VBS_MARKER = "LOCALAIHUB_LEGACY_VBS_V1"
+LEGACY_VBS_CONTENT_SHA256 = hashlib.sha256((LEGACY_VBS_MARKER + "\n").encode("ascii")).hexdigest()
 
 
 def _path(value: object) -> str:
@@ -41,6 +44,27 @@ def _root_script_reference(arguments: str, root: str) -> bool:
     normalized = arguments.replace("/", "\\").casefold()
     script = _path(Path(root) / "LocalAIHub.vbs").replace("/", "\\").casefold()
     return script in normalized or ("localaihub.vbs" in normalized and _path(root).casefold() in normalized)
+
+
+def _legacy_vbs_provenance(value: Mapping[str, Any], root: str, arguments: str) -> bool:
+    """Require the bounded historical all-users Temp/VBS signature."""
+
+    if str(value.get("scope") or "").casefold() != "all_users":
+        return False
+    if str(value.get("name") or "").casefold() != "local ai hub.lnk":
+        return False
+    if str(value.get("location_class") or "").casefold() != "all_users_start_menu":
+        return False
+    script_path = str(value.get("legacy_vbs_path") or "").replace("/", "\\").casefold()
+    if not script_path.startswith("d:\\localaihub\\temp\\") or not script_path.endswith("localaihub.vbs"):
+        return False
+    if _path(Path(root) / "LocalAIHub.vbs").replace("/", "\\").casefold() in script_path:
+        return False
+    if LEGACY_VBS_MARKER not in str(value.get("legacy_script_marker") or ""):
+        return False
+    if str(value.get("legacy_script_sha256") or "").casefold() != LEGACY_VBS_CONTENT_SHA256:
+        return False
+    return "localaihub.vbs" in arguments.casefold()
 
 
 def classify_shortcut(shortcut: Mapping[str, Any] | None, install_root: str | os.PathLike[str]) -> dict[str, Any]:
@@ -66,7 +90,7 @@ def classify_shortcut(shortcut: Mapping[str, Any] | None, install_root: str | os
 
     wscript = _basename(target) in {"wscript.exe", "wscript"}
     has_hub_script = "localaihub.vbs" in arguments.casefold()
-    if wscript and has_hub_script and _root_script_reference(arguments, root):
+    if wscript and has_hub_script and _legacy_vbs_provenance(value, root, arguments):
         return {"classification": SHORTCUT_STALE, "owned": True, "scope": scope, "stale": True, "target_is_hub": True}
     if wscript or has_hub_script or "local ai hub" in str(value.get("name") or "").casefold():
         return {"classification": SHORTCUT_AMBIGUOUS, "owned": True, "scope": scope, "stale": False, "target_is_hub": False}
@@ -122,7 +146,7 @@ def normal_launch_command(install_root: str | os.PathLike[str]) -> tuple[str, ..
 
 __all__ = [
     "MIGRATION_ADMIN_REQUIRED", "MIGRATION_AMBIGUOUS", "MIGRATION_ALREADY_CORRECT",
-    "MIGRATION_UNOWNED", "MIGRATION_UPDATE_REQUIRED", "SHORTCUT_AMBIGUOUS",
+    "MIGRATION_UNOWNED", "MIGRATION_UPDATE_REQUIRED", "SHORTCUT_AMBIGUOUS", "LEGACY_VBS_CONTENT_SHA256", "LEGACY_VBS_MARKER",
     "SHORTCUT_CORRECT", "SHORTCUT_STALE", "SHORTCUT_UNOWNED", "classify_shortcut",
     "migration_complete", "normal_launch_command", "plan_shortcut_migration",
 ]

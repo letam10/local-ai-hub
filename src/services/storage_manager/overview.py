@@ -127,8 +127,20 @@ class _IdentityLedger:
         self.connection.execute("CREATE TABLE identities (identity TEXT PRIMARY KEY, scope TEXT NOT NULL)")
         self.connection.execute("CREATE TABLE frontier (sequence INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT NOT NULL, depth INTEGER NOT NULL, identity TEXT NOT NULL, counted INTEGER NOT NULL)")
         self.connection.commit()
+        self.commit_count = 1
         self.pending = 0
+        self.frontier_pending = 0
+        self._last_commit = time.monotonic()
         self.scope: str = ""
+
+    def _maybe_commit(self, *, force: bool = False) -> None:
+        if not force and self.pending + self.frontier_pending < 512 and time.monotonic() - self._last_commit < 1.0:
+            return
+        self.connection.commit()
+        self.commit_count += 1
+        self.pending = 0
+        self.frontier_pending = 0
+        self._last_commit = time.monotonic()
 
     @staticmethod
     def _key(identity: tuple[int, int, int]) -> str:
@@ -141,17 +153,14 @@ class _IdentityLedger:
     def add(self, identity: tuple[int, int, int]) -> None:
         self.connection.execute("INSERT OR IGNORE INTO identities(identity, scope) VALUES (?, ?)", (self._key(identity), self.scope))
         self.pending += 1
-        if self.pending >= 512:
-            self.connection.commit()
-            self.pending = 0
+        self._maybe_commit()
 
     def set_scope(self, scope: str) -> None:
         self.scope = str(scope)
 
     def remove_scope(self, scope: str) -> None:
         self.connection.execute("DELETE FROM identities WHERE scope = ?", (str(scope),))
-        self.connection.commit()
-        self.pending = 0
+        self._maybe_commit(force=True)
 
     def push_frontier(self, path: Path, depth: int, identity: os.stat_result | tuple[int, ...], counted_entry: bool) -> None:
         # ``os.stat_result`` is a tuple subclass on Windows.  It must still be
@@ -164,14 +173,16 @@ class _IdentityLedger:
             "INSERT INTO frontier(path, depth, identity, counted) VALUES (?, ?, ?, ?)",
             (str(path), int(depth), encoded, 1 if counted_entry else 0),
         )
-        self.connection.commit()
+        self.frontier_pending += 1
+        self._maybe_commit()
 
     def pop_frontier(self) -> tuple[Path, int, tuple[int, ...], bool] | None:
         row = self.connection.execute("SELECT sequence, path, depth, identity, counted FROM frontier ORDER BY sequence LIMIT 1").fetchone()
         if row is None:
             return None
         self.connection.execute("DELETE FROM frontier WHERE sequence = ?", (row[0],))
-        self.connection.commit()
+        self.frontier_pending += 1
+        self._maybe_commit()
         try:
             identity = tuple(int(item) for item in str(row[3]).split(":"))
         except (TypeError, ValueError):
@@ -180,14 +191,14 @@ class _IdentityLedger:
 
     def clear_frontier(self) -> None:
         self.connection.execute("DELETE FROM frontier")
-        self.connection.commit()
+        self._maybe_commit(force=True)
 
     def close(self, *, cleanup: bool = True) -> None:
         try:
-            if self.pending:
-                self.connection.commit()
+            if self.pending or self.frontier_pending:
+                self._maybe_commit(force=True)
             self.connection.execute("DELETE FROM frontier")
-            self.connection.commit()
+            self._maybe_commit(force=True)
         finally:
             self.connection.close()
         if cleanup:
