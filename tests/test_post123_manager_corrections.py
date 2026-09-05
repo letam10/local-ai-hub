@@ -765,6 +765,34 @@ class Post123ManagerCorrectionTests(unittest.TestCase):
         self.assertIn("Compress-Archive -Path $bundle -DestinationPath", workflow)
         self.assertNotIn('Compress-Archive -Path "$bundle/*"', workflow)
 
+    def test_composite_assembler_accepts_downloaded_launcher_sidecar_layout(self) -> None:
+        from scripts.assemble_product_update import assemble
+
+        source_commit = "a" * 40
+        temp_root = REPO / "Temp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(dir=temp_root, prefix="post123-assembler-layout-") as temporary:
+            root = Path(temporary)
+            app_root = root / "app-artifact"
+            launcher_root = root / "launcher-artifact"
+            app_root.mkdir()
+            (launcher_root / "stable-launcher").mkdir(parents=True)
+            with zipfile.ZipFile(app_root / "LocalAIHub-main-update.zip", "w") as archive:
+                info = zipfile.ZipInfo("app/README.md", date_time=(1980, 1, 1, 0, 0, 0))
+                archive.writestr(info, b"app")
+            (app_root / "update-manifest.json").write_text(json.dumps({"source_commit": source_commit}), encoding="utf-8")
+            with zipfile.ZipFile(launcher_root / "LocalAIHub-stable-launcher-onedir.zip", "w") as archive:
+                for name, data in (("LocalAIHub/LocalAIHub.exe", b"exe"), ("LocalAIHub/_internal/support.dll", b"support")):
+                    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                    archive.writestr(info, data)
+            (launcher_root / "stable-launcher" / "launcher-build.json").write_text(
+                json.dumps({"source_commit": source_commit, "workflow_run_id": 123}), encoding="utf-8"
+            )
+            result = assemble(app_root, launcher_root, root / "assembled", workflow_run_id=123)
+            self.assertEqual(result["source_commit"], source_commit)
+            self.assertEqual(result["workflow_run_id"], 123)
+            self.assertEqual(result["launcher_format"], "onedir")
+
 
 if __name__ == "__main__":
     unittest.main()

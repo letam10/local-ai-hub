@@ -63,8 +63,8 @@ def _read_json(path: Path) -> dict[str, object]:
     return value
 
 
-def _read_launcher_zip(path: Path) -> tuple[dict[str, object], dict[str, bytes]]:
-    build_path = path.parent / "launcher-build.json"
+def _read_launcher_zip(path: Path, *, metadata_path: Path | None = None) -> tuple[dict[str, object], dict[str, bytes]]:
+    build_path = metadata_path or path.parent / "launcher-build.json"
     metadata = _read_json(build_path) if build_path.is_file() else {}
     with zipfile.ZipFile(path, "r") as bundle:
         members = bundle.infolist()
@@ -110,7 +110,8 @@ def assemble(app_artifact_dir: Path, launcher_artifact_dir: Path, output_dir: Pa
         raise RuntimeError("source_commit_invalid")
     app_archive_path = _find_file(app_root, APP_ARCHIVE)
     launcher_zip = _find_file(launcher_root, "LocalAIHub-stable-launcher-onedir.zip")
-    launcher_metadata, launcher_files = _read_launcher_zip(launcher_zip)
+    launcher_metadata_path = _find_file(launcher_root, "launcher-build.json")
+    launcher_metadata, launcher_files = _read_launcher_zip(launcher_zip, metadata_path=launcher_metadata_path)
     launcher_commit = launcher_metadata.get("source_commit")
     if launcher_commit != app_commit:
         raise RuntimeError("cross_commit_mismatch")

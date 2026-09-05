@@ -83,7 +83,7 @@ jobs:
       - name: Bind launcher artifact to source head
         shell: pwsh
         run: |
-          $bundle = "dist/stable-launcher/dist/LocalAIHub"
+          $bundle = (Resolve-Path -LiteralPath "dist/stable-launcher/dist/LocalAIHub").Path
           $exe = Join-Path $bundle "LocalAIHub.exe"
           if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Stable launcher executable is missing" }
           $info = [ordered]@{
