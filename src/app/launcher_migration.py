@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import re
 from typing import Any
 
 
@@ -31,6 +32,20 @@ LAUNCHER_BUNDLE_NAME = "LocalAIHub"
 LAUNCHER_INTERNAL_NAME = "_internal"
 MAX_LAUNCHER_FILES = 10_000
 MAX_LAUNCHER_BYTES = 500 * 1024 * 1024
+_TRANSACTION_RE = re.compile(r"^txn-[0-9a-f]{32}$")
+_PAYLOAD_RE = re.compile(r"^main-[0-9a-f]{12}$")
+_SOURCE_RE = re.compile(r"^[0-9a-f]{40}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_MAX_WORKFLOW_RUN_ID = (1 << 63) - 1
+_ACTIVATION_STATUSES = frozenset({
+    "prepared", "activation_copy_complete", "old_exe_moved", "old_internal_moved",
+    "old_manifest_moved", "candidate_exe_moved", "candidate_internal_moved",
+    "shell_manifest_written", "shell_switched", "rollback_in_progress", "restored", "switching",
+}) | frozenset(
+    f"{prefix}_{name.replace('.', '_')}_moved"
+    for prefix in ("candidate", "previous")
+    for name in (LAUNCHER_INTERNAL_NAME, LAUNCHER_EXECUTABLE_NAME, LAUNCHER_SHELL_MANIFEST_NAME)
+)
 
 
 class LauncherMigrationError(ValueError):
@@ -176,6 +191,143 @@ def verify_launcher_manifest(bundle: Path, expected: dict[str, Any] | None = Non
     return actual
 
 
+def _shell_tree_manifest(root: Path) -> dict[str, Any]:
+    """Manifest only the files that are switched as the installed shell."""
+
+    install = root.absolute()
+    if not install.is_dir() or install.is_symlink() or _is_reparse(install):
+        raise LauncherMigrationError("INSTALL_ROOT_INVALID")
+    executable = install / LAUNCHER_EXECUTABLE_NAME
+    internal = install / LAUNCHER_INTERNAL_NAME
+    if not executable.is_file() or executable.is_symlink() or _is_reparse(executable):
+        raise LauncherMigrationError("STABLE_LAUNCHER_REQUIRED")
+    if not internal.is_dir() or internal.is_symlink() or _is_reparse(internal):
+        raise LauncherMigrationError("LAUNCHER_INTERNAL_MISSING")
+    rows: list[dict[str, Any]] = []
+    total = 0
+    candidates = [executable]
+    for current, directories, filenames in os.walk(internal, topdown=True, followlinks=False):
+        current_path = Path(current)
+        if _is_reparse(current_path):
+            raise LauncherMigrationError("LAUNCHER_REPARSE")
+        directories[:] = sorted(directories)
+        for name in directories + filenames:
+            child = current_path / name
+            if _is_reparse(child):
+                raise LauncherMigrationError("LAUNCHER_REPARSE")
+        candidates.extend(Path(current) / name for name in sorted(filenames))
+    for path in candidates:
+        if not path.is_file() or _is_reparse(path):
+            raise LauncherMigrationError("LAUNCHER_REPARSE")
+        size = path.stat().st_size
+        total += size
+        if len(rows) >= MAX_LAUNCHER_FILES or total > MAX_LAUNCHER_BYTES:
+            raise LauncherMigrationError("LAUNCHER_BOUNDS_EXCEEDED")
+        rows.append({"name": path.relative_to(install).as_posix(), "size": size, "sha256": _sha256(path)})
+    rows.sort(key=lambda row: str(row["name"]))
+    raw = _canonical(rows)
+    exe_row = next(row for row in rows if row["name"].casefold() == LAUNCHER_EXECUTABLE_NAME.casefold())
+    return {
+        "schema_version": LAUNCHER_MANIFEST_SCHEMA,
+        "format": "onedir",
+        "executable": LAUNCHER_EXECUTABLE_NAME,
+        "executable_sha256": exe_row["sha256"],
+        "tree_manifest_sha256": hashlib.sha256(raw).hexdigest(),
+        "file_count": len(rows),
+        "total_bytes": total,
+        "files": rows,
+    }
+
+
+def _verify_shell_manifest(root: Path, expected: dict[str, Any]) -> None:
+    actual = _shell_tree_manifest(root)
+    if actual != expected:
+        raise LauncherMigrationError("LAUNCHER_TREE_CHANGED")
+
+
+def _bootable_format(root: Path) -> str | None:
+    install = root.absolute()
+    exe = install / LAUNCHER_EXECUTABLE_NAME
+    internal = install / LAUNCHER_INTERNAL_NAME
+    try:
+        if not exe.is_file() or exe.is_symlink() or _is_reparse(exe):
+            return None
+        if internal.exists() or internal.is_symlink():
+            if internal.is_dir() and not internal.is_symlink() and not _is_reparse(internal):
+                return "onedir"
+            return None
+        return "single_file"
+    except OSError:
+        return None
+
+
+def _current_activation_state(path: Path, transaction_id: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise LauncherMigrationError("LAUNCHER_STATE_INVALID") from exc
+    if not isinstance(value, dict) or value.get("schema_version") != LAUNCHER_ACTIVATION_SCHEMA or value.get("transaction_id") != transaction_id:
+        raise LauncherMigrationError("LAUNCHER_TRANSACTION_MISMATCH")
+    required = {
+        "schema_version", "transaction_id", "payload_id", "source_commit", "format",
+        "executable_sha256", "tree_manifest_sha256", "file_count", "total_bytes", "status",
+    }
+    if not required.issubset(value) or value.get("format") != "onedir" or value.get("status") not in _ACTIVATION_STATUSES:
+        raise LauncherMigrationError("LAUNCHER_STATE_INVALID")
+    payload_id = value.get("payload_id")
+    source_commit = value.get("source_commit")
+    if (
+        not isinstance(payload_id, str) or _PAYLOAD_RE.fullmatch(payload_id) is None
+        or not isinstance(source_commit, str) or _SOURCE_RE.fullmatch(source_commit) is None
+        or payload_id != f"main-{source_commit[:12]}"
+        or not isinstance(value.get("executable_sha256"), str) or _SHA256_RE.fullmatch(value["executable_sha256"]) is None
+        or not isinstance(value.get("tree_manifest_sha256"), str) or _SHA256_RE.fullmatch(value["tree_manifest_sha256"]) is None
+        or isinstance(value.get("file_count"), bool) or not isinstance(value.get("file_count"), int)
+        or not 2 <= value["file_count"] <= MAX_LAUNCHER_FILES
+        or isinstance(value.get("total_bytes"), bool) or not isinstance(value.get("total_bytes"), int)
+        or not 1 <= value["total_bytes"] <= MAX_LAUNCHER_BYTES
+    ):
+        raise LauncherMigrationError("LAUNCHER_STATE_INVALID")
+    run_id = value.get("workflow_run_id")
+    if run_id is not None and (isinstance(run_id, bool) or not isinstance(run_id, int) or not 0 < run_id <= _MAX_WORKFLOW_RUN_ID):
+        raise LauncherMigrationError("LAUNCHER_STATE_INVALID")
+    previous_format = value.get("previous_format")
+    if previous_format is not None and previous_format not in {"single_file", "onedir"}:
+        raise LauncherMigrationError("LAUNCHER_STATE_INVALID")
+    for key in ("previous_executable_sha256", "previous_tree_manifest_sha256"):
+        item = value.get(key)
+        if item is not None and (not isinstance(item, str) or _SHA256_RE.fullmatch(item) is None):
+            raise LauncherMigrationError("LAUNCHER_STATE_INVALID")
+    previous_file_count_value = value.get("previous_file_count")
+    if previous_file_count_value is not None and (
+        isinstance(previous_file_count_value, bool)
+        or not isinstance(previous_file_count_value, int)
+        or not 2 <= previous_file_count_value <= MAX_LAUNCHER_FILES
+    ):
+        raise LauncherMigrationError("LAUNCHER_STATE_INVALID")
+    previous_total_bytes_value = value.get("previous_total_bytes")
+    if previous_total_bytes_value is not None and (
+        isinstance(previous_total_bytes_value, bool)
+        or not isinstance(previous_total_bytes_value, int)
+        or not 1 <= previous_total_bytes_value <= MAX_LAUNCHER_BYTES
+    ):
+        raise LauncherMigrationError("LAUNCHER_STATE_INVALID")
+    return value
+
+
+def _forensic_destination(backup: Path) -> Path:
+    base = backup / "candidate-shell"
+    if not base.exists():
+        base.mkdir(parents=True, exist_ok=False)
+        return base
+    for index in range(2, 101):
+        candidate = backup / f"candidate-shell-{index}"
+        if not candidate.exists():
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+    raise LauncherMigrationError("LAUNCHER_FORENSIC_BOUNDS_EXCEEDED")
+
+
 def _write_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -236,6 +388,8 @@ def activate_launcher_bundle(
     transaction_id: str,
     payload_id: str,
     source_commit: str,
+    workflow_run_id: int | None = None,
+    expected_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Switch the root shell after the old owner has exited.
 
@@ -249,16 +403,37 @@ def activate_launcher_bundle(
     if not candidate.is_relative_to(root) or candidate == root:
         raise LauncherMigrationError("LAUNCHER_CANDIDATE_OUTSIDE_INSTALL")
     manifest = launcher_tree_manifest(candidate)
-    if not isinstance(transaction_id, str) or not transaction_id.startswith("txn-"):
+    if expected_manifest is not None and manifest != expected_manifest:
+        raise LauncherMigrationError("LAUNCHER_MANIFEST_MISMATCH")
+    if any(
+        str(row.get("name")) != LAUNCHER_EXECUTABLE_NAME
+        and not str(row.get("name", "")).startswith(f"{LAUNCHER_INTERNAL_NAME}/")
+        for row in manifest.get("files", [])
+    ):
+        raise LauncherMigrationError("LAUNCHER_BUNDLE_LAYOUT_INVALID")
+    if not isinstance(transaction_id, str) or _TRANSACTION_RE.fullmatch(transaction_id) is None:
         raise LauncherMigrationError("LAUNCHER_TRANSACTION_INVALID")
-    if not isinstance(payload_id, str) or not payload_id or not isinstance(source_commit, str) or len(source_commit) != 40:
+    if not isinstance(payload_id, str) or _PAYLOAD_RE.fullmatch(payload_id) is None or not isinstance(source_commit, str) or _SOURCE_RE.fullmatch(source_commit) is None or payload_id != f"main-{source_commit[:12]}":
         raise LauncherMigrationError("LAUNCHER_IDENTITY_INVALID")
+    if workflow_run_id is not None and (
+        isinstance(workflow_run_id, bool)
+        or not isinstance(workflow_run_id, int)
+        or not 0 < workflow_run_id <= _MAX_WORKFLOW_RUN_ID
+    ):
+        raise LauncherMigrationError("LAUNCHER_WORKFLOW_RUN_INVALID")
 
     state_root = root / "update-state"
     backup = state_root / "launcher-rollback" / transaction_id
     activation = root / "staging" / "launcher-activation" / transaction_id
     if backup.exists() or activation.exists():
         raise LauncherMigrationError("LAUNCHER_TRANSACTION_OCCUPIED")
+    old_exe = root / LAUNCHER_EXECUTABLE_NAME
+    old_internal = root / LAUNCHER_INTERNAL_NAME
+    old_manifest = _shell_manifest_path(root)
+    previous_format = _bootable_format(root)
+    if previous_format is None:
+        raise LauncherMigrationError("LAUNCHER_CURRENT_INVALID")
+    previous_shell_manifest = _shell_tree_manifest(root) if previous_format == "onedir" else None
     backup.mkdir(parents=True, exist_ok=False)
     activation.mkdir(parents=True, exist_ok=False)
     state_path = state_root / "launcher-activation.json"
@@ -272,35 +447,62 @@ def activate_launcher_bundle(
         "tree_manifest_sha256": manifest["tree_manifest_sha256"],
         "file_count": manifest["file_count"],
         "total_bytes": manifest["total_bytes"],
+        "workflow_run_id": workflow_run_id,
+        "previous_format": previous_format,
+        "previous_executable_sha256": _sha256(old_exe),
+        "previous_tree_manifest_sha256": previous_shell_manifest.get("tree_manifest_sha256") if previous_shell_manifest else None,
+        "previous_file_count": previous_shell_manifest.get("file_count") if previous_shell_manifest else None,
+        "previous_total_bytes": previous_shell_manifest.get("total_bytes") if previous_shell_manifest else None,
         "status": "prepared",
     }
-    _write_json(state_path, state)
+    try:
+        _write_json(state_path, state)
+    except Exception:
+        # No shell move has happened yet.  If the durable transaction state
+        # could not be published, remove only the two empty directories owned
+        # by this transaction so a retry cannot be mistaken for a live move.
+        if not state_path.exists():
+            for empty in (activation, backup):
+                try:
+                    empty.rmdir()
+                except OSError:
+                    pass
+        raise
     try:
         # Copying first means the candidate remains available if the root
         # shell swap or a later pointer activation fails.
         copied = copy_launcher_bundle(candidate, activation / LAUNCHER_BUNDLE_NAME)
-        state["status"] = "switching"
+        if expected_manifest is not None and copied != expected_manifest:
+            raise LauncherMigrationError("LAUNCHER_TREE_CHANGED")
+        state["status"] = "activation_copy_complete"
         _write_json(state_path, state)
 
-        old_exe = root / LAUNCHER_EXECUTABLE_NAME
-        old_internal = root / LAUNCHER_INTERNAL_NAME
-        old_manifest = _shell_manifest_path(root)
         if old_exe.exists() or old_exe.is_symlink():
             if _is_reparse(old_exe) or not old_exe.is_file():
                 raise LauncherMigrationError("LAUNCHER_CURRENT_INVALID")
             os.replace(old_exe, backup / LAUNCHER_EXECUTABLE_NAME)
+            state["status"] = "old_exe_moved"
+            _write_json(state_path, state)
         if old_internal.exists() or old_internal.is_symlink():
             if _is_reparse(old_internal) or not old_internal.is_dir():
                 raise LauncherMigrationError("LAUNCHER_CURRENT_INVALID")
             os.replace(old_internal, backup / LAUNCHER_INTERNAL_NAME)
+            state["status"] = "old_internal_moved"
+            _write_json(state_path, state)
         if old_manifest.exists() or old_manifest.is_symlink():
             if _is_reparse(old_manifest) or not old_manifest.is_file():
                 raise LauncherMigrationError("LAUNCHER_CURRENT_INVALID")
             os.replace(old_manifest, backup / LAUNCHER_SHELL_MANIFEST_NAME)
+            state["status"] = "old_manifest_moved"
+            _write_json(state_path, state)
 
         staged = activation / LAUNCHER_BUNDLE_NAME
         os.replace(staged / LAUNCHER_EXECUTABLE_NAME, root / LAUNCHER_EXECUTABLE_NAME)
+        state["status"] = "candidate_exe_moved"
+        _write_json(state_path, state)
         os.replace(staged / LAUNCHER_INTERNAL_NAME, root / LAUNCHER_INTERNAL_NAME)
+        state["status"] = "candidate_internal_moved"
+        _write_json(state_path, state)
         shell = {
             "schema_version": LAUNCHER_MANIFEST_SCHEMA,
             "product_id": "LocalAIHub",
@@ -313,6 +515,9 @@ def activate_launcher_bundle(
             "total_bytes": copied["total_bytes"],
         }
         _write_json(root / LAUNCHER_SHELL_MANIFEST_NAME, shell)
+        _verify_shell_manifest(root, copied)
+        state["status"] = "shell_manifest_written"
+        _write_json(state_path, state)
         state["status"] = "shell_switched"
         _write_json(state_path, state)
         return {**shell, "status": "shell_switched", "transaction_id": transaction_id}
@@ -325,37 +530,186 @@ def activate_launcher_bundle(
 
 
 def restore_launcher_bundle(root: Path, *, transaction_id: str, _allow_state_status: bool = False) -> dict[str, Any]:
-    """Restore the shell saved by a previous activation transaction."""
+    """Restore a shell exactly once and make later calls verified no-ops.
 
+    The rollback directory is intentionally retained as forensic evidence.  A
+    second watchdog retry must first recognize the verified previous shell and
+    return ``already_restored``; it must never move that shell back into the
+    forensic directory just because the transaction backup no longer contains
+    the files that were already restored.
+    """
+
+    if not isinstance(transaction_id, str) or _TRANSACTION_RE.fullmatch(transaction_id) is None:
+        raise LauncherMigrationError("LAUNCHER_TRANSACTION_INVALID")
     install = _root_is_safe(root)
-    backup = install / "update-state" / "launcher-rollback" / transaction_id
     state_path = install / "update-state" / "launcher-activation.json"
+    if not state_path.is_file() or state_path.is_symlink():
+        raise LauncherMigrationError("LAUNCHER_STATE_INVALID")
+    state = _current_activation_state(state_path, transaction_id)
+    backup = install / "update-state" / "launcher-rollback" / transaction_id
+    status = str(state.get("status") or "")
+    previous_format = state.get("previous_format")
+    if previous_format not in {"single_file", "onedir"}:
+        # Transactions written by the first PR revision had no explicit
+        # previous format.  Infer it only from the preserved backup, never
+        # from a candidate/forensic directory.
+        previous_format = "onedir" if (backup / LAUNCHER_INTERNAL_NAME).is_dir() else "single_file"
+    previous_hash = state.get("previous_executable_sha256")
+    if previous_hash is not None and (not isinstance(previous_hash, str) or re.fullmatch(r"[0-9a-f]{64}", previous_hash) is None):
+        raise LauncherMigrationError("LAUNCHER_STATE_INVALID")
+    previous_tree_hash = state.get("previous_tree_manifest_sha256")
+    previous_file_count = state.get("previous_file_count")
+    previous_total_bytes = state.get("previous_total_bytes")
+    if previous_tree_hash is not None and (not isinstance(previous_tree_hash, str) or _SHA256_RE.fullmatch(previous_tree_hash) is None):
+        raise LauncherMigrationError("LAUNCHER_STATE_INVALID")
+    if previous_file_count is not None and (isinstance(previous_file_count, bool) or not isinstance(previous_file_count, int) or not 2 <= previous_file_count <= MAX_LAUNCHER_FILES):
+        raise LauncherMigrationError("LAUNCHER_STATE_INVALID")
+    if previous_total_bytes is not None and (isinstance(previous_total_bytes, bool) or not isinstance(previous_total_bytes, int) or not 1 <= previous_total_bytes <= MAX_LAUNCHER_BYTES):
+        raise LauncherMigrationError("LAUNCHER_STATE_INVALID")
+
+    def previous_shell_is_verified() -> bool:
+        if _bootable_format(install) != previous_format:
+            return False
+        if previous_hash is None:
+            # Pre-correction transactions did not persist the previous shell
+            # hash.  While its backup is still present, compare the live root
+            # with that backup instead of treating any shell of the same
+            # format as the already-restored shell.
+            previous_backup_exe = backup / LAUNCHER_EXECUTABLE_NAME
+            if previous_backup_exe.is_file() and not previous_backup_exe.is_symlink() and not _is_reparse(previous_backup_exe):
+                try:
+                    if _sha256(install / LAUNCHER_EXECUTABLE_NAME) != _sha256(previous_backup_exe):
+                        return False
+                    if previous_format == "onedir":
+                        current = _shell_tree_manifest(install)
+                        expected = _shell_tree_manifest(backup)
+                        return current.get("tree_manifest_sha256") == expected.get("tree_manifest_sha256")
+                    return True
+                except LauncherMigrationError:
+                    return False
+            # The previous executable may already have been moved back before
+            # an older transaction wrote its final state.  The format check at
+            # the top of this helper is the remaining bounded proof in that
+            # legacy state shape.
+            live_status = str(state.get("status") or status)
+            return live_status == "restored" or live_status.startswith("previous_")
+        try:
+            if _sha256(install / LAUNCHER_EXECUTABLE_NAME) != previous_hash:
+                return False
+            if previous_format == "onedir" and previous_tree_hash is not None:
+                current = _shell_tree_manifest(install)
+                return (
+                    current.get("tree_manifest_sha256") == previous_tree_hash
+                    and (previous_file_count is None or current.get("file_count") == previous_file_count)
+                    and (previous_total_bytes is None or current.get("total_bytes") == previous_total_bytes)
+                )
+            return True
+        except LauncherMigrationError:
+            return False
+
+    def mark_restored() -> None:
+        state["status"] = "restored"
+        try:
+            _write_json(state_path, state)
+        except LauncherMigrationError:
+            # The shell is already verified.  A later retry will use the
+            # previous hash/format and still remain a no-op.
+            pass
+
+    # This check intentionally precedes any backup existence or move check.
+    # It covers the second/third/post-crash watchdog call and the case where a
+    # previous restore completed but its state write was interrupted.
+    if previous_shell_is_verified():
+        if status != "restored":
+            mark_restored()
+        return {"status": "already_restored", "transaction_id": transaction_id}
+
     if not backup.is_dir() or backup.is_symlink() or _is_reparse(backup):
         raise LauncherMigrationError("LAUNCHER_ROLLBACK_UNAVAILABLE")
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        state = {}
-    if not _allow_state_status and state.get("transaction_id") not in {None, transaction_id}:
-        raise LauncherMigrationError("LAUNCHER_TRANSACTION_MISMATCH")
+    previous_exe = backup / LAUNCHER_EXECUTABLE_NAME
+    previous_internal = backup / LAUNCHER_INTERNAL_NAME
+    previous_manifest = backup / LAUNCHER_SHELL_MANIFEST_NAME
+    if (
+        not previous_exe.is_file()
+        or previous_exe.is_symlink()
+        or _is_reparse(previous_exe)
+        or (previous_format == "onedir" and (not previous_internal.is_dir() or previous_internal.is_symlink() or _is_reparse(previous_internal)))
+        or (previous_format == "single_file" and (previous_internal.exists() or previous_internal.is_symlink()))
+    ):
+        # If the backup is incomplete but the root is not the exact previous
+        # shell, moving anything would make an ambiguous state worse.
+        raise LauncherMigrationError("LAUNCHER_ROLLBACK_UNAVAILABLE")
+    if previous_hash is not None and _sha256(previous_exe) != previous_hash:
+        raise LauncherMigrationError("LAUNCHER_ROLLBACK_FAILED")
 
-    # Preserve the currently selected candidate shell for forensic review;
-    # never delete it while rolling back.
-    failed = backup / "candidate-shell"
-    failed.mkdir(parents=True, exist_ok=True)
-    for name in (LAUNCHER_EXECUTABLE_NAME, LAUNCHER_INTERNAL_NAME, LAUNCHER_SHELL_MANIFEST_NAME):
-        current = install / name
-        if current.exists() or current.is_symlink():
-            if _is_reparse(current):
-                raise LauncherMigrationError("LAUNCHER_ROLLBACK_FAILED")
-            os.replace(current, failed / name)
-    for name in (LAUNCHER_EXECUTABLE_NAME, LAUNCHER_INTERNAL_NAME, LAUNCHER_SHELL_MANIFEST_NAME):
-        previous = backup / name
-        if previous.exists() or previous.is_symlink():
-            os.replace(previous, install / name)
-    if state_path.parent.exists():
-        state["status"] = "restored"
-        _write_json(state_path, state if isinstance(state, dict) else {"status": "restored", "transaction_id": transaction_id})
+    failed = _forensic_destination(backup)
+
+    def assert_transaction_ready() -> None:
+        live = _current_activation_state(state_path, transaction_id)
+        if live.get("status") == "restored":
+            raise LauncherMigrationError("LAUNCHER_ALREADY_RESTORED")
+
+    def move_known(source: Path, destination: Path) -> None:
+        assert_transaction_ready()
+        if _is_reparse(source) or _is_reparse(destination.parent):
+            raise LauncherMigrationError("LAUNCHER_REPARSE")
+        if destination.exists() or destination.is_symlink():
+            raise LauncherMigrationError("LAUNCHER_DESTINATION_OCCUPIED")
+        os.replace(source, destination)
+
+    def reconcile_previous_shell() -> bool:
+        """Finish a partially interrupted restore without broad cleanup."""
+
+        try:
+            # Remove any remaining candidate component into the same unique
+            # forensic directory before putting the preserved shell back.
+            for name in (LAUNCHER_INTERNAL_NAME, LAUNCHER_EXECUTABLE_NAME, LAUNCHER_SHELL_MANIFEST_NAME):
+                current = install / name
+                if current.exists() or current.is_symlink():
+                    if _is_reparse(current):
+                        return False
+                    target = failed / name
+                    if not target.exists() and not target.is_symlink():
+                        os.replace(current, target)
+            # Restore internal files before the executable so an onedir shell
+            # is complete as soon as its root executable is switched back.
+            for name in (LAUNCHER_INTERNAL_NAME, LAUNCHER_EXECUTABLE_NAME, LAUNCHER_SHELL_MANIFEST_NAME):
+                source = backup / name
+                if source.exists() or source.is_symlink():
+                    if name == LAUNCHER_INTERNAL_NAME and previous_format != "onedir":
+                        continue
+                    os.replace(source, install / name)
+            return previous_shell_is_verified()
+        except (OSError, LauncherMigrationError):
+            return False
+
+    try:
+        state["status"] = "rollback_in_progress"
+        _write_json(state_path, state)
+        # Preserve the candidate first.  Each move is scoped to this exact
+        # transaction and never overwrites an existing forensic byte set.
+        for name in (LAUNCHER_INTERNAL_NAME, LAUNCHER_EXECUTABLE_NAME, LAUNCHER_SHELL_MANIFEST_NAME):
+            current = install / name
+            if current.exists() or current.is_symlink():
+                if _is_reparse(current):
+                    raise LauncherMigrationError("LAUNCHER_ROLLBACK_FAILED")
+                move_known(current, failed / name)
+                state["status"] = f"candidate_{name.replace('.', '_')}_moved"
+                _write_json(state_path, state)
+        for name in (LAUNCHER_INTERNAL_NAME, LAUNCHER_EXECUTABLE_NAME, LAUNCHER_SHELL_MANIFEST_NAME):
+            previous = backup / name
+            if previous.exists() or previous.is_symlink():
+                if name == LAUNCHER_INTERNAL_NAME and previous_format != "onedir":
+                    continue
+                move_known(previous, install / name)
+                state["status"] = f"previous_{name.replace('.', '_')}_moved"
+                _write_json(state_path, state)
+    except (OSError, LauncherMigrationError):
+        if not reconcile_previous_shell():
+            raise LauncherMigrationError("LAUNCHER_ROLLBACK_FAILED")
+    if not previous_shell_is_verified():
+        raise LauncherMigrationError("LAUNCHER_ROLLBACK_FAILED")
+    mark_restored()
     return {"status": "restored", "transaction_id": transaction_id}
 
 

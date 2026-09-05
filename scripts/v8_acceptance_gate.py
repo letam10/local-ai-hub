@@ -38,7 +38,7 @@ OID = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 GATE_ID = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
 CHECK_ID = re.compile(r"^[a-z][a-z0-9_.-]{1,95}$")
-EVIDENCE_STATUSES = frozenset({"PASS", "FAIL", "BLOCKED", "NOT_RUN"})
+EVIDENCE_STATUSES = frozenset({"PASS", "FAIL", "BLOCKED", "NOT_RUN", "NOT_AVAILABLE_ON_TEST_HOST"})
 PROVENANCE_SCHEMA_VERSION = "v8-local-gate-provenance.v1"
 PROVENANCE_KINDS = frozenset({"RERUN_EXACT_HEAD", "REUSED_UNAFFECTED_EVIDENCE"})
 _WEBVIEW_CAPABILITY_SCHEMA = "v8-webview-dpi-evidence.v1"
@@ -124,6 +124,8 @@ def _path_impact_scope_single(path: str) -> str | None:
         # reused runtime_smoke report, while remaining explicitly classified
         # instead of falling through to the unknown high-risk sentinel.
         return "application_launch"
+    if normalized == "src/services/shortcut_migration.py":
+        return "application_launch"
     if normalized.startswith("src/services/resource_scheduler/"):
         return "resource_scheduler"
     if normalized.startswith("src/services/workflow_runtime_v2/"):
@@ -165,6 +167,8 @@ def _path_impact_scope_single(path: str) -> str | None:
     if normalized == "scripts/generate_api_route_inventory.py":
         return "loopback_api"
     if normalized == "scripts/stage_stable_product.py":
+        return "updater"
+    if normalized in {"scripts/build_main_update.py", "scripts/assemble_product_update.py", "scripts/update_managed_shortcuts.ps1", ".github/workflows/ci.yml"}:
         return "updater"
     if normalized.startswith("src/services/api/"):
         return "loopback_api"
@@ -507,7 +511,7 @@ def _validate_evidence(value: Any, contract: Mapping[str, Any]) -> dict[str, Any
     normalized: dict[str, dict[str, Any]] = {}
     for gate_id in required_ids:
         item = gates.get(gate_id)
-        if not isinstance(item, dict) or set(item) != {"status", "report_sha256", "provenance"}:
+        if not isinstance(item, dict) or not {"status", "report_sha256", "provenance"}.issubset(item) or set(item) - {"status", "report_sha256", "provenance", "check_statuses"}:
             raise AcceptanceGateError("EVIDENCE_GATE_INVALID")
         status = item.get("status")
         report_sha256 = item.get("report_sha256")
@@ -517,10 +521,18 @@ def _validate_evidence(value: Any, contract: Mapping[str, Any]) -> dict[str, Any
             raise AcceptanceGateError("EVIDENCE_REPORT_DIGEST_INVALID")
         if status == "PASS" and not isinstance(report_sha256, str):
             raise AcceptanceGateError("EVIDENCE_PASS_WITHOUT_REPORT")
+        check_statuses = item.get("check_statuses")
+        if check_statuses is not None:
+            declared_checks = next(item["required_checks"] for item in contract["gates"] if item["gate_id"] == gate_id)
+            if not isinstance(check_statuses, dict) or set(check_statuses) != set(declared_checks) or any(value not in EVIDENCE_STATUSES for value in check_statuses.values()):
+                raise AcceptanceGateError("EVIDENCE_CHECK_STATUS_INVALID")
+            if status == "PASS" and any(value != "PASS" for value in check_statuses.values()):
+                raise AcceptanceGateError("EVIDENCE_CHECK_STATUS_INVALID")
         normalized[gate_id] = {
             "status": status,
             "report_sha256": report_sha256,
             "provenance": _validate_gate_provenance(item.get("provenance"), gate_id=gate_id, evidence_source_commit=source_commit),
+            "check_statuses": dict(check_statuses) if isinstance(check_statuses, dict) else None,
         }
     return {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
@@ -681,12 +693,18 @@ def evaluate(
         "present": evidence_path is not None,
         "valid": False,
         "reports_verified": False,
+        "report_integrity_verified": False,
         "source_commit_matches": None,
         "required": source["required_local_gates"],
         "passed": 0,
         "pending_gates": [item["gate_id"] for item in contract["gates"] if item["required"] is True],
+        "pending_checks": {
+            item["gate_id"]: list(item["required_checks"])
+            for item in contract["gates"] if item["required"] is True
+        },
     }
     evidence_blockers: list[str] = []
+    native_unavailable = evidence_path is None
     if evidence_path is None:
         evidence_blockers.append("LOCAL_WINDOWS_EVIDENCE_REQUIRED")
     else:
@@ -694,13 +712,36 @@ def evaluate(
             evidence = _validate_evidence(_load_json(evidence_path), contract)
             _verify_pass_reports(evidence, evidence_path, contract, repo_root=repo_root)
             pending = [gate_id for gate_id, item in evidence["gates"].items() if item["status"] != "PASS"]
+            webview_evidence = evidence["gates"].get("webview2_product_ux", {})
+            native_unavailable = (
+                webview_evidence.get("status") == "NOT_AVAILABLE_ON_TEST_HOST"
+                or any(
+                    status == "NOT_AVAILABLE_ON_TEST_HOST"
+                    for status in (webview_evidence.get("check_statuses") or {}).values()
+                )
+            )
+            required_check_map = {
+                item["gate_id"]: list(item["required_checks"])
+                for item in contract["gates"] if item["required"] is True
+            }
+            pending_checks = {
+                gate_id: (
+                    [check_id for check_id, check_status in item["check_statuses"].items() if check_status != "PASS"]
+                    if isinstance(item.get("check_statuses"), dict)
+                    else required_check_map[gate_id]
+                )
+                for gate_id, item in evidence["gates"].items()
+                if item["status"] != "PASS"
+            }
             source_matches = evidence["source_commit"] == head
             evidence_summary.update({
                 "valid": True,
                 "reports_verified": True,
+                "report_integrity_verified": True,
                 "source_commit_matches": source_matches,
                 "passed": len(evidence["gates"]) - len(pending),
                 "pending_gates": pending,
+                "pending_checks": pending_checks,
             })
             if not source_matches:
                 evidence_blockers.append("EVIDENCE_SOURCE_COMMIT_MISMATCH")
@@ -721,11 +762,18 @@ def evaluate(
         status = "merge_ready" if merge_ready else ("technical_ready" if technical_ready else "blocked")
     else:
         status = "release_ready" if release_ready else "blocked"
+    report_integrity_verified = evidence_summary["report_integrity_verified"] is True
+    strict_acceptance = "PASS" if merge_ready else "BLOCKED"
     return {
         "schema_version": "v8-acceptance-preflight.v2",
         "status": status,
         "execution": "not_run",
         "dry_run": True,
+        "strict_acceptance": strict_acceptance,
+        "native_webview_automation": "NOT_AVAILABLE_ON_TEST_HOST" if native_unavailable else "PASS",
+        "report_integrity_verified": report_integrity_verified,
+        "technical_merge_ready": technical_ready,
+        "full_acceptance_merge_ready": bool(merge_ready and not native_unavailable),
         "source_commit": head,
         "source_preflight": source,
         "local_evidence": evidence_summary,

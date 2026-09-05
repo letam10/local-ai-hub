@@ -306,13 +306,23 @@ class StartupLifecycleTests(unittest.TestCase):
         self.assertIn("Hủy jobs và thoát", page)
         self.assertIn("Giữ chạy nền vào khay", page)
 
-    def test_desktop_bridge_exposes_only_the_three_close_choices(self) -> None:
+    def test_desktop_bridge_exposes_close_choices_and_recovery_actions(self) -> None:
         bridge = desktop.DesktopBridge()
         methods = {
             name for name in dir(bridge)
             if not name.startswith("_") and callable(getattr(bridge, name))
         }
-        self.assertEqual(methods, {"return_to_hub", "cancel_jobs_and_exit", "keep_running_in_background"})
+        self.assertEqual(
+            methods,
+            {
+                "return_to_hub",
+                "cancel_jobs_and_exit",
+                "keep_running_in_background",
+                "retry_startup",
+                "confirm_frontend_ready",
+                "rollback_previous_payload",
+            },
+        )
 
 
 if __name__ == "__main__":

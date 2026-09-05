@@ -1232,23 +1232,10 @@ const loadRouteData = async ({ scan = false } = {}) => {
       if (results[3].status === "fulfilled") state.updateCenter = { ...state.updateCenter, settings: results[3].value || state.updateCenter.settings };
       if (!isCurrent()) return;
       render();
+      // Normal route navigation only attaches to an existing server-owned
+      // worker.  DEEP_EXACT is started by the explicit Quét chính xác action.
       if (STORAGE_SCAN_ACTIVE_STATES.includes(String(state.storageScan?.status || ""))) {
         pollStorageScan(state.storageScan.scan_id || "");
-      } else {
-        // FAST is only a first-paint placeholder. Queue DEEP_EXACT
-        // automatically after the page is visible, attaching to the
-        // server-owned worker if another view already started it.
-        try {
-          const deep = await scanStorage();
-          if (!isCurrent()) return;
-          state.storage = { ...(state.storage || {}), ...(deep || {}), disk: deep?.disk || state.storage?.disk || {} };
-          state.storageScan = deep?.scan || state.storageScan;
-          render({ background: true });
-          if (STORAGE_SCAN_ACTIVE_STATES.includes(String(state.storageScan?.status || ""))) pollStorageScan(state.storageScan.scan_id || "");
-        } catch {
-          // The visible FAST snapshot remains truthful; the scan route will
-          // retry on the next user navigation/refresh.
-        }
       }
     }).catch(() => {}));
   }

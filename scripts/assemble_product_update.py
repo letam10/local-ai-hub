@@ -115,7 +115,7 @@ def assemble(app_artifact_dir: Path, launcher_artifact_dir: Path, output_dir: Pa
     if launcher_commit != app_commit:
         raise RuntimeError("cross_commit_mismatch")
     launcher_run = launcher_metadata.get("workflow_run_id")
-    if launcher_run is not None and launcher_run != workflow_run_id:
+    if isinstance(launcher_run, bool) or not isinstance(launcher_run, int) or launcher_run != workflow_run_id:
         raise RuntimeError("cross_run_mismatch")
 
     app_files: dict[str, bytes] = {}

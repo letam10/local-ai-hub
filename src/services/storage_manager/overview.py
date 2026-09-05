@@ -39,6 +39,7 @@ _FINGERPRINT_MAX_DEPTH = 24
 _DEEP_SCAN_YIELD_ENTRIES = 512
 _DEEP_SCAN_YIELD_SECONDS = 0.25
 _DEEP_SCAN_PROGRESS_WINDOW = 1_000
+_IDENTITY_RETRY_LIMIT = 2
 _OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
 _OLLAMA_TIMEOUT_SECONDS = 0.5
 _VOLUME_ALLOWLIST = (
@@ -65,6 +66,14 @@ _scan_state: dict[str, Any] = {
     "current_area": None,
     "areas": {},
     "exact": False,
+    "traversal_completed": False,
+    "exact_at_saved_time": False,
+    "current_exact": False,
+    "identity_changed_entries": 0,
+    "unreadable_entries": 0,
+    "unknown_reparse_entries": 0,
+    "volatile_root": None,
+    "volatile_roots": [],
     "entries_scanned": 0,
     "started_at": None,
     "completed_at": None,
@@ -115,9 +124,11 @@ class _IdentityLedger:
         self.path = workspace / "identities.sqlite3"
         self.connection = sqlite3.connect(str(self.path), timeout=5.0)
         self.connection.execute("PRAGMA journal_mode=DELETE")
-        self.connection.execute("CREATE TABLE identities (identity TEXT PRIMARY KEY)")
+        self.connection.execute("CREATE TABLE identities (identity TEXT PRIMARY KEY, scope TEXT NOT NULL)")
+        self.connection.execute("CREATE TABLE frontier (sequence INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT NOT NULL, depth INTEGER NOT NULL, identity TEXT NOT NULL, counted INTEGER NOT NULL)")
         self.connection.commit()
         self.pending = 0
+        self.scope: str = ""
 
     @staticmethod
     def _key(identity: tuple[int, int, int]) -> str:
@@ -128,16 +139,55 @@ class _IdentityLedger:
         return row is not None
 
     def add(self, identity: tuple[int, int, int]) -> None:
-        self.connection.execute("INSERT OR IGNORE INTO identities(identity) VALUES (?)", (self._key(identity),))
+        self.connection.execute("INSERT OR IGNORE INTO identities(identity, scope) VALUES (?, ?)", (self._key(identity), self.scope))
         self.pending += 1
         if self.pending >= 512:
             self.connection.commit()
             self.pending = 0
 
+    def set_scope(self, scope: str) -> None:
+        self.scope = str(scope)
+
+    def remove_scope(self, scope: str) -> None:
+        self.connection.execute("DELETE FROM identities WHERE scope = ?", (str(scope),))
+        self.connection.commit()
+        self.pending = 0
+
+    def push_frontier(self, path: Path, depth: int, identity: os.stat_result | tuple[int, ...], counted_entry: bool) -> None:
+        # ``os.stat_result`` is a tuple subclass on Windows.  It must still be
+        # normalized to the scanner's seven-field identity; persisting all
+        # platform-specific stat fields makes every dequeued directory compare
+        # unequal on the post-read check.
+        value = identity if isinstance(identity, tuple) and not isinstance(identity, os.stat_result) else _stat_identity(identity)
+        encoded = ":".join(str(int(item)) for item in value)
+        self.connection.execute(
+            "INSERT INTO frontier(path, depth, identity, counted) VALUES (?, ?, ?, ?)",
+            (str(path), int(depth), encoded, 1 if counted_entry else 0),
+        )
+        self.connection.commit()
+
+    def pop_frontier(self) -> tuple[Path, int, tuple[int, ...], bool] | None:
+        row = self.connection.execute("SELECT sequence, path, depth, identity, counted FROM frontier ORDER BY sequence LIMIT 1").fetchone()
+        if row is None:
+            return None
+        self.connection.execute("DELETE FROM frontier WHERE sequence = ?", (row[0],))
+        self.connection.commit()
+        try:
+            identity = tuple(int(item) for item in str(row[3]).split(":"))
+        except (TypeError, ValueError):
+            raise OSError("storage_frontier_invalid") from None
+        return Path(str(row[1])), int(row[2]), identity, bool(row[4])
+
+    def clear_frontier(self) -> None:
+        self.connection.execute("DELETE FROM frontier")
+        self.connection.commit()
+
     def close(self, *, cleanup: bool = True) -> None:
         try:
             if self.pending:
                 self.connection.commit()
+            self.connection.execute("DELETE FROM frontier")
+            self.connection.commit()
         finally:
             self.connection.close()
         if cleanup:
@@ -470,8 +520,8 @@ def _restore_exact_scan_cache() -> None:
             # Large/deep trees cannot be revalidated by the bounded legacy
             # fingerprint. Keep exact-at-time totals visible but remove the
             # claim that the current filesystem is exact.
-            restored_scan.update({"status": "partial", "exact": False, "historical_exact": True, "fresh_validation_required": True})
-            restored_result.update({"status": "partial", "owned_storage_exact": False, "historical_exact": True, "fresh_validation_required": True})
+            restored_scan.update({"status": "partial", "exact": False, "exact_at_saved_time": True, "current_exact": False, "historical_exact": True, "fresh_validation_required": True})
+            restored_result.update({"status": "partial", "owned_storage_exact": False, "exact_at_saved_time": True, "current_exact": False, "historical_exact": True, "fresh_validation_required": True})
             restored_result["scan"] = restored_scan
             restored_result["reason"] = f"Chính xác tại {saved_at or scan.get('saved_at') or 'thời điểm đã lưu'}; cần quét DEEP_EXACT mới để xác nhận hiện tại."
             restored_result["next_action"] = "Mở lại Models & Storage để theo dõi lần quét xác thực mới."
@@ -479,6 +529,14 @@ def _restore_exact_scan_cache() -> None:
             "schema_version": "storage-scan.v1", "scan_id": scan.get("scan_id"), "status": "partial" if historical_exact else "completed", "execution": "background",
             "progress": 100, "current_area": None, "areas": {str(k): dict(v) for k, v in areas.items() if isinstance(v, dict)},
             "exact": not historical_exact, "historical_exact": historical_exact, "fresh_validation_required": historical_exact, "mode": "deep_exact", "entries_scanned": int(scan.get("entries_scanned", 0)),
+            "traversal_completed": bool(scan.get("traversal_completed", True)),
+            "exact_at_saved_time": True if historical_exact else bool(scan.get("exact_at_saved_time", scan.get("exact", False))),
+            "current_exact": False if historical_exact else bool(scan.get("current_exact", scan.get("exact", False))),
+            "identity_changed_entries": int(scan.get("identity_changed_entries", result.get("identity_changed_entries", 0)) or 0),
+            "unreadable_entries": int(scan.get("unreadable_entries", result.get("unreadable_entries", 0)) or 0),
+            "unknown_reparse_entries": int(scan.get("unknown_reparse_entries", result.get("unknown_reparse_entries", 0)) or 0),
+            "volatile_root": scan.get("volatile_root", result.get("volatile_root")),
+            "volatile_roots": list(scan.get("volatile_roots", result.get("volatile_roots", [])) or []),
             "files_scanned": int(scan.get("files_scanned", 0)), "total_bytes_counted": int(scan.get("total_bytes_counted", 0)),
             "started_at": scan.get("started_at"), "completed_at": scan.get("completed_at"), "reason": restored_result.get("reason", "Đã khôi phục tổng storage chính xác đã lưu."),
             "next_action": restored_result.get("next_action", "Bấm Quét lại sau khi có thay đổi bên ngoài."), "cancel_requested": False,
@@ -568,6 +626,7 @@ def _directory_tree_report(
     on_progress: Any = None,
     allowlisted_roots: tuple[Path, ...] = (),
     seen_identities: object | None = None,
+    frontier: object | None = None,
 ) -> dict[str, Any]:
     """Read one managed tree without following aliases or trusting stale stats.
 
@@ -597,13 +656,14 @@ def _directory_tree_report(
         if category in category_counts:
             category_counts[category] += max(0, int(amount))
 
-    def report(*, status: str, complete: bool, reason: str, next_action: str) -> dict[str, Any]:
+    def report(*, status: str, complete: bool, reason: str, next_action: str, traversal_completed: bool = False) -> dict[str, Any]:
         value = {
             "bytes": total,
             "gb": round(total / (1024**3), 3),
             "total_bytes_counted": total,
             "status": status,
             "complete": complete,
+            "traversal_completed": traversal_completed,
             "entries_scanned": entries_scanned,
             "files_scanned": files_scanned,
             "directories_scanned": directories_scanned,
@@ -633,8 +693,9 @@ def _directory_tree_report(
             next_action="Bấm Quét lại để bắt đầu một deep scan mới.",
         )
 
-    def post_read_identity_changed(before: os.stat_result, after: os.stat_result) -> bool:
-        return _stat_identity(before) != _stat_identity(after)
+    def post_read_identity_changed(before: os.stat_result | tuple[int, ...], after: os.stat_result) -> bool:
+        expected = before if isinstance(before, tuple) and not isinstance(before, os.stat_result) else _stat_identity(before)
+        return expected != _stat_identity(after)
 
     try:
         root_stat = path.stat(follow_symlinks=False)
@@ -664,10 +725,11 @@ def _directory_tree_report(
         if identity is not None and _identity_contains(seen, identity):
             add_category("INTERNAL_DUPLICATE_ALIAS")
             deduplicated_entries += 1
-            return report(
-                status="available",
-                complete=True,
-                reason="Managed storage root đã được tính qua một allowlisted alias; không cộng lại.",
+        return report(
+            status="available",
+            complete=True,
+            traversal_completed=True,
+            reason="Managed storage root đã được tính qua một allowlisted alias; không cộng lại.",
                 next_action="Không cần thao tác; bấm Quét lại sau khi có thay đổi bên ngoài.",
             )
         try:
@@ -677,6 +739,7 @@ def _directory_tree_report(
             return report(
                 status="partial",
                 complete=False,
+                traversal_completed=True,
                 reason="Tệp managed storage đã thay đổi trong lúc đọc nên tổng không được đánh dấu chính xác.",
                 next_action="Bấm Quét lại để xác nhận lại tổng managed.",
             )
@@ -694,6 +757,7 @@ def _directory_tree_report(
             return report(
                 status="partial",
                 complete=False,
+                traversal_completed=True,
                 reason="Tệp managed storage đã thay đổi trong lúc đọc nên tổng không được đánh dấu chính xác.",
                 next_action="Bấm Quét lại để xác nhận lại tổng managed.",
             )
@@ -705,6 +769,7 @@ def _directory_tree_report(
         return report(
             status="available",
             complete=True,
+            traversal_completed=True,
             reason="Đã đọc chính xác tệp managed storage.",
             next_action="Không cần thao tác; bấm Quét lại sau khi có thay đổi bên ngoài.",
         )
@@ -723,13 +788,28 @@ def _directory_tree_report(
     if root_identity is not None:
         _identity_add(seen, root_identity)
     # The final boolean records whether this directory itself was counted as a
-    # normal entry.  The managed root is not an entry in its own report.
-    stack: list[tuple[Path, int, os.stat_result, bool]] = [(path, 0, root_stat, False)]
+    # normal entry.  The managed root is not an entry in its own report.  A
+    # deep background scan supplies a SQLite frontier so a directory with
+    # hundreds of thousands of sibling directories never grows a Python list
+    # proportional to that fan-out.
+    disk_frontier = frontier if isinstance(frontier, _IdentityLedger) else None
+    stack: list[tuple[Path, int, os.stat_result, bool]] = []
+    if disk_frontier is not None:
+        disk_frontier.clear_frontier()
+        disk_frontier.push_frontier(path, 0, root_stat, False)
+    else:
+        stack.append((path, 0, root_stat, False))
 
-    while stack:
+    while stack or disk_frontier is not None:
         if event.is_set():
             return cancelled()
-        current, depth, expected_stat, counted_entry = stack.pop()
+        if disk_frontier is not None:
+            pending = disk_frontier.pop_frontier()
+            if pending is None:
+                break
+            current, depth, expected_stat, counted_entry = pending
+        else:
+            current, depth, expected_stat, counted_entry = stack.pop()
         try:
             entries = os.scandir(current)
         except OSError:
@@ -776,7 +856,10 @@ def _directory_tree_report(
                             directories_scanned += 1
                             child = Path(entry.path)
                             if deep or depth < _DIRECTORY_SCAN_MAX_DEPTH:
-                                stack.append((child, depth + 1, before, True))
+                                if disk_frontier is not None:
+                                    disk_frontier.push_frontier(child, depth + 1, before, True)
+                                else:
+                                    stack.append((child, depth + 1, before, True))
                             elif not deep:
                                 truncated = True
                         elif stat.S_ISREG(before.st_mode):
@@ -864,6 +947,7 @@ def _directory_tree_report(
         return report(
             status="partial",
             complete=False,
+            traversal_completed=not unreadable_entries and not truncated,
             reason="Không thể xác nhận tổng chính xác: " + "; ".join(reasons) + ".",
             next_action="Sửa quyền/identity hoặc loại trừ reparse point rồi quét lại.",
         )
@@ -875,6 +959,7 @@ def _directory_tree_report(
     return report(
         status="available",
         complete=True,
+        traversal_completed=True,
         reason=reason,
         next_action="Không cần thao tác; bấm Quét lại sau khi có thay đổi bên ngoài.",
     )
@@ -903,6 +988,7 @@ def _deep_directory_size_report(
     on_progress: Any = None,
     allowlisted_roots: tuple[Path, ...] = (),
     seen_identities: object | None = None,
+    frontier: object | None = None,
 ) -> dict[str, Any]:
     """Stream a cancellable DEEP_EXACT projection without an entry cap."""
 
@@ -913,6 +999,7 @@ def _deep_directory_size_report(
         on_progress=on_progress,
         allowlisted_roots=allowlisted_roots,
         seen_identities=seen_identities,
+        frontier=frontier,
     )
 
 
@@ -1016,6 +1103,7 @@ def _storage_summary_from_reports(
     # terminal complete report.  ``all([])`` and a cancelled worker with only
     # its first area completed must never be promoted to exact.
     exact = _reports_are_exact(reports)
+    truth = _storage_truth_fields(reports, current_exact=exact)
     owned_total_bytes = sum(int(report.get("bytes", 0) or 0) for report in reports.values())
     entries_scanned = sum(int(report.get("entries_scanned", 0) or 0) for report in reports.values())
     files_scanned = sum(int(report.get("files_scanned", 0) or 0) for report in reports.values())
@@ -1036,6 +1124,7 @@ def _storage_summary_from_reports(
         report = reports.get(name, {"status": "pending", "complete": False})
         managed_root_counts[name] = {
             "complete": report.get("complete") is True,
+            "traversal_completed": report.get("traversal_completed") is True,
             "status": str(report.get("status") or "pending"),
             "entries_scanned": int(report.get("entries_scanned", 0) or 0),
             "files_scanned": int(report.get("files_scanned", 0) or 0),
@@ -1096,6 +1185,7 @@ def _storage_summary_from_reports(
             "completed_at": completed_at,
             "saved_at": saved_at if exact else None,
             "exact": exact,
+            **truth,
             "owned_storage_total_bytes": owned_total_bytes,
             "owned_storage_total_gb": round(owned_total_bytes / (1024**3), 3),
             "owned_storage_exact": exact,
@@ -1126,6 +1216,7 @@ def _storage_summary_from_reports(
         "owned_storage_total_bytes": owned_total_bytes,
         "owned_storage_total_gb": round(owned_total_bytes / (1024**3), 3),
         "owned_storage_exact": exact,
+        **truth,
         "owned_storage_scope": "allowlisted managed roots only; external reparse targets excluded",
         "deduplicated_targets": max(0, int(deduplicated_targets)),
         "deduplicated_entries": max(0, deduplicated_entries),
@@ -1194,7 +1285,7 @@ def storage_scan_snapshot() -> dict[str, Any]:
     scan = {
         key: state.get(key)
         for key in (
-            "schema_version", "scan_id", "status", "execution", "progress", "current_area", "exact",
+            "schema_version", "scan_id", "status", "execution", "progress", "current_area", "exact", "traversal_completed", "exact_at_saved_time", "current_exact", "identity_changed_entries", "unreadable_entries", "unknown_reparse_entries", "volatile_root", "volatile_roots",
             "entries_scanned", "files_scanned", "total_bytes_counted", "started_at", "completed_at",
             "saved_at", "owned_storage_total_bytes", "owned_storage_exact", "deduplicated_targets", "deduplicated_entries", "category_counts", "fingerprint",
             "reason", "next_action", "mode", "cancel_requested", "requested_mode", "next_mode", "historical_exact", "fresh_validation_required",
@@ -1206,6 +1297,13 @@ def storage_scan_snapshot() -> dict[str, Any]:
         "directories_scanned": directories_scanned,
         "reparse_entries": reparse_entries,
         "unreadable_entries": unreadable_entries,
+        "traversal_completed": bool(state.get("traversal_completed", False)),
+        "exact_at_saved_time": bool(state.get("exact_at_saved_time", False)),
+        "current_exact": bool(state.get("current_exact", state.get("exact", False))),
+        "identity_changed_entries": int(state.get("identity_changed_entries", 0) or 0),
+        "unknown_reparse_entries": int(state.get("unknown_reparse_entries", category_counts["UNKNOWN_REPARSE"]) or 0),
+        "volatile_root": state.get("volatile_root"),
+        "volatile_roots": list(state.get("volatile_roots", []) or []),
         "deduplicated_entries": deduplicated_entries,
         "category_counts": category_counts,
         "completed_roots": completed_roots,
@@ -1220,6 +1318,14 @@ def storage_scan_snapshot() -> dict[str, Any]:
         "managed_root_counts": state.get("managed_root_counts", {}),
         "owned_storage_total_bytes": state.get("owned_storage_total_bytes", 0),
         "owned_storage_exact": state.get("owned_storage_exact", False),
+        "traversal_completed": bool(state.get("traversal_completed", False)),
+        "exact_at_saved_time": bool(state.get("exact_at_saved_time", False)),
+        "current_exact": bool(state.get("current_exact", state.get("exact", False))),
+        "identity_changed_entries": int(state.get("identity_changed_entries", 0) or 0),
+        "unreadable_entries": int(state.get("unreadable_entries", unreadable_entries) or 0),
+        "unknown_reparse_entries": int(state.get("unknown_reparse_entries", category_counts["UNKNOWN_REPARSE"]) or 0),
+        "volatile_root": state.get("volatile_root"),
+        "volatile_roots": list(state.get("volatile_roots", []) or []),
         "historical_exact": state.get("historical_exact", False),
         "fresh_validation_required": state.get("fresh_validation_required", False),
         "deduplicated_targets": state.get("deduplicated_targets", 0),
@@ -1246,6 +1352,7 @@ def _empty_scan_area(*, mode: str) -> dict[str, Any]:
         "total_bytes_counted": 0,
         "status": "running",
         "complete": False,
+        "traversal_completed": False,
         "entries_scanned": 0,
         "files_scanned": 0,
         "directories_scanned": 0,
@@ -1296,6 +1403,45 @@ def _reports_are_exact(reports: dict[str, dict[str, Any]]) -> bool:
     return True
 
 
+def _storage_truth_fields(
+    reports: dict[str, dict[str, Any]],
+    *,
+    current_exact: bool,
+    exact_at_saved_time: bool | None = None,
+) -> dict[str, Any]:
+    """Separate traversal completion, saved-time exactness and current truth."""
+
+    changed = sum(int(report.get("identity_changed_entries", 0) or 0) for report in reports.values())
+    unreadable = sum(int(report.get("unreadable_entries", 0) or 0) for report in reports.values())
+    categories = _empty_category_counts()
+    for report in reports.values():
+        values = report.get("category_counts") if isinstance(report.get("category_counts"), dict) else {}
+        for category in _STORAGE_ENTRY_CATEGORIES:
+            value = values.get(category, 0)
+            if isinstance(value, int) and value >= 0:
+                categories[category] += value
+    unknown_reparse = categories["UNKNOWN_REPARSE"]
+    volatile_roots = [
+        name for name in _SCAN_AREA_NAMES
+        if int((reports.get(name) or {}).get("identity_changed_entries", 0) or 0) > 0
+    ]
+    traversal_completed = (
+        len(reports) == len(_SCAN_AREA_NAMES)
+        and all(report.get("traversal_completed") is True for report in reports.values())
+    )
+    return {
+        "traversal_completed": traversal_completed,
+        "exact_at_saved_time": current_exact if exact_at_saved_time is None else bool(exact_at_saved_time),
+        "current_exact": bool(current_exact),
+        "identity_changed_entries": changed,
+        "unreadable_entries": unreadable,
+        "unknown_reparse_entries": unknown_reparse,
+        "volatile_root": volatile_roots[0] if len(volatile_roots) == 1 else None,
+        "volatile_roots": volatile_roots,
+        "safe_reparse_entries": max(0, categories["INTERNAL_ALLOWLISTED_ALIAS"] + categories["INTERNAL_DUPLICATE_ALIAS"] + categories["EXTERNAL_EXCLUDED_TARGET"]),
+    }
+
+
 def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None:
     global _scan_state, _size_cache, _scan_thread
     data_root, model_root, environments_root, runtime_root, cache_root, output_root, temp_root, log_root = _managed_roots()
@@ -1333,11 +1479,13 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
                 category: sum(int((item.get("category_counts") or {}).get(category, 0) or 0) for item in reports.values())
                 for category in _STORAGE_ENTRY_CATEGORIES
             }
+            _scan_state.update(_storage_truth_fields(reports, current_exact=False))
             _scan_state["managed_root_counts"] = {}
             for root_name in _SCAN_AREA_NAMES:
                 value = reports.get(root_name, {"status": "pending", "complete": False})
                 _scan_state["managed_root_counts"][root_name] = {
                     "complete": value.get("complete") is True,
+                    "traversal_completed": value.get("traversal_completed") is True,
                     "status": str(value.get("status") or "pending"),
                     "entries_scanned": int(value.get("entries_scanned", 0) or 0),
                     "files_scanned": int(value.get("files_scanned", 0) or 0),
@@ -1391,6 +1539,7 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
                         "total_bytes_counted": 0,
                         "status": "available",
                         "complete": True,
+                        "traversal_completed": True,
                         "entries_scanned": 0,
                         "files_scanned": 0,
                         "directories_scanned": 0,
@@ -1416,13 +1565,37 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
                     except OSError:
                         pass
                     publish_area(name, index, _empty_scan_area(mode=mode))
-                    report = _invoke_storage_report(_deep_directory_size_report,
-                        path,
-                        cancel_event=cancel_event,
-                        on_progress=lambda value, n=name, i=index: publish_area(n, i, value),
-                        allowlisted_roots=allowlisted_roots,
-                        seen_identities=seen_identities,
-                    )
+                    identity_retry_count = 0
+                    while True:
+                        if ledger is not None:
+                            ledger.set_scope(name)
+                        report = _invoke_storage_report(_deep_directory_size_report,
+                            path,
+                            cancel_event=cancel_event,
+                            on_progress=lambda value, n=name, i=index: publish_area(n, i, value),
+                            allowlisted_roots=allowlisted_roots,
+                            seen_identities=seen_identities,
+                            frontier=ledger,
+                        )
+                        changed = int(report.get("identity_changed_entries", 0) or 0)
+                        if changed > 0 and identity_retry_count < _IDENTITY_RETRY_LIMIT:
+                            identity_retry_count += 1
+                            if ledger is not None:
+                                # Remove only identities owned by this
+                                # affected root. Stable roots remain in the
+                                # shared ledger and are never rescanned.
+                                ledger.remove_scope(name)
+                            publish_area(name, index, {
+                                **report,
+                                "status": "retrying",
+                                "complete": False,
+                                "identity_retry_count": identity_retry_count,
+                                "reason": f"Vùng {name} thay đổi trong lúc đọc; đang thử lại riêng vùng bị ảnh hưởng ({identity_retry_count}/{_IDENTITY_RETRY_LIMIT}).",
+                                "next_action": "Giữ trang mở để hoàn tất lần thử lại bounded.",
+                            })
+                            continue
+                        report = {**report, "identity_retry_count": identity_retry_count, "identity_retry_limit": _IDENTITY_RETRY_LIMIT}
+                        break
             else:
                 report = _invoke_storage_report(
                     _directory_size_report,
@@ -1473,6 +1646,7 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
                 "current_area": None,
                 "areas": {name: dict(value) for name, value in reports.items()},
                 "exact": exact,
+                **_storage_truth_fields(reports, current_exact=exact),
                 "mode": mode,
                 "entries_scanned": result["scan"]["entries_scanned"],
                 "files_scanned": result["scan"]["files_scanned"],
@@ -1851,6 +2025,7 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
                 "total_bytes_counted": 0,
                 "status": "available",
                 "complete": True,
+                "traversal_completed": True,
                 "entries_scanned": 0,
                 "files_scanned": 0,
                 "directories_scanned": 0,
@@ -1899,9 +2074,11 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
             if isinstance(value, int) and value >= 0:
                 fast_category_counts[category] += value
     fast_completed_roots = sum(report.get("complete") is True for report in area_reports.values())
+    fast_truth = _storage_truth_fields(area_reports, current_exact=fast_exact)
     managed_root_counts = {
         name: {
             "complete": report.get("complete") is True,
+            "traversal_completed": report.get("traversal_completed") is True,
             "status": str(report.get("status") or "unavailable"),
             "entries_scanned": int(report.get("entries_scanned", 0) or 0),
             "files_scanned": int(report.get("files_scanned", 0) or 0),
@@ -1927,6 +2104,7 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
             "status": "completed" if fast_exact else "partial",
             "mode": "fast",
             "exact": fast_exact,
+            **fast_truth,
             "owned_storage_total_bytes": fast_owned_total,
             "owned_storage_total_gb": round(fast_owned_total / (1024**3), 3),
             "owned_storage_exact": fast_exact,
@@ -1963,6 +2141,7 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
         "owned_storage_total_bytes": fast_owned_total,
         "owned_storage_total_gb": round(fast_owned_total / (1024**3), 3),
         "owned_storage_exact": fast_exact,
+        **fast_truth,
         "owned_storage_scope": "allowlisted managed roots only; external reparse targets excluded",
         "deduplicated_targets": 0,
         "deduplicated_entries": fast_deduplicated_entries,

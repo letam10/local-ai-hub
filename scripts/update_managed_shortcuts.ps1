@@ -88,7 +88,7 @@ foreach ($location in $locationsToRepair) {
         $shortcut.Save()
         Write-Output "UPDATED $link -> $($product.Launcher)"
     } catch {
-        if ($location -match '(?i)ProgramData') { Write-Output "SHORTCUT_REPAIR_ADMIN_REQUIRED $link" }
+        if ($location -match '(?i)ProgramData') { Write-Output "ADMIN_REQUIRED $link :: Mở Diagnostics bằng quyền Administrator rồi chọn Sửa shortcut dùng chung." }
         else { Write-Output "SHORTCUT_REPAIR_FAILED $link" }
     }
 }

@@ -953,6 +953,27 @@ def _close_prompt_html(detail: dict[str, object]) -> str:
     <script>async function choose(name){{const buttons=[...document.querySelectorAll('button')];const status=document.getElementById('status');const api=window.pywebview&&window.pywebview.api;if(!api||!api[name]){{status.textContent='Desktop bridge chưa sẵn sàng; Hub vẫn được giữ mở an toàn.';return}}buttons.forEach(button=>button.disabled=true);try{{const result=await api[name]();status.textContent=(result&&result.message)||'Đã nhận lựa chọn.';if(!result||result.status!=='pending')buttons.forEach(button=>button.disabled=false)}}catch(error){{status.textContent='Không thể xử lý lựa chọn: '+error;buttons.forEach(button=>button.disabled=false)}}}}</script></html>"""
 
 
+def _continue_bootstrap_after_restart() -> None:
+    """Finish a legacy APP_ONLY hand-off in the background after UI readiness."""
+
+    try:
+        from src.services.app_update import app_update_service
+
+        result = app_update_service().continue_bootstrap_after_restart()
+        if result.get("status") in {"staged", "blocked"}:
+            _record_startup_event(
+                "bootstrap_continuation_" + str(result.get("status")),
+                selected_port=_configured_port(),
+                probe_state="frontend",
+                runtime_class="installed_bundled",
+            )
+    except Exception:
+        # Bootstrap continuation is a recovery convenience.  A failed lookup
+        # must not take down an otherwise healthy desktop; the durable marker
+        # and the updater status surface remain the source of truth.
+        return
+
+
 def _load_ui_when_ready(window: object, bridge: DesktopBridge | None = None) -> None:
     """Load the WebView and wait for the explicit frontend-ready handshake."""
 
@@ -1004,6 +1025,16 @@ def _load_ui_when_ready(window: object, bridge: DesktopBridge | None = None) -> 
             window.load_html(_error_html(FRONTEND_BOOTSTRAP_TIMEOUT))  # type: ignore[attr-defined]
         except Exception:
             pass
+    else:
+        # The exact legacy updater may have just installed an APP_ONLY payload
+        # which is unable to migrate the shell itself.  Once the new payload
+        # proves its UI readiness, continue the same trusted run automatically
+        # so the user never needs a second artifact selection or Codex build.
+        threading.Thread(
+            target=_continue_bootstrap_after_restart,
+            name="LocalAIHub-bootstrap-continuation",
+            daemon=True,
+        ).start()
 
 
 def _load_window_settings() -> tuple[int, int, bool]:

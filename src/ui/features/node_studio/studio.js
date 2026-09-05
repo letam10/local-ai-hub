@@ -481,7 +481,7 @@ const NODE_OUTPUT_STATE_HEADER_HEIGHT = 22;
 const NODE_OUTPUT_STATE_ROW_HEIGHT = 18;
 const NODE_INLINE_MIN_HEIGHT = 28;
 const NODE_INLINE_MULTILINE_MAX_HEIGHT = 92;
-const NODE_INLINE_EDITOR_MAX_HEIGHT = 240;
+const NODE_PROMPT_EDITOR_MAX_HEIGHT = "min(48vh, 520px)";
 
 const finiteOr = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
 
@@ -1775,6 +1775,8 @@ class HubGraphEditor {
     const anchorX = canvasRect.left - shellRect.left + Number(offset[0] || 0) + (Number(state.node.pos?.[0] || 0) + 8) * scale;
     const anchorY = canvasRect.top - shellRect.top + Number(offset[1] || 0) + (Number(state.node.pos?.[1] || 0) + widgetY) * scale;
     const maxWidth = Math.max(220, Math.min(360, shell.clientWidth - 16));
+    state.panel.dataset.anchorNodeId = String(state.node.id ?? "");
+    state.panel.dataset.anchorPosition = `${Math.round(anchorX)},${Math.round(anchorY)}`;
     state.panel.style.width = `${maxWidth}px`;
     const panelWidth = state.panel.offsetWidth || maxWidth;
     const panelHeight = state.panel.offsetHeight || 160;
@@ -1860,11 +1862,14 @@ class HubGraphEditor {
     if (this.destroyed || !node || !control) return false;
     if (this.inlineEditor && !this.commitInlineEditor()) return false;
     const panel = document.createElement("div");
-    panel.className = "graph-inline-editor";
+    const anchoredPrompt = control.multiline || control.control === "prompt" || /prompt/i.test(String(property.name || ""));
+    panel.className = anchoredPrompt ? "graph-node-prompt-editor" : "graph-inline-editor";
     panel.setAttribute("data-graph-inline-editor", "true");
+    panel.setAttribute("data-prompt-editor-mode", anchoredPrompt ? "persistent-anchored" : "inline");
+    panel.setAttribute("data-outside-click", "commit");
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-label", control.label || property.name);
-    panel.style.maxHeight = `${NODE_INLINE_EDITOR_MAX_HEIGHT}px`;
+    panel.style.maxHeight = anchoredPrompt ? NODE_PROMPT_EDITOR_MAX_HEIGHT : "min(36vh, 360px)";
     const label = document.createElement("label");
     label.className = "graph-inline-editor__label";
     label.textContent = control.label || property.name;
@@ -1903,7 +1908,7 @@ class HubGraphEditor {
       field.append(row);
     } else if (control.multiline) {
       input = document.createElement("textarea");
-      input.rows = 4;
+      input.rows = 8;
       input.value = String(initial);
       input.maxLength = Number.isFinite(Number(control.maxLength)) ? Number(control.maxLength) : 20000;
       if (control.placeholder) input.placeholder = control.placeholder;
@@ -1980,11 +1985,20 @@ class HubGraphEditor {
     exactInput?.addEventListener("keydown", handleEditorKeydown);
     state.outsideHandler = (event) => {
       if (!this.inlineEditor || panel.contains(event.target)) return;
+      // A middle-button gesture is graph pan, not a deliberate outside click;
+      // keep the anchored prompt alive while the canvas viewport moves.
+      if (event.button !== undefined && event.button !== 0) return;
       const committed = this.commitInlineEditor();
       event.preventDefault();
       event.stopImmediatePropagation();
       if (!committed) input?.focus();
     };
+    // Pointer exit is not a close signal.  The prompt editor is anchored to
+    // the selected node and remains available while the graph, minimap or
+    // pointer focus moves elsewhere; only the documented outside pointerdown
+    // commit rule closes it.
+    panel.addEventListener("pointerleave", () => { state.pointerLeft = true; }, { signal: this.abort.signal });
+    panel.addEventListener("pointerenter", () => { state.pointerLeft = false; }, { signal: this.abort.signal });
     state.resizeHandler = () => this.positionInlineEditor();
     window.addEventListener("pointerdown", state.outsideHandler, true);
     window.addEventListener("resize", state.resizeHandler, true);
@@ -2736,7 +2750,7 @@ class HubGraphEditor {
       if (this.liteCanvas.node_dragged || this.liteCanvas.resizing_node || this.liteCanvas.dragging_canvas || this.liteCanvas.selected_group || this.liteCanvas.connecting_node) this.scheduleMinimapUpdate();
       if (this.inlineEditor) this.positionInlineEditor();
     };
-    this.liteCanvas.ds.onredraw = () => this.scheduleMinimapUpdate();
+    this.liteCanvas.ds.onredraw = () => { this.scheduleMinimapUpdate(); this.positionInlineEditor(); };
     // LiteGraph's default processContextMenu appends a document-level menu.
     // Keep LiteGraph as the only editor while routing both targets through the
     // Hub-owned, container-bounded menu below.
