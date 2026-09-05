@@ -298,6 +298,11 @@ def _current_activation_state(path: Path, transaction_id: str) -> dict[str, Any]
         item = value.get(key)
         if item is not None and (not isinstance(item, str) or _SHA256_RE.fullmatch(item) is None):
             raise LauncherMigrationError("LAUNCHER_STATE_INVALID")
+    previous_manifest_sha256 = value.get("previous_manifest_sha256")
+    if previous_manifest_sha256 is not None and (
+        not isinstance(previous_manifest_sha256, str) or _SHA256_RE.fullmatch(previous_manifest_sha256) is None
+    ):
+        raise LauncherMigrationError("LAUNCHER_STATE_INVALID")
     previous_file_count_value = value.get("previous_file_count")
     if previous_file_count_value is not None and (
         isinstance(previous_file_count_value, bool)
@@ -451,6 +456,7 @@ def activate_launcher_bundle(
         "previous_format": previous_format,
         "previous_executable_sha256": _sha256(old_exe),
         "previous_tree_manifest_sha256": previous_shell_manifest.get("tree_manifest_sha256") if previous_shell_manifest else None,
+        "previous_manifest_sha256": _sha256(old_manifest) if old_manifest.is_file() and not _is_reparse(old_manifest) else None,
         "previous_file_count": previous_shell_manifest.get("file_count") if previous_shell_manifest else None,
         "previous_total_bytes": previous_shell_manifest.get("total_bytes") if previous_shell_manifest else None,
         "status": "prepared",
@@ -558,9 +564,12 @@ def restore_launcher_bundle(root: Path, *, transaction_id: str, _allow_state_sta
     if previous_hash is not None and (not isinstance(previous_hash, str) or re.fullmatch(r"[0-9a-f]{64}", previous_hash) is None):
         raise LauncherMigrationError("LAUNCHER_STATE_INVALID")
     previous_tree_hash = state.get("previous_tree_manifest_sha256")
+    previous_manifest_hash = state.get("previous_manifest_sha256")
     previous_file_count = state.get("previous_file_count")
     previous_total_bytes = state.get("previous_total_bytes")
     if previous_tree_hash is not None and (not isinstance(previous_tree_hash, str) or _SHA256_RE.fullmatch(previous_tree_hash) is None):
+        raise LauncherMigrationError("LAUNCHER_STATE_INVALID")
+    if previous_manifest_hash is not None and (not isinstance(previous_manifest_hash, str) or _SHA256_RE.fullmatch(previous_manifest_hash) is None):
         raise LauncherMigrationError("LAUNCHER_STATE_INVALID")
     if previous_file_count is not None and (isinstance(previous_file_count, bool) or not isinstance(previous_file_count, int) or not 2 <= previous_file_count <= MAX_LAUNCHER_FILES):
         raise LauncherMigrationError("LAUNCHER_STATE_INVALID")
@@ -598,11 +607,33 @@ def restore_launcher_bundle(root: Path, *, transaction_id: str, _allow_state_sta
                 return False
             if previous_format == "onedir" and previous_tree_hash is not None:
                 current = _shell_tree_manifest(install)
-                return (
-                    current.get("tree_manifest_sha256") == previous_tree_hash
-                    and (previous_file_count is None or current.get("file_count") == previous_file_count)
-                    and (previous_total_bytes is None or current.get("total_bytes") == previous_total_bytes)
-                )
+                if (
+                    current.get("tree_manifest_sha256") != previous_tree_hash
+                    or (previous_file_count is not None and current.get("file_count") != previous_file_count)
+                    or (previous_total_bytes is not None and current.get("total_bytes") != previous_total_bytes)
+                ):
+                    return False
+            if previous_format == "onedir":
+                live_manifest = install / LAUNCHER_SHELL_MANIFEST_NAME
+                if previous_manifest_hash is not None:
+                    if (
+                        not live_manifest.is_file()
+                        or live_manifest.is_symlink()
+                        or _is_reparse(live_manifest)
+                        or _sha256(live_manifest) != previous_manifest_hash
+                    ):
+                        return False
+                elif previous_manifest.is_file() and not _is_reparse(previous_manifest):
+                    # Older activation states did not persist this hash.  If
+                    # the preserved manifest is still in backup, a complete
+                    # restore must put the same bytes back at the root.
+                    if (
+                        not live_manifest.is_file()
+                        or live_manifest.is_symlink()
+                        or _is_reparse(live_manifest)
+                        or _sha256(live_manifest) != _sha256(previous_manifest)
+                    ):
+                        return False
             return True
         except LauncherMigrationError:
             return False

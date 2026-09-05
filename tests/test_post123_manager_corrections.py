@@ -772,6 +772,7 @@ class Post123ManagerCorrectionTests(unittest.TestCase):
             self.assertEqual(launcher_projection(root)["format"], "onedir")
             self.assertTrue((root / "LocalAIHub.exe").is_file())
             self.assertTrue((root / "_internal" / "legacy-support.dll").is_file())
+            self.assertTrue((root / "launcher-manifest.json").is_file())
             self.assertEqual(
                 restore_launcher_bundle(root, transaction_id=str(fixture["transaction"]["transaction_id"]))["status"],
                 "already_restored",
@@ -798,6 +799,7 @@ class Post123ManagerCorrectionTests(unittest.TestCase):
             self.assertEqual(launcher_projection(root)["format"], "onedir")
             self.assertTrue((root / "LocalAIHub.exe").is_file())
             self.assertTrue((root / "_internal" / "legacy-support.dll").is_file())
+            self.assertTrue((root / "launcher-manifest.json").is_file())
             self.assertEqual(
                 restore_launcher_bundle(root, transaction_id=str(fixture["transaction"]["transaction_id"]))["status"],
                 "already_restored",
