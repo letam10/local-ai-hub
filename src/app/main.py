@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import html
 import hashlib
-import inspect
 import json
 import os
 import re
@@ -35,6 +34,7 @@ from .desktop_lifecycle import DesktopCloseController
 from .payload_bootstrap import api_server_command
 from .readiness import event_seen, load_state, record_event as record_readiness_event
 from .stable_shell import StableShellError, resolve_launch_plan
+from .stable_launcher import _set_app_user_model_id
 from .tray import WindowsTray
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -83,6 +83,21 @@ def _canonical_icon_path() -> str | None:
         return str(candidate) if candidate.is_file() and not candidate.is_symlink() else None
     except OSError:
         return None
+
+
+def _start_native_webview(webview: object, initialize_window: object) -> None:
+    """Brand the process that owns the HWND, not just its parent launcher.
+
+    The bundled Windows backend reads its Form.Icon from start(icon=...).
+    create_window has no icon argument; omitting start's icon falls back to
+    pythonw.exe, affecting both the title bar and the taskbar thumbnail.
+    """
+
+    _set_app_user_model_id()
+    webview.start(  # type: ignore[attr-defined]
+        initialize_window, gui="edgechromium", debug=False,
+        icon=_canonical_icon_path(),
+    )
 
 
 def _configured_port() -> int:
@@ -1052,11 +1067,6 @@ def main() -> int:
                 "confirm_close": False,
                 "js_api": bridge,
             }
-            # pywebview versions differ: newer hosts may accept an icon path,
-            # while the reviewed host does not. Never pass an unsupported kwarg
-            # and never substitute a system/Python icon.
-            if "icon" in inspect.signature(webview.create_window).parameters:
-                window_kwargs["icon"] = _canonical_icon_path()
             window = webview.create_window("Local AI Hub", **window_kwargs)
             bridge._bind(window)
             window.events.closing += bridge._request_window_close
@@ -1075,7 +1085,7 @@ def main() -> int:
                 ).start()
 
             try:
-                webview.start(initialize_window, gui="edgechromium", debug=False)
+                _start_native_webview(webview, initialize_window)
                 # pywebview returns after the window has been closed through
                 # its normal close path (including the explicit close prompt).
                 # Treat that as a user/normal exit, not a crash or a still-live
