@@ -156,6 +156,19 @@ await identityFlow.observe({ ...identity("txn-b", "main-b"), bootstrap_restart_a
 while (await identityClock.runNext()) {}
 if (identityRestartCalls !== 0 || identityFlow.state.countdownKey !== "") throw new Error("transaction change revived old countdown");
 
+const revokedClock = new FakeClock();
+let revokedRestartCalls = 0;
+const revokedFlow = createBootstrapFlow({
+  schedule: revokedClock.schedule.bind(revokedClock),
+  cancel: revokedClock.cancel.bind(revokedClock),
+  countdownSeconds: 1,
+  restart: async () => { revokedRestartCalls += 1; },
+});
+await revokedFlow.observe(staged, () => {});
+await revokedFlow.observe({ ...staged, bootstrap_restart_authorized: false }, () => {});
+while (await revokedClock.runNext()) {}
+if (revokedRestartCalls !== 0 || revokedFlow.state.countdownKey !== "") throw new Error("consent revocation did not cancel countdown");
+
 // Duplicate renders/observations schedule one countdown and one automatic
 // restart.  stop() models route leave; re-entry is a fresh snapshot.
 const reentryClock = new FakeClock();
@@ -202,6 +215,7 @@ process.stdout.write(JSON.stringify({
   transientErrors,
   restartCalls,
   deferredRestartCalls,
+  revokedRestartCalls,
   deferred: deferWasVisible,
   reentryRestartCalls,
   noConsentRestartCalls,

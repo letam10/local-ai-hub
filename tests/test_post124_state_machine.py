@@ -8,6 +8,7 @@ import unittest
 
 import src.app.launcher_migration as launcher_migration
 from src.app.launcher_migration import launcher_projection, shell_identity
+from src.app.update_watchdog import _activate_deferred_product
 from src.services.app_update import (
     AppUpdateError,
     _complete_bootstrap_marker,
@@ -122,6 +123,25 @@ class Post124StateMachineTests(unittest.TestCase):
             self.assertFalse((root / "update-state" / "pending-health.json").exists())
             self.assertFalse((root / "update-state" / "restart-transaction.json").exists())
             self.assertEqual(json.loads((root / "update-state" / "restart-completed.json").read_text(encoding="utf-8"))["status"], "completed")
+
+    def test_retained_shell_identity_is_required_for_health_admission(self) -> None:
+        from tests.test_post123_manager_corrections import Post123ManagerCorrectionTests
+
+        with TemporaryDirectory(dir=ROOT / "Temp", prefix="post124-retained-health-") as temporary:
+            fixture = Post123ManagerCorrectionTests._deferred_fixture(Path(temporary) / "install", previous_format="onedir")
+            root = Path(fixture["root"])
+            self.assertTrue(_activate_deferred_product(root, fixture["transaction"]))
+            health = {
+                "product_id": "LocalAIHub", "product_version": PRODUCT_VERSION,
+                "api_protocol_version": API_PROTOCOL_VERSION, "app_user_model_id": "LocalAIHub.Desktop",
+                "installation_id": "a" * 32,
+                "build_source_commit": fixture["source_commit"], "build_payload_id": fixture["payload_id"],
+            }
+            result = mark_startup_health(root, health=health, frontend_ready=True)
+            self.assertEqual(result["status"], "healthy")
+            projection = launcher_projection(root)
+            self.assertEqual(projection["payload_id"], fixture["previous"]["version"])
+            self.assertNotEqual(projection["payload_id"], fixture["payload_id"])
 
     def test_storage_frontier_push_pop_commits_are_batched(self) -> None:
         with TemporaryDirectory(dir=ROOT / "Temp", prefix="post124-frontier-") as temporary:

@@ -113,7 +113,11 @@ export function createBootstrapFlow({
   async function observe(value, render) {
     const next = value && typeof value === "object" ? value : { bootstrap_pending: false, bootstrap_status: "blocked" };
     const key = bootstrapIdentity(next);
-    if (countdownKey && countdownKey !== key) stopCountdown();
+    if (countdownKey && (
+      countdownKey !== key
+      || next.bootstrap_status !== "staged"
+      || next.bootstrap_restart_authorized !== true
+    )) stopCountdown();
     lastValue = next;
     if (typeof render === "function") render(next);
     if (!isBootstrapPending(next)) {
