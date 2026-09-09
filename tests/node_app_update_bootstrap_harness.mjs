@@ -195,6 +195,52 @@ await reentryFlow.observe(reentryStatus, () => {});
 for (let step = 0; step < 4; step += 1) await reentryClock.runNext();
 if (reentryRestartCalls !== 1) throw new Error("route re-entry revived prior restart");
 
+// A route leave can happen after the poll timer has started request A but
+// before A settles.  Re-entry must retain a generation-owned continuation;
+// both a stale resolve and a stale reject must release exactly one next poll.
+const deferredRequest = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+};
+const runInflightReentryRegression = async (settlement) => {
+  const inflightClock = new FakeClock();
+  const pending = { ...identity(`txn-inflight-${settlement}`, `main-inflight-${settlement}`), bootstrap_status: "pending", bootstrap_restart_authorized: false };
+  const requestA = deferredRequest();
+  let requests = 0;
+  const inflightFlow = createBootstrapFlow({
+    schedule: inflightClock.schedule.bind(inflightClock),
+    cancel: inflightClock.cancel.bind(inflightClock),
+    pollIntervalMs: 10,
+    getStatus: async () => {
+      requests += 1;
+      if (requests === 1) return requestA.promise;
+      return pending;
+    },
+  });
+  await inflightFlow.observe(pending, () => {});
+  const firstPoll = inflightClock.runNext();
+  await Promise.resolve();
+  if (requests !== 1 || inflightFlow.state.pollInFlight !== true) throw new Error(`${settlement}: request A did not become in-flight`);
+  inflightFlow.stop();
+  await inflightFlow.observe(pending, () => {});
+  if (inflightClock.size !== 0) throw new Error(`${settlement}: re-entry created an overlapping request`);
+  if (settlement === "resolve") requestA.resolve({ ...pending, bootstrap_status: "downloading" });
+  else requestA.reject(new Error("stale request A"));
+  await firstPoll;
+  if (inflightClock.size !== 1) throw new Error(`${settlement}: generation-new continuation was lost`);
+  await inflightClock.runNext();
+  if (requests !== 2) throw new Error(`${settlement}: generation-new polling did not resume`);
+  inflightFlow.stop();
+  return requests;
+};
+const inflightReentryResolveRequests = await runInflightReentryRegression("resolve");
+const inflightReentryRejectRequests = await runInflightReentryRegression("reject");
+
 // A staged snapshot without durable consent is visible but can never trigger
 // the automatic restart path.
 const noConsentClock = new FakeClock();
@@ -218,6 +264,8 @@ process.stdout.write(JSON.stringify({
   revokedRestartCalls,
   deferred: deferWasVisible,
   reentryRestartCalls,
+  inflightReentryResolveRequests,
+  inflightReentryRejectRequests,
   noConsentRestartCalls,
   stagedCountdownVisible: log.values.filter((value) => Number.isFinite(value.bootstrap_countdown)).map((value) => value.bootstrap_countdown),
 }));

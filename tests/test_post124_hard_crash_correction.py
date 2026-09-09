@@ -93,8 +93,20 @@ def _child_main(mode: str, root: Path) -> int:
         os.environ["LOCALAIHUB_DATA_ROOT"] = str(root)
         from src.app import launcher
 
+        # This legacy fixture has no installed stable-shell manifests or
+        # runnable payload runtimes.  Its scope is journal reconciliation; the
+        # identity-bearing rollback handoff is covered by the dedicated
+        # regression source in test_post124_launcher_handoff_regression.py.
+        def fixture_handoff(_install_root: Path, _recovery: dict[str, object]) -> bool:
+            return False
+
+        launcher._handoff_after_recovery = fixture_handoff
         launcher.bootstrap = lambda: None
-        launcher.main = lambda: 0
+
+        def fixture_main() -> int:
+            return 0
+
+        launcher.main = fixture_main
         return launcher.launch()
     if mode == "activate":
         candidate = root / "versions" / "main-aaaaaaaaaaaa" / "launcher" / "LocalAIHub"

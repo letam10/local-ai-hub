@@ -26,7 +26,9 @@ export function createBootstrapFlow({
   // being observed at an arbitrary 20-request cutoff.
   void maxPolls;
   let pollTimer = null;
-  let pollInFlight = false;
+  let pollInFlight = null;
+  let pollRequestId = 0;
+  let pollResume = null;
   let generation = 0;
   let pollCount = 0;
   let pollDelay = Math.max(500, Number(pollIntervalMs) || 1500);
@@ -55,6 +57,7 @@ export function createBootstrapFlow({
     generation += 1;
     cancelTimer(pollTimer);
     pollTimer = null;
+    pollResume = null;
     pollCount = 0;
     pollDelay = Math.max(500, Number(pollIntervalMs) || 1500);
   };
@@ -86,12 +89,23 @@ export function createBootstrapFlow({
   };
 
   const schedulePoll = (render, token) => {
-    if (token !== generation || pollTimer !== null || pollInFlight || !isBootstrapPending(lastValue) || typeof getStatus !== "function") return;
+    if (token !== generation || pollTimer !== null || !isBootstrapPending(lastValue) || typeof getStatus !== "function") return;
+    if (pollInFlight !== null) {
+      // A request cannot be cancelled by a torn-down/re-entered view.  Keep a
+      // generation-owned continuation so its completion cannot strand the new
+      // observer, while still allowing only one request at a time.
+      if (pollInFlight.generation !== token) pollResume = { generation: token, render };
+      return;
+    }
     const delay = pollDelay;
-    pollTimer = schedule(async () => {
-      pollTimer = null;
+    const request = { id: ++pollRequestId, generation: token, render };
+    let timer = null;
+    const run = async () => {
+      if (pollTimer === timer) pollTimer = null;
       if (token !== generation || !isBootstrapPending(lastValue)) return;
-      pollInFlight = true;
+      // A stale timer callback must not replace or clear a newer request.
+      if (pollInFlight !== null) return;
+      pollInFlight = request;
       pollCount += 1;
       try {
         const value = await getStatus();
@@ -104,10 +118,21 @@ export function createBootstrapFlow({
           if (typeof render === "function") render({ ...(lastValue || {}), bootstrap_poll_error: true, bootstrap_poll_retry_ms: pollDelay });
         }
       } finally {
-        pollInFlight = false;
-        if (token === generation && isBootstrapPending(lastValue)) schedulePoll(render, token);
+        if (pollInFlight !== request) return;
+        pollInFlight = null;
+        if (token === generation && isBootstrapPending(lastValue)) {
+          schedulePoll(render, token);
+        } else if (pollResume?.generation === generation && isBootstrapPending(lastValue)) {
+          const resume = pollResume;
+          pollResume = null;
+          schedulePoll(resume.render, resume.generation);
+        } else {
+          pollResume = null;
+        }
       }
-    }, delay);
+    };
+    timer = schedule(run, delay);
+    pollTimer = timer;
   };
 
   async function observe(value, render) {
@@ -147,6 +172,6 @@ export function createBootstrapFlow({
     defer,
     stop() { stopPolling(); stopCountdown(); lastValue = null; },
     stopCountdown,
-    get state() { return { pollCount, pollInFlight, countdownKey, restartInFlight, generation, lastValue }; },
+    get state() { return { pollCount, pollInFlight: pollInFlight !== null, countdownKey, restartInFlight, generation, lastValue }; },
   });
 }
