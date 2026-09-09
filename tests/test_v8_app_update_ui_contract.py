@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import unittest
 
 from src.app.update_bridge import install_update_bridge
@@ -11,6 +12,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class V8AppUpdateUiContractTests(unittest.TestCase):
+    def test_shipped_app_update_module_executes_shared_bootstrap_flow(self) -> None:
+        result = subprocess.run(
+            ["node", str(ROOT / "tests" / "node_app_update_ui_harness.mjs")],
+            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+        self.assertIn('"productionModule":true', result.stdout)
+        self.assertIn('"initialRestartVisible":true', result.stdout)
+        self.assertIn('"automaticRestartCalls":1', result.stdout)
+        self.assertIn('"applyCalls":0', result.stdout)
+        self.assertIn('"countdownValues":[5', result.stdout)
+
     def test_router_exposes_bounded_installed_update_surface(self) -> None:
         rows = {(route.method, route.path) for route in build_router().routes()}
         self.assertIn(("GET", "/api/app-update/status"), rows)
