@@ -358,6 +358,11 @@ class Post123ManagerCorrectionTests(unittest.TestCase):
             pending = _read_bootstrap_pending(root)
             self.assertIsNotNone(pending)
             self.assertEqual(pending["status"], "staged")
+            self.assertFalse(pending["restart_authorized"])
+            self.assertTrue(result["download_stage_automatic"])
+            self.assertFalse(result["second_restart_automatic"])
+            self.assertTrue(result["additional_confirmation_required"])
+            self.assertEqual(result["user_action_count"], 2)
             staged = json.loads((root / "update-state" / "staged-update.json").read_text(encoding="utf-8"))
             self.assertEqual(staged["update_kind"], UPDATE_KIND_APP_AND_LAUNCHER)
             self.assertEqual(staged["workflow_run_id"], 123)
@@ -809,6 +814,53 @@ class Post123ManagerCorrectionTests(unittest.TestCase):
                 restore_launcher_bundle(root, transaction_id=str(fixture["transaction"]["transaction_id"]))["status"],
                 "already_restored",
             )
+
+    def test_retained_onedir_identity_is_persisted_and_candidate_is_not_reported_as_installed(self) -> None:
+        with TemporaryDirectory(dir=REPO / "Temp", prefix="post123-retained-identity-") as temporary:
+            fixture = self._deferred_fixture(Path(temporary) / "install", previous_format="onedir")
+            root = fixture["root"]
+            self.assertTrue(_activate_deferred_product(root, fixture["transaction"]))
+            state = json.loads((root / "update-state" / "launcher-activation.json").read_text(encoding="utf-8"))
+            pending = json.loads((root / "update-state" / "pending-health.json").read_text(encoding="utf-8"))
+            retained = state["retained_shell_identity"]
+            self.assertEqual(pending["retained_shell_identity"], retained)
+            self.assertEqual(pending["retained_shell_payload_id"], retained["payload_id"])
+            self.assertEqual(launcher_projection(root)["payload_id"], retained["payload_id"])
+            self.assertNotEqual(launcher_projection(root)["payload_id"], fixture["payload_id"])
+            recovery = launcher_migration.reconcile_launcher_transaction(root, transaction_id=str(fixture["transaction"]["transaction_id"]))
+            self.assertEqual(recovery["status"], "shell_retained")
+            self.assertEqual(recovery["retained_shell_identity"], retained)
+
+    def test_retained_manifest_tamper_is_rejected_then_restored_from_exact_backup(self) -> None:
+        with TemporaryDirectory(dir=REPO / "Temp", prefix="post123-retained-manifest-") as temporary:
+            fixture = self._deferred_fixture(Path(temporary) / "install", previous_format="onedir")
+            root = fixture["root"]
+            _activate_deferred_product(root, fixture["transaction"])
+            manifest_path = root / "launcher-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["payload_id"] = fixture["payload_id"]
+            manifest["source_commit"] = fixture["source_commit"]
+            self._write_json(manifest_path, manifest)
+            with self.assertRaisesRegex(LauncherMigrationError, "LAUNCHER_RETAINED_SHELL_MISMATCH"):
+                launcher_migration.reconcile_launcher_transaction(root, transaction_id=str(fixture["transaction"]["transaction_id"]))
+            self.assertTrue((root / "LocalAIHub.exe").is_file())
+            repaired = restore_launcher_bundle(root, transaction_id=str(fixture["transaction"]["transaction_id"]))
+            self.assertEqual(repaired["status"], "restored")
+            self.assertEqual(launcher_projection(root)["payload_id"], "main-bbbbbbbbbbbb")
+            self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8"))["source_commit"], "b" * 40)
+
+    def test_retained_support_tree_tamper_fails_closed_without_moving_root_shell(self) -> None:
+        with TemporaryDirectory(dir=REPO / "Temp", prefix="post123-retained-support-") as temporary:
+            fixture = self._deferred_fixture(Path(temporary) / "install", previous_format="onedir")
+            root = fixture["root"]
+            _activate_deferred_product(root, fixture["transaction"])
+            support = root / "_internal" / "legacy-support.dll"
+            support.write_bytes(b"tampered-support")
+            with self.assertRaisesRegex(LauncherMigrationError, "LAUNCHER_ROLLBACK_UNAVAILABLE"):
+                restore_launcher_bundle(root, transaction_id=str(fixture["transaction"]["transaction_id"]))
+            self.assertTrue((root / "LocalAIHub.exe").is_file())
+            self.assertEqual((root / "LocalAIHub.exe").read_bytes(), b"legacy-shell")
+            self.assertEqual(support.read_bytes(), b"tampered-support")
 
     def test_shortcut_fixture_contract_is_explicit_and_non_mutating(self) -> None:
         root = r"D:\LocalAIHub\fixture-install"

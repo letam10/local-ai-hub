@@ -84,6 +84,18 @@ def _run_child(mode: str, root: Path, boundary: str = "") -> subprocess.Complete
 
 
 def _child_main(mode: str, root: Path) -> int:
+    if mode == "launcher-entrypoint":
+        # Exercise the shipped payload entrypoint.  Only the normal bootstrap
+        # and desktop main are replaced so this child performs real startup
+        # reconciliation against the fixture journals.
+        os.environ["LOCALAIHUB_INSTALL_ROOT"] = str(root)
+        os.environ["LOCALAIHUB_APP_ROOT"] = str(root)
+        os.environ["LOCALAIHUB_DATA_ROOT"] = str(root)
+        from src.app import launcher
+
+        launcher.bootstrap = lambda: None
+        launcher.main = lambda: 0
+        return launcher.launch()
     if mode == "activate":
         candidate = root / "versions" / "main-aaaaaaaaaaaa" / "launcher" / "LocalAIHub"
         activate_launcher_bundle(
@@ -122,7 +134,7 @@ class Post124HardCrashTests(unittest.TestCase):
         self.assertEqual(result.returncode, 197, (boundary, result.stdout, result.stderr))
         self.assertTrue((root / LAUNCHER_EXECUTABLE_NAME).is_file(), boundary)
         self.assertTrue((root / "versions" / "main-aaaaaaaaaaaa" / "launcher" / "LocalAIHub" / "LocalAIHub.exe").is_file(), boundary)
-        recovery = _run_child("recover-launcher", root)
+        recovery = _run_child("launcher-entrypoint", root)
         self.assertEqual(recovery.returncode, 0, (boundary, recovery.stdout, recovery.stderr))
         self.assertTrue((root / LAUNCHER_EXECUTABLE_NAME).is_file(), boundary)
         first_bytes = (root / LAUNCHER_EXECUTABLE_NAME).read_bytes()
@@ -150,7 +162,7 @@ class Post124HardCrashTests(unittest.TestCase):
                 result = _run_child("restore", root, boundary)
                 self.assertEqual(result.returncode, 197, (boundary, result.stdout, result.stderr))
                 self.assertTrue((root / LAUNCHER_EXECUTABLE_NAME).is_file())
-                recovery = _run_child("recover-launcher", root)
+                recovery = _run_child("launcher-entrypoint", root)
                 self.assertEqual(recovery.returncode, 0, (boundary, recovery.stdout, recovery.stderr))
                 self.assertEqual((root / LAUNCHER_EXECUTABLE_NAME).read_bytes(), b"legacy-shell")
                 self.assertEqual(launcher_projection(root)["format"], "single_file")
@@ -169,7 +181,7 @@ class Post124HardCrashTests(unittest.TestCase):
                 "payload_relative": f"versions/{transaction['payload_id']}",
                 "manifest_sha256": transaction["manifest_sha256"],
             })
-            child = _run_child("recover-pointer", root)
+            child = _run_child("launcher-entrypoint", root)
             self.assertEqual(child.returncode, 0, (child.stdout, child.stderr))
             self.assertEqual(json.loads((root / "current.json").read_text(encoding="utf-8"))["version"], fixture["previous"]["version"])
 
@@ -183,7 +195,7 @@ class Post124HardCrashTests(unittest.TestCase):
                 child = _run_child("activate-pointer", root, boundary)
                 self.assertEqual(child.returncode, 198, (boundary, child.stdout, child.stderr))
                 self.assertTrue((root / "LocalAIHub.exe").is_file(), boundary)
-                recovery = _run_child("recover-pointer", root)
+                recovery = _run_child("launcher-entrypoint", root)
                 self.assertEqual(recovery.returncode, 0, (boundary, recovery.stdout, recovery.stderr))
                 self.assertTrue((root / "LocalAIHub.exe").is_file(), boundary)
                 first = reconcile_restart_transaction(root)["status"]

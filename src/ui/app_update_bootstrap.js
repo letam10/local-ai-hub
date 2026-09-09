@@ -1,4 +1,4 @@
-/* Pure bounded bootstrap hand-off state used by the installed updater card. */
+/* Shared bounded bootstrap coordinator used by the shipped updater card. */
 
 export const BOOTSTRAP_PHASES = Object.freeze(["pending", "downloading", "verifying", "staged", "restarting"]);
 
@@ -10,72 +10,139 @@ export const bootstrapIdentity = (value) => [
   value?.latest_build || value?.source_commit || "",
 ].join(":");
 
-export function createBootstrapFlow({ getStatus, restart, schedule = globalThis.setTimeout, cancel = globalThis.clearTimeout, storage = null, maxPolls = 20, countdownSeconds = 5 } = {}) {
+export function createBootstrapFlow({
+  getStatus,
+  restart,
+  schedule = globalThis.setTimeout,
+  cancel = globalThis.clearTimeout,
+  storage = null,
+  maxPolls = null,
+  countdownSeconds = 5,
+  pollIntervalMs = 1500,
+  pollBackoffMaxMs = 15000,
+} = {}) {
+  // ``maxPolls`` remains accepted for callers from the earlier harness, but
+  // is intentionally ignored: an active durable transaction must not stop
+  // being observed at an arbitrary 20-request cutoff.
+  void maxPolls;
   let pollTimer = null;
-  let countdownTimer = null;
+  let pollInFlight = false;
+  let generation = 0;
   let pollCount = 0;
+  let pollDelay = Math.max(500, Number(pollIntervalMs) || 1500);
+  let countdownTimer = null;
   let countdownKey = "";
   let restartInFlight = false;
+  let lastValue = null;
+
   const getStored = (key) => {
     try { return storage?.getItem(`local-ai-hub-bootstrap:${key}`) || ""; } catch { return ""; }
   };
   const setStored = (key, value) => {
-    try { if (storage && key) storage.setItem(`local-ai-hub-bootstrap:${key}`, value); } catch { /* advisory */ }
+    try { if (storage && key) storage.setItem(`local-ai-hub-bootstrap:${key}`, value); } catch { /* advisory only */ }
+  };
+  const cancelTimer = (timer) => {
+    if (timer !== null && timer !== undefined) {
+      try { cancel(timer); } catch { /* a torn-down surface owns no timer */ }
+    }
   };
   const stopCountdown = () => {
-    if (countdownTimer !== null) cancel(countdownTimer);
+    cancelTimer(countdownTimer);
     countdownTimer = null;
     countdownKey = "";
   };
-  const defer = (value, render) => {
-    const key = bootstrapIdentity(value);
-    stopCountdown();
-    setStored(key, "deferred");
-    const next = { ...(value || {}), bootstrap_restart_authorized: false, bootstrap_deferred: true };
-    if (typeof render === "function") render(next);
-    return next;
+  const stopPolling = () => {
+    generation += 1;
+    cancelTimer(pollTimer);
+    pollTimer = null;
+    pollCount = 0;
+    pollDelay = Math.max(500, Number(pollIntervalMs) || 1500);
   };
-  const startCountdown = (value, render) => {
+
+  const startCountdown = (value, render, token) => {
     const key = bootstrapIdentity(value);
-    if (!key || value?.bootstrap_restart_authorized !== true || getStored(key) === "deferred" || getStored(key) === "attempted") return;
+    if (!key || token !== generation || value?.bootstrap_restart_authorized !== true || getStored(key) === "deferred" || getStored(key) === "attempted") return;
     if (countdownKey === key && countdownTimer !== null) return;
+    if (countdownKey && countdownKey !== key) stopCountdown();
     countdownKey = key;
     let remaining = Math.max(0, Number(countdownSeconds) || 0);
     const tick = () => {
-      if (countdownKey !== key) return;
+      if (token !== generation || countdownKey !== key || !isBootstrapPending(lastValue) || bootstrapIdentity(lastValue) !== key) return;
+      const visible = { ...(lastValue || value), bootstrap_countdown: remaining, bootstrap_count: remaining };
+      if (typeof render === "function") render(visible);
       if (remaining <= 0) {
         countdownTimer = null;
         setStored(key, "attempted");
         if (!restartInFlight && typeof restart === "function") {
           restartInFlight = true;
-          Promise.resolve(restart(value, { automatic: true })).finally(() => { restartInFlight = false; });
+          Promise.resolve().then(() => restart(visible, { automatic: true })).catch(() => {}).finally(() => { restartInFlight = false; });
         }
         return;
       }
-      if (typeof render === "function") render({ ...(value || {}), bootstrap_countdown: remaining });
       remaining -= 1;
       countdownTimer = schedule(tick, 1000);
     };
     tick();
   };
-  const observe = async (value, render) => {
-    if (typeof render === "function") render(value);
-    if (!isBootstrapPending(value)) {
-      if (pollTimer !== null) cancel(pollTimer);
+
+  const schedulePoll = (render, token) => {
+    if (token !== generation || pollTimer !== null || pollInFlight || !isBootstrapPending(lastValue) || typeof getStatus !== "function") return;
+    const delay = pollDelay;
+    pollTimer = schedule(async () => {
       pollTimer = null;
-      pollCount = 0;
-      stopCountdown();
-      return value;
-    }
-    if (value?.bootstrap_status === "staged") startCountdown(value, render);
-    if (pollTimer === null && pollCount < maxPolls && typeof getStatus === "function") {
-      pollTimer = schedule(async () => {
-        pollTimer = null;
-        pollCount += 1;
-        try { await observe(await getStatus(), render); } catch { /* durable marker remains visible */ }
-      }, 1500);
-    }
-    return value;
+      if (token !== generation || !isBootstrapPending(lastValue)) return;
+      pollInFlight = true;
+      pollCount += 1;
+      try {
+        const value = await getStatus();
+        if (token !== generation) return;
+        pollDelay = Math.max(500, Number(pollIntervalMs) || 1500);
+        await observe(value, render);
+      } catch {
+        if (token === generation && isBootstrapPending(lastValue)) {
+          pollDelay = Math.min(Math.max(pollDelay * 2, 2000), Math.max(2000, Number(pollBackoffMaxMs) || 15000));
+          if (typeof render === "function") render({ ...(lastValue || {}), bootstrap_poll_error: true, bootstrap_poll_retry_ms: pollDelay });
+        }
+      } finally {
+        pollInFlight = false;
+        if (token === generation && isBootstrapPending(lastValue)) schedulePoll(render, token);
+      }
+    }, delay);
   };
-  return Object.freeze({ observe, defer, stopCountdown, get state() { return { pollCount, countdownKey, restartInFlight }; } });
+
+  async function observe(value, render) {
+    const next = value && typeof value === "object" ? value : { bootstrap_pending: false, bootstrap_status: "blocked" };
+    const key = bootstrapIdentity(next);
+    if (countdownKey && countdownKey !== key) stopCountdown();
+    lastValue = next;
+    if (typeof render === "function") render(next);
+    if (!isBootstrapPending(next)) {
+      stopPolling();
+      stopCountdown();
+      return next;
+    }
+    const token = generation;
+    if (next.bootstrap_status === "staged") startCountdown(next, render, token);
+    schedulePoll(render, token);
+    return next;
+  }
+
+  const defer = (value, render) => {
+    const key = bootstrapIdentity(value);
+    stopCountdown();
+    setStored(key, "deferred");
+    const next = { ...(value || {}), bootstrap_restart_authorized: false, bootstrap_deferred: true };
+    lastValue = next;
+    if (typeof render === "function") render(next);
+    schedulePoll(render, generation);
+    return next;
+  };
+
+  return Object.freeze({
+    observe,
+    defer,
+    stop() { stopPolling(); stopCountdown(); lastValue = null; },
+    stopCountdown,
+    get state() { return { pollCount, pollInFlight, countdownKey, restartInFlight, generation, lastValue }; },
+  });
 }

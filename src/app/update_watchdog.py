@@ -459,6 +459,8 @@ def _activate_deferred_product(app_root: Path, transaction: dict[str, object]) -
         _atomic_restart_transaction_state(app_root, {**transaction, "status": "health_intent_written"})
         _hard_crash_checkpoint("after_health_intent_before_shell")
         shell_recovery = reconcile_launcher_transaction(app_root, transaction_id=transaction_id)
+        if shell_recovery.get("status") == "already_reconciled" and shell_recovery.get("shell_restored") is True:
+            raise StableShellError("RESTART_SHELL_ROLLED_BACK")
         if shell_recovery.get("status") in {"shell_switched", "already_reconciled", "shell_retained"}:
             activation = {
                 "format": "onedir",
@@ -467,6 +469,7 @@ def _activate_deferred_product(app_root: Path, transaction: dict[str, object]) -
                 "file_count": transaction["launcher_file_count"],
                 "total_bytes": transaction["launcher_total_bytes"],
                 "shell_retained": shell_recovery.get("status") == "shell_retained",
+                "retained_shell_identity": shell_recovery.get("retained_shell_identity"),
             }
         elif shell_recovery.get("status") == "restored":
             raise StableShellError("RESTART_SHELL_ROLLED_BACK")
@@ -486,10 +489,21 @@ def _activate_deferred_product(app_root: Path, transaction: dict[str, object]) -
                 raise StableShellError("RESTART_LAUNCHER_MANIFEST_MISMATCH")
         pending_after_shell = _read_pending_health(app_root)
         if pending_after_shell is not None:
-            _atomic_json(_pending_health_path(app_root), {
+            pending_update: dict[str, object] = {
                 **pending_after_shell,
                 "launcher_retained": activation.get("shell_retained") is True,
-            })
+            }
+            retained_identity = activation.get("retained_shell_identity")
+            if isinstance(retained_identity, dict):
+                pending_update["retained_shell_identity"] = retained_identity
+                pending_update["retained_shell_payload_id"] = retained_identity.get("payload_id")
+                pending_update["retained_shell_source_commit"] = retained_identity.get("source_commit")
+                pending_update["retained_shell_workflow_run_id"] = retained_identity.get("workflow_run_id")
+                pending_update["retained_shell_executable_sha256"] = retained_identity.get("executable_sha256")
+                pending_update["retained_shell_tree_manifest_sha256"] = retained_identity.get("tree_manifest_sha256")
+                pending_update["retained_shell_file_count"] = retained_identity.get("file_count")
+                pending_update["retained_shell_total_bytes"] = retained_identity.get("total_bytes")
+            _atomic_json(_pending_health_path(app_root), pending_update)
         _atomic_restart_transaction_state(app_root, {**transaction, "status": "shell_switched"})
         _hard_crash_checkpoint("before_pointer_switch")
         pointer = atomic_activate_pointer(app_root, version=payload_id, manifest_sha256=str(transaction["manifest_sha256"]))

@@ -19,7 +19,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.app.bootstrap import bootstrap
+from src.app.launcher_migration import reconcile_launcher_transaction
 from src.app.main import DesktopBridge, main
+from src.app.update_watchdog import reconcile_restart_transaction
 from src.app.update_bridge import install_update_bridge
 
 
@@ -61,9 +63,37 @@ def _wait_for_restart_parent() -> None:
         time.sleep(0.1)
 
 
+def _reconcile_startup_transactions() -> dict[str, object]:
+    """Let the real payload entrypoint own one idempotent recovery pass.
+
+    The restart watchdog normally completes the deferred transaction before it
+    launches this payload.  A process termination can still leave a durable
+    journal between two filesystem phases, so the payload performs the same
+    two read/reconcile operations once at startup.  Both operations are
+    transaction-bound and idempotent; no second watchdog is spawned here.
+    Development/check-out launches without an installed root have no managed
+    transaction to reconcile.
+    """
+
+    install_value = os.environ.get("LOCALAIHUB_INSTALL_ROOT")
+    if not install_value:
+        return {"status": "not_configured"}
+    install_root = Path(install_value).expanduser().absolute()
+    restart = reconcile_restart_transaction(install_root)
+    shell = reconcile_launcher_transaction(install_root)
+    return {"status": "reconciled", "restart": restart, "shell": shell}
+
+
 def launch() -> int:
     """Bootstrap managed directories and run the native desktop shell."""
     _wait_for_restart_parent()
+    try:
+        _reconcile_startup_transactions()
+    except (OSError, TypeError, ValueError, UnicodeError) as exc:
+        # A malformed or ambiguous journal must not be hidden by launching a
+        # payload that could observe an unpaired pointer/shell state.
+        print(f"Startup update recovery failed: {exc}", file=sys.stderr)
+        return 81
     install_update_bridge(DesktopBridge)
     try:
         bootstrap()

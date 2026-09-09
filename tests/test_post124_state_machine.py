@@ -9,6 +9,7 @@ import unittest
 import src.app.launcher_migration as launcher_migration
 from src.app.launcher_migration import launcher_projection, shell_identity
 from src.services.app_update import (
+    AppUpdateError,
     _complete_bootstrap_marker,
     _read_bootstrap_pending,
     _write_bootstrap_pending,
@@ -64,6 +65,7 @@ class Post124StateMachineTests(unittest.TestCase):
             pending = _write_bootstrap_pending(
                 root, source_commit="a" * 40, workflow_run_id=123, status="staged",
                 transaction_id="txn-" + "a" * 32, payload_id="main-" + "a" * 12, restart_authorized=True,
+                consent_transaction_id="txn-" + "a" * 32, consent_payload_id="main-" + "a" * 12,
             )
             completed = _complete_bootstrap_marker(root, pending, current={"commit": "a" * 40, "workflow_run_id": 123, "payload_id": "main-" + "a" * 12})
             self.assertEqual(completed["status"], "completed")
@@ -74,6 +76,22 @@ class Post124StateMachineTests(unittest.TestCase):
             blocked = _complete_bootstrap_marker(root, mismatch, current={"commit": "a" * 40, "workflow_run_id": 123, "payload_id": "main-" + "a" * 12})
             self.assertEqual(blocked["status"], "blocked")
             self.assertEqual(_read_bootstrap_pending(root)["status"], "staged")
+
+    def test_bootstrap_consent_is_rejected_when_transaction_binding_changes(self) -> None:
+        with TemporaryDirectory(dir=ROOT / "Temp", prefix="post124-bootstrap-consent-") as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(AppUpdateError, "UPDATE_STATE_INVALID"):
+                _write_bootstrap_pending(
+                    root,
+                    source_commit="a" * 40,
+                    workflow_run_id=123,
+                    status="staged",
+                    transaction_id="txn-" + "a" * 32,
+                    payload_id="main-" + "a" * 12,
+                    restart_authorized=True,
+                    consent_transaction_id="txn-" + "b" * 32,
+                    consent_payload_id="main-" + "a" * 12,
+                )
 
     def test_frontend_health_admission_commits_terminal_restart_audit_before_cleanup(self) -> None:
         from tests.test_post123_manager_corrections import Post123ManagerCorrectionTests

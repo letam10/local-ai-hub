@@ -42,6 +42,7 @@ from src.app.launcher_migration import (
     LauncherMigrationError,
     launcher_projection,
     launcher_tree_manifest,
+    restore_launcher_bundle,
 )
 from src.app.payload_bootstrap import api_server_command
 from src.shared.runtime_identity import API_PROTOCOL_VERSION, api_identity
@@ -453,6 +454,8 @@ def _write_bootstrap_pending(
     transaction_id: str | None = None,
     payload_id: str | None = None,
     restart_authorized: bool = False,
+    consent_transaction_id: str | None = None,
+    consent_payload_id: str | None = None,
 ) -> dict[str, Any]:
     """Persist the legacy-client hand-off without storing paths or commands."""
 
@@ -470,6 +473,18 @@ def _write_bootstrap_pending(
         raise AppUpdateError("UPDATE_STATE_INVALID")
     if type(restart_authorized) is not bool:
         raise AppUpdateError("UPDATE_STATE_INVALID")
+    if consent_transaction_id is not None and (not isinstance(consent_transaction_id, str) or _TRANSACTION_RE.fullmatch(consent_transaction_id) is None):
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if consent_payload_id is not None and (not isinstance(consent_payload_id, str) or _PAYLOAD_RE.fullmatch(consent_payload_id) is None):
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if (consent_transaction_id is None) != (consent_payload_id is None):
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if consent_transaction_id is not None and (
+        transaction_id != consent_transaction_id or payload_id != consent_payload_id
+    ):
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if restart_authorized and (consent_transaction_id is None or consent_payload_id is None):
+        raise AppUpdateError("UPDATE_STATE_INVALID")
     value: dict[str, Any] = {
         "schema_version": BOOTSTRAP_PENDING_SCHEMA,
         "source_commit": source_commit,
@@ -481,6 +496,8 @@ def _write_bootstrap_pending(
         "transaction_id": transaction_id,
         "payload_id": payload_id,
         "restart_authorized": restart_authorized,
+        "consent_transaction_id": consent_transaction_id,
+        "consent_payload_id": consent_payload_id,
         "updated_at": _utc_now(),
     }
     _write_json_atomic(_bootstrap_pending_path(root), value)
@@ -499,9 +516,11 @@ def _read_bootstrap_pending(root: Path) -> dict[str, Any] | None:
         "schema_version", "source_commit", "workflow_run_id", "legacy_artifact_name",
         "composite_artifact_name", "status", "reason_code", "updated_at",
     }
-    expected = legacy_expected | {"transaction_id", "payload_id", "restart_authorized"}
+    expected = legacy_expected | {"transaction_id", "payload_id", "restart_authorized", "consent_transaction_id", "consent_payload_id"}
     if set(value) == legacy_expected:
-        value = {**value, "transaction_id": None, "payload_id": None, "restart_authorized": False}
+        value = {**value, "transaction_id": None, "payload_id": None, "restart_authorized": False, "consent_transaction_id": None, "consent_payload_id": None}
+    elif set(value) == legacy_expected | {"transaction_id", "payload_id", "restart_authorized"}:
+        value = {**value, "consent_transaction_id": None, "consent_payload_id": None}
     if set(value) != expected or value.get("schema_version") != BOOTSTRAP_PENDING_SCHEMA:
         raise AppUpdateError("UPDATE_STATE_INVALID")
     source_commit = value.get("source_commit")
@@ -519,6 +538,14 @@ def _read_bootstrap_pending(root: Path) -> dict[str, Any] | None:
         or (value.get("transaction_id") is not None and (not isinstance(value.get("transaction_id"), str) or _TRANSACTION_RE.fullmatch(str(value.get("transaction_id"))) is None))
         or (value.get("payload_id") is not None and (not isinstance(value.get("payload_id"), str) or _PAYLOAD_RE.fullmatch(str(value.get("payload_id"))) is None or value.get("payload_id") != f"main-{source_commit[:12]}"))
         or type(value.get("restart_authorized")) is not bool
+        or (value.get("consent_transaction_id") is not None and (not isinstance(value.get("consent_transaction_id"), str) or _TRANSACTION_RE.fullmatch(str(value.get("consent_transaction_id"))) is None))
+        or (value.get("consent_payload_id") is not None and (not isinstance(value.get("consent_payload_id"), str) or _PAYLOAD_RE.fullmatch(str(value.get("consent_payload_id"))) is None))
+        or (value.get("consent_transaction_id") is None) != (value.get("consent_payload_id") is None)
+        or (value.get("consent_transaction_id") is not None and (
+            value.get("transaction_id") != value.get("consent_transaction_id")
+            or value.get("payload_id") != value.get("consent_payload_id")
+        ))
+        or (value.get("restart_authorized") is True and (value.get("consent_transaction_id") is None or value.get("consent_payload_id") is None))
         or not isinstance(value.get("updated_at"), str)
     ):
         raise AppUpdateError("UPDATE_STATE_INVALID")
@@ -544,6 +571,8 @@ def _complete_bootstrap_marker(root: Path, pending: dict[str, Any], *, current: 
         transaction_id=pending.get("transaction_id") if isinstance(pending.get("transaction_id"), str) else None,
         payload_id=str(current.get("payload_id")) if _PAYLOAD_RE.fullmatch(str(current.get("payload_id") or "")) else None,
         restart_authorized=False,
+        consent_transaction_id=pending.get("consent_transaction_id") if isinstance(pending.get("consent_transaction_id"), str) else None,
+        consent_payload_id=pending.get("consent_payload_id") if isinstance(pending.get("consent_payload_id"), str) else None,
     )
     _write_json_atomic(root / "update-state" / "bootstrap-completed.json", {
         "schema_version": "local-ai-hub-bootstrap-completed.v1",
@@ -883,11 +912,60 @@ def mark_startup_health(
     if pending.get("launcher_tree_manifest_sha256") is not None:
         launcher = launcher_projection(root)
         launcher_admission = launcher.get("status") == "verified"
-        if pending.get("launcher_retained") is not True:
+        if pending.get("launcher_retained") is True:
+            retained_identity = pending.get("retained_shell_identity")
+            retained_shape_valid = (
+                isinstance(retained_identity, dict)
+                and set(retained_identity) == {
+                    "schema_version", "product_id", "payload_id", "source_commit", "format", "executable",
+                    "workflow_run_id", "executable_sha256", "tree_manifest_sha256", "file_count", "total_bytes",
+                }
+                and retained_identity.get("schema_version") == "local-ai-hub-launcher-bundle.v1"
+                and retained_identity.get("product_id") == "LocalAIHub"
+                and retained_identity.get("format") == "onedir"
+                and retained_identity.get("executable") == "LocalAIHub.exe"
+            )
+            launcher_admission = launcher_admission and retained_shape_valid and all(
+                launcher.get(left) == pending.get(right)
+                for left, right in (
+                    ("payload_id", "retained_shell_payload_id"),
+                    ("source_commit", "retained_shell_source_commit"),
+                    ("workflow_run_id", "retained_shell_workflow_run_id"),
+                    ("executable_sha256", "retained_shell_executable_sha256"),
+                    ("tree_manifest_sha256", "retained_shell_tree_manifest_sha256"),
+                    ("file_count", "retained_shell_file_count"),
+                    ("total_bytes", "retained_shell_total_bytes"),
+                )
+            )
+            if retained_shape_valid:
+                launcher_admission = launcher_admission and all(
+                    launcher.get(left) == retained_identity.get(right)
+                    for left, right in (
+                        ("payload_id", "payload_id"),
+                        ("source_commit", "source_commit"),
+                        ("workflow_run_id", "workflow_run_id"),
+                        ("executable_sha256", "executable_sha256"),
+                        ("tree_manifest_sha256", "tree_manifest_sha256"),
+                        ("file_count", "file_count"),
+                        ("total_bytes", "total_bytes"),
+                    )
+                )
+                activation_path = root / "update-state" / "launcher-activation.json"
+                activation_identity = None
+                if activation_path.is_file() and not activation_path.is_symlink():
+                    try:
+                        activation = _safe_json_file(activation_path, max_bytes=64 * 1024)
+                        activation_identity = activation.get("retained_shell_identity")
+                    except (OSError, UnicodeError, json.JSONDecodeError, AppUpdateError):
+                        activation_identity = None
+                launcher_admission = launcher_admission and activation_identity == retained_identity
+        else:
             launcher_admission = launcher_admission and (
                 launcher.get("format") == pending.get("launcher_format", "onedir")
                 and launcher.get("executable_sha256") == pending.get("launcher_executable_sha256")
                 and launcher.get("tree_manifest_sha256") == pending.get("launcher_tree_manifest_sha256")
+                and launcher.get("payload_id") == pending.get("payload_id")
+                and launcher.get("source_commit") == pending.get("source_commit")
             )
     healthy = healthy and launcher_admission
     if healthy:
@@ -914,6 +992,12 @@ def mark_startup_health(
         )
         return {"status": "healthy", "payload_id": current["version"], "source_commit": build["source_commit"]}
     previous = pending["previous"]
+    rollback_root = root / "update-state" / "launcher-rollback" / transaction_id if transaction_id is not None else None
+    if rollback_root is not None and rollback_root.is_dir() and not rollback_root.is_symlink():
+        try:
+            restore_launcher_bundle(root, transaction_id=transaction_id, _allow_state_status=True)
+        except (OSError, LauncherMigrationError) as exc:
+            raise AppUpdateError("UPDATE_LAUNCHER_ROLLBACK_FAILED") from exc
     pointer = atomic_activate_pointer(root, version=str(previous["version"]), manifest_sha256=str(previous["manifest_sha256"]))
     _write_json_atomic(root / "update-state" / "last-rollback.json", {
         "schema_version": PENDING_HEALTH_SCHEMA,
@@ -1545,6 +1629,10 @@ class AppUpdateService:
             "bootstrap_transaction_id": bootstrap.get("transaction_id") if isinstance(bootstrap, dict) else None,
             "bootstrap_payload_id": bootstrap.get("payload_id") if isinstance(bootstrap, dict) else None,
             "bootstrap_restart_authorized": bool(bootstrap and bootstrap.get("restart_authorized") is True),
+            "download_stage_automatic": bool(bootstrap and bootstrap.get("status") in {"downloading", "verifying", "staged", "restarting"}),
+            "second_restart_automatic": bool(bootstrap and bootstrap.get("restart_authorized") is True),
+            "additional_confirmation_required": bool(bootstrap and bootstrap.get("status") in {"staged", "restarting"} and bootstrap.get("restart_authorized") is not True),
+            "user_action_count": 1 if bootstrap and bootstrap.get("restart_authorized") is True else 2 if bootstrap and bootstrap.get("status") in {"staged", "restarting"} else None,
         })
         return value
 
@@ -2008,6 +2096,8 @@ class AppUpdateService:
                         workflow_run_id=run_id,
                         status="pending",
                         transaction_id=self._transaction_id,
+                        consent_transaction_id=None,
+                        consent_payload_id=None,
                     )
                 if pending.get("status") in {"staged", "restarting", "completed"}:
                     return {
@@ -2018,6 +2108,8 @@ class AppUpdateService:
                         "transaction_id": pending.get("transaction_id"),
                         "payload_id": pending.get("payload_id"),
                         "restart_authorized": pending.get("restart_authorized") is True,
+                        "additional_confirmation_required": pending.get("restart_authorized") is not True,
+                        "user_action_count": 1 if pending.get("restart_authorized") is True else 2,
                     }
                 if pending.get("status") == "blocked":
                     return {
@@ -2040,6 +2132,8 @@ class AppUpdateService:
                         reason_code="artifact_identity_mismatch",
                         transaction_id=pending.get("transaction_id") if isinstance(pending.get("transaction_id"), str) else None,
                         payload_id=pending.get("payload_id") if isinstance(pending.get("payload_id"), str) else None,
+                        consent_transaction_id=pending.get("consent_transaction_id") if isinstance(pending.get("consent_transaction_id"), str) else None,
+                        consent_payload_id=pending.get("consent_payload_id") if isinstance(pending.get("consent_payload_id"), str) else None,
                     )
                     return {
                         "status": "blocked",
@@ -2050,18 +2144,31 @@ class AppUpdateService:
                     }
                 result = self._prepare_locked_impl(root, candidate_override=candidate)
                 if result.get("update_kind") == UPDATE_KIND_APP_AND_LAUNCHER or result.get("status") == "staged":
+                    next_transaction_id = result.get("transaction_id") if isinstance(result.get("transaction_id"), str) else pending.get("transaction_id")
+                    next_payload_id = result.get("payload_id") if isinstance(result.get("payload_id"), str) else pending.get("payload_id")
+                    consent_matches = (
+                        pending.get("restart_authorized") is True
+                        and pending.get("consent_transaction_id") == next_transaction_id
+                        and pending.get("consent_payload_id") == next_payload_id
+                    )
                     _write_bootstrap_pending(
                         root,
                         source_commit=str(pending["source_commit"]),
                         workflow_run_id=int(pending["workflow_run_id"]),
                         status="staged",
-                        transaction_id=result.get("transaction_id") if isinstance(result.get("transaction_id"), str) else pending.get("transaction_id"),
-                        payload_id=result.get("payload_id") if isinstance(result.get("payload_id"), str) else pending.get("payload_id"),
-                        restart_authorized=pending.get("restart_authorized") is True,
+                        transaction_id=next_transaction_id,
+                        payload_id=next_payload_id,
+                        restart_authorized=consent_matches,
+                        consent_transaction_id=next_transaction_id if consent_matches else None,
+                        consent_payload_id=next_payload_id if consent_matches else None,
                     )
                     result["bootstrap_pending"] = True
                     result["bootstrap_status"] = "staged"
-                    result["bootstrap_restart_authorized"] = pending.get("restart_authorized") is True
+                    result["bootstrap_restart_authorized"] = consent_matches
+                    result["additional_confirmation_required"] = not consent_matches
+                    result["user_action_count"] = 1 if consent_matches else 2
+                    result["download_stage_automatic"] = True
+                    result["second_restart_automatic"] = consent_matches
                 return self._public_projection(result, root=root)
 
     @staticmethod
@@ -2264,7 +2371,9 @@ class AppUpdateService:
                             status="restarting",
                             transaction_id=transaction_id,
                             payload_id=payload_id,
-                            restart_authorized=True,
+                            restart_authorized=(isinstance(transaction_id, str) and _TRANSACTION_RE.fullmatch(transaction_id) is not None and _PAYLOAD_RE.fullmatch(payload_id) is not None),
+                            consent_transaction_id=transaction_id if isinstance(transaction_id, str) and _TRANSACTION_RE.fullmatch(transaction_id) is not None else None,
+                            consent_payload_id=payload_id if _PAYLOAD_RE.fullmatch(payload_id) is not None else None,
                         )
                     atomic_activate_pointer(root, version=payload_id, manifest_sha256=manifest_hash)
                     activated = True
