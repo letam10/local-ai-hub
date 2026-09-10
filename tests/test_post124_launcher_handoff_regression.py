@@ -84,7 +84,7 @@ class Post124LauncherHandoffRegressionTests(unittest.TestCase):
                 clear=False,
             ),
             patch.object(launcher, "_reconcile_startup_transactions", side_effect=recovery),
-            patch.object(launcher, "resolve_verified_running_plan", return_value=candidate),
+            patch.object(launcher, "resolve_verified_running_plan", side_effect=AssertionError("candidate resolver must not gate confirmed rollback")) as candidate_resolver,
             patch.object(launcher, "resolve_launch_plan", return_value=previous),
             patch.object(launcher.subprocess, "Popen", side_effect=fake_popen),
             patch.object(launcher, "bootstrap", side_effect=candidate_bootstrap),
@@ -93,6 +93,7 @@ class Post124LauncherHandoffRegressionTests(unittest.TestCase):
             result = launcher.launch()
 
         self.assertEqual(result, 0)
+        candidate_resolver.assert_not_called()
         self.assertNotIn(("candidate-main", candidate.version), events)
         self.assertNotIn(("candidate-bootstrap", candidate.version), events)
         self.assertEqual(events, [("previous-main", previous.version)])
@@ -105,6 +106,60 @@ class Post124LauncherHandoffRegressionTests(unittest.TestCase):
         self.assertEqual(child_environment["LOCALAIHUB_RESTART_WAIT_PID"], str(os.getpid()))
         self.assertNotIn("LOCALAIHUB_WATCHDOG_APP_ROOT", child_environment)
         self.assertNotIn("LOCALAIHUB_RESTART_SESSION_NONCE", child_environment)
+
+    def test_confirmed_rollback_with_invalid_previous_fails_closed(self) -> None:
+        install_root = Path("fixture-install").absolute()
+        recovery = {"restart": {"status": "rolled_back"}}
+        with (
+            patch.object(launcher, "resolve_verified_running_plan", side_effect=AssertionError("candidate must not be inspected")) as candidate_resolver,
+            patch.object(launcher, "resolve_launch_plan", side_effect=ValueError("previous payload invalid")) as selected_resolver,
+            patch.object(launcher.subprocess, "Popen") as popen,
+        ):
+            with self.assertRaisesRegex(ValueError, "previous payload invalid"):
+                launcher._handoff_after_recovery(install_root, recovery)
+
+        candidate_resolver.assert_not_called()
+        selected_resolver.assert_called_once_with(install_root)
+        popen.assert_not_called()
+
+    def test_unconfirmed_recovery_does_not_swallow_candidate_resolver_error(self) -> None:
+        candidate = _plan("main-aaaaaaaaaaaa", "a" * 40)
+        install_root = Path("fixture-install").absolute()
+
+        def recovery() -> dict[str, object]:
+            return {"status": "reconciled", "restart": {"status": "candidate_pending_health"}}
+
+        def candidate_bootstrap() -> None:
+            raise AssertionError("candidate bootstrap must not run")
+
+        def candidate_main() -> int:
+            raise AssertionError("candidate main must not run")
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "LOCALAIHUB_INSTALL_ROOT": str(install_root),
+                    "LOCALAIHUB_APP_ROOT": str(candidate.app_payload.absolute()),
+                    "LOCALAIHUB_RESTART_WAIT_PID": "",
+                },
+                clear=False,
+            ),
+            patch.object(launcher, "_reconcile_startup_transactions", side_effect=recovery),
+            patch.object(launcher, "resolve_verified_running_plan", side_effect=ValueError("candidate payload invalid")) as candidate_resolver,
+            patch.object(launcher, "resolve_launch_plan", side_effect=AssertionError("selected resolver must not hide candidate failure")) as selected_resolver,
+            patch.object(launcher.subprocess, "Popen") as popen,
+            patch.object(launcher, "bootstrap", side_effect=candidate_bootstrap) as bootstrap_call,
+            patch.object(launcher, "main", side_effect=candidate_main) as main_call,
+        ):
+            result = launcher.launch()
+
+        self.assertEqual(result, 81)
+        candidate_resolver.assert_called_once()
+        selected_resolver.assert_not_called()
+        popen.assert_not_called()
+        bootstrap_call.assert_not_called()
+        main_call.assert_not_called()
 
 
 if __name__ == "__main__":

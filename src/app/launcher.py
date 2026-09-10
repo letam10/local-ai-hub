@@ -136,18 +136,25 @@ def _relaunch_selected_payload(plan: LaunchPlan) -> None:
 def _handoff_after_recovery(install_root: Path, recovery: dict[str, object]) -> bool:
     """Do not let a payload continue after recovery selected a different one."""
 
-    running_value = os.environ.get("LOCALAIHUB_APP_ROOT")
-    running = (
-        resolve_verified_running_plan(install_root, Path(running_value).expanduser().absolute())
-        if running_value
-        else None
-    )
     restart = recovery.get("restart") if isinstance(recovery, dict) else None
     rollback_handoff = isinstance(restart, dict) and restart.get("status") == "rolled_back"
-    if running is None and not rollback_handoff:
+    if rollback_handoff:
+        # Recovery already restored current.json and owns the rollback result.
+        # Validate only the selected pointer/payload here; the stale candidate
+        # is not an input to this handoff and must not gate the previous launch.
+        selected = resolve_launch_plan(install_root)
+        _relaunch_selected_payload(selected)
+        return True
+
+    running_value = os.environ.get("LOCALAIHUB_APP_ROOT")
+    if not running_value:
         return False
+    # Outside a confirmed rollback, a running-payload resolver failure is a
+    # fail-closed startup error.  Never treat it as permission to launch an
+    # arbitrary selected payload.
+    running = resolve_verified_running_plan(install_root, Path(running_value).expanduser().absolute())
     selected = resolve_launch_plan(install_root)
-    if rollback_handoff or running is None or not _same_payload_identity(running, selected):
+    if not _same_payload_identity(running, selected):
         _relaunch_selected_payload(selected)
         return True
     return False
