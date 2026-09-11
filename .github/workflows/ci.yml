@@ -110,7 +110,7 @@ jobs:
       - name: Install launcher builder
         run: python -m pip install pyinstaller
       - name: Build onedir stable launcher
-        run: python scripts/build_stable_launcher.py --output-dir dist/stable-launcher --expected-source-sha "$EXPECTED_SOURCE_SHA" --workflow-run-id "${{ github.run_id }}"
+        run: python scripts/build_stable_launcher.py --output-dir dist/stable-launcher --expected-source-sha "$env:EXPECTED_SOURCE_SHA" --workflow-run-id "${{ github.run_id }}"
       - name: Bind launcher artifact to source head
         shell: pwsh
         run: |
