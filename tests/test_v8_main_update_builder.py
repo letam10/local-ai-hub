@@ -7,7 +7,9 @@ from pathlib import Path
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch
 
+import scripts.build_main_update as build_main_update
 from scripts.build_main_update import ARCHIVE_NAME, build
 
 
@@ -15,15 +17,8 @@ class V8MainUpdateBuilderTests(unittest.TestCase):
     def test_builder_packages_only_tracked_app_content_with_commit_binding(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "update"
-            previous = os.environ.get("GITHUB_SHA")
-            os.environ["GITHUB_SHA"] = "d" * 40
-            try:
-                manifest = build(output)
-            finally:
-                if previous is None:
-                    os.environ.pop("GITHUB_SHA", None)
-                else:
-                    os.environ["GITHUB_SHA"] = previous
+            with patch.object(build_main_update, "resolve_source_commit", return_value="d" * 40):
+                manifest = build(output, expected_source_sha="d" * 40)
             self.assertEqual(manifest["source_commit"], "d" * 40)
             self.assertEqual(manifest["payload_id"], "main-dddddddddddd")
             self.assertEqual(manifest["runtime_strategy"], "reuse-current")
@@ -56,17 +51,17 @@ class V8MainUpdateBuilderTests(unittest.TestCase):
             (runtime / "pythonw.exe").write_bytes(b"python")
             (runtime / "runtime.dll").write_bytes(b"dll")
             output = root / "update"
-            previous = os.environ.get("GITHUB_SHA")
             previous_runtime = os.environ.get("LOCALAIHUB_RUNTIME_VERSION")
-            os.environ["GITHUB_SHA"] = "e" * 40
             os.environ["LOCALAIHUB_RUNTIME_VERSION"] = "3.12.10"
             try:
-                manifest = build(output, update_kind="FULL", runtime_root=runtime)
+                with patch.object(build_main_update, "resolve_source_commit", return_value="e" * 40):
+                    manifest = build(
+                        output,
+                        update_kind="FULL",
+                        runtime_root=runtime,
+                        expected_source_sha="e" * 40,
+                    )
             finally:
-                if previous is None:
-                    os.environ.pop("GITHUB_SHA", None)
-                else:
-                    os.environ["GITHUB_SHA"] = previous
                 if previous_runtime is None:
                     os.environ.pop("LOCALAIHUB_RUNTIME_VERSION", None)
                 else:

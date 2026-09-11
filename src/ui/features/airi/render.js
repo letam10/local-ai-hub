@@ -7,17 +7,20 @@ export function createAiriRenderer(deps) {
     const discoveryState = String(item.discovery_state || "unavailable");
     const launchState = String(item.launch_state || "unavailable");
     const runningState = ["running", "not_running", "unknown"].includes(String(item.running_state)) ? String(item.running_state) : "unknown";
+    const ownershipState = ["owned", "external", "not_owned", "unknown"].includes(String(item.ownership_state)) ? String(item.ownership_state) : "unknown";
     const integrationAllowsLaunch = !integration || integration.launch_capability?.state === "AVAILABLE";
     const launchAvailable = discoveryState === "verified" && launchState === "available" && item.launchable === true && integrationAllowsLaunch;
     const ambiguous = discoveryState === "ambiguous" || launchState === "ambiguous";
     const status = launchAvailable ? "operational" : ambiguous ? "attention" : "unavailable";
     const statusCopy = launchAvailable
-      ? (runningState === "running" ? "AIRI đang chạy · có thể mở lại bằng launcher đã xác minh." : runningState === "unknown" ? "Launcher AIRI đã được xác minh; chưa xác minh được trạng thái tiến trình." : "Launcher AIRI đã được xác minh.")
+      ? (ownershipState === "external" ? "AIRI đang chạy ngoài quyền quản lý của Hub; Hub không có quyền đóng tiến trình này." : ownershipState === "owned" ? "AIRI đang chạy do Hub mở; có thể đóng bằng nút Đóng AIRI." : runningState === "running" ? "AIRI đang chạy; quyền quản lý chưa được xác minh." : runningState === "unknown" ? "Launcher AIRI đã được xác minh; chưa xác minh được trạng thái tiến trình." : "Sẵn sàng để mở · AIRI chưa chạy.")
       : ambiguous
         ? "Có nhiều launcher AIRI hợp lệ; Hub không tự chọn candidate."
         : "Chưa tìm thấy AIRI qua registry local hoặc Windows installer identity.";
+    const instanceId = typeof item.launch_instance_id === "string" && /^airi_[a-f0-9]{32}$/.test(item.launch_instance_id) ? item.launch_instance_id : "";
+    const closeAvailable = item.close_available === true && instanceId;
     const action = launchAvailable
-      ? `<button class="button button--primary" type="button" data-launch="airi">Mở AIRI</button>`
+      ? `<span class="button-row"><button class="button button--primary" type="button" data-launch="airi">Mở AIRI</button>${closeAvailable ? `<button class="button button--compact" type="button" data-close-application="airi" data-launch-instance-id="${escapeHtml(instanceId)}">Đóng AIRI</button>` : ""}</span>`
       : `<button class="button button--compact" type="button" data-refresh-applications="airi">Làm mới trạng thái</button>`;
     const title = launchAvailable ? "AIRI" : ambiguous ? "AIRI chưa thể chọn" : "Chưa tìm thấy AIRI";
     const explanation = statusExplanation({

@@ -27,6 +27,7 @@ from scripts.v8_acceptance_gate import (
     source_change_scopes,
     source_preflight,
     _path_impact_scope,
+    _path_impact_scopes,
 )
 
 
@@ -258,6 +259,17 @@ class V8Wave5AcceptanceGateTests(unittest.TestCase):
             ),
             {"filesystem_transaction"},
         )
+
+    def test_set_based_impact_mapping_keeps_all_downstream_consumers(self) -> None:
+        self.assertEqual(
+            _path_impact_scopes("src/services/api/routes/compatibility.py"),
+            frozenset({"loopback_api", "product_experience"}),
+        )
+        self.assertEqual(
+            _path_impact_scopes("src/app/main.py"),
+            frozenset({"desktop_startup", "product_experience"}),
+        )
+        self.assertEqual(_path_impact_scopes("docs/operations/review.md"), frozenset())
 
     def test_shared_ai_result_contracts_are_artifact_callsite_scope(self) -> None:
         for path in (

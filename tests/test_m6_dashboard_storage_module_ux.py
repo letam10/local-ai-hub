@@ -40,7 +40,7 @@ def _render(route: str, state: dict[str, object]) -> str:
 
 
 class M6DashboardStorageModuleUxTests(unittest.TestCase):
-    def test_dashboard_is_three_tier_summary_attention_and_actions(self) -> None:
+    def test_dashboard_is_four_tier_summary_volumes_attention_and_actions(self) -> None:
         html = _render(
             "dashboard",
             {
@@ -51,11 +51,10 @@ class M6DashboardStorageModuleUxTests(unittest.TestCase):
         )
         self.assertEqual(
             re.findall(r'data-dashboard-tier="([^"]+)"', html),
-            ["summary", "attention", "actions"],
+            ["summary", "volumes", "attention", "actions"],
         )
         self.assertIn('data-dashboard-simplified="true"', html)
         for forbidden in (
-            "dashboard-storage",
             "media-evidence",
             "dashboard-onboarding",
             "workflow-library-state",
@@ -63,6 +62,60 @@ class M6DashboardStorageModuleUxTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, html)
         self.assertEqual(len(re.findall(r'data-dashboard-metric=', html)), 4)
+
+    def test_dashboard_renders_only_server_owned_c_and_d_volume_projection(self) -> None:
+        html = _render(
+            "dashboard",
+            {
+                "health": {"status": "healthy"},
+                "storage": {
+                    "volumes": [
+                        {
+                            "id": "c",
+                            "status": "available",
+                            "total_bytes": 100 * 1024**3,
+                            "free_bytes": 10 * 1024**3,
+                            "used_bytes": 90 * 1024**3,
+                            "low_space": True,
+                            "reason": "Free space is low.",
+                            "next_action": "Review storage before new writes.",
+                        },
+                        {
+                            "id": "d",
+                            "status": "unavailable",
+                            "total_bytes": None,
+                            "free_bytes": None,
+                            "used_bytes": None,
+                            "reason": r"D:\\private\\reason.txt",
+                            "next_action": "token=must-not-render",
+                        },
+                        {"id": "e", "status": "available", "total_bytes": 1, "free_bytes": 1, "used_bytes": 0},
+                    ],
+                },
+            },
+        )
+        self.assertEqual(re.findall(r'data-dashboard-volume="([^"]+)"', html), ["c", "d"])
+        self.assertIn('data-dashboard-volume-total="107374182400"', html)
+        self.assertIn('data-dashboard-volume-used="96636764160"', html)
+        self.assertIn('data-dashboard-volume-free="10737418240"', html)
+        self.assertIn('data-dashboard-volume-percent="90"', html)
+        self.assertIn('data-dashboard-volume-percent=""', html)
+        self.assertIn('data-low-space="true"', html)
+        self.assertIn('data-status="unavailable"', html)
+        self.assertIn("Tổng", html)
+        self.assertIn("Đã dùng", html)
+        self.assertIn("Trống", html)
+        self.assertIn("Free space is low.", html)
+        self.assertNotIn("private", html)
+        self.assertNotIn("token=must-not-render", html)
+        self.assertNotIn('data-dashboard-volume="e"', html)
+        self.assertNotIn("style=", html)
+
+    def test_dashboard_storage_projection_supports_two_columns_then_one_column(self) -> None:
+        css = (ROOT / "src" / "ui" / "styles.css").read_text(encoding="utf-8")
+        self.assertIn(".dashboard-storage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));", css)
+        self.assertIn("@media (max-width: 1100px)", css)
+        self.assertIn(".dashboard-storage-grid { grid-template-columns: 1fr; }", css)
 
     def test_dashboard_active_count_excludes_reconstruct_only_records(self) -> None:
         html = _render(
@@ -169,6 +222,18 @@ class M6DashboardStorageModuleUxTests(unittest.TestCase):
             value,
             {"scheduled": 2, "afterRestart": 1, "afterStop": 2, "firstCancelled": True, "secondCancelled": True},
         )
+
+    def test_models_route_queues_one_deep_scan_per_frontend_session(self) -> None:
+        app = (ROOT / "src" / "ui" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("let storageAutoDeepRequested = false", app)
+        self.assertIn("const storageScanNeedsAutomaticDeep", app)
+        self.assertIn('if (STORAGE_SCAN_ACTIVE_STATES.includes(status)) return mode === "fast";', app)
+        self.assertIn("if (!scan && !storageAutoDeepRequested", app)
+        self.assertIn("const deep = await scanStorage()", app)
+        self.assertIn("Route navigation only", app)
+        self.assertIn("observes the worker and never starts a second one.", app)
+        self.assertIn('if (storageMode === "deep_exact" && STORAGE_SCAN_ACTIVE_STATES.includes(storageStatus))', app)
+        self.assertIn("await loadRouteData({ scan: true })", app)
 
     def test_models_storage_projection_separates_disk_free_and_owned_scan(self) -> None:
         html = _render(

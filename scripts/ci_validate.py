@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import subprocess
@@ -8,6 +9,10 @@ from pathlib import Path, PurePosixPath
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.shared.source_provenance import resolve_source_commit
 REPORT_LARGE_FILE_BYTES = 10 * 1024 * 1024
 FAIL_LARGE_FILE_BYTES = 50 * 1024 * 1024
 REVIEWED_LARGE_FILE_ALLOWLIST: frozenset[str] = frozenset()
@@ -270,9 +275,22 @@ def validate_worktree_whitespace(failures: list[str]) -> None:
         failures.append(f"Whitespace validation failed: {detail}")
 
 
-def main() -> int:
+def validate_expected_source(expected_source_sha: str | None, failures: list[str]) -> None:
+    if expected_source_sha is None:
+        return
+    try:
+        resolve_source_commit(ROOT, expected_source_sha)
+    except (OSError, ValueError) as exc:
+        failures.append(f"Source identity validation failed: {exc}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--expected-source-sha")
+    args = parser.parse_args(argv)
     failures: list[str] = []
     warnings: list[str] = []
+    validate_expected_source(args.expected_source_sha, failures)
     try:
         files = tracked_files()
     except RuntimeError as exc:

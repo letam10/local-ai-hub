@@ -103,6 +103,22 @@ class StorageSummaryBoundedTests(unittest.TestCase):
             self.assertEqual(report["bytes"], total_files)
             self.assertTrue(any(int(item["entries_scanned"]) > overview._DIRECTORY_SCAN_MAX_ENTRIES for item in updates))
 
+    def test_deep_scan_crosses_depth_24_without_using_fast_depth_budget(self) -> None:
+        with TemporaryDirectory(dir=ROOT.parent) as temporary:
+            models = Path(temporary) / "Models"
+            nested = models
+            for index in range(30):
+                nested = nested / f"level-{index:02d}"
+                nested.mkdir(parents=True)
+            models.mkdir(parents=True, exist_ok=True)
+            leaf = nested / "deep.bin"
+            leaf.write_bytes(b"deep")
+            report = overview._deep_directory_size_report(models, allowlisted_roots=(models,))
+            self.assertTrue(report["complete"])
+            self.assertEqual(report["status"], "available")
+            self.assertEqual(report["bytes"], len(b"deep"))
+            self.assertGreater(report["directories_scanned"], overview._DIRECTORY_SCAN_MAX_DEPTH)
+
     def test_deep_scan_cancellation_returns_partial_count_without_finishing(self) -> None:
         with TemporaryDirectory(dir=ROOT.parent) as temporary:
             models = Path(temporary) / "Models"
@@ -207,6 +223,41 @@ class StorageSummaryBoundedTests(unittest.TestCase):
                     overview._size_cache = original_size
             self.assertTrue(snapshot["scan"]["exact"])
             self.assertEqual(snapshot["scan"]["saved_at"], "2026-08-27T00:00:01+00:00")
+
+    def test_large_exact_cache_is_retained_as_historical_until_fresh_validation(self) -> None:
+        with TemporaryDirectory(dir=ROOT.parent) as temporary:
+            root = Path(temporary)
+            roots = self._roots(root)
+            for path in roots[1:]:
+                path.mkdir(parents=True)
+            reports = {
+                name: {"bytes": 2, "gb": 0.0, "status": "available", "complete": True, "entries_scanned": 2, "files_scanned": 2, "directories_scanned": 0, "reparse_entries": 0, "unreadable_entries": 0, "category_counts": overview._empty_category_counts()}
+                for name in overview._SCAN_AREA_NAMES
+            }
+            cache = root / "Config" / "storage_scan_cache.json"
+            with patch.object(overview, "_volume_projection", return_value=[]), patch.object(overview, "_legacy_records", return_value=[]), patch.object(overview, "_disk_snapshot", return_value={"status": "available"}), patch.object(overview, "_scan_cache_path", return_value=cache), patch.object(overview, "_FINGERPRINT_MAX_ENTRIES", 1):
+                result = overview._storage_summary_from_reports(root, reports, scan_status="completed", scan_execution="background", scan_id="scan-historical", started_at="2026-09-04T00:00:00+00:00", completed_at="2026-09-04T00:00:01+00:00", saved_at="2026-09-04T00:00:01+00:00", scan_mode="deep_exact")
+                overview._persist_exact_scan(result, root)
+                payload = json.loads(cache.read_text(encoding="utf-8"))
+                self.assertIsNone(payload["fingerprint"])
+                old_state = overview._scan_state
+                old_loaded = overview._scan_cache_loaded
+                old_size = overview._size_cache
+                try:
+                    overview._scan_state = {"status": "idle"}
+                    overview._scan_cache_loaded = False
+                    overview._size_cache = None
+                    overview._restore_exact_scan_cache()
+                    snapshot = overview.storage_scan_snapshot()
+                finally:
+                    overview._scan_state = old_state
+                    overview._scan_cache_loaded = old_loaded
+                    overview._size_cache = old_size
+            self.assertEqual(snapshot["status"], "partial")
+            self.assertFalse(snapshot["scan"]["exact"])
+            self.assertTrue(snapshot["scan"]["historical_exact"])
+            self.assertTrue(snapshot["scan"]["fresh_validation_required"])
+            self.assertEqual(snapshot["scan"]["owned_storage_total_bytes"], 14)
 
     def test_complete_root_with_unreadable_or_reparse_entries_cannot_be_exact(self) -> None:
         reports = {
@@ -448,7 +499,10 @@ class StorageSummaryBoundedTests(unittest.TestCase):
             roots = self._roots(root)
             updates: list[dict[str, object]] = []
 
-            def deep_report(path: Path, *, cancel_event=None, on_progress=None) -> dict[str, object]:
+            seen_ledgers: list[object] = []
+
+            def deep_report(path: Path, *, cancel_event=None, on_progress=None, seen_identities=None) -> dict[str, object]:
+                seen_ledgers.append(seen_identities)
                 value = {"bytes": 1, "gb": 0.0, "status": "available", "complete": True, "entries_scanned": 1, "files_scanned": 1, "directories_scanned": 0, "reparse_entries": 0, "unreadable_entries": 0, "reason": "fixture", "next_action": "none"}
                 if callable(on_progress):
                     on_progress(value)
@@ -469,6 +523,246 @@ class StorageSummaryBoundedTests(unittest.TestCase):
             self.assertTrue(snapshot["scan"]["exact"])
             self.assertEqual(snapshot["scan"]["mode"], "deep_exact")
             self.assertEqual(snapshot["scan"]["total_bytes_counted"], 7)
+            self.assertEqual(len(seen_ledgers), len(overview._SCAN_AREA_NAMES))
+            self.assertTrue(all(isinstance(item, overview._IdentityLedger) for item in seen_ledgers))
+            self.assertEqual(len({id(item) for item in seen_ledgers}), 1)
+
+    def test_fast_scan_requests_deep_only_after_fast_worker_stops(self) -> None:
+        with TemporaryDirectory(dir=ROOT.parent) as temporary:
+            root = Path(temporary)
+            roots = self._roots(root)
+            fast_started = threading.Event()
+            release_fast = threading.Event()
+            deep_started = threading.Event()
+
+            def fast_report(path: Path, *, cancel_event=None, **_kwargs: object) -> dict[str, object]:
+                fast_started.set()
+                release_fast.wait(timeout=2)
+                return {"bytes": 1, "gb": 0.0, "status": "available", "complete": True, "entries_scanned": 1, "files_scanned": 1, "directories_scanned": 0, "reparse_entries": 0, "unreadable_entries": 0, "reason": "fast fixture", "next_action": "none"}
+
+            def deep_report(path: Path, *, cancel_event=None, on_progress=None, seen_identities=None) -> dict[str, object]:
+                deep_started.set()
+                return {"bytes": 2, "gb": 0.0, "status": "available", "complete": True, "entries_scanned": 1, "files_scanned": 1, "directories_scanned": 0, "reparse_entries": 0, "unreadable_entries": 0, "reason": "deep fixture", "next_action": "none"}
+
+            old_state = overview._scan_state
+            old_thread = overview._scan_thread
+            old_events = overview._scan_cancel_events
+            old_cache_loaded = overview._scan_cache_loaded
+            old_journal_loaded = overview._scan_journal_loaded
+            old_size_cache = overview._size_cache
+            try:
+                with patch.object(overview, "_managed_roots", return_value=roots), patch.object(overview, "_directory_size_report", side_effect=fast_report), patch.object(overview, "_deep_directory_size_report", side_effect=deep_report), patch.object(overview, "_volume_projection", return_value=[]), patch.object(overview, "_legacy_records", return_value=[]), patch.object(overview, "_disk_snapshot", return_value={"status": "available"}):
+                    overview._scan_state = {"status": "idle"}
+                    overview._scan_thread = None
+                    overview._scan_cancel_events = {}
+                    overview._scan_cache_loaded = False
+                    overview._scan_journal_loaded = False
+                    overview._size_cache = None
+                    first = overview.start_storage_scan(force=True, mode="fast")
+                    self.assertTrue(fast_started.wait(timeout=2))
+                    requested = overview.start_storage_scan(force=True, mode="deep_exact")
+                    self.assertEqual(requested["scan"]["mode"], "fast")
+                    self.assertEqual(requested["scan"]["requested_mode"], "deep_exact")
+                    self.assertFalse(deep_started.is_set())
+                    fast_thread = overview._scan_thread
+                    self.assertIsNotNone(fast_thread)
+                    release_fast.set()
+                    fast_thread.join(timeout=2)
+                    self.assertTrue(deep_started.wait(timeout=2))
+                    deep_thread = overview._scan_thread
+                    self.assertIsNotNone(deep_thread)
+                    deep_thread.join(timeout=2)
+                    snapshot = overview.storage_scan_snapshot()
+            finally:
+                release_fast.set()
+                if overview._scan_thread is not None and overview._scan_thread is not old_thread:
+                    overview._scan_thread.join(timeout=2)
+                overview._scan_state = old_state
+                overview._scan_thread = old_thread
+                overview._scan_cancel_events = old_events
+                overview._scan_cache_loaded = old_cache_loaded
+                overview._scan_journal_loaded = old_journal_loaded
+                overview._size_cache = old_size_cache
+
+            self.assertEqual(snapshot["scan"]["mode"], "deep_exact")
+            self.assertEqual(snapshot["status"], "completed")
+
+    def test_deep_scan_retries_only_the_affected_root_after_identity_change(self) -> None:
+        with TemporaryDirectory(dir=ROOT.parent) as temporary:
+            root = Path(temporary)
+            roots = self._roots(root)
+            calls: dict[str, int] = {}
+            old_state = overview._scan_state
+            old_thread = overview._scan_thread
+            old_events = overview._scan_cancel_events
+            old_cache_loaded = overview._scan_cache_loaded
+            old_journal_loaded = overview._scan_journal_loaded
+            old_size_cache = overview._size_cache
+
+            def deep_report(path: Path, **_kwargs: object) -> dict[str, object]:
+                name = path.name
+                calls[name] = calls.get(name, 0) + 1
+                changed = name == "Models" and calls[name] == 1
+                categories = overview._empty_category_counts()
+                if changed:
+                    categories["IDENTITY_CHANGED"] = 1
+                return {
+                    "bytes": 3 if not changed else 0, "gb": 0.0,
+                    "status": "partial" if changed else "available", "complete": not changed,
+                    "traversal_completed": True, "entries_scanned": 1, "files_scanned": 1 if not changed else 0,
+                    "directories_scanned": 0, "reparse_entries": 0, "unreadable_entries": 0,
+                    "identity_changed_entries": 1 if changed else 0, "deduplicated_entries": 0,
+                    "category_counts": categories, "reason": "identity fixture", "next_action": "retry",
+                }
+
+            try:
+                with patch.object(overview, "_managed_roots", return_value=roots), patch.object(overview, "_deep_directory_size_report", side_effect=deep_report), patch.object(overview, "_volume_projection", return_value=[]), patch.object(overview, "_legacy_records", return_value=[]), patch.object(overview, "_disk_snapshot", return_value={"status": "available"}):
+                    overview._scan_state = {"status": "idle"}
+                    overview._scan_thread = None
+                    overview._scan_cancel_events = {}
+                    overview._scan_cache_loaded = False
+                    overview._scan_journal_loaded = False
+                    overview._size_cache = None
+                    started = overview.start_storage_scan(force=True, mode="deep_exact")
+                    thread = overview._scan_thread
+                    self.assertIsNotNone(thread)
+                    thread.join(timeout=3)
+                    snapshot = overview.storage_scan_snapshot()
+            finally:
+                if overview._scan_thread is not None and overview._scan_thread is not old_thread:
+                    overview._scan_thread.join(timeout=3)
+                overview._scan_state = old_state
+                overview._scan_thread = old_thread
+                overview._scan_cancel_events = old_events
+                overview._scan_cache_loaded = old_cache_loaded
+                overview._scan_journal_loaded = old_journal_loaded
+                overview._size_cache = old_size_cache
+
+            self.assertEqual(started["status"], "running")
+            self.assertEqual(snapshot["status"], "completed")
+            self.assertTrue(snapshot["scan"]["current_exact"])
+            self.assertEqual(snapshot["scan"]["volatile_roots"], [])
+            self.assertEqual(calls["Models"], 2)
+            self.assertTrue(all(calls[name] == 1 for name in ("Environments", "Runtime", "Cache", "Output", "Temp", "Logs")))
+            self.assertEqual(snapshot["areas"]["Models"]["identity_retry_count"], 1)
+
+    def test_permanently_volatile_root_remains_partial_after_finite_retries(self) -> None:
+        with TemporaryDirectory(dir=ROOT.parent) as temporary:
+            root = Path(temporary)
+            roots = self._roots(root)
+            calls: dict[str, int] = {}
+            old_state = overview._scan_state
+            old_thread = overview._scan_thread
+            old_events = overview._scan_cancel_events
+            old_cache_loaded = overview._scan_cache_loaded
+            old_journal_loaded = overview._scan_journal_loaded
+            old_size_cache = overview._size_cache
+
+            def deep_report(path: Path, **_kwargs: object) -> dict[str, object]:
+                name = path.name
+                calls[name] = calls.get(name, 0) + 1
+                categories = overview._empty_category_counts()
+                categories["IDENTITY_CHANGED"] = 1 if name == "Models" else 0
+                return {
+                    "bytes": 0, "gb": 0.0, "status": "partial" if name == "Models" else "available",
+                    "complete": name != "Models", "traversal_completed": True, "entries_scanned": 1,
+                    "files_scanned": 0, "directories_scanned": 0, "reparse_entries": 0,
+                    "unreadable_entries": 0, "identity_changed_entries": 1 if name == "Models" else 0,
+                    "deduplicated_entries": 0, "category_counts": categories,
+                    "reason": "permanent volatile fixture", "next_action": "retry",
+                }
+
+            try:
+                with patch.object(overview, "_managed_roots", return_value=roots), patch.object(overview, "_deep_directory_size_report", side_effect=deep_report), patch.object(overview, "_volume_projection", return_value=[]), patch.object(overview, "_legacy_records", return_value=[]), patch.object(overview, "_disk_snapshot", return_value={"status": "available"}):
+                    overview._scan_state = {"status": "idle"}
+                    overview._scan_thread = None
+                    overview._scan_cancel_events = {}
+                    overview._scan_cache_loaded = False
+                    overview._scan_journal_loaded = False
+                    overview._size_cache = None
+                    overview.start_storage_scan(force=True, mode="deep_exact")
+                    thread = overview._scan_thread
+                    self.assertIsNotNone(thread)
+                    thread.join(timeout=3)
+                    snapshot = overview.storage_scan_snapshot()
+            finally:
+                if overview._scan_thread is not None and overview._scan_thread is not old_thread:
+                    overview._scan_thread.join(timeout=3)
+                overview._scan_state = old_state
+                overview._scan_thread = old_thread
+                overview._scan_cancel_events = old_events
+                overview._scan_cache_loaded = old_cache_loaded
+                overview._scan_journal_loaded = old_journal_loaded
+                overview._size_cache = old_size_cache
+
+            self.assertEqual(snapshot["status"], "partial")
+            self.assertFalse(snapshot["scan"]["current_exact"])
+            self.assertEqual(snapshot["scan"]["volatile_roots"], ["Models"])
+            self.assertEqual(calls["Models"], overview._IDENTITY_RETRY_LIMIT + 1)
+            self.assertTrue(all(calls[name] == 1 for name in ("Environments", "Runtime", "Cache", "Output", "Temp", "Logs")))
+            self.assertEqual(snapshot["areas"]["Models"]["identity_retry_count"], overview._IDENTITY_RETRY_LIMIT)
+
+    def test_wide_deep_tree_uses_disk_frontier_instead_of_python_sibling_stack(self) -> None:
+        with TemporaryDirectory(dir=ROOT.parent) as temporary:
+            root = Path(temporary)
+            models = root / "Models"
+            models.mkdir(parents=True)
+            for index in range(1600):
+                (models / f"wide-{index:04d}").mkdir()
+
+            class TrackingLedger(overview._IdentityLedger):
+                def __init__(self, data_root: Path, scan_id: str) -> None:
+                    super().__init__(data_root, scan_id)
+                    self.max_frontier = 0
+
+                def push_frontier(self, path, depth, identity, counted_entry):
+                    super().push_frontier(path, depth, identity, counted_entry)
+                    pending = self.connection.execute("SELECT COUNT(*) FROM frontier").fetchone()[0]
+                    self.max_frontier = max(self.max_frontier, int(pending))
+
+            ledger = TrackingLedger(root, "scan-wide")
+            try:
+                report = overview._deep_directory_size_report(
+                    models, allowlisted_roots=(models,), seen_identities=ledger, frontier=ledger,
+                )
+            finally:
+                ledger.close(cleanup=True)
+            self.assertTrue(report["complete"])
+            self.assertEqual(report["status"], "available")
+            self.assertEqual(report["directories_scanned"], 1600)
+            self.assertGreaterEqual(ledger.max_frontier, 1600)
+
+    def test_interrupted_scan_journal_restores_partial_not_exact_state(self) -> None:
+        with TemporaryDirectory(dir=ROOT.parent) as temporary:
+            root = Path(temporary)
+            roots = self._roots(root)
+            journal = root / "Config" / "storage_scan_control.json"
+            journal.parent.mkdir(parents=True)
+            journal.write_text(json.dumps({
+                "schema_version": overview._SCAN_JOURNAL_SCHEMA,
+                "scan_id": "scan-interrupted",
+                "status": "running",
+                "mode": "deep_exact",
+                "progress": 37,
+                "started_at": "2026-09-04T00:00:00+00:00",
+            }), encoding="utf-8")
+            old_state = overview._scan_state
+            old_loaded = overview._scan_journal_loaded
+            old_cache_loaded = overview._scan_cache_loaded
+            try:
+                with patch.object(overview, "_managed_roots", return_value=roots), patch.object(overview, "_scan_journal_path", return_value=journal):
+                    overview._scan_state = {"status": "idle"}
+                    overview._scan_journal_loaded = False
+                    overview._scan_cache_loaded = True
+                    snapshot = overview.storage_scan_snapshot()
+            finally:
+                overview._scan_state = old_state
+                overview._scan_journal_loaded = old_loaded
+                overview._scan_cache_loaded = old_cache_loaded
+            self.assertEqual(snapshot["status"], "partial")
+            self.assertEqual(snapshot["scan"]["status"], "partial")
+            self.assertFalse(snapshot["scan"]["exact"])
+            self.assertTrue(snapshot["scan"]["fresh_validation_required"])
 
     def test_background_deep_scan_can_be_cancelled_without_blocking_request(self) -> None:
         with TemporaryDirectory(dir=ROOT.parent) as temporary:

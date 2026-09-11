@@ -209,6 +209,9 @@ export const ensureM3State = (state) => {
   vision.activeTool = ["omniparser", "rfdetr", "groundingdino"].includes(vision.activeTool) ? vision.activeTool : "omniparser";
   vision.thresholds = vision.thresholds && typeof vision.thresholds === "object" ? vision.thresholds : {};
   vision.selectedDetectionIndex = Number.isInteger(vision.selectedDetectionIndex) ? vision.selectedDetectionIndex : -1;
+  vision.settingsExpanded = vision.settingsExpanded === true;
+  vision.previewGeneration = Number.isInteger(vision.previewGeneration) && vision.previewGeneration >= 0 ? vision.previewGeneration : 0;
+  vision.previewState = ["empty", "loading", "loaded", "error"].includes(vision.previewState) ? vision.previewState : "empty";
   vision.job = vision.job && typeof vision.job === "object" ? vision.job : null;
   vision.staleJob = vision.staleJob && typeof vision.staleJob === "object" ? vision.staleJob : null;
   if (!state.m3.sam2 || typeof state.m3.sam2 !== "object") state.m3.sam2 = createSam2SelectionState();
@@ -222,6 +225,9 @@ export const ensureM3State = (state) => {
   sam2.frameTimeSeconds = Math.max(0, Math.min(MAX_FRAME_TIME_SECONDS, finite(sam2.frameTimeSeconds)));
   sam2.duration = Math.max(0, Math.min(MAX_FRAME_TIME_SECONDS, finite(sam2.duration)));
   sam2.framePrecisionUnavailable = sam2.framePrecisionUnavailable === true;
+  sam2.settingsExpanded = sam2.settingsExpanded === true;
+  sam2.previewGeneration = Number.isInteger(sam2.previewGeneration) && sam2.previewGeneration >= 0 ? sam2.previewGeneration : 0;
+  sam2.previewState = ["empty", "loading", "loaded", "error"].includes(sam2.previewState) ? sam2.previewState : "empty";
   sam2.selectedPointIndex = Number.isInteger(sam2.selectedPointIndex) ? sam2.selectedPointIndex : -1;
   sam2.selectedBox = Boolean(sam2.selection.box) && (sam2.mode === "box" || sam2.mode === "track");
   sam2.maskOpacity = clamp(sam2.maskOpacity ?? 0.68, 0, 1);
@@ -496,21 +502,35 @@ export const syncM3WorkspaceDom = (workspace, state) => {
     detachWorkspaceJob(model);
   }
   const source = sourceFor(model);
+  if (source.url && model.previewState === "empty") model.previewState = "loading";
+  if (!source.url) model.previewState = "empty";
   updateFileControl(workspace, source);
+  updateM3CommandStrip(workspace, model);
   const image = workspace.querySelector("[data-m3-preview-image]");
   const video = workspace.querySelector("[data-m3-preview-video]");
   const isVideo = source.mediaType.startsWith("video/") || Boolean(model?.sourceFile?.type?.startsWith("video/"));
+  const previewState = source.url ? (model.previewState || "loading") : "empty";
   if (image) {
     image.hidden = !source.url || isVideo;
+    image.dataset.previewGeneration = String(model.previewGeneration || 0);
+    image.dataset.previewSource = source.url;
     if (source.url && image.src !== new URL(source.url, window.location.href).href) image.src = source.url;
     if (source.name) image.alt = `Xem trước ${source.name}`;
   }
   if (video) {
     video.hidden = !source.url || !isVideo;
+    video.dataset.previewGeneration = String(model.previewGeneration || 0);
+    video.dataset.previewSource = source.url;
     if (source.url && video.src !== new URL(source.url, window.location.href).href) video.src = source.url;
   }
   const empty = workspace.querySelector("[data-m3-preview-empty]");
-  if (empty) empty.hidden = Boolean(source.url);
+  if (empty) empty.hidden = previewState !== "empty";
+  const loading = workspace.querySelector("[data-m3-preview-loading]");
+  if (loading) loading.hidden = previewState !== "loading" || Boolean(model.sourceError);
+  const error = workspace.querySelector("[data-m3-preview-error]");
+  if (error) error.hidden = !model.sourceError;
+  const errorText = workspace.querySelector("[data-m3-preview-error-text]");
+  if (errorText && model.sourceError) errorText.textContent = model.sourceError;
   if (key === "vision") syncVisionOverlay(workspace, model);
   if (key === "sam2") {
     const stage = workspace.querySelector("[data-sam2-canvas]");
@@ -535,6 +555,8 @@ export const rememberM3FileSelection = (input, state) => {
   model.sourceArtifact = null;
   model.localPreviewUrl = objectUrl;
   model.sourceError = "";
+  model.previewGeneration = Number(model.previewGeneration || 0) + 1;
+  model.previewState = "loading";
   delete input.dataset.uploadedArtifactId;
   if (key === "vision") {
     model.selectedDetectionIndex = -1;
@@ -562,6 +584,9 @@ export const setM3UploadedArtifact = (workspace, state, artifact) => {
     detachWorkspaceJob(model);
   }
   model.sourceArtifact = { id: artifact.id, name: artifact.name, size_bytes: artifact.size_bytes, media_type: artifact.media_type, url: artifact.url };
+  model.sourceError = "";
+  model.previewGeneration = Number(model.previewGeneration || 0) + 1;
+  model.previewState = "loading";
   const input = workspace.querySelector("input[data-m3-source-input], input[data-asset-key]");
   if (input && typeof artifact.id === "string") input.dataset.uploadedArtifactId = artifact.id;
   syncM3WorkspaceDom(workspace, state);
@@ -577,6 +602,42 @@ const updateVisionTabDom = (workspace, activeTool) => {
     button.classList.toggle("is-selected", selected);
     button.setAttribute("aria-selected", String(selected));
   });
+  const selectedTab = [...workspace.querySelectorAll("[data-vision-tool]")].find((button) => button.dataset.visionTool === activeTool);
+  const selectedPanel = [...workspace.querySelectorAll("[data-vision-tool-panel]")].find((panel) => panel.dataset.visionToolPanel === activeTool);
+  const label = workspace.querySelector("[data-m3-active-tool-label]");
+  if (label && selectedTab) label.textContent = selectedTab.firstChild?.textContent?.trim() || activeTool;
+  const primary = workspace.querySelector("[data-m3-primary-action]");
+  if (primary && selectedTab) {
+    primary.textContent = selectedTab.dataset.visionRunLabel || "Chạy công cụ";
+    primary.setAttribute("form", `vision-job-form-${activeTool}`);
+  }
+  const readiness = workspace.querySelector("[data-m3-readiness]");
+  if (readiness && selectedPanel) readiness.textContent = selectedPanel.querySelector(".status-pill")?.textContent?.trim() || "Chưa rõ";
+  const reason = workspace.querySelector("[data-m3-readiness-reason]");
+  if (reason && selectedPanel) reason.textContent = selectedPanel.querySelector(".m3-tool-readiness")?.textContent?.trim() || "Chưa có readiness snapshot.";
+  const settings = workspace.querySelector("[data-vision-active-settings]");
+  if (settings) settings.dataset.visionActiveSettings = activeTool;
+};
+
+const updateM3CommandStrip = (workspace, model) => {
+  const key = workspace.dataset.m3Workspace;
+  const active = key === "vision" ? model.activeTool : model.mode;
+  if (key === "vision") updateVisionTabDom(workspace, active);
+  else {
+    const activeButton = [...workspace.querySelectorAll("[data-sam2-mode]")].find((button) => button.dataset.sam2Mode === active);
+    const label = workspace.querySelector("[data-m3-active-tool-label]");
+    if (label) label.textContent = `SAM2 · ${activeButton?.textContent?.trim() || active}`;
+    const primary = workspace.querySelector("[data-m3-primary-action]");
+    if (primary) primary.setAttribute("form", "sam2-job-form");
+  }
+  const settings = workspace.querySelector("[data-m3-settings-toggle]");
+  const panel = workspace.querySelector("[data-m3-settings]");
+  if (settings && panel) {
+    const expanded = model.settingsExpanded === true;
+    panel.hidden = !expanded;
+    settings.setAttribute("aria-expanded", String(expanded));
+    settings.textContent = expanded ? "Thu gọn thiết lập" : "Thiết lập";
+  }
 };
 
 const syncThresholdPair = (workspace, target) => {
@@ -628,11 +689,20 @@ export const mountM3InteractiveWorkspaces = (root, state, callbacks = {}) => {
     if (key === "vision") updateVisionTabDom(workspace, model.activeTool);
     syncM3WorkspaceDom(workspace, state);
     workspace.addEventListener("click", (event) => {
+      const settingsToggle = event.target.closest("[data-m3-settings-toggle]");
+      if (settingsToggle && workspace.contains(settingsToggle)) {
+        model.settingsExpanded = !model.settingsExpanded;
+        updateM3CommandStrip(workspace, model);
+        callbacks.onStateChange?.(workspace.dataset.m3Workspace, state);
+        return;
+      }
       const visionTab = event.target.closest("[data-vision-tool]");
       if (visionTab && workspace.contains(visionTab)) {
         model.activeTool = visionTab.dataset.visionTool || "omniparser";
         updateVisionTabDom(workspace, model.activeTool);
+        updateM3CommandStrip(workspace, model);
         callbacks.onVisionToolChange?.(model.activeTool, state);
+        callbacks.onStateChange?.(workspace.dataset.m3Workspace, state);
         return;
       }
       const detection = event.target.closest("[data-vision-detection-index]");
@@ -864,10 +934,20 @@ export const mountM3InteractiveWorkspaces = (root, state, callbacks = {}) => {
     const mediaElements = [...workspace.querySelectorAll("[data-m3-preview-image], [data-m3-preview-video]")];
     mediaElements.forEach((media) => {
       ["load", "loadedmetadata", "durationchange"].forEach((eventName) => media.addEventListener(eventName, () => {
+        if (media.dataset.previewGeneration !== String(model.previewGeneration || 0)) return;
+        model.previewState = "loaded";
+        model.sourceError = "";
         if (key === "sam2" && media === workspace.querySelector("[data-m3-preview-video]")) updateFrameFromVideo(workspace, model, media);
         if (key === "sam2") drawSam2Canvas(workspace, model);
         else syncVisionOverlay(workspace, model);
+        syncM3WorkspaceDom(workspace, state);
       }, { signal }));
+      media.addEventListener("error", () => {
+        if (media.dataset.previewGeneration !== String(model.previewGeneration || 0)) return;
+        model.previewState = "error";
+        model.sourceError = "Artifact hoặc media không thể tải trong player hiện tại.";
+        syncM3WorkspaceDom(workspace, state);
+      }, { signal });
     });
     const video = workspace.querySelector("[data-m3-preview-video]");
     if (video) {

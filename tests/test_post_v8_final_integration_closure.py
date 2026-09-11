@@ -188,6 +188,11 @@ class ProductTruthfulnessIntegrationTests(unittest.TestCase):
         self.assertIn('src/ui/**/*.js', workflow)
         self.assertIn('Checked ${#files[@]} UI JavaScript files.', workflow)
 
+    def test_windows_launcher_records_large_github_run_ids_without_int32_overflow(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn('workflow_run_id = [int64]$env:GITHUB_RUN_ID', workflow)
+        self.assertNotIn('workflow_run_id = [int]$env:GITHUB_RUN_ID', workflow)
+
     def test_search_categories_have_one_routable_target_and_correct_truncation(self) -> None:
         frontend = (ROOT / "src" / "ui" / "shared" / "rendering.js").read_text(encoding="utf-8")
         for route in set(SEARCH_CATEGORY_ROUTES.values()):

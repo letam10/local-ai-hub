@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import re
 from types import SimpleNamespace
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -22,6 +24,30 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _fingerprint(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _node_json(script: str) -> object:
+    result = subprocess.run(
+        ["node", "--input-type=module", "--eval", script],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=15,
+        check=False,
+    )
+    if result.returncode:
+        raise AssertionError(result.stderr)
+    return json.loads(result.stdout)
+
+
+def _render_models(state: dict[str, object]) -> str:
+    script = (
+        "import { renderPage } from './src/ui/pages.js';"
+        f"const state = {json.dumps(state, ensure_ascii=True)};"
+        "process.stdout.write(JSON.stringify(renderPage('models', state)));"
+    )
+    return str(_node_json(script))
 
 
 def _capability(capability_id: str, *, dependencies: list[str] | None = None, state: str = "DEGRADED") -> dict[str, object]:
@@ -315,6 +341,65 @@ class ModelManagerV2ArchitectureTests(unittest.TestCase):
         self.assertIn("v2_inventory.js", document)
         self.assertNotIn("input type=\"file\"", controller)
         self.assertNotIn("setInterval", controller)
+
+    def test_models_ui_uses_master_detail_and_user_facing_state_copy(self) -> None:
+        controller = (ROOT / "src/ui/features/models/v2_inventory.js").read_text(encoding="utf-8")
+        self.assertIn("model-manager-v2-master-detail", controller)
+        self.assertIn("data-model-v2-select", controller)
+        self.assertIn("model-manager-v2-technical", controller)
+        for label in (
+            "Đã quan sát · chờ xác minh",
+            "Chưa cài đặt",
+            "Đã cài · đã xác minh",
+            "Đang hoạt động",
+            "Bị chặn · chưa khả dụng",
+            "Có bản cập nhật",
+        ):
+            self.assertIn(label, controller)
+        self.assertNotIn("<input", controller)
+        self.assertNotIn("download(", controller)
+
+    def test_models_render_one_v2_surface_without_legacy_catalog_table(self) -> None:
+        html = _render_models({
+            "productionCatalog": {"models": [_model()]},
+            "models": [{"model_name": "legacy-visible", "engine": "legacy", "size": {"bytes": 1}, "installed": True}],
+            "storage": {"scan": {"status": "partial", "mode": "fast"}},
+            "updateCenter": {},
+            "modelFilters": {"query": "", "category": "", "installed": "all"},
+        })
+        panels = re.findall(r'<section[^>]*\sdata-model-manager-v2(?:=|\s)[^>]*>[\s\S]*?</section>', html)
+        self.assertEqual(len(panels), 1)
+        panel = panels[0]
+        for marker in ("data-model-filters", "data-model-search", "data-model-category", "data-model-installed", "data-model-v2-count", "data-model-manager-v2-list"):
+            self.assertIn(marker, panel)
+        self.assertNotIn("<table", html)
+        self.assertNotIn("AI Models &amp; Components", html)
+        self.assertNotIn("data-model-readiness", html)
+        self.assertNotIn("legacy-visible", html)
+
+    def test_v2_filter_records_follow_query_category_and_install_state(self) -> None:
+        value = _node_json(r"""
+import { filterModelRecords } from './src/ui/features/models/v2_inventory.js';
+const records = [
+  { model_id: 'vision-one', display_name: 'Vision One', family: 'Vision', provider: 'Hub', category: 'Vision', format: 'bin', precision: 'FP16', runtime_id: 'vision', modules: ['vision'], installed: true },
+  { model_id: 'whisper-one', display_name: 'Whisper One', family: 'Speech', provider: 'Hub', category: 'Audio', format: 'bin', precision: 'FP16', runtime_id: 'whisper', modules: ['whisper'], installed: false },
+  { model_id: 'image-one', display_name: 'Image One', family: 'Image', provider: 'Hub', category: 'Image', format: 'safetensors', precision: 'FP8', runtime_id: 'image', modules: ['image'], installed: false },
+];
+process.stdout.write(JSON.stringify({
+  query: filterModelRecords(records, { query: 'whisper' }).map((item) => item.model_id),
+  category: filterModelRecords(records, { category: 'Vision' }).map((item) => item.model_id),
+  installed: filterModelRecords(records, { installed: 'installed' }).map((item) => item.model_id),
+  uninstalled: filterModelRecords(records, { installed: 'uninstalled' }).map((item) => item.model_id),
+  invalidCategory: filterModelRecords(records, { category: 'Legacy' }).map((item) => item.model_id),
+}));
+""")
+        self.assertEqual(value, {
+            "query": ["whisper-one"],
+            "category": ["vision-one"],
+            "installed": ["vision-one"],
+            "uninstalled": ["whisper-one", "image-one"],
+            "invalidCategory": ["vision-one", "whisper-one", "image-one"],
+        })
 
     def test_tracked_route_inventory_lists_v2_model_routes(self) -> None:
         inventory = json.loads((ROOT / "architecture/api_routes.yaml").read_text(encoding="utf-8"))

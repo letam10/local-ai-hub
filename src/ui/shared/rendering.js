@@ -289,17 +289,22 @@ const safeReadinessModules = (state) => {
 const safeStorageVolumes = (state) => {
   const productization = state?.productization && typeof state.productization === "object" ? state.productization : {};
   const storage = state?.storage && typeof state.storage === "object" ? state.storage : (productization.storage && typeof productization.storage === "object" ? productization.storage : {});
-  const raw = Array.isArray(storage.volumes) ? storage.volumes : [];
+  const nestedProjection = storage.volume_projection && typeof storage.volume_projection === "object" ? storage.volume_projection : {};
+  const raw = Array.isArray(storage.volumes)
+    ? storage.volumes
+    : Array.isArray(nestedProjection.volumes) ? nestedProjection.volumes : [];
   const byId = new Map(raw.filter((item) => item && typeof item === "object" && !Array.isArray(item)).map((item) => [String(item.id || "").toLowerCase(), item]));
   return ["c", "d"].map((id) => {
     const item = byId.get(id) || {};
     const status = readinessStatus(item.status, "unavailable");
-    const numeric = ["total_bytes", "free_bytes", "used_bytes"].every((key) => Number.isInteger(item[key]) && item[key] >= 0);
+    const numeric = ["total_bytes", "free_bytes", "used_bytes"].every((key) => Number.isInteger(item[key]) && item[key] >= 0)
+      && item.free_bytes <= item.total_bytes
+      && item.used_bytes <= item.total_bytes;
     const available = status === "available" && numeric;
     return {
       id,
       label: id === "c" ? "C:" : "D:",
-      status,
+      status: available ? "available" : status === "partial" ? "partial" : "unavailable",
       available,
       totalBytes: available ? item.total_bytes : null,
       freeBytes: available ? item.free_bytes : null,

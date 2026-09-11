@@ -132,12 +132,12 @@ class V8WindowsUxClosureTests(unittest.TestCase):
         models = (ROOT / "src" / "ui" / "features" / "models" / "models.js").read_text(encoding="utf-8")
         self.assertIn("not_installed_count", models)
         self.assertIn("operational_count", models)
-        self.assertIn('data-model-readiness=', models)
-        self.assertIn("This means not installed, not that the source is unavailable.", models)
-        self.assertIn("Needs verification", models)
-        self.assertIn("const modelSizeLabel", models)
-        self.assertIn("formatGb(bytes)", models)
-        self.assertIn("${modelSizeLabel(item", models)
+        self.assertIn("data-model-manager-v2", models)
+        self.assertIn("data-model-filters", models)
+        self.assertIn("data-model-v2-count", models)
+        self.assertNotIn("data-model-readiness=", models)
+        self.assertNotIn("catalogRows", models)
+        self.assertNotIn("legacyRows", models)
 
     def test_product_pages_have_vietnamese_feature_copy_dictionary(self) -> None:
         i18n = (ROOT / "src" / "ui" / "i18n.js").read_text(encoding="utf-8")
@@ -173,6 +173,10 @@ class V8WindowsUxClosureTests(unittest.TestCase):
 
     def test_ui_closure_contracts_are_explicit(self) -> None:
         css = (ROOT / "src/ui/styles.css").read_text(encoding="utf-8")
+        vision = (ROOT / "src/ui/features/vision/render.js").read_text(encoding="utf-8")
+        sam2 = (ROOT / "src/ui/features/sam2/render.js").read_text(encoding="utf-8")
+        ocr = (ROOT / "src/ui/features/ocr/render.js").read_text(encoding="utf-8")
+        whisper = (ROOT / "src/ui/features/whisper/render.js").read_text(encoding="utf-8")
         diagnostics = (ROOT / "src/ui/features/diagnostics/render.js").read_text(encoding="utf-8")
         settings = (ROOT / "src/ui/features/settings/render.js").read_text(encoding="utf-8")
         app = (ROOT / "src/ui/app.js").read_text(encoding="utf-8")
@@ -181,6 +185,16 @@ class V8WindowsUxClosureTests(unittest.TestCase):
         self.assertIn("diagnostics-column", diagnostics)
         self.assertIn("diagnostics-inventory-summary", diagnostics)
         self.assertIn("align-content: start", css)
+        self.assertIn("height: min(760px, calc(100dvh - 250px))", css)
+        self.assertIn("overflow: auto", css)
+        for workspace, region in (
+            (vision, "data-m3-scroll-region"),
+            (sam2, "data-m3-scroll-region"),
+            (ocr, "data-m4-scroll-region"),
+            (whisper, "data-m4-scroll-region"),
+        ):
+            self.assertIn(region, workspace)
+            self.assertIn("workspace__body", workspace)
         self.assertIn("status-explanation__body", css)
         self.assertIn("settingsDirty", app)
         self.assertIn("Áp dụng & lưu", settings)

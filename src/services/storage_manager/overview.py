@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import os
 import shutil
+import sqlite3
 import stat
 import threading
 import time
@@ -38,6 +39,7 @@ _FINGERPRINT_MAX_DEPTH = 24
 _DEEP_SCAN_YIELD_ENTRIES = 512
 _DEEP_SCAN_YIELD_SECONDS = 0.25
 _DEEP_SCAN_PROGRESS_WINDOW = 1_000
+_IDENTITY_RETRY_LIMIT = 2
 _OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
 _OLLAMA_TIMEOUT_SECONDS = 0.5
 _VOLUME_ALLOWLIST = (
@@ -52,7 +54,9 @@ _scan_lock = threading.RLock()
 _scan_thread: threading.Thread | None = None
 _scan_cancel_events: dict[str, threading.Event] = {}
 _scan_cache_loaded = False
+_scan_journal_loaded = False
 _SCAN_CACHE_SCHEMA = "storage-scan-cache.v1"
+_SCAN_JOURNAL_SCHEMA = "storage-scan-control.v1"
 _scan_state: dict[str, Any] = {
     "schema_version": "storage-scan.v1",
     "scan_id": None,
@@ -62,6 +66,14 @@ _scan_state: dict[str, Any] = {
     "current_area": None,
     "areas": {},
     "exact": False,
+    "traversal_completed": False,
+    "exact_at_saved_time": False,
+    "current_exact": False,
+    "identity_changed_entries": 0,
+    "unreadable_entries": 0,
+    "unknown_reparse_entries": 0,
+    "volatile_root": None,
+    "volatile_roots": [],
     "entries_scanned": 0,
     "started_at": None,
     "completed_at": None,
@@ -90,6 +102,133 @@ _STORAGE_ENTRY_CATEGORIES = (
     "UNREADABLE",
     "IDENTITY_CHANGED",
 )
+
+
+class _IdentityLedger:
+    """Disk-backed exact identity set for a single disposable deep scan.
+
+    SQLite keeps the primary-key index on disk, so the worker never retains a
+    set proportional to the number of files.  The ledger stores only stat
+    identities and is created under the managed DATA_ROOT Temp workspace; it
+    is never part of an artifact or source checkout.
+    """
+
+    def __init__(self, data_root: Path, scan_id: str) -> None:
+        # Config is outside the seven managed storage roots, so the ledger
+        # cannot be counted as a file while the worker is scanning Temp.
+        workspace = Path(data_root) / "Config" / ".storage-scan-ledgers" / scan_id
+        if workspace.exists() and (workspace.is_symlink() or _reparse_from_stat(workspace.stat(follow_symlinks=False))):
+            raise OSError("storage_ledger_reparse")
+        workspace.mkdir(parents=True, exist_ok=False)
+        self.workspace = workspace
+        self.path = workspace / "identities.sqlite3"
+        self.connection = sqlite3.connect(str(self.path), timeout=5.0)
+        self.connection.execute("PRAGMA journal_mode=DELETE")
+        self.connection.execute("CREATE TABLE identities (identity TEXT PRIMARY KEY, scope TEXT NOT NULL)")
+        self.connection.execute("CREATE TABLE frontier (sequence INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT NOT NULL, depth INTEGER NOT NULL, identity TEXT NOT NULL, counted INTEGER NOT NULL)")
+        self.connection.commit()
+        self.commit_count = 1
+        self.pending = 0
+        self.frontier_pending = 0
+        self._last_commit = time.monotonic()
+        self.scope: str = ""
+
+    def _maybe_commit(self, *, force: bool = False) -> None:
+        if not force and self.pending + self.frontier_pending < 512 and time.monotonic() - self._last_commit < 1.0:
+            return
+        self.connection.commit()
+        self.commit_count += 1
+        self.pending = 0
+        self.frontier_pending = 0
+        self._last_commit = time.monotonic()
+
+    @staticmethod
+    def _key(identity: tuple[int, int, int]) -> str:
+        return ":".join(str(int(value)) for value in identity)
+
+    def contains(self, identity: tuple[int, int, int]) -> bool:
+        row = self.connection.execute("SELECT 1 FROM identities WHERE identity = ? LIMIT 1", (self._key(identity),)).fetchone()
+        return row is not None
+
+    def add(self, identity: tuple[int, int, int]) -> None:
+        self.connection.execute("INSERT OR IGNORE INTO identities(identity, scope) VALUES (?, ?)", (self._key(identity), self.scope))
+        self.pending += 1
+        self._maybe_commit()
+
+    def set_scope(self, scope: str) -> None:
+        self.scope = str(scope)
+
+    def remove_scope(self, scope: str) -> None:
+        self.connection.execute("DELETE FROM identities WHERE scope = ?", (str(scope),))
+        self._maybe_commit(force=True)
+
+    def push_frontier(self, path: Path, depth: int, identity: os.stat_result | tuple[int, ...], counted_entry: bool) -> None:
+        # ``os.stat_result`` is a tuple subclass on Windows.  It must still be
+        # normalized to the scanner's seven-field identity; persisting all
+        # platform-specific stat fields makes every dequeued directory compare
+        # unequal on the post-read check.
+        value = identity if isinstance(identity, tuple) and not isinstance(identity, os.stat_result) else _stat_identity(identity)
+        encoded = ":".join(str(int(item)) for item in value)
+        self.connection.execute(
+            "INSERT INTO frontier(path, depth, identity, counted) VALUES (?, ?, ?, ?)",
+            (str(path), int(depth), encoded, 1 if counted_entry else 0),
+        )
+        self.frontier_pending += 1
+        self._maybe_commit()
+
+    def pop_frontier(self) -> tuple[Path, int, tuple[int, ...], bool] | None:
+        row = self.connection.execute("SELECT sequence, path, depth, identity, counted FROM frontier ORDER BY sequence LIMIT 1").fetchone()
+        if row is None:
+            return None
+        self.connection.execute("DELETE FROM frontier WHERE sequence = ?", (row[0],))
+        self.frontier_pending += 1
+        self._maybe_commit()
+        try:
+            identity = tuple(int(item) for item in str(row[3]).split(":"))
+        except (TypeError, ValueError):
+            raise OSError("storage_frontier_invalid") from None
+        return Path(str(row[1])), int(row[2]), identity, bool(row[4])
+
+    def clear_frontier(self) -> None:
+        self.connection.execute("DELETE FROM frontier")
+        self._maybe_commit(force=True)
+
+    def close(self, *, cleanup: bool = True) -> None:
+        try:
+            if self.pending or self.frontier_pending:
+                self._maybe_commit(force=True)
+            self.connection.execute("DELETE FROM frontier")
+            self._maybe_commit(force=True)
+        finally:
+            self.connection.close()
+        if cleanup:
+            try:
+                self.path.unlink(missing_ok=True)
+                self.workspace.rmdir()
+                self.workspace.parent.rmdir()
+            except OSError:
+                # An interrupted or externally occupied ledger stays for the
+                # next ownership-verified recovery pass.
+                pass
+
+
+def _identity_contains(seen: object, identity: tuple[int, int, int]) -> bool:
+    if isinstance(seen, _IdentityLedger):
+        return seen.contains(identity)
+    try:
+        return identity in seen  # type: ignore[operator]
+    except (TypeError, AttributeError):
+        return False
+
+
+def _identity_add(seen: object, identity: tuple[int, int, int]) -> None:
+    if isinstance(seen, _IdentityLedger):
+        seen.add(identity)
+    else:
+        try:
+            seen.add(identity)  # type: ignore[union-attr]
+        except (AttributeError, TypeError):
+            pass
 
 
 def _empty_category_counts() -> dict[str, int]:
@@ -155,7 +294,7 @@ def _classify_reparse_entry(
     path: Path,
     *,
     allowlisted_roots: tuple[Path, ...] = (),
-    seen_identities: set[tuple[int, int, int]] | None = None,
+    seen_identities: object | None = None,
 ) -> str:
     """Classify a reparse without following its bytes into the scan."""
 
@@ -169,7 +308,7 @@ def _classify_reparse_entry(
     except (OSError, TypeError, ValueError):
         return "UNKNOWN_REPARSE"
     identity = _object_identity(target_stat)
-    if identity is not None and seen_identities is not None and identity in seen_identities:
+    if identity is not None and seen_identities is not None and _identity_contains(seen_identities, identity):
         return "INTERNAL_DUPLICATE_ALIAS"
     return "INTERNAL_ALLOWLISTED_ALIAS"
 
@@ -243,15 +382,89 @@ def _scan_cache_path(data_root: Path | None = None) -> Path:
     return Path(root) / "Config" / "storage_scan_cache.json"
 
 
+def _scan_journal_path(data_root: Path | None = None) -> Path:
+    root = data_root if data_root is not None else _managed_roots()[0]
+    return Path(root) / "Config" / "storage_scan_control.json"
+
+
+def _persist_scan_journal() -> None:
+    """Persist only small scan-control state for truthful restart recovery."""
+
+    try:
+        data_root = _managed_roots()[0]
+        state = _copy_scan_state()
+        value = {
+            "schema_version": _SCAN_JOURNAL_SCHEMA,
+            "scan_id": state.get("scan_id"),
+            "status": state.get("status"),
+            "mode": state.get("mode"),
+            "progress": state.get("progress", 0),
+            "current_area": state.get("current_area"),
+            "started_at": state.get("started_at"),
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        target = _scan_journal_path(data_root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8", newline="\n")
+        os.replace(temporary, target)
+    except (OSError, TypeError, ValueError):
+        try:
+            temporary.unlink(missing_ok=True)
+        except (UnboundLocalError, OSError):
+            pass
+
+
+def _restore_scan_journal() -> None:
+    """Turn a process-dead running scan into an explicit partial state."""
+
+    global _scan_journal_loaded, _scan_state
+    if _scan_journal_loaded or _scan_state.get("status") != "idle":
+        return
+    _scan_journal_loaded = True
+    try:
+        value = json.loads(_scan_journal_path().read_text(encoding="utf-8"))
+        if not isinstance(value, dict) or value.get("schema_version") != _SCAN_JOURNAL_SCHEMA:
+            return
+        if value.get("status") not in {"running", "cancelling"}:
+            return
+        progress = value.get("progress") if isinstance(value.get("progress"), int) else 0
+        _scan_state = {
+            **_scan_state,
+            "scan_id": value.get("scan_id"),
+            "status": "partial",
+            "execution": "background",
+            "mode": value.get("mode") if value.get("mode") in {"fast", "deep_exact"} else "deep_exact",
+            "progress": min(99, max(0, progress)),
+            "current_area": None,
+            "exact": False,
+            "historical_exact": False,
+            "fresh_validation_required": True,
+            "started_at": value.get("started_at"),
+            "completed_at": None,
+            "saved_at": None,
+            "reason": "Lần quét storage trước đã bị gián đoạn khi process dừng; không phục hồi thành exact.",
+            "next_action": "Mở Models & Storage để bắt đầu một DEEP_EXACT scan mới.",
+            "cancel_requested": False,
+        }
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        return
+
+
 def _persist_exact_scan(result: dict[str, Any], data_root: Path) -> None:
     scan = result.get("scan", {}) if isinstance(result.get("scan"), dict) else {}
     if result.get("status") != "completed" or scan.get("mode") != "deep_exact" or scan.get("exact") is not True:
         return
     fingerprint = scan.get("fingerprint") or result.get("fingerprint")
-    if not isinstance(fingerprint, str) or len(fingerprint) != 64:
+    # Small fixtures may still use the legacy bounded fingerprint as an
+    # optimization.  A real deep scan must not perform a second full metadata
+    # pass merely to manufacture cache validity; its saved totals are
+    # historical truth and require a fresh validation scan on reopen.
+    entries = scan.get("entries_scanned") if isinstance(scan.get("entries_scanned"), int) else 0
+    if (not isinstance(fingerprint, str) or len(fingerprint) != 64) and entries <= _FINGERPRINT_MAX_ENTRIES:
         fingerprint = _fingerprint_roots(tuple(Path(data_root) / name for name in _SCAN_AREA_NAMES))
     if not isinstance(fingerprint, str) or len(fingerprint) != 64:
-        return
+        fingerprint = None
     target = _scan_cache_path(data_root)
     config_root = target.parent
     try:
@@ -260,7 +473,14 @@ def _persist_exact_scan(result: dict[str, Any], data_root: Path) -> None:
             return
         config_root.mkdir(parents=True, exist_ok=True)
         saved_at = str(result.get("scan", {}).get("saved_at") or datetime.now(timezone.utc).isoformat(timespec="seconds"))
-        payload = {"schema_version": _SCAN_CACHE_SCHEMA, "saved_at": saved_at, "fingerprint": fingerprint, "summary": result}
+        payload = {
+            "schema_version": _SCAN_CACHE_SCHEMA,
+            "saved_at": saved_at,
+            "fingerprint": fingerprint,
+            "cache_mode": "validated" if fingerprint else "historical_exact",
+            "fresh_validation_required": fingerprint is None,
+            "summary": result,
+        }
         temporary = config_root / ".storage_scan_cache.tmp"
         with temporary.open("w", encoding="utf-8", newline="\n") as handle:
             json.dump(payload, handle, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
@@ -291,39 +511,59 @@ def _restore_exact_scan_cache() -> None:
         if not isinstance(result, dict) or not isinstance(scan, dict) or scan.get("mode") != "deep_exact" or scan.get("exact") is not True or result.get("status") != "completed":
             return
         cached_fingerprint = scan.get("fingerprint") or result.get("fingerprint") or (payload.get("fingerprint") if isinstance(payload, dict) else None)
-        if not isinstance(cached_fingerprint, str) or len(cached_fingerprint) != 64:
-            return
-        cache_data_root = cache_path.parent.parent
-        current_roots = tuple(_managed_roots()[1:])
-        if _absolute_path(cache_data_root) != _absolute_path(data_root):
-            current_roots = tuple(cache_data_root / name for name in _SCAN_AREA_NAMES)
-        current_fingerprint = _fingerprint_roots(current_roots)
-        if current_fingerprint != cached_fingerprint:
-            return
+        validated_cache = isinstance(cached_fingerprint, str) and len(cached_fingerprint) == 64
+        if validated_cache:
+            cache_data_root = cache_path.parent.parent
+            current_roots = tuple(_managed_roots()[1:])
+            if _absolute_path(cache_data_root) != _absolute_path(data_root):
+                current_roots = tuple(cache_data_root / name for name in _SCAN_AREA_NAMES)
+            current_fingerprint = _fingerprint_roots(current_roots)
+            if current_fingerprint != cached_fingerprint:
+                return
         areas = result.get("areas") if isinstance(result.get("areas"), dict) else {}
         saved_at = payload.get("saved_at") if isinstance(payload, dict) else None
         if not isinstance(saved_at, str) or not saved_at:
             saved_at = scan.get("saved_at")
+        restored_result = dict(result)
+        restored_scan = dict(scan)
+        historical_exact = not validated_cache
+        if historical_exact:
+            # Large/deep trees cannot be revalidated by the bounded legacy
+            # fingerprint. Keep exact-at-time totals visible but remove the
+            # claim that the current filesystem is exact.
+            restored_scan.update({"status": "partial", "exact": False, "exact_at_saved_time": True, "current_exact": False, "historical_exact": True, "fresh_validation_required": True})
+            restored_result.update({"status": "partial", "owned_storage_exact": False, "exact_at_saved_time": True, "current_exact": False, "historical_exact": True, "fresh_validation_required": True})
+            restored_result["scan"] = restored_scan
+            restored_result["reason"] = f"Chính xác tại {saved_at or scan.get('saved_at') or 'thời điểm đã lưu'}; cần quét DEEP_EXACT mới để xác nhận hiện tại."
+            restored_result["next_action"] = "Mở lại Models & Storage để theo dõi lần quét xác thực mới."
         _scan_state = {
-            "schema_version": "storage-scan.v1", "scan_id": scan.get("scan_id"), "status": "completed", "execution": "background",
+            "schema_version": "storage-scan.v1", "scan_id": scan.get("scan_id"), "status": "partial" if historical_exact else "completed", "execution": "background",
             "progress": 100, "current_area": None, "areas": {str(k): dict(v) for k, v in areas.items() if isinstance(v, dict)},
-            "exact": True, "mode": "deep_exact", "entries_scanned": int(scan.get("entries_scanned", 0)),
+            "exact": not historical_exact, "historical_exact": historical_exact, "fresh_validation_required": historical_exact, "mode": "deep_exact", "entries_scanned": int(scan.get("entries_scanned", 0)),
+            "traversal_completed": bool(scan.get("traversal_completed", True)),
+            "exact_at_saved_time": True if historical_exact else bool(scan.get("exact_at_saved_time", scan.get("exact", False))),
+            "current_exact": False if historical_exact else bool(scan.get("current_exact", scan.get("exact", False))),
+            "identity_changed_entries": int(scan.get("identity_changed_entries", result.get("identity_changed_entries", 0)) or 0),
+            "unreadable_entries": int(scan.get("unreadable_entries", result.get("unreadable_entries", 0)) or 0),
+            "unknown_reparse_entries": int(scan.get("unknown_reparse_entries", result.get("unknown_reparse_entries", 0)) or 0),
+            "volatile_root": scan.get("volatile_root", result.get("volatile_root")),
+            "volatile_roots": list(scan.get("volatile_roots", result.get("volatile_roots", [])) or []),
             "files_scanned": int(scan.get("files_scanned", 0)), "total_bytes_counted": int(scan.get("total_bytes_counted", 0)),
-            "started_at": scan.get("started_at"), "completed_at": scan.get("completed_at"), "reason": result.get("reason", "Đã khôi phục tổng storage chính xác đã lưu."),
-            "next_action": result.get("next_action", "Bấm Quét lại sau khi có thay đổi bên ngoài."), "cancel_requested": False,
+            "started_at": scan.get("started_at"), "completed_at": scan.get("completed_at"), "reason": restored_result.get("reason", "Đã khôi phục tổng storage chính xác đã lưu."),
+            "next_action": restored_result.get("next_action", "Bấm Quét lại sau khi có thay đổi bên ngoài."), "cancel_requested": False,
             "saved_at": saved_at,
             "managed_root_counts": {str(k): dict(v) for k, v in (result.get("managed_root_counts") or {}).items() if isinstance(v, dict)},
             "owned_storage_total_bytes": int(result.get("owned_storage_total_bytes", scan.get("owned_storage_total_bytes", scan.get("total_bytes_counted", 0))) or 0),
-            "owned_storage_exact": result.get("owned_storage_exact") is True or scan.get("owned_storage_exact") is True,
+            "owned_storage_exact": (not historical_exact) and (result.get("owned_storage_exact") is True or scan.get("owned_storage_exact") is True),
             "deduplicated_targets": int(result.get("deduplicated_targets", scan.get("deduplicated_targets", 0)) or 0),
             "deduplicated_entries": int(result.get("deduplicated_entries", scan.get("deduplicated_entries", 0)) or 0),
             "category_counts": {str(k): int(v) for k, v in (result.get("category_counts") or scan.get("category_counts") or {}).items() if isinstance(v, int) and v >= 0},
-            "fingerprint": cached_fingerprint,
+            "fingerprint": cached_fingerprint if validated_cache else None,
             "disk": dict(result.get("disk") or {}), "volumes": [dict(item) for item in result.get("volumes") or [] if isinstance(item, dict)],
             "volume_projection": dict(result.get("volume_projection") or {}), "legacy": [dict(item) for item in result.get("legacy") or [] if isinstance(item, dict)],
             "legacy_counts": dict(result.get("legacy_counts") or {}),
         }
-        _size_cache = (time.monotonic(), result)
+        _size_cache = (time.monotonic(), restored_result)
     except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError, KeyError):
         return
 
@@ -396,7 +636,8 @@ def _directory_tree_report(
     cancel_event: threading.Event | None = None,
     on_progress: Any = None,
     allowlisted_roots: tuple[Path, ...] = (),
-    seen_identities: set[tuple[int, int, int]] | None = None,
+    seen_identities: object | None = None,
+    frontier: object | None = None,
 ) -> dict[str, Any]:
     """Read one managed tree without following aliases or trusting stale stats.
 
@@ -426,13 +667,14 @@ def _directory_tree_report(
         if category in category_counts:
             category_counts[category] += max(0, int(amount))
 
-    def report(*, status: str, complete: bool, reason: str, next_action: str) -> dict[str, Any]:
+    def report(*, status: str, complete: bool, reason: str, next_action: str, traversal_completed: bool = False) -> dict[str, Any]:
         value = {
             "bytes": total,
             "gb": round(total / (1024**3), 3),
             "total_bytes_counted": total,
             "status": status,
             "complete": complete,
+            "traversal_completed": traversal_completed,
             "entries_scanned": entries_scanned,
             "files_scanned": files_scanned,
             "directories_scanned": directories_scanned,
@@ -462,8 +704,9 @@ def _directory_tree_report(
             next_action="Bấm Quét lại để bắt đầu một deep scan mới.",
         )
 
-    def post_read_identity_changed(before: os.stat_result, after: os.stat_result) -> bool:
-        return _stat_identity(before) != _stat_identity(after)
+    def post_read_identity_changed(before: os.stat_result | tuple[int, ...], after: os.stat_result) -> bool:
+        expected = before if isinstance(before, tuple) and not isinstance(before, os.stat_result) else _stat_identity(before)
+        return expected != _stat_identity(after)
 
     try:
         root_stat = path.stat(follow_symlinks=False)
@@ -490,13 +733,14 @@ def _directory_tree_report(
 
     if stat.S_ISREG(root_stat.st_mode):
         identity = _object_identity(root_stat)
-        if identity is not None and identity in seen:
+        if identity is not None and _identity_contains(seen, identity):
             add_category("INTERNAL_DUPLICATE_ALIAS")
             deduplicated_entries += 1
-            return report(
-                status="available",
-                complete=True,
-                reason="Managed storage root đã được tính qua một allowlisted alias; không cộng lại.",
+        return report(
+            status="available",
+            complete=True,
+            traversal_completed=True,
+            reason="Managed storage root đã được tính qua một allowlisted alias; không cộng lại.",
                 next_action="Không cần thao tác; bấm Quét lại sau khi có thay đổi bên ngoài.",
             )
         try:
@@ -506,6 +750,7 @@ def _directory_tree_report(
             return report(
                 status="partial",
                 complete=False,
+                traversal_completed=True,
                 reason="Tệp managed storage đã thay đổi trong lúc đọc nên tổng không được đánh dấu chính xác.",
                 next_action="Bấm Quét lại để xác nhận lại tổng managed.",
             )
@@ -523,17 +768,19 @@ def _directory_tree_report(
             return report(
                 status="partial",
                 complete=False,
+                traversal_completed=True,
                 reason="Tệp managed storage đã thay đổi trong lúc đọc nên tổng không được đánh dấu chính xác.",
                 next_action="Bấm Quét lại để xác nhận lại tổng managed.",
             )
         if identity is not None:
-            seen.add(identity)
+            _identity_add(seen, identity)
         add_category("NORMAL_OWNED_ENTRY")
         total = int(after.st_size)
         entries_scanned = files_scanned = 1
         return report(
             status="available",
             complete=True,
+            traversal_completed=True,
             reason="Đã đọc chính xác tệp managed storage.",
             next_action="Không cần thao tác; bấm Quét lại sau khi có thay đổi bên ngoài.",
         )
@@ -550,15 +797,30 @@ def _directory_tree_report(
 
     root_identity = _object_identity(root_stat)
     if root_identity is not None:
-        seen.add(root_identity)
+        _identity_add(seen, root_identity)
     # The final boolean records whether this directory itself was counted as a
-    # normal entry.  The managed root is not an entry in its own report.
-    stack: list[tuple[Path, int, os.stat_result, bool]] = [(path, 0, root_stat, False)]
+    # normal entry.  The managed root is not an entry in its own report.  A
+    # deep background scan supplies a SQLite frontier so a directory with
+    # hundreds of thousands of sibling directories never grows a Python list
+    # proportional to that fan-out.
+    disk_frontier = frontier if isinstance(frontier, _IdentityLedger) else None
+    stack: list[tuple[Path, int, os.stat_result, bool]] = []
+    if disk_frontier is not None:
+        disk_frontier.clear_frontier()
+        disk_frontier.push_frontier(path, 0, root_stat, False)
+    else:
+        stack.append((path, 0, root_stat, False))
 
-    while stack:
+    while stack or disk_frontier is not None:
         if event.is_set():
             return cancelled()
-        current, depth, expected_stat, counted_entry = stack.pop()
+        if disk_frontier is not None:
+            pending = disk_frontier.pop_frontier()
+            if pending is None:
+                break
+            current, depth, expected_stat, counted_entry = pending
+        else:
+            current, depth, expected_stat, counted_entry = stack.pop()
         try:
             entries = os.scandir(current)
         except OSError:
@@ -595,18 +857,21 @@ def _directory_tree_report(
                             deduplicated_entries += 1
                     else:
                         identity = _object_identity(before)
-                        if identity is not None and identity in seen:
+                        if identity is not None and _identity_contains(seen, identity):
                             add_category("INTERNAL_DUPLICATE_ALIAS")
                             deduplicated_entries += 1
                         elif stat.S_ISDIR(before.st_mode):
                             if identity is not None:
-                                seen.add(identity)
+                                _identity_add(seen, identity)
                             add_category("NORMAL_OWNED_ENTRY")
                             directories_scanned += 1
                             child = Path(entry.path)
-                            if depth < _DIRECTORY_SCAN_MAX_DEPTH:
-                                stack.append((child, depth + 1, before, True))
-                            else:
+                            if deep or depth < _DIRECTORY_SCAN_MAX_DEPTH:
+                                if disk_frontier is not None:
+                                    disk_frontier.push_frontier(child, depth + 1, before, True)
+                                else:
+                                    stack.append((child, depth + 1, before, True))
+                            elif not deep:
                                 truncated = True
                         elif stat.S_ISREG(before.st_mode):
                             try:
@@ -622,7 +887,7 @@ def _directory_tree_report(
                                 add_category("IDENTITY_CHANGED")
                                 continue
                             if identity is not None:
-                                seen.add(identity)
+                                _identity_add(seen, identity)
                             add_category("NORMAL_OWNED_ENTRY")
                             files_scanned += 1
                             total += int(after.st_size)
@@ -693,6 +958,7 @@ def _directory_tree_report(
         return report(
             status="partial",
             complete=False,
+            traversal_completed=not unreadable_entries and not truncated,
             reason="Không thể xác nhận tổng chính xác: " + "; ".join(reasons) + ".",
             next_action="Sửa quyền/identity hoặc loại trừ reparse point rồi quét lại.",
         )
@@ -704,6 +970,7 @@ def _directory_tree_report(
     return report(
         status="available",
         complete=True,
+        traversal_completed=True,
         reason=reason,
         next_action="Không cần thao tác; bấm Quét lại sau khi có thay đổi bên ngoài.",
     )
@@ -713,7 +980,7 @@ def _directory_size_report(
     path: Path,
     *,
     allowlisted_roots: tuple[Path, ...] = (),
-    seen_identities: set[tuple[int, int, int]] | None = None,
+    seen_identities: object | None = None,
 ) -> dict[str, Any]:
     """Return a bounded, path-free FAST projection for one managed root."""
 
@@ -731,7 +998,8 @@ def _deep_directory_size_report(
     cancel_event: threading.Event | None = None,
     on_progress: Any = None,
     allowlisted_roots: tuple[Path, ...] = (),
-    seen_identities: set[tuple[int, int, int]] | None = None,
+    seen_identities: object | None = None,
+    frontier: object | None = None,
 ) -> dict[str, Any]:
     """Stream a cancellable DEEP_EXACT projection without an entry cap."""
 
@@ -742,6 +1010,7 @@ def _deep_directory_size_report(
         on_progress=on_progress,
         allowlisted_roots=allowlisted_roots,
         seen_identities=seen_identities,
+        frontier=frontier,
     )
 
 
@@ -845,6 +1114,7 @@ def _storage_summary_from_reports(
     # terminal complete report.  ``all([])`` and a cancelled worker with only
     # its first area completed must never be promoted to exact.
     exact = _reports_are_exact(reports)
+    truth = _storage_truth_fields(reports, current_exact=exact)
     owned_total_bytes = sum(int(report.get("bytes", 0) or 0) for report in reports.values())
     entries_scanned = sum(int(report.get("entries_scanned", 0) or 0) for report in reports.values())
     files_scanned = sum(int(report.get("files_scanned", 0) or 0) for report in reports.values())
@@ -865,6 +1135,7 @@ def _storage_summary_from_reports(
         report = reports.get(name, {"status": "pending", "complete": False})
         managed_root_counts[name] = {
             "complete": report.get("complete") is True,
+            "traversal_completed": report.get("traversal_completed") is True,
             "status": str(report.get("status") or "pending"),
             "entries_scanned": int(report.get("entries_scanned", 0) or 0),
             "files_scanned": int(report.get("files_scanned", 0) or 0),
@@ -925,6 +1196,7 @@ def _storage_summary_from_reports(
             "completed_at": completed_at,
             "saved_at": saved_at if exact else None,
             "exact": exact,
+            **truth,
             "owned_storage_total_bytes": owned_total_bytes,
             "owned_storage_total_gb": round(owned_total_bytes / (1024**3), 3),
             "owned_storage_exact": exact,
@@ -955,6 +1227,7 @@ def _storage_summary_from_reports(
         "owned_storage_total_bytes": owned_total_bytes,
         "owned_storage_total_gb": round(owned_total_bytes / (1024**3), 3),
         "owned_storage_exact": exact,
+        **truth,
         "owned_storage_scope": "allowlisted managed roots only; external reparse targets excluded",
         "deduplicated_targets": max(0, int(deduplicated_targets)),
         "deduplicated_entries": max(0, deduplicated_entries),
@@ -988,6 +1261,7 @@ def storage_scan_snapshot() -> dict[str, Any]:
     """Return a path-free, incremental scan projection for UI polling."""
 
     with _scan_lock:
+        _restore_scan_journal()
         _restore_exact_scan_cache()
     state = _copy_scan_state()
     area_values = state.get("areas") if isinstance(state.get("areas"), dict) else {}
@@ -1022,10 +1296,10 @@ def storage_scan_snapshot() -> dict[str, Any]:
     scan = {
         key: state.get(key)
         for key in (
-            "schema_version", "scan_id", "status", "execution", "progress", "current_area", "exact",
+            "schema_version", "scan_id", "status", "execution", "progress", "current_area", "exact", "traversal_completed", "exact_at_saved_time", "current_exact", "identity_changed_entries", "unreadable_entries", "unknown_reparse_entries", "volatile_root", "volatile_roots",
             "entries_scanned", "files_scanned", "total_bytes_counted", "started_at", "completed_at",
             "saved_at", "owned_storage_total_bytes", "owned_storage_exact", "deduplicated_targets", "deduplicated_entries", "category_counts", "fingerprint",
-            "reason", "next_action", "mode", "cancel_requested",
+            "reason", "next_action", "mode", "cancel_requested", "requested_mode", "next_mode", "historical_exact", "fresh_validation_required",
         )
     }
     scan.update({
@@ -1034,6 +1308,13 @@ def storage_scan_snapshot() -> dict[str, Any]:
         "directories_scanned": directories_scanned,
         "reparse_entries": reparse_entries,
         "unreadable_entries": unreadable_entries,
+        "traversal_completed": bool(state.get("traversal_completed", False)),
+        "exact_at_saved_time": bool(state.get("exact_at_saved_time", False)),
+        "current_exact": bool(state.get("current_exact", state.get("exact", False))),
+        "identity_changed_entries": int(state.get("identity_changed_entries", 0) or 0),
+        "unknown_reparse_entries": int(state.get("unknown_reparse_entries", category_counts["UNKNOWN_REPARSE"]) or 0),
+        "volatile_root": state.get("volatile_root"),
+        "volatile_roots": list(state.get("volatile_roots", []) or []),
         "deduplicated_entries": deduplicated_entries,
         "category_counts": category_counts,
         "completed_roots": completed_roots,
@@ -1048,6 +1329,16 @@ def storage_scan_snapshot() -> dict[str, Any]:
         "managed_root_counts": state.get("managed_root_counts", {}),
         "owned_storage_total_bytes": state.get("owned_storage_total_bytes", 0),
         "owned_storage_exact": state.get("owned_storage_exact", False),
+        "traversal_completed": bool(state.get("traversal_completed", False)),
+        "exact_at_saved_time": bool(state.get("exact_at_saved_time", False)),
+        "current_exact": bool(state.get("current_exact", state.get("exact", False))),
+        "identity_changed_entries": int(state.get("identity_changed_entries", 0) or 0),
+        "unreadable_entries": int(state.get("unreadable_entries", unreadable_entries) or 0),
+        "unknown_reparse_entries": int(state.get("unknown_reparse_entries", category_counts["UNKNOWN_REPARSE"]) or 0),
+        "volatile_root": state.get("volatile_root"),
+        "volatile_roots": list(state.get("volatile_roots", []) or []),
+        "historical_exact": state.get("historical_exact", False),
+        "fresh_validation_required": state.get("fresh_validation_required", False),
         "deduplicated_targets": state.get("deduplicated_targets", 0),
         "deduplicated_entries": deduplicated_entries,
         "category_counts": category_counts,
@@ -1072,6 +1363,7 @@ def _empty_scan_area(*, mode: str) -> dict[str, Any]:
         "total_bytes_counted": 0,
         "status": "running",
         "complete": False,
+        "traversal_completed": False,
         "entries_scanned": 0,
         "files_scanned": 0,
         "directories_scanned": 0,
@@ -1122,6 +1414,45 @@ def _reports_are_exact(reports: dict[str, dict[str, Any]]) -> bool:
     return True
 
 
+def _storage_truth_fields(
+    reports: dict[str, dict[str, Any]],
+    *,
+    current_exact: bool,
+    exact_at_saved_time: bool | None = None,
+) -> dict[str, Any]:
+    """Separate traversal completion, saved-time exactness and current truth."""
+
+    changed = sum(int(report.get("identity_changed_entries", 0) or 0) for report in reports.values())
+    unreadable = sum(int(report.get("unreadable_entries", 0) or 0) for report in reports.values())
+    categories = _empty_category_counts()
+    for report in reports.values():
+        values = report.get("category_counts") if isinstance(report.get("category_counts"), dict) else {}
+        for category in _STORAGE_ENTRY_CATEGORIES:
+            value = values.get(category, 0)
+            if isinstance(value, int) and value >= 0:
+                categories[category] += value
+    unknown_reparse = categories["UNKNOWN_REPARSE"]
+    volatile_roots = [
+        name for name in _SCAN_AREA_NAMES
+        if int((reports.get(name) or {}).get("identity_changed_entries", 0) or 0) > 0
+    ]
+    traversal_completed = (
+        len(reports) == len(_SCAN_AREA_NAMES)
+        and all(report.get("traversal_completed") is True for report in reports.values())
+    )
+    return {
+        "traversal_completed": traversal_completed,
+        "exact_at_saved_time": current_exact if exact_at_saved_time is None else bool(exact_at_saved_time),
+        "current_exact": bool(current_exact),
+        "identity_changed_entries": changed,
+        "unreadable_entries": unreadable,
+        "unknown_reparse_entries": unknown_reparse,
+        "volatile_root": volatile_roots[0] if len(volatile_roots) == 1 else None,
+        "volatile_roots": volatile_roots,
+        "safe_reparse_entries": max(0, categories["INTERNAL_ALLOWLISTED_ALIAS"] + categories["INTERNAL_DUPLICATE_ALIAS"] + categories["EXTERNAL_EXCLUDED_TARGET"]),
+    }
+
+
 def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None:
     global _scan_state, _size_cache, _scan_thread
     data_root, model_root, environments_root, runtime_root, cache_root, output_root, temp_root, log_root = _managed_roots()
@@ -1131,7 +1462,8 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
     deep = mode == "deep_exact"
     prior_paths: list[Path] = []
     allowlisted_roots = tuple(roots.values())
-    seen_identities: set[tuple[int, int, int]] = set()
+    ledger: _IdentityLedger | None = None
+    seen_identities: object = set()
     deduplicated_targets = 0
     previous_areas: dict[str, Any] = {}
     with _scan_lock:
@@ -1158,11 +1490,13 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
                 category: sum(int((item.get("category_counts") or {}).get(category, 0) or 0) for item in reports.values())
                 for category in _STORAGE_ENTRY_CATEGORIES
             }
+            _scan_state.update(_storage_truth_fields(reports, current_exact=False))
             _scan_state["managed_root_counts"] = {}
             for root_name in _SCAN_AREA_NAMES:
                 value = reports.get(root_name, {"status": "pending", "complete": False})
                 _scan_state["managed_root_counts"][root_name] = {
                     "complete": value.get("complete") is True,
+                    "traversal_completed": value.get("traversal_completed") is True,
                     "status": str(value.get("status") or "pending"),
                     "entries_scanned": int(value.get("entries_scanned", 0) or 0),
                     "files_scanned": int(value.get("files_scanned", 0) or 0),
@@ -1179,8 +1513,12 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
                 }
             _scan_state["progress"] = _scan_progress(index, len(roots), report, estimate) if deep else _scan_state.get("progress", 0)
             _scan_state["current_area"] = name
+        _persist_scan_journal()
 
     try:
+        if deep:
+            ledger = _IdentityLedger(data_root, scan_id)
+            seen_identities = ledger
         for index, (name, path) in enumerate(roots.items(), start=1):
             if cancel_event.is_set():
                 break
@@ -1212,6 +1550,7 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
                         "total_bytes_counted": 0,
                         "status": "available",
                         "complete": True,
+                        "traversal_completed": True,
                         "entries_scanned": 0,
                         "files_scanned": 0,
                         "directories_scanned": 0,
@@ -1237,13 +1576,37 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
                     except OSError:
                         pass
                     publish_area(name, index, _empty_scan_area(mode=mode))
-                    report = _invoke_storage_report(_deep_directory_size_report,
-                        path,
-                        cancel_event=cancel_event,
-                        on_progress=lambda value, n=name, i=index: publish_area(n, i, value),
-                        allowlisted_roots=allowlisted_roots,
-                        seen_identities=seen_identities,
-                    )
+                    identity_retry_count = 0
+                    while True:
+                        if ledger is not None:
+                            ledger.set_scope(name)
+                        report = _invoke_storage_report(_deep_directory_size_report,
+                            path,
+                            cancel_event=cancel_event,
+                            on_progress=lambda value, n=name, i=index: publish_area(n, i, value),
+                            allowlisted_roots=allowlisted_roots,
+                            seen_identities=seen_identities,
+                            frontier=ledger,
+                        )
+                        changed = int(report.get("identity_changed_entries", 0) or 0)
+                        if changed > 0 and identity_retry_count < _IDENTITY_RETRY_LIMIT:
+                            identity_retry_count += 1
+                            if ledger is not None:
+                                # Remove only identities owned by this
+                                # affected root. Stable roots remain in the
+                                # shared ledger and are never rescanned.
+                                ledger.remove_scope(name)
+                            publish_area(name, index, {
+                                **report,
+                                "status": "retrying",
+                                "complete": False,
+                                "identity_retry_count": identity_retry_count,
+                                "reason": f"Vùng {name} thay đổi trong lúc đọc; đang thử lại riêng vùng bị ảnh hưởng ({identity_retry_count}/{_IDENTITY_RETRY_LIMIT}).",
+                                "next_action": "Giữ trang mở để hoàn tất lần thử lại bounded.",
+                            })
+                            continue
+                        report = {**report, "identity_retry_count": identity_retry_count, "identity_retry_limit": _IDENTITY_RETRY_LIMIT}
+                        break
             else:
                 report = _invoke_storage_report(
                     _directory_size_report,
@@ -1264,7 +1627,11 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
         else:
             final_status = "completed" if exact else "partial"
         saved_at = datetime.now(timezone.utc).isoformat(timespec="seconds") if exact else None
-        fingerprint = _fingerprint_roots(allowlisted_roots) if exact else None
+        fingerprint = (
+            _fingerprint_roots(allowlisted_roots)
+            if exact and sum(int(item.get("entries_scanned", 0) or 0) for item in reports.values()) <= _FINGERPRINT_MAX_ENTRIES
+            else None
+        )
         result = _storage_summary_from_reports(
             data_root,
             reports,
@@ -1290,6 +1657,7 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
                 "current_area": None,
                 "areas": {name: dict(value) for name, value in reports.items()},
                 "exact": exact,
+                **_storage_truth_fields(reports, current_exact=exact),
                 "mode": mode,
                 "entries_scanned": result["scan"]["entries_scanned"],
                 "files_scanned": result["scan"]["files_scanned"],
@@ -1310,10 +1678,17 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
                 "disk": dict(result.get("disk") or {}),
                 "volumes": [dict(item) for item in result.get("volumes") or []],
                 "volume_projection": dict(result.get("volume_projection") or {}),
-                "legacy": [dict(item) for item in result.get("legacy") or []],
-                "legacy_counts": dict(result.get("legacy_counts") or {}),
-            }
+                 "legacy": [dict(item) for item in result.get("legacy") or []],
+                 "legacy_counts": dict(result.get("legacy_counts") or {}),
+                 # Preserve a DEEP_EXACT request that arrived while FAST was
+                 # still the active worker.  The finalizer consumes
+                 # ``next_mode`` only after this terminal FAST projection has
+                 # been published, so replacing the state must not erase it.
+                 "requested_mode": _scan_state.get("requested_mode"),
+                 "next_mode": _scan_state.get("next_mode"),
+             }
             _size_cache = (time.monotonic(), result)
+        _persist_scan_journal()
         if exact:
             _persist_exact_scan(result, data_root)
     except Exception:
@@ -1327,10 +1702,23 @@ def _scan_worker(scan_id: str, mode: str, cancel_event: threading.Event) -> None
                 "next_action": "Kiểm tra quyền vùng storage rồi thử lại.",
                 "cancel_requested": cancel_event.is_set(),
             })
+        _persist_scan_journal()
     finally:
+        if ledger is not None:
+            try:
+                ledger.close(cleanup=True)
+            except Exception:
+                pass
+        next_mode = None
         with _scan_lock:
             _scan_cancel_events.pop(scan_id, None)
             _scan_thread = None
+            if mode == "fast" and _scan_state.get("next_mode") == "deep_exact":
+                next_mode = "deep_exact"
+                _scan_state["next_mode"] = None
+                _scan_state["requested_mode"] = None
+        if next_mode is not None:
+            start_storage_scan(force=True, mode=next_mode)
 
 
 def start_storage_scan(*, force: bool = False, mode: str = "fast") -> dict[str, Any]:
@@ -1341,6 +1729,19 @@ def start_storage_scan(*, force: bool = False, mode: str = "fast") -> dict[str, 
     with _scan_lock:
         _restore_exact_scan_cache()
         if _scan_thread is not None and _scan_thread.is_alive():
+            if selected_mode == "deep_exact" and _scan_state.get("mode") == "fast":
+                # Do not claim that DEEP has started while FAST still owns the
+                # worker.  Ask FAST to stop at its next checkpoint and let the
+                # worker finalizer launch the requested DEEP scan.
+                _scan_state["requested_mode"] = "deep_exact"
+                _scan_state["next_mode"] = "deep_exact"
+                cancel_id = str(_scan_state.get("scan_id") or "")
+                pending_event = _scan_cancel_events.get(cancel_id)
+                if pending_event is not None:
+                    pending_event.set()
+                _scan_state["reason"] = "FAST đang kết thúc để chuyển sang DEEP_EXACT; chưa tuyên bố deep đã bắt đầu."
+                _scan_state["next_action"] = "Chờ FAST dừng rồi theo dõi DEEP_EXACT tự động."
+                _persist_scan_journal()
             return storage_scan_snapshot()
         if not force and _scan_state.get("scan_id") and _scan_state.get("status") in {"completed", "partial", "cancelled", "unavailable"}:
             return storage_scan_snapshot()
@@ -1374,7 +1775,10 @@ def start_storage_scan(*, force: bool = False, mode: str = "fast") -> dict[str, 
             "category_counts": _empty_category_counts(),
             "fingerprint": None,
             "disk": initial_disk,
+            "requested_mode": selected_mode,
+            "next_mode": None,
         }
+        _persist_scan_journal()
         _scan_cache_loaded = True
         _scan_cancel_events[scan_id] = cancel_event
         _size_cache = None
@@ -1596,6 +2000,7 @@ def _legacy_records() -> list[dict[str, Any]]:
 def storage_summary(*, force: bool = False) -> dict[str, Any]:
     global _size_cache
     with _scan_lock:
+        _restore_scan_journal()
         _restore_exact_scan_cache()
     now = time.monotonic()
     with _cache_lock:
@@ -1631,6 +2036,7 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
                 "total_bytes_counted": 0,
                 "status": "available",
                 "complete": True,
+                "traversal_completed": True,
                 "entries_scanned": 0,
                 "files_scanned": 0,
                 "directories_scanned": 0,
@@ -1679,9 +2085,11 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
             if isinstance(value, int) and value >= 0:
                 fast_category_counts[category] += value
     fast_completed_roots = sum(report.get("complete") is True for report in area_reports.values())
+    fast_truth = _storage_truth_fields(area_reports, current_exact=fast_exact)
     managed_root_counts = {
         name: {
             "complete": report.get("complete") is True,
+            "traversal_completed": report.get("traversal_completed") is True,
             "status": str(report.get("status") or "unavailable"),
             "entries_scanned": int(report.get("entries_scanned", 0) or 0),
             "files_scanned": int(report.get("files_scanned", 0) or 0),
@@ -1707,6 +2115,7 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
             "status": "completed" if fast_exact else "partial",
             "mode": "fast",
             "exact": fast_exact,
+            **fast_truth,
             "owned_storage_total_bytes": fast_owned_total,
             "owned_storage_total_gb": round(fast_owned_total / (1024**3), 3),
             "owned_storage_exact": fast_exact,
@@ -1743,6 +2152,7 @@ def storage_summary(*, force: bool = False) -> dict[str, Any]:
         "owned_storage_total_bytes": fast_owned_total,
         "owned_storage_total_gb": round(fast_owned_total / (1024**3), 3),
         "owned_storage_exact": fast_exact,
+        **fast_truth,
         "owned_storage_scope": "allowlisted managed roots only; external reparse targets excluded",
         "deduplicated_targets": 0,
         "deduplicated_entries": fast_deduplicated_entries,

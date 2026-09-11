@@ -38,6 +38,12 @@ from src.app.stable_shell import (
     load_current_pointer,
     resolve_launch_plan,
 )
+from src.app.launcher_migration import (
+    LauncherMigrationError,
+    launcher_projection,
+    launcher_tree_manifest,
+    restore_launcher_bundle,
+)
 from src.app.payload_bootstrap import api_server_command
 from src.shared.runtime_identity import API_PROTOCOL_VERSION, api_identity
 from src.shared.version import PRODUCT_VERSION
@@ -46,18 +52,33 @@ from src.services.update_transport import AuthState, TransportError, TransportSe
 
 REPOSITORY = "letam10/local-ai-hub"
 WORKFLOW_FILE = "ci.yml"
-UPDATE_ARTIFACT_NAME = "local-ai-hub-main-update"
+# ``local-ai-hub-main-update`` is the historical APP_ONLY artifact name.  The
+# exact base updater at de616f4 knows only this identity and its legacy
+# manifest/contract, so it must remain APP_ONLY forever.  The onedir shell
+# product is deliberately a separate artifact identity; otherwise the old
+# client would download a contract it cannot parse and the first bootstrap
+# could never reach the new updater.
+LEGACY_UPDATE_ARTIFACT_NAME = "local-ai-hub-main-update"
+COMPOSITE_UPDATE_ARTIFACT_NAME = "local-ai-hub-composite-product-update"
+# Compatibility alias for callers/tests that used the historical constant.
+UPDATE_ARTIFACT_NAME = LEGACY_UPDATE_ARTIFACT_NAME
 UPDATE_SCHEMA = "local-ai-hub-main-update.v1"
+COMPOSITE_UPDATE_SCHEMA = "local-ai-hub-composite-update.v1"
 UPDATE_CONTRACT_SCHEMA = "local-ai-hub-update-contract.v1"
 UPDATE_CONTRACT_NAME = "update-contract.json"
 BUILD_INFO_SCHEMA = "local-ai-hub-build-info.v1"
 PENDING_HEALTH_SCHEMA = "local-ai-hub-pending-health.v1"
 STAGED_UPDATE_SCHEMA = "local-ai-hub-staged-update.v1"
 RESTART_SESSION_SCHEMA = "local-ai-hub-restart-session.v1"
+RESTART_TRANSACTION_SCHEMA = "local-ai-hub-restart-transaction.v1"
+BOOTSTRAP_PENDING_SCHEMA = "local-ai-hub-bootstrap-pending.v1"
+BOOTSTRAP_PENDING_FILE = "bootstrap-pending.json"
 RUNTIME_STRATEGY = "reuse-current"
 RUNTIME_STRATEGY_BUNDLED = "bundled"
 UPDATE_KIND_APP_ONLY = "APP_ONLY"
 UPDATE_KIND_FULL = "FULL"
+UPDATE_KIND_APP_AND_LAUNCHER = "APP_AND_LAUNCHER"
+PRODUCT_UPDATE_CONTRACT_SCHEMA = "local-ai-hub-product-update-contract.v1"
 RUNTIME_CONTRACT_BUNDLED = "bundled"
 RUNTIME_CONTRACT_REUSE_CURRENT = "reuse-current"
 MINIMUM_LAUNCHER_VERSION = "v8.0.1"
@@ -78,6 +99,7 @@ _PAYLOAD_RE = re.compile(r"^main-[0-9a-f]{12}$")
 _RUNTIME_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _TRANSACTION_RE = re.compile(r"^txn-[0-9a-f]{32}$")
 _OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+MAX_WORKFLOW_RUN_ID = (1 << 63) - 1
 
 UPDATE_STATE_SCHEMA = "local-ai-hub-update-state.v1"
 UPDATE_STATE_FILE = "updater-state.json"
@@ -119,6 +141,7 @@ STABLE_UPDATE_REASON_CODES = frozenset({
     "rollback_unavailable",
     "state_unavailable",
     "update_failed",
+    "launcher_migration_required",
 })
 
 _ERROR_REASON_CODES = {
@@ -127,6 +150,10 @@ _ERROR_REASON_CODES = {
     "GITHUB_CLI_FAILED": "artifact_download_failed",
     "GITHUB_RUNS_INVALID": "artifact_download_failed",
     "UPDATE_ARTIFACT_NOT_FOUND": "artifact_not_found",
+    "UPDATE_ARTIFACT_AMBIGUOUS": "artifact_identity_mismatch",
+    "UPDATE_ARTIFACT_EXPIRED": "artifact_identity_mismatch",
+    "UPDATE_COMPOSITE_ARTIFACT_REQUIRED": "artifact_identity_mismatch",
+    "UPDATE_OLD_CLIENT_ARTIFACT_MISMATCH": "artifact_identity_mismatch",
     "UPDATE_IDENTITY_MISMATCH": "artifact_identity_mismatch",
     "UPDATE_MANIFEST_INVALID": "artifact_identity_mismatch",
     "UPDATE_MANIFEST_TOO_LARGE": "artifact_identity_mismatch",
@@ -136,6 +163,14 @@ _ERROR_REASON_CODES = {
     "UPDATE_ARCHIVE_IDENTITY_INVALID": "artifact_identity_mismatch",
     "UPDATE_CONTRACT_INVALID": "artifact_identity_mismatch",
     "UPDATE_KIND_UNSUPPORTED": "artifact_identity_mismatch",
+    "UPDATE_RUN_MISMATCH": "artifact_identity_mismatch",
+    "UPDATE_PRODUCT_CONTRACT_INVALID": "artifact_identity_mismatch",
+    "UPDATE_LAUNCHER_REQUIRED": "artifact_identity_mismatch",
+    "UPDATE_LAUNCHER_MANIFEST_MISMATCH": "manifest_hash_mismatch",
+    "UPDATE_LAUNCHER_INTERNAL_MISSING": "artifact_identity_mismatch",
+    "UPDATE_LAUNCHER_STAGING_FAILED": "pointer_commit_failed",
+    "LAUNCHER_ROLLBACK_FAILED": "watchdog_rollback_failed",
+    "LAUNCHER_CANDIDATE_INVALID": "artifact_identity_mismatch",
     "UPDATE_APP_PROTOCOL_INCOMPATIBLE": "artifact_identity_mismatch",
     "UPDATE_RUNTIME_CONTRACT_MISMATCH": "artifact_identity_mismatch",
     "UPDATE_RUNTIME_STRATEGY_UNSUPPORTED": "artifact_identity_mismatch",
@@ -221,6 +256,7 @@ _STATUS_REASON_CODES = {
     "oauth_configuration_required": "authentication_required",
     "unavailable": "state_unavailable",
     "no_artifact": "artifact_not_found",
+    "launcher_migration_required": "launcher_migration_required",
 }
 
 
@@ -381,6 +417,11 @@ def update_error_projection(
         "reason_code": reason_code_for(code),
         "last_error_code": code if re.fullmatch(r"[A-Z][A-Z0-9_]{2,95}", code) else "UPDATE_FAILED",
         "execution": "not_run",
+        "payload_status": "unavailable" if current_payload_id is None else "blocked",
+        "launcher_status": "unknown",
+        "launcher_format": "unknown",
+        "launcher_migration_required": True,
+        "restart_state": "idle",
     }
     if active_jobs is not None:
         value["active_jobs"] = active_jobs
@@ -393,6 +434,155 @@ def _staged_update_path(root: Path) -> Path:
 
 def _restart_session_path(root: Path) -> Path:
     return root / "update-state" / "restart-session.json"
+
+
+def _restart_transaction_path(root: Path) -> Path:
+    return root / "update-state" / "restart-transaction.json"
+
+
+def _bootstrap_pending_path(root: Path) -> Path:
+    return root / "update-state" / BOOTSTRAP_PENDING_FILE
+
+
+def _write_bootstrap_pending(
+    root: Path,
+    *,
+    source_commit: str,
+    workflow_run_id: int,
+    status: str = "pending",
+    reason_code: str | None = None,
+    transaction_id: str | None = None,
+    payload_id: str | None = None,
+    restart_authorized: bool = False,
+    consent_transaction_id: str | None = None,
+    consent_payload_id: str | None = None,
+) -> dict[str, Any]:
+    """Persist the legacy-client hand-off without storing paths or commands."""
+
+    if not _SHA_RE.fullmatch(source_commit):
+        raise AppUpdateError("UPDATE_COMMIT_MISMATCH")
+    if isinstance(workflow_run_id, bool) or not isinstance(workflow_run_id, int) or not 0 < workflow_run_id <= MAX_WORKFLOW_RUN_ID:
+        raise AppUpdateError("UPDATE_RUN_MISMATCH")
+    if status not in {"pending", "downloading", "verifying", "staged", "restarting", "blocked", "failed", "completed"}:
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if reason_code is not None and reason_code not in STABLE_UPDATE_REASON_CODES:
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if transaction_id is not None and (not isinstance(transaction_id, str) or _TRANSACTION_RE.fullmatch(transaction_id) is None):
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if payload_id is not None and (not isinstance(payload_id, str) or _PAYLOAD_RE.fullmatch(payload_id) is None or payload_id != f"main-{source_commit[:12]}"):
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if type(restart_authorized) is not bool:
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if consent_transaction_id is not None and (not isinstance(consent_transaction_id, str) or _TRANSACTION_RE.fullmatch(consent_transaction_id) is None):
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if consent_payload_id is not None and (not isinstance(consent_payload_id, str) or _PAYLOAD_RE.fullmatch(consent_payload_id) is None):
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if (consent_transaction_id is None) != (consent_payload_id is None):
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if consent_transaction_id is not None and (
+        transaction_id != consent_transaction_id or payload_id != consent_payload_id
+    ):
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    if restart_authorized and (consent_transaction_id is None or consent_payload_id is None):
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    value: dict[str, Any] = {
+        "schema_version": BOOTSTRAP_PENDING_SCHEMA,
+        "source_commit": source_commit,
+        "workflow_run_id": workflow_run_id,
+        "legacy_artifact_name": LEGACY_UPDATE_ARTIFACT_NAME,
+        "composite_artifact_name": COMPOSITE_UPDATE_ARTIFACT_NAME,
+        "status": status,
+        "reason_code": reason_code,
+        "transaction_id": transaction_id,
+        "payload_id": payload_id,
+        "restart_authorized": restart_authorized,
+        "consent_transaction_id": consent_transaction_id,
+        "consent_payload_id": consent_payload_id,
+        "updated_at": _utc_now(),
+    }
+    _write_json_atomic(_bootstrap_pending_path(root), value)
+    return value
+
+
+def _read_bootstrap_pending(root: Path) -> dict[str, Any] | None:
+    path = _bootstrap_pending_path(root)
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        value = _safe_json_file(path, max_bytes=16 * 1024)
+    except (OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError, AppUpdateError) as exc:
+        raise AppUpdateError("UPDATE_STATE_INVALID") from exc
+    legacy_expected = {
+        "schema_version", "source_commit", "workflow_run_id", "legacy_artifact_name",
+        "composite_artifact_name", "status", "reason_code", "updated_at",
+    }
+    expected = legacy_expected | {"transaction_id", "payload_id", "restart_authorized", "consent_transaction_id", "consent_payload_id"}
+    if set(value) == legacy_expected:
+        value = {**value, "transaction_id": None, "payload_id": None, "restart_authorized": False, "consent_transaction_id": None, "consent_payload_id": None}
+    elif set(value) == legacy_expected | {"transaction_id", "payload_id", "restart_authorized"}:
+        value = {**value, "consent_transaction_id": None, "consent_payload_id": None}
+    if set(value) != expected or value.get("schema_version") != BOOTSTRAP_PENDING_SCHEMA:
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    source_commit = value.get("source_commit")
+    run_id = value.get("workflow_run_id")
+    if (
+        not isinstance(source_commit, str)
+        or not _SHA_RE.fullmatch(source_commit)
+        or isinstance(run_id, bool)
+        or not isinstance(run_id, int)
+        or not 0 < run_id <= MAX_WORKFLOW_RUN_ID
+        or value.get("legacy_artifact_name") != LEGACY_UPDATE_ARTIFACT_NAME
+        or value.get("composite_artifact_name") != COMPOSITE_UPDATE_ARTIFACT_NAME
+        or value.get("status") not in {"pending", "downloading", "verifying", "staged", "restarting", "blocked", "failed", "completed"}
+        or (value.get("reason_code") is not None and value.get("reason_code") not in STABLE_UPDATE_REASON_CODES)
+        or (value.get("transaction_id") is not None and (not isinstance(value.get("transaction_id"), str) or _TRANSACTION_RE.fullmatch(str(value.get("transaction_id"))) is None))
+        or (value.get("payload_id") is not None and (not isinstance(value.get("payload_id"), str) or _PAYLOAD_RE.fullmatch(str(value.get("payload_id"))) is None or value.get("payload_id") != f"main-{source_commit[:12]}"))
+        or type(value.get("restart_authorized")) is not bool
+        or (value.get("consent_transaction_id") is not None and (not isinstance(value.get("consent_transaction_id"), str) or _TRANSACTION_RE.fullmatch(str(value.get("consent_transaction_id"))) is None))
+        or (value.get("consent_payload_id") is not None and (not isinstance(value.get("consent_payload_id"), str) or _PAYLOAD_RE.fullmatch(str(value.get("consent_payload_id"))) is None))
+        or (value.get("consent_transaction_id") is None) != (value.get("consent_payload_id") is None)
+        or (value.get("consent_transaction_id") is not None and (
+            value.get("transaction_id") != value.get("consent_transaction_id")
+            or value.get("payload_id") != value.get("consent_payload_id")
+        ))
+        or (value.get("restart_authorized") is True and (value.get("consent_transaction_id") is None or value.get("consent_payload_id") is None))
+        or not isinstance(value.get("updated_at"), str)
+    ):
+        raise AppUpdateError("UPDATE_STATE_INVALID")
+    return dict(value)
+
+
+def _complete_bootstrap_marker(root: Path, pending: dict[str, Any], *, current: dict[str, Any]) -> dict[str, Any]:
+    """Commit a matching stale bootstrap marker to one terminal state."""
+
+    if pending.get("status") in {"blocked", "failed"}:
+        return {"status": "blocked", "code": pending.get("reason_code") or "UPDATE_BOOTSTRAP_BLOCKED", "bootstrap_pending": True}
+    if (
+        pending.get("source_commit") != current.get("commit")
+        or pending.get("workflow_run_id") != current.get("workflow_run_id")
+        or pending.get("payload_id") not in {None, current.get("payload_id")}
+    ):
+        return {"status": "blocked", "code": "UPDATE_BOOTSTRAP_IDENTITY_MISMATCH", "bootstrap_pending": True}
+    completed = _write_bootstrap_pending(
+        root,
+        source_commit=str(pending["source_commit"]),
+        workflow_run_id=int(pending["workflow_run_id"]),
+        status="completed",
+        transaction_id=pending.get("transaction_id") if isinstance(pending.get("transaction_id"), str) else None,
+        payload_id=str(current.get("payload_id")) if _PAYLOAD_RE.fullmatch(str(current.get("payload_id") or "")) else None,
+        restart_authorized=False,
+        consent_transaction_id=pending.get("consent_transaction_id") if isinstance(pending.get("consent_transaction_id"), str) else None,
+        consent_payload_id=pending.get("consent_payload_id") if isinstance(pending.get("consent_payload_id"), str) else None,
+    )
+    _write_json_atomic(root / "update-state" / "bootstrap-completed.json", {
+        "schema_version": "local-ai-hub-bootstrap-completed.v1",
+        "source_commit": completed["source_commit"],
+        "workflow_run_id": completed["workflow_run_id"],
+        "transaction_id": completed.get("transaction_id"),
+        "payload_id": completed.get("payload_id"),
+        "status": "completed",
+    })
+    return {"status": "completed", "bootstrap_pending": False, "source_commit": completed["source_commit"], "workflow_run_id": completed["workflow_run_id"]}
 
 
 def _unlink_state(path: Path) -> None:
@@ -461,6 +651,11 @@ class UpdateCandidate:
     source_commit: str
     artifact_id: int
     artifact_name: str
+    update_kind: str = UPDATE_KIND_APP_ONLY
+
+    @property
+    def is_composite(self) -> bool:
+        return self.update_kind == UPDATE_KIND_APP_AND_LAUNCHER or self.artifact_name == COMPOSITE_UPDATE_ARTIFACT_NAME
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
@@ -555,6 +750,32 @@ def _record_pending_health(
     _write_json_atomic(_pending_health_path(root), value)
 
 
+def _commit_restart_health_admission(root: Path, *, transaction_id: str | None, payload_id: str, source_commit: str) -> None:
+    """Durably commit health admission before clearing restart journals."""
+
+    restart_path = _restart_transaction_path(root)
+    transaction: dict[str, Any] | None = None
+    if transaction_id is not None and restart_path.is_file() and not restart_path.is_symlink():
+        transaction = _safe_json_file(restart_path, max_bytes=128 * 1024)
+        if (
+            transaction.get("schema_version") != RESTART_TRANSACTION_SCHEMA
+            or transaction.get("transaction_id") != transaction_id
+            or transaction.get("payload_id") != payload_id
+            or transaction.get("source_commit") != source_commit
+        ):
+            raise AppUpdateError("UPDATE_RESTART_TRANSACTION_MISMATCH")
+        _write_json_atomic(restart_path, {**transaction, "status": "health_admitted"})
+    _write_json_atomic(root / "update-state" / "restart-completed.json", {
+        "schema_version": "local-ai-hub-restart-completed.v1",
+        "transaction_id": transaction_id,
+        "payload_id": payload_id,
+        "source_commit": source_commit,
+        "status": "completed",
+    })
+    if transaction is not None:
+        _write_json_atomic(restart_path, {**transaction, "status": "completed"})
+
+
 def _write_restart_session(root: Path, value: dict[str, Any]) -> None:
     """Publish bounded candidate-session identity for the watchdog.
 
@@ -575,7 +796,10 @@ def _read_staged_update(root: Path) -> dict[str, Any] | None:
         "schema_version", "payload_id", "source_commit", "payload_relative",
         "manifest_sha256", "previous", "staged_at", "update_kind",
     }
-    allowed = expected | {"transaction_id"}
+    allowed = expected | {
+        "transaction_id", "workflow_run_id", "launcher_format", "launcher_executable_sha256",
+        "launcher_tree_manifest_sha256", "launcher_file_count", "launcher_total_bytes",
+    }
     if not expected.issubset(value) or not set(value).issubset(allowed) or value.get("schema_version") != STAGED_UPDATE_SCHEMA:
         raise AppUpdateError("STAGED_UPDATE_INVALID")
     payload_id = value.get("payload_id")
@@ -590,12 +814,31 @@ def _read_staged_update(root: Path) -> dict[str, Any] | None:
         or not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None
         or not isinstance(value.get("previous"), dict)
         or not isinstance(value.get("staged_at"), str)
-        or value.get("update_kind") not in {UPDATE_KIND_APP_ONLY, UPDATE_KIND_FULL}
+        or value.get("update_kind") not in {UPDATE_KIND_APP_ONLY, UPDATE_KIND_FULL, UPDATE_KIND_APP_AND_LAUNCHER}
         or (
             value.get("transaction_id") is not None
             and (
                 not isinstance(value.get("transaction_id"), str)
                 or _TRANSACTION_RE.fullmatch(str(value.get("transaction_id"))) is None
+            )
+        )
+        or (
+            value.get("update_kind") == UPDATE_KIND_APP_AND_LAUNCHER
+            and (
+                isinstance(value.get("workflow_run_id"), bool)
+                or not isinstance(value.get("workflow_run_id"), int)
+                or value.get("workflow_run_id") <= 0
+                or value.get("launcher_format") != "onedir"
+                or not isinstance(value.get("launcher_executable_sha256"), str)
+                or _SHA256_RE.fullmatch(value.get("launcher_executable_sha256")) is None
+                or not isinstance(value.get("launcher_tree_manifest_sha256"), str)
+                or _SHA256_RE.fullmatch(value.get("launcher_tree_manifest_sha256")) is None
+                or isinstance(value.get("launcher_file_count"), bool)
+                or not isinstance(value.get("launcher_file_count"), int)
+                or value.get("launcher_file_count") < 2
+                or isinstance(value.get("launcher_total_bytes"), bool)
+                or not isinstance(value.get("launcher_total_bytes"), int)
+                or value.get("launcher_total_bytes") < 1
             )
         )
     ):
@@ -665,12 +908,80 @@ def mark_startup_health(
         and health.get("build_source_commit") == pending.get("source_commit")
         and health.get("build_payload_id") == pending.get("payload_id")
     )
+    launcher_admission = True
+    if pending.get("launcher_tree_manifest_sha256") is not None:
+        launcher = launcher_projection(root)
+        launcher_admission = launcher.get("status") == "verified"
+        if pending.get("launcher_retained") is True:
+            retained_identity = pending.get("retained_shell_identity")
+            retained_shape_valid = (
+                isinstance(retained_identity, dict)
+                and set(retained_identity) == {
+                    "schema_version", "product_id", "payload_id", "source_commit", "format", "executable",
+                    "workflow_run_id", "executable_sha256", "tree_manifest_sha256", "file_count", "total_bytes",
+                }
+                and retained_identity.get("schema_version") == "local-ai-hub-launcher-bundle.v1"
+                and retained_identity.get("product_id") == "LocalAIHub"
+                and retained_identity.get("format") == "onedir"
+                and retained_identity.get("executable") == "LocalAIHub.exe"
+            )
+            launcher_admission = launcher_admission and retained_shape_valid and all(
+                launcher.get(left) == pending.get(right)
+                for left, right in (
+                    ("payload_id", "retained_shell_payload_id"),
+                    ("source_commit", "retained_shell_source_commit"),
+                    ("workflow_run_id", "retained_shell_workflow_run_id"),
+                    ("executable_sha256", "retained_shell_executable_sha256"),
+                    ("tree_manifest_sha256", "retained_shell_tree_manifest_sha256"),
+                    ("file_count", "retained_shell_file_count"),
+                    ("total_bytes", "retained_shell_total_bytes"),
+                )
+            )
+            if retained_shape_valid:
+                launcher_admission = launcher_admission and all(
+                    launcher.get(left) == retained_identity.get(right)
+                    for left, right in (
+                        ("payload_id", "payload_id"),
+                        ("source_commit", "source_commit"),
+                        ("workflow_run_id", "workflow_run_id"),
+                        ("executable_sha256", "executable_sha256"),
+                        ("tree_manifest_sha256", "tree_manifest_sha256"),
+                        ("file_count", "file_count"),
+                        ("total_bytes", "total_bytes"),
+                    )
+                )
+                activation_path = root / "update-state" / "launcher-activation.json"
+                activation_identity = None
+                if activation_path.is_file() and not activation_path.is_symlink():
+                    try:
+                        activation = _safe_json_file(activation_path, max_bytes=64 * 1024)
+                        activation_identity = activation.get("retained_shell_identity")
+                    except (OSError, UnicodeError, json.JSONDecodeError, AppUpdateError):
+                        activation_identity = None
+                launcher_admission = launcher_admission and activation_identity == retained_identity
+        else:
+            launcher_admission = launcher_admission and (
+                launcher.get("format") == pending.get("launcher_format", "onedir")
+                and launcher.get("executable_sha256") == pending.get("launcher_executable_sha256")
+                and launcher.get("tree_manifest_sha256") == pending.get("launcher_tree_manifest_sha256")
+                and launcher.get("payload_id") == pending.get("payload_id")
+                and launcher.get("source_commit") == pending.get("source_commit")
+            )
+    healthy = healthy and launcher_admission
     if healthy:
         try:
+            _commit_restart_health_admission(
+                root,
+                transaction_id=transaction_id,
+                payload_id=str(current["version"]),
+                source_commit=str(build["source_commit"]),
+            )
             pending_path.unlink()
         except OSError as exc:
             raise AppUpdateError("UPDATE_STATE_CLEAR_FAILED") from exc
         _unlink_state(_staged_update_path(root))
+        _unlink_state(_restart_transaction_path(root))
+        _unlink_state(_restart_session_path(root))
         _try_write_update_state(
             root,
             phase="succeeded",
@@ -681,6 +992,12 @@ def mark_startup_health(
         )
         return {"status": "healthy", "payload_id": current["version"], "source_commit": build["source_commit"]}
     previous = pending["previous"]
+    rollback_root = root / "update-state" / "launcher-rollback" / transaction_id if transaction_id is not None else None
+    if rollback_root is not None and rollback_root.is_dir() and not rollback_root.is_symlink():
+        try:
+            restore_launcher_bundle(root, transaction_id=transaction_id, _allow_state_status=True)
+        except (OSError, LauncherMigrationError) as exc:
+            raise AppUpdateError("UPDATE_LAUNCHER_ROLLBACK_FAILED") from exc
     pointer = atomic_activate_pointer(root, version=str(previous["version"]), manifest_sha256=str(previous["manifest_sha256"]))
     _write_json_atomic(root / "update-state" / "last-rollback.json", {
         "schema_version": PENDING_HEALTH_SCHEMA,
@@ -715,14 +1032,24 @@ def _safe_update_manifest(value: object, *, expected_commit: str | None = None) 
         "schema_version", "product_id", "product_version", "channel", "source_commit",
         "payload_id", "runtime_strategy", "archive", "archive_sha256", "file_count",
     }
-    if set(value) != required:
+    schema = value.get("schema_version")
+    composite_optional = {
+        "workflow_run_id", "app_file_count", "app_total_bytes", "app_manifest_sha256",
+        "launcher_format", "launcher_file_count", "launcher_total_bytes",
+        "launcher_manifest_sha256", "launcher_executable_sha256",
+    }
+    if schema == COMPOSITE_UPDATE_SCHEMA:
+        allowed = required | composite_optional
+        if not required.issubset(value) or not set(value).issubset(allowed):
+            raise AppUpdateError("UPDATE_MANIFEST_INVALID")
+    elif set(value) != required:
         raise AppUpdateError("UPDATE_MANIFEST_INVALID")
     source_commit = str(value.get("source_commit") or "")
     payload_id = str(value.get("payload_id") or "")
     digest = str(value.get("archive_sha256") or "")
     archive = str(value.get("archive") or "")
     count = value.get("file_count")
-    if value.get("schema_version") != UPDATE_SCHEMA or value.get("product_id") != PRODUCT_ID:
+    if schema not in {UPDATE_SCHEMA, COMPOSITE_UPDATE_SCHEMA} or value.get("product_id") != PRODUCT_ID:
         raise AppUpdateError("UPDATE_IDENTITY_MISMATCH")
     if value.get("product_version") != PRODUCT_VERSION or value.get("channel") != "main":
         raise AppUpdateError("UPDATE_PRODUCT_VERSION_MISMATCH")
@@ -736,6 +1063,21 @@ def _safe_update_manifest(value: object, *, expected_commit: str | None = None) 
         raise AppUpdateError("UPDATE_ARCHIVE_IDENTITY_INVALID")
     if isinstance(count, bool) or not isinstance(count, int) or count < 1 or count > MAX_ARCHIVE_FILES:
         raise AppUpdateError("UPDATE_FILE_COUNT_INVALID")
+    if schema == COMPOSITE_UPDATE_SCHEMA:
+        run_id = value.get("workflow_run_id")
+        if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id <= 0:
+            raise AppUpdateError("UPDATE_RUN_MISMATCH")
+        for key in ("app_manifest_sha256", "launcher_manifest_sha256", "launcher_executable_sha256"):
+            if not isinstance(value.get(key), str) or _SHA256_RE.fullmatch(value[key]) is None:
+                raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+        if value.get("launcher_format") != "onedir":
+            raise AppUpdateError("UPDATE_LAUNCHER_REQUIRED")
+        for key, minimum in (("app_file_count", 1), ("launcher_file_count", 2), ("app_total_bytes", 0), ("launcher_total_bytes", 1)):
+            item = value.get(key)
+            if isinstance(item, bool) or not isinstance(item, int) or item < minimum:
+                raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+        if expected_commit is not None and run_id <= 0:
+            raise AppUpdateError("UPDATE_RUN_MISMATCH")
     return dict(value)
 
 
@@ -748,7 +1090,19 @@ def _safe_update_contract(value: object, *, expected_commit: str | None = None) 
         "schema_version", "update_kind", "app_protocol", "runtime_contract",
         "runtime_version", "runtime_hash", "minimum_launcher_version", "source_commit",
     }
-    if set(value) != required or value.get("schema_version") != UPDATE_CONTRACT_SCHEMA:
+    schema = value.get("schema_version")
+    if schema == PRODUCT_UPDATE_CONTRACT_SCHEMA:
+        product_required = required | {
+            "product_id", "product_version", "workflow_run_id", "app_payload_id",
+            "app_manifest_sha256", "app_file_count", "app_total_bytes", "launcher_format",
+            "launcher_executable_sha256", "launcher_tree_manifest_sha256", "launcher_file_count",
+            "launcher_total_bytes",
+        }
+        if set(value) != product_required:
+            raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+        if value.get("product_id") != PRODUCT_ID or value.get("product_version") != PRODUCT_VERSION:
+            raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+    elif set(value) != required or schema != UPDATE_CONTRACT_SCHEMA:
         raise AppUpdateError("UPDATE_CONTRACT_INVALID")
     source_commit = value.get("source_commit")
     if not isinstance(source_commit, str) or not _SHA_RE.fullmatch(source_commit) or (expected_commit is not None and source_commit != expected_commit):
@@ -765,6 +1119,23 @@ def _safe_update_contract(value: object, *, expected_commit: str | None = None) 
     elif kind == UPDATE_KIND_FULL:
         if runtime_contract != RUNTIME_CONTRACT_BUNDLED or not isinstance(runtime_version, str) or not runtime_version or not isinstance(runtime_hash, str) or not _RUNTIME_HASH_RE.fullmatch(runtime_hash):
             raise AppUpdateError("UPDATE_CONTRACT_INVALID")
+    elif kind == UPDATE_KIND_APP_AND_LAUNCHER:
+        if schema != PRODUCT_UPDATE_CONTRACT_SCHEMA or runtime_contract != RUNTIME_CONTRACT_REUSE_CURRENT or runtime_version is not None or runtime_hash is not None:
+            raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+        run_id = value.get("workflow_run_id")
+        if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id <= 0:
+            raise AppUpdateError("UPDATE_RUN_MISMATCH")
+        if value.get("app_payload_id") != f"main-{source_commit[:12]}":
+            raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+        for key in ("app_manifest_sha256", "launcher_executable_sha256", "launcher_tree_manifest_sha256"):
+            if not isinstance(value.get(key), str) or _SHA256_RE.fullmatch(value[key]) is None:
+                raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+        if value.get("launcher_format") != "onedir":
+            raise AppUpdateError("UPDATE_LAUNCHER_REQUIRED")
+        for key, minimum in (("app_file_count", 1), ("launcher_file_count", 2), ("app_total_bytes", 0), ("launcher_total_bytes", 1)):
+            item = value.get(key)
+            if isinstance(item, bool) or not isinstance(item, int) or item < minimum:
+                raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
     else:
         raise AppUpdateError("UPDATE_KIND_UNSUPPORTED")
     return dict(value)
@@ -786,7 +1157,11 @@ def _safe_extract_app_archive(archive: Path, destination: Path, *, expected_file
             raise AppUpdateError("UPDATE_ARCHIVE_FILE_COUNT_MISMATCH")
         for info in members:
             name = info.filename
-            allowed_prefix = name.startswith("app/") or (update_kind == UPDATE_KIND_FULL and name.startswith("runtime/"))
+            allowed_prefix = (
+                name.startswith("app/")
+                or (update_kind == UPDATE_KIND_FULL and name.startswith("runtime/"))
+                or (update_kind == UPDATE_KIND_APP_AND_LAUNCHER and name.startswith("launcher/"))
+            )
             if (
                 not allowed_prefix
                 or name.startswith(("/", "\\"))
@@ -886,30 +1261,88 @@ class AppUpdateService:
         except TransportError as exc:
             raise AppUpdateError(exc.code) from exc
 
-    def _latest_candidate(self) -> UpdateCandidate | None:
+    @staticmethod
+    def _artifact_candidates(artifacts: object, *, name: str) -> list[dict[str, Any]]:
+        """Return live, uniquely selectable artifact metadata for one identity."""
+
+        if not isinstance(artifacts, list):
+            return []
+        rows = [row for row in artifacts if isinstance(row, dict) and row.get("name") == name]
+        if len(rows) > 1:
+            raise AppUpdateError("UPDATE_ARTIFACT_AMBIGUOUS")
+        live = [row for row in rows if row.get("expired") is not True]
+        return live
+
+    def _latest_candidate(self, *, require_composite: bool = False) -> UpdateCandidate | None:
+        """Select one exact main-run artifact, preferring the composite identity.
+
+        The legacy identity is intentionally still visible to a new client as
+        a bootstrap fallback.  It is never selected when a live composite is
+        present in the same successful run, and a composite identity that is
+        present but expired/ambiguous fails closed instead of silently
+        downgrading to APP_ONLY.
+        """
+
         runs = self._api_json(
             f"repos/{REPOSITORY}/actions/workflows/{WORKFLOW_FILE}/runs",
-            {"branch": "main", "event": "push", "status": "success", "per_page": "10"},
+            {"branch": "main", "event": "push", "status": "success", "per_page": "20"},
         ).get("workflow_runs")
         if not isinstance(runs, list):
             raise AppUpdateError("GITHUB_RUNS_INVALID")
         for row in runs:
             if not isinstance(row, dict) or row.get("conclusion") != "success" or row.get("head_branch") != "main":
                 continue
-            sha = str(row.get("head_sha") or "")
+            sha = str(row.get("head_sha") or "").lower()
             run_id = row.get("id")
-            if not _SHA_RE.fullmatch(sha) or isinstance(run_id, bool) or not isinstance(run_id, int):
+            if not _SHA_RE.fullmatch(sha) or isinstance(run_id, bool) or not isinstance(run_id, int) or not 0 < run_id <= MAX_WORKFLOW_RUN_ID:
                 continue
             artifacts = self._api_json(f"repos/{REPOSITORY}/actions/runs/{run_id}/artifacts", {"per_page": "100"}).get("artifacts")
             if not isinstance(artifacts, list):
                 continue
-            for artifact in artifacts:
-                if not isinstance(artifact, dict) or artifact.get("name") != UPDATE_ARTIFACT_NAME or artifact.get("expired") is True:
-                    continue
-                artifact_id = artifact.get("id")
-                if isinstance(artifact_id, int) and not isinstance(artifact_id, bool):
-                    return UpdateCandidate(run_id, sha, artifact_id, UPDATE_ARTIFACT_NAME)
+            composite_rows = self._artifact_candidates(artifacts, name=COMPOSITE_UPDATE_ARTIFACT_NAME)
+            composite_named = [item for item in artifacts if isinstance(item, dict) and item.get("name") == COMPOSITE_UPDATE_ARTIFACT_NAME]
+            legacy_rows = self._artifact_candidates(artifacts, name=LEGACY_UPDATE_ARTIFACT_NAME)
+            if composite_named and not composite_rows:
+                # A same-run composite that has expired is not permission to
+                # fall back to APP_ONLY when the shell migration is required.
+                if require_composite:
+                    raise AppUpdateError("UPDATE_ARTIFACT_EXPIRED")
+            if composite_rows:
+                artifact_id = composite_rows[0].get("id")
+                if isinstance(artifact_id, int) and not isinstance(artifact_id, bool) and artifact_id > 0:
+                    return UpdateCandidate(run_id, sha, artifact_id, COMPOSITE_UPDATE_ARTIFACT_NAME, UPDATE_KIND_APP_AND_LAUNCHER)
+                raise AppUpdateError("UPDATE_ARTIFACT_AMBIGUOUS")
+            if require_composite and composite_named:
+                raise AppUpdateError("UPDATE_ARTIFACT_EXPIRED")
+            if legacy_rows:
+                artifact_id = legacy_rows[0].get("id")
+                if isinstance(artifact_id, int) and not isinstance(artifact_id, bool) and artifact_id > 0:
+                    # This is a deliberate bootstrap candidate only when a
+                    # composite is not available in the exact run.  The
+                    # prepare path records the durable continuation marker.
+                    return UpdateCandidate(run_id, sha, artifact_id, LEGACY_UPDATE_ARTIFACT_NAME, UPDATE_KIND_APP_ONLY)
+                raise AppUpdateError("UPDATE_ARTIFACT_AMBIGUOUS")
         return None
+
+    def _candidate_for_exact_run(self, *, source_commit: str, workflow_run_id: int) -> UpdateCandidate | None:
+        """Find only the composite artifact bound to one prior APP_ONLY run."""
+
+        if not _SHA_RE.fullmatch(source_commit) or isinstance(workflow_run_id, bool) or not isinstance(workflow_run_id, int) or not 0 < workflow_run_id <= MAX_WORKFLOW_RUN_ID:
+            raise AppUpdateError("UPDATE_RUN_MISMATCH")
+        artifacts = self._api_json(
+            f"repos/{REPOSITORY}/actions/runs/{workflow_run_id}/artifacts",
+            {"per_page": "100"},
+        ).get("artifacts")
+        rows = self._artifact_candidates(artifacts, name=COMPOSITE_UPDATE_ARTIFACT_NAME)
+        if not rows:
+            named = [item for item in artifacts if isinstance(item, dict) and item.get("name") == COMPOSITE_UPDATE_ARTIFACT_NAME]
+            if named:
+                raise AppUpdateError("UPDATE_ARTIFACT_EXPIRED")
+            return None
+        artifact_id = rows[0].get("id")
+        if not isinstance(artifact_id, int) or isinstance(artifact_id, bool) or artifact_id <= 0:
+            raise AppUpdateError("UPDATE_ARTIFACT_AMBIGUOUS")
+        return UpdateCandidate(workflow_run_id, source_commit, artifact_id, COMPOSITE_UPDATE_ARTIFACT_NAME, UPDATE_KIND_APP_AND_LAUNCHER)
 
     def _current_build(self, root: Path) -> dict[str, str]:
         plan = resolve_launch_plan(root, allow_test_root=self._allow_test_root)
@@ -924,6 +1357,25 @@ class AppUpdateService:
         if value.get("schema_version") != BUILD_INFO_SCHEMA or not _SHA_RE.fullmatch(commit):
             commit = "unknown"
         return {"commit": commit, "payload_id": plan.version}
+
+    def _current_build_metadata(self, root: Path) -> dict[str, Any]:
+        """Read the bounded source/run identity needed by bootstrap continuation."""
+
+        plan = resolve_launch_plan(root, allow_test_root=self._allow_test_root)
+        path = plan.payload_root / "build.json"
+        if not path.is_file() or path.is_symlink():
+            return {"commit": "legacy", "payload_id": plan.version, "workflow_run_id": None}
+        try:
+            value = _safe_json_file(path, max_bytes=32 * 1024)
+        except (OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError, AppUpdateError):
+            return {"commit": "unknown", "payload_id": plan.version, "workflow_run_id": None}
+        commit = value.get("source_commit")
+        run_id = value.get("workflow_run_id")
+        if value.get("schema_version") != BUILD_INFO_SCHEMA or not isinstance(commit, str) or not _SHA_RE.fullmatch(commit):
+            commit = "unknown"
+        if isinstance(run_id, bool) or not isinstance(run_id, int) or not 0 < run_id <= MAX_WORKFLOW_RUN_ID:
+            run_id = None
+        return {"commit": commit, "payload_id": plan.version, "workflow_run_id": run_id}
 
     def _channel_relation(self, current_commit: str, candidate_commit: str) -> str:
         """Prove update ancestry before exposing or preparing a main update."""
@@ -1004,6 +1456,7 @@ class AppUpdateService:
         value = dict(result)
         persisted: dict[str, Any] | None = None
         staged: dict[str, Any] | None = None
+        bootstrap: dict[str, Any] | None = None
         if root is not None:
             try:
                 persisted = _read_update_state(root)
@@ -1013,6 +1466,10 @@ class AppUpdateService:
                 staged = _read_staged_update(root)
             except (OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError, AppUpdateError):
                 staged = None
+            try:
+                bootstrap = _read_bootstrap_pending(root)
+            except (OSError, UnicodeError, UnicodeDecodeError, json.JSONDecodeError, AppUpdateError):
+                bootstrap = None
 
         status = str(value.get("status") or "unavailable")
         current_payload = _safe_opaque_id(value.get("current_payload_id") or value.get("current_payload"))
@@ -1051,7 +1508,7 @@ class AppUpdateService:
             can_prepare = False
             can_restart = True
             requires_restart = True
-        elif status == "available":
+        elif status in {"available", "launcher_migration_required"}:
             phase = "update_available"
             progress = 0
             can_prepare = True
@@ -1135,6 +1592,16 @@ class AppUpdateService:
             last_error = persisted.get("last_error_code")
         if transaction_id is None and self._retry_attempt is not None and phase == "checking":
             transaction_id = None
+        launcher = launcher_projection(root) if root is not None else {"status": "unavailable", "format": "unknown", "migration_required": True}
+        launcher_status = str(launcher.get("status") or "unavailable")
+        launcher_format = str(launcher.get("format") or "unknown")
+        launcher_migration_required = launcher.get("migration_required") is True
+        if isinstance(staged, dict) and staged.get("update_kind") == UPDATE_KIND_APP_AND_LAUNCHER:
+            launcher_status = "candidate_verified" if phase in {"staged", "confirm_restart", "restarting"} else launcher_status
+            launcher_format = "onedir"
+            launcher_migration_required = False if phase in {"staged", "confirm_restart", "restarting", "succeeded"} else launcher_migration_required
+        payload_status = "unavailable" if current_payload is None else "satisfied" if status == "up_to_date" else "candidate_ready" if staged is not None else "available" if candidate_payload and candidate_payload != current_payload else "satisfied"
+        restart_state = "pending" if pending_exists else "awaiting_restart" if staged is not None else "idle"
         value.update({
             "transaction_id": transaction_id,
             "phase": phase,
@@ -1149,6 +1616,23 @@ class AppUpdateService:
             "rollback_mode": rollback_mode,
             "reason_code": reason,
             "last_error_code": last_error,
+            # Product-level status deliberately keeps payload and shell
+            # contracts separate.  A legacy single-file shell therefore
+            # cannot be reported as a complete up_to_date product.
+            "payload_status": payload_status,
+            "launcher_status": launcher_status,
+            "launcher_format": launcher_format,
+            "launcher_migration_required": launcher_migration_required,
+            "restart_state": restart_state,
+            "bootstrap_pending": bool(bootstrap and bootstrap.get("status") in {"pending", "downloading", "verifying", "staged", "restarting"}),
+            "bootstrap_status": bootstrap.get("status") if isinstance(bootstrap, dict) else None,
+            "bootstrap_transaction_id": bootstrap.get("transaction_id") if isinstance(bootstrap, dict) else None,
+            "bootstrap_payload_id": bootstrap.get("payload_id") if isinstance(bootstrap, dict) else None,
+            "bootstrap_restart_authorized": bool(bootstrap and bootstrap.get("restart_authorized") is True),
+            "download_stage_automatic": bool(bootstrap and bootstrap.get("status") in {"downloading", "verifying", "staged", "restarting"}),
+            "second_restart_automatic": bool(bootstrap and bootstrap.get("restart_authorized") is True),
+            "additional_confirmation_required": bool(bootstrap and bootstrap.get("status") in {"staged", "restarting"} and bootstrap.get("restart_authorized") is not True),
+            "user_action_count": 1 if bootstrap and bootstrap.get("restart_authorized") is True else 2 if bootstrap and bootstrap.get("status") in {"staged", "restarting"} else None,
         })
         return value
 
@@ -1207,7 +1691,8 @@ class AppUpdateService:
                         "latest_build": None, "transport": auth.transport, "code": auth.code, "action": auth.action,
                     }
                 else:
-                    candidate = self._latest_candidate()
+                    shell_migration_required = launcher_projection(root).get("migration_required") is True
+                    candidate = self._latest_candidate(require_composite=shell_migration_required)
                     if candidate is None:
                         result = {
                             "status": "no_artifact", "available": False, "product_version": PRODUCT_VERSION,
@@ -1267,7 +1752,7 @@ class AppUpdateService:
                                     "action": "Không xác minh được ancestry của payload; Hub không tự cài đặt.",
                                 }
                             else:
-                                available = relation == "forward_update_available" or (relation == "legacy_or_unbound" and current["commit"] != candidate.source_commit)
+                                available = relation == "forward_update_available" or (relation == "legacy_or_unbound" and current["commit"] != candidate.source_commit) or (relation == "same" and shell_migration_required)
                                 result = {
                                     "status": "available" if available else "up_to_date", "available": available,
                                     "product_version": PRODUCT_VERSION, "current_build": current["commit"],
@@ -1276,6 +1761,13 @@ class AppUpdateService:
                                     "artifact_id": candidate.artifact_id, "transport": auth.transport,
                                     "action": "Cập nhật Local AI Hub" if available else "Bạn đang dùng build main mới nhất.",
                                 }
+                                if relation == "same" and shell_migration_required:
+                                    result.update({
+                                        "status": "launcher_migration_required",
+                                        "code": "UPDATE_LAUNCHER_REQUIRED",
+                                        "reason_code": "launcher_migration_required",
+                                        "action": "Shell Local AI Hub legacy cần được nâng cấp cùng payload trong một composite update.",
+                                    })
             except AppUpdateError as exc:
                 result = {
                     "status": "unavailable", "available": False, "product_version": PRODUCT_VERSION,
@@ -1314,7 +1806,7 @@ class AppUpdateService:
 
     def _download_candidate(self, candidate: UpdateCandidate, destination: Path) -> None:
         try:
-            self._transport().download_artifact(candidate.run_id, destination, UPDATE_ARTIFACT_NAME)
+            self._transport().download_artifact(candidate.run_id, destination, candidate.artifact_name)
         except TransportError as exc:
             raise AppUpdateError(exc.code) from exc
 
@@ -1323,6 +1815,17 @@ class AppUpdateService:
         contract_path = folder / UPDATE_CONTRACT_NAME
         if contract_path.is_file() and not contract_path.is_symlink():
             contract = _safe_update_contract(_safe_json_file(contract_path), expected_commit=candidate.source_commit)
+            if contract.get("update_kind") == UPDATE_KIND_APP_AND_LAUNCHER:
+                if manifest.get("schema_version") != COMPOSITE_UPDATE_SCHEMA:
+                    raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+                if manifest.get("workflow_run_id") != candidate.run_id or contract.get("workflow_run_id") != candidate.run_id:
+                    raise AppUpdateError("UPDATE_RUN_MISMATCH")
+                if manifest.get("payload_id") != contract.get("app_payload_id"):
+                    raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+                if manifest.get("launcher_format") != contract.get("launcher_format") or manifest.get("launcher_executable_sha256") != contract.get("launcher_executable_sha256") or manifest.get("launcher_manifest_sha256") != contract.get("launcher_tree_manifest_sha256"):
+                    raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
+                if manifest.get("app_manifest_sha256") != contract.get("app_manifest_sha256") or manifest.get("app_file_count") != contract.get("app_file_count") or manifest.get("app_total_bytes") != contract.get("app_total_bytes"):
+                    raise AppUpdateError("UPDATE_PRODUCT_CONTRACT_INVALID")
             sums_path = folder / "SHA256SUMS.txt"
             if not sums_path.is_file() or sums_path.is_symlink():
                 raise AppUpdateError("UPDATE_CHECKSUM_MANIFEST_MISSING")
@@ -1348,6 +1851,14 @@ class AppUpdateService:
                 "legacy_manifest": True,
             }
         expected_strategy = RUNTIME_STRATEGY_BUNDLED if contract["update_kind"] == UPDATE_KIND_FULL else RUNTIME_STRATEGY
+        if candidate.artifact_name == LEGACY_UPDATE_ARTIFACT_NAME and contract["update_kind"] == UPDATE_KIND_APP_AND_LAUNCHER:
+            # The historical artifact is intentionally legacy-parseable.  A
+            # composite payload under that identity would be offered to the
+            # exact de616f4 client, which is forbidden by the bootstrap
+            # contract.
+            raise AppUpdateError("UPDATE_OLD_CLIENT_ARTIFACT_MISMATCH")
+        if candidate.artifact_name == COMPOSITE_UPDATE_ARTIFACT_NAME and contract["update_kind"] != UPDATE_KIND_APP_AND_LAUNCHER:
+            raise AppUpdateError("UPDATE_COMPOSITE_ARTIFACT_REQUIRED")
         if manifest.get("runtime_strategy") != expected_strategy:
             raise AppUpdateError("UPDATE_RUNTIME_CONTRACT_MISMATCH")
         archive = folder / str(manifest["archive"])
@@ -1548,6 +2059,118 @@ class AppUpdateService:
             self._verify_staged_payload(root, value)
             return value
 
+    def continue_bootstrap_after_restart(self) -> dict[str, Any]:
+        """Continue a legacy APP_ONLY transition without a second artifact pick.
+
+        The exact base client can install only the historical APP_ONLY
+        contract.  Once that payload starts, its build metadata identifies the
+        trusted workflow run; this method binds the next lookup to that exact
+        commit/run and stages the distinct composite artifact automatically.
+        It never changes ``current.json`` or launches a second process by
+        itself, so the normal native restart transaction remains the only
+        activation path.
+        """
+
+        with self._lock:
+            root = self._install_root()
+            with _update_serialization_lock(root):
+                metadata = self._current_build_metadata(root)
+                pending = _read_bootstrap_pending(root)
+                if launcher_projection(root).get("migration_required") is not True:
+                    if pending is not None and pending.get("status") != "completed":
+                        return _complete_bootstrap_marker(root, pending, current=metadata)
+                    return {"status": "not_required", "bootstrap_pending": False}
+                if pending is None:
+                    commit = metadata.get("commit")
+                    run_id = metadata.get("workflow_run_id")
+                    if not isinstance(commit, str) or not _SHA_RE.fullmatch(commit) or not isinstance(run_id, int):
+                        return {
+                            "status": "blocked",
+                            "code": "UPDATE_COMPOSITE_ARTIFACT_REQUIRED",
+                            "bootstrap_pending": False,
+                            "action": "Chưa có source/run identity để tiếp tục shell migration tự động.",
+                        }
+                    pending = _write_bootstrap_pending(
+                        root,
+                        source_commit=commit,
+                        workflow_run_id=run_id,
+                        status="pending",
+                        transaction_id=self._transaction_id,
+                        consent_transaction_id=None,
+                        consent_payload_id=None,
+                    )
+                if pending.get("status") in {"staged", "restarting", "completed"}:
+                    return {
+                        "status": pending["status"],
+                        "bootstrap_pending": pending["status"] in {"staged", "restarting"},
+                        "source_commit": pending["source_commit"],
+                        "workflow_run_id": pending["workflow_run_id"],
+                        "transaction_id": pending.get("transaction_id"),
+                        "payload_id": pending.get("payload_id"),
+                        "restart_authorized": pending.get("restart_authorized") is True,
+                        "additional_confirmation_required": pending.get("restart_authorized") is not True,
+                        "user_action_count": 1 if pending.get("restart_authorized") is True else 2,
+                    }
+                if pending.get("status") == "blocked":
+                    return {
+                        "status": "blocked",
+                        "code": pending.get("reason_code") or "UPDATE_COMPOSITE_ARTIFACT_REQUIRED",
+                        "bootstrap_pending": True,
+                        "source_commit": pending["source_commit"],
+                        "workflow_run_id": pending["workflow_run_id"],
+                    }
+                candidate = self._candidate_for_exact_run(
+                    source_commit=str(pending["source_commit"]),
+                    workflow_run_id=int(pending["workflow_run_id"]),
+                )
+                if candidate is None:
+                    _write_bootstrap_pending(
+                        root,
+                        source_commit=str(pending["source_commit"]),
+                        workflow_run_id=int(pending["workflow_run_id"]),
+                        status="blocked",
+                        reason_code="artifact_identity_mismatch",
+                        transaction_id=pending.get("transaction_id") if isinstance(pending.get("transaction_id"), str) else None,
+                        payload_id=pending.get("payload_id") if isinstance(pending.get("payload_id"), str) else None,
+                        consent_transaction_id=pending.get("consent_transaction_id") if isinstance(pending.get("consent_transaction_id"), str) else None,
+                        consent_payload_id=pending.get("consent_payload_id") if isinstance(pending.get("consent_payload_id"), str) else None,
+                    )
+                    return {
+                        "status": "blocked",
+                        "code": "UPDATE_COMPOSITE_ARTIFACT_REQUIRED",
+                        "bootstrap_pending": True,
+                        "source_commit": pending["source_commit"],
+                        "workflow_run_id": pending["workflow_run_id"],
+                    }
+                result = self._prepare_locked_impl(root, candidate_override=candidate)
+                if result.get("update_kind") == UPDATE_KIND_APP_AND_LAUNCHER or result.get("status") == "staged":
+                    next_transaction_id = result.get("transaction_id") if isinstance(result.get("transaction_id"), str) else pending.get("transaction_id")
+                    next_payload_id = result.get("payload_id") if isinstance(result.get("payload_id"), str) else pending.get("payload_id")
+                    consent_matches = (
+                        pending.get("restart_authorized") is True
+                        and pending.get("consent_transaction_id") == next_transaction_id
+                        and pending.get("consent_payload_id") == next_payload_id
+                    )
+                    _write_bootstrap_pending(
+                        root,
+                        source_commit=str(pending["source_commit"]),
+                        workflow_run_id=int(pending["workflow_run_id"]),
+                        status="staged",
+                        transaction_id=next_transaction_id,
+                        payload_id=next_payload_id,
+                        restart_authorized=consent_matches,
+                        consent_transaction_id=next_transaction_id if consent_matches else None,
+                        consent_payload_id=next_payload_id if consent_matches else None,
+                    )
+                    result["bootstrap_pending"] = True
+                    result["bootstrap_status"] = "staged"
+                    result["bootstrap_restart_authorized"] = consent_matches
+                    result["additional_confirmation_required"] = not consent_matches
+                    result["user_action_count"] = 1 if consent_matches else 2
+                    result["download_stage_automatic"] = True
+                    result["second_restart_automatic"] = consent_matches
+                return self._public_projection(result, root=root)
+
     @staticmethod
     def _verify_staged_payload(root: Path, staged: dict[str, Any]) -> None:
         """Revalidate a candidate immediately before pointer activation."""
@@ -1575,6 +2198,23 @@ class AppUpdateService:
         app = payload / "app"
         if app.is_symlink() or not app.is_dir() or runtime.is_symlink() or not runtime.is_file():
             raise AppUpdateError("STAGED_RUNTIME_UNAVAILABLE")
+        if staged.get("update_kind") == UPDATE_KIND_APP_AND_LAUNCHER:
+            run_id = staged.get("workflow_run_id")
+            if isinstance(run_id, bool) or not isinstance(run_id, int) or not 0 < run_id <= MAX_WORKFLOW_RUN_ID or build_value.get("workflow_run_id") != run_id:
+                raise AppUpdateError("UPDATE_RUN_MISMATCH")
+            try:
+                launcher = launcher_tree_manifest(payload / "launcher" / "LocalAIHub")
+            except LauncherMigrationError as exc:
+                raise AppUpdateError("UPDATE_LAUNCHER_MANIFEST_MISMATCH") from exc
+            if (
+                staged.get("workflow_run_id") is None
+                or launcher.get("format") != staged.get("launcher_format")
+                or launcher.get("executable_sha256") != staged.get("launcher_executable_sha256")
+                or launcher.get("tree_manifest_sha256") != staged.get("launcher_tree_manifest_sha256")
+                or launcher.get("file_count") != staged.get("launcher_file_count")
+                or launcher.get("total_bytes") != staged.get("launcher_total_bytes")
+            ):
+                raise AppUpdateError("UPDATE_LAUNCHER_MANIFEST_MISMATCH")
 
     def create_restart_session(self, *, payload_id: str, source_commit: str, nonce: str, parent_pid: int) -> dict[str, Any]:
         """Atomically publish the session contract consumed by the watchdog."""
@@ -1599,6 +2239,87 @@ class AppUpdateService:
             value["transaction_id"] = self._transaction_id
         _write_restart_session(root, value)
         return {key: value[key] for key in ("schema_version", "payload_id", "source_commit", "nonce", "parent_pid", "status", "transaction_id") if key in value}
+
+    def prepare_staged_restart(self) -> dict[str, Any]:
+        """Reserve a composite shell/payload restart without switching yet.
+
+        Legacy ``commit_staged_restart`` remains available for older payloads
+        and tests.  A composite product must follow the stricter ordering:
+        close-preflight -> old desktop exit -> shell switch -> pointer
+        activation.  This journal is the hand-off consumed by the candidate
+        watchdog and contains only bounded identities and the previous
+        pointer, never paths or commands in public projections.
+        """
+
+        with self._lock:
+            root = self._install_root()
+            with _update_serialization_lock(root):
+                staged = _read_staged_update(root)
+                if staged is None:
+                    raise AppUpdateError("STAGED_UPDATE_UNAVAILABLE")
+                self._verify_staged_payload(root, staged)
+                if staged.get("update_kind") != UPDATE_KIND_APP_AND_LAUNCHER:
+                    raise AppUpdateError("UPDATE_LAUNCHER_REQUIRED")
+                current = load_current_pointer(root)
+                previous = staged.get("previous")
+                if not isinstance(previous, dict) or current != previous:
+                    raise AppUpdateError("STAGED_CURRENT_POINTER_CHANGED")
+                transaction_id = staged.get("transaction_id") if isinstance(staged.get("transaction_id"), str) else self._transaction_id
+                if transaction_id is None or _TRANSACTION_RE.fullmatch(transaction_id) is None:
+                    transaction_id = _new_transaction_id()
+                value = {
+                    "schema_version": RESTART_TRANSACTION_SCHEMA,
+                    "transaction_id": transaction_id,
+                    "payload_id": staged["payload_id"],
+                    "source_commit": staged["source_commit"],
+                    "update_kind": staged["update_kind"],
+                    "previous": previous,
+                    "manifest_sha256": staged["manifest_sha256"],
+                    "workflow_run_id": staged.get("workflow_run_id"),
+                    "launcher_format": staged.get("launcher_format"),
+                    "launcher_executable_sha256": staged.get("launcher_executable_sha256"),
+                    "launcher_tree_manifest_sha256": staged.get("launcher_tree_manifest_sha256"),
+                    "launcher_file_count": staged.get("launcher_file_count"),
+                    "launcher_total_bytes": staged.get("launcher_total_bytes"),
+                    "status": "awaiting_old_exit",
+                    "created_at": _utc_now(),
+                }
+                _write_json_atomic(_restart_transaction_path(root), value)
+                self._transaction_id = transaction_id
+                self._remember_update_state(
+                    root,
+                    phase="restarting",
+                    progress=80,
+                    transaction_id=transaction_id,
+                    requires_restart=True,
+                    current_payload_id=current.get("version"),
+                    candidate_payload_id=staged.get("payload_id"),
+                    rollback_payload_id=previous.get("version"),
+                )
+                return {
+                    "status": "restart_prepared",
+                    "source_commit": staged["source_commit"],
+                    "payload_id": staged["payload_id"],
+                    "transaction_id": transaction_id,
+                    "previous_payload": previous.get("version"),
+                    "restart_required": True,
+                    "launcher_changed": True,
+                    "update_kind": staged["update_kind"],
+                    "commit_phase": "awaiting_old_exit",
+                }
+
+    def abort_restart_transaction(self, *, reason: str = "RESTART_TRANSACTION_FAILED") -> dict[str, Any]:
+        """Cancel a deferred composite restart before pointer activation."""
+
+        with self._lock:
+            root = self._install_root()
+            with _update_serialization_lock(root):
+                path = _restart_transaction_path(root)
+                if path.is_file() and not path.is_symlink():
+                    _unlink_state(path)
+                    _try_write_update_state(root, phase="error", progress=0, transaction_id=self._transaction_id, reason_code=reason_code_for(reason), last_error_code=reason if re.fullmatch(r"[A-Z][A-Z0-9_]{2,95}", reason) else "RESTART_TRANSACTION_FAILED")
+                    return {"status": "aborted", "reason": str(reason)[:96]}
+                return {"status": "not_pending"}
 
     def commit_staged_restart(self) -> dict[str, Any]:
         """Commit a staged candidate after the native close gate is ready.
@@ -1637,6 +2358,23 @@ class AppUpdateService:
                         source_commit=source_commit,
                         transaction_id=transaction_id,
                     )
+                    bootstrap_marker = _read_bootstrap_pending(root)
+                    if (
+                        isinstance(bootstrap_marker, dict)
+                        and bootstrap_marker.get("source_commit") == source_commit
+                        and bootstrap_marker.get("status") in {"pending", "restarting"}
+                    ):
+                        _write_bootstrap_pending(
+                            root,
+                            source_commit=source_commit,
+                            workflow_run_id=int(bootstrap_marker["workflow_run_id"]),
+                            status="restarting",
+                            transaction_id=transaction_id,
+                            payload_id=payload_id,
+                            restart_authorized=(isinstance(transaction_id, str) and _TRANSACTION_RE.fullmatch(transaction_id) is not None and _PAYLOAD_RE.fullmatch(payload_id) is not None),
+                            consent_transaction_id=transaction_id if isinstance(transaction_id, str) and _TRANSACTION_RE.fullmatch(transaction_id) is not None else None,
+                            consent_payload_id=payload_id if _PAYLOAD_RE.fullmatch(payload_id) is not None else None,
+                        )
                     atomic_activate_pointer(root, version=payload_id, manifest_sha256=manifest_hash)
                     activated = True
                 except (OSError, UnicodeError, json.JSONDecodeError, StableShellError, AppUpdateError) as exc:
@@ -1808,18 +2546,35 @@ class AppUpdateService:
             )
             raise
 
-    def _prepare_locked_impl(self, root: Path) -> dict[str, Any]:
+    def _prepare_locked_impl(
+        self,
+        root: Path,
+        *,
+        candidate_override: UpdateCandidate | None = None,
+    ) -> dict[str, Any]:
         """Implementation of :meth:`prepare` under the cross-process lock."""
 
         self._remember_update_state(root, phase="checking", progress=0)
         _transport, auth = self._selected_transport()
         if auth.status != "ready":
             raise AppUpdateError(auth.code or "GITHUB_AUTH_REQUIRED")
-        candidate = self._latest_candidate()
+        shell_migration_required = launcher_projection(root).get("migration_required") is True
+        pending_bootstrap = _read_bootstrap_pending(root)
+        if candidate_override is not None:
+            candidate = candidate_override
+        elif isinstance(pending_bootstrap, dict) and pending_bootstrap.get("status") == "pending":
+            candidate = self._candidate_for_exact_run(
+                source_commit=str(pending_bootstrap["source_commit"]),
+                workflow_run_id=int(pending_bootstrap["workflow_run_id"]),
+            )
+            if candidate is None:
+                raise AppUpdateError("UPDATE_COMPOSITE_ARTIFACT_REQUIRED")
+        else:
+            candidate = self._latest_candidate(require_composite=shell_migration_required)
         if candidate is None:
             raise AppUpdateError("UPDATE_ARTIFACT_NOT_FOUND")
         current = self._current_build(root)
-        if current["commit"] == candidate.source_commit:
+        if current["commit"] == candidate.source_commit and not shell_migration_required:
             self._remember_update_state(
                 root,
                 phase="succeeded",
@@ -1848,8 +2603,29 @@ class AppUpdateService:
         if relation == "channel_relation_unavailable" and current["commit"] not in {"legacy", "unknown"}:
             raise AppUpdateError("UPDATE_CHANNEL_RELATION_UNAVAILABLE")
         existing_staged = _read_staged_update(root)
+        bootstrap_previous: dict[str, Any] | None = None
         if existing_staged is not None:
-            if existing_staged.get("source_commit") == candidate.source_commit:
+            existing_kind = existing_staged.get("update_kind")
+            bootstrap_upgrade = (
+                existing_staged.get("source_commit") == candidate.source_commit
+                and candidate.is_composite
+                and existing_kind == UPDATE_KIND_APP_ONLY
+            )
+            if bootstrap_upgrade:
+                # The old client has already moved current.json to this app
+                # payload. Preserve its original pointer as the rollback
+                # target while replacing only the staged contract with the
+                # same-run composite shell payload below.
+                previous = existing_staged.get("previous")
+                if (
+                    not isinstance(previous, dict)
+                    or set(previous) != {"schema_version", "version", "payload_relative", "manifest_sha256"}
+                    or previous.get("schema_version") != POINTER_SCHEMA
+                ):
+                    raise AppUpdateError("STAGED_UPDATE_INVALID")
+                bootstrap_previous = dict(previous)
+                existing_staged = None
+            elif existing_staged.get("source_commit") == candidate.source_commit:
                 transaction_id = existing_staged.get("transaction_id")
                 if not isinstance(transaction_id, str) or _TRANSACTION_RE.fullmatch(transaction_id) is None:
                     transaction_id = self._transaction_id or _new_transaction_id()
@@ -1873,6 +2649,16 @@ class AppUpdateService:
                     candidate_payload_id=existing_staged.get("payload_id"),
                     rollback_payload_id=rollback_payload_id,
                 )
+                if existing_kind == UPDATE_KIND_APP_ONLY and shell_migration_required:
+                    _write_bootstrap_pending(
+                        root,
+                        source_commit=candidate.source_commit,
+                        workflow_run_id=candidate.run_id,
+                        status="pending",
+                        transaction_id=transaction_id,
+                        payload_id=existing_staged.get("payload_id") if isinstance(existing_staged.get("payload_id"), str) else None,
+                        restart_authorized=False,
+                    )
                 return {
                     "status": "staged",
                     "source_commit": candidate.source_commit,
@@ -1881,9 +2667,12 @@ class AppUpdateService:
                     "previous_payload": rollback_payload_id,
                     "restart_required": True,
                     "staged": True,
+                    "bootstrap_pending": existing_kind == UPDATE_KIND_APP_ONLY and shell_migration_required,
+                    "update_kind": existing_kind,
                     "commit_phase": "awaiting_restart",
                 }
-            raise AppUpdateError("UPDATE_STAGED_UPDATE_PENDING")
+            else:
+                raise AppUpdateError("UPDATE_STAGED_UPDATE_PENDING")
         plan = resolve_launch_plan(root, allow_test_root=self._allow_test_root)
         staging_root = root / "staging"
         staging_root.mkdir(parents=True, exist_ok=True)
@@ -1916,10 +2705,25 @@ class AppUpdateService:
             )
             manifest, contract, archive = self._validate_download(download, candidate)
             update_kind = str(contract["update_kind"])
+            bootstrap_candidate = update_kind == UPDATE_KIND_APP_ONLY and shell_migration_required
             stage_payload.mkdir(parents=False, exist_ok=False)
             _safe_extract_app_archive(archive, stage_payload, expected_files=int(manifest["file_count"]), update_kind=update_kind)
+            launcher_manifest: dict[str, Any] | None = None
+            if update_kind == UPDATE_KIND_APP_AND_LAUNCHER:
+                try:
+                    launcher_manifest = launcher_tree_manifest(stage_payload / "launcher" / "LocalAIHub")
+                except LauncherMigrationError as exc:
+                    raise AppUpdateError("UPDATE_LAUNCHER_MANIFEST_MISMATCH") from exc
+                if (
+                    launcher_manifest.get("format") != contract.get("launcher_format")
+                    or launcher_manifest.get("executable_sha256") != contract.get("launcher_executable_sha256")
+                    or launcher_manifest.get("tree_manifest_sha256") != contract.get("launcher_tree_manifest_sha256")
+                    or launcher_manifest.get("file_count") != contract.get("launcher_file_count")
+                    or launcher_manifest.get("total_bytes") != contract.get("launcher_total_bytes")
+                ):
+                    raise AppUpdateError("UPDATE_LAUNCHER_MANIFEST_MISMATCH")
             runtime_source = plan.payload_root / "runtime"
-            if update_kind == UPDATE_KIND_APP_ONLY:
+            if update_kind in {UPDATE_KIND_APP_ONLY, UPDATE_KIND_APP_AND_LAUNCHER}:
                 if not runtime_source.is_dir() or runtime_source.is_symlink():
                     raise AppUpdateError("CURRENT_RUNTIME_UNAVAILABLE")
                 shutil.copytree(runtime_source, stage_payload / "runtime", symlinks=False)
@@ -1973,11 +2777,31 @@ class AppUpdateService:
                 existing = target / "build.json"
                 if not existing.is_file() or _safe_json_file(existing, max_bytes=32 * 1024).get("source_commit") != candidate.source_commit:
                     raise AppUpdateError("UPDATE_TARGET_CONFLICT")
-                shutil.rmtree(stage_payload)
+                if update_kind == UPDATE_KIND_APP_AND_LAUNCHER:
+                    target_launcher = target / "launcher" / "LocalAIHub"
+                    if target_launcher.exists():
+                        try:
+                            verify_launcher = launcher_tree_manifest(target_launcher)
+                        except LauncherMigrationError as exc:
+                            raise AppUpdateError("UPDATE_TARGET_CONFLICT") from exc
+                        if verify_launcher != launcher_manifest:
+                            raise AppUpdateError("UPDATE_TARGET_CONFLICT")
+                        shutil.rmtree(stage_payload)
+                    else:
+                        # A legacy APP_ONLY bootstrap already created the
+                        # exact app/runtime payload at this version.  Add the
+                        # independently verified onedir shell without
+                        # replacing user data or weakening the source binding.
+                        shutil.copytree(stage_payload / "launcher", target_launcher.parent, symlinks=False)
+                        if launcher_manifest is None or launcher_tree_manifest(target_launcher) != launcher_manifest:
+                            raise AppUpdateError("UPDATE_TARGET_CONFLICT")
+                        shutil.rmtree(stage_payload)
+                else:
+                    shutil.rmtree(stage_payload)
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(stage_payload, target)
-            previous = load_current_pointer(root)
+            previous = bootstrap_previous or load_current_pointer(root)
             history = root / "update-state"
             history.mkdir(parents=True, exist_ok=True)
             _write_json_atomic(history / "staged-update.json", {
@@ -1991,6 +2815,34 @@ class AppUpdateService:
                 "staged_at": _utc_now(),
                 "update_kind": update_kind,
             })
+            if bootstrap_candidate:
+                _write_bootstrap_pending(
+                    root,
+                    source_commit=candidate.source_commit,
+                    workflow_run_id=candidate.run_id,
+                    status="pending",
+                    transaction_id=self._transaction_id,
+                    payload_id=version,
+                    restart_authorized=False,
+                )
+            if update_kind == UPDATE_KIND_APP_AND_LAUNCHER and launcher_manifest is not None:
+                _write_json_atomic(_staged_update_path(root), {
+                    "schema_version": STAGED_UPDATE_SCHEMA,
+                    "payload_id": version,
+                    "source_commit": candidate.source_commit,
+                    "transaction_id": self._transaction_id,
+                    "payload_relative": f"versions/{version}",
+                    "manifest_sha256": manifest_hash,
+                    "previous": previous,
+                    "staged_at": _utc_now(),
+                    "update_kind": update_kind,
+                    "workflow_run_id": contract.get("workflow_run_id"),
+                    "launcher_format": launcher_manifest.get("format"),
+                    "launcher_executable_sha256": launcher_manifest.get("executable_sha256"),
+                    "launcher_tree_manifest_sha256": launcher_manifest.get("tree_manifest_sha256"),
+                    "launcher_file_count": launcher_manifest.get("file_count"),
+                    "launcher_total_bytes": launcher_manifest.get("total_bytes"),
+                })
             self._remember_update_state(
                 root,
                 phase="staged",
@@ -2007,8 +2859,9 @@ class AppUpdateService:
                 "status": "staged", "source_commit": candidate.source_commit,
                 "payload_id": version, "previous_payload": previous.get("version"),
                 "transaction_id": self._transaction_id,
-                "restart_required": True, "staged": True, "launcher_changed": False, "data_root_changed": False,
+                "restart_required": True, "staged": True, "launcher_changed": update_kind == UPDATE_KIND_APP_AND_LAUNCHER, "data_root_changed": False,
                 "update_kind": update_kind, "runtime_contract": contract["runtime_contract"],
+                "bootstrap_pending": bootstrap_candidate,
                 "commit_phase": "awaiting_restart",
             }
         except AppUpdateError:
@@ -2072,7 +2925,8 @@ def app_update_service() -> AppUpdateService:
 
 
 __all__ = [
-    "AppUpdateError", "AppUpdateService", "BUILD_INFO_SCHEMA", "REPOSITORY", "UPDATE_ARTIFACT_NAME",
-    "UPDATE_CONTRACT_NAME", "UPDATE_CONTRACT_SCHEMA", "UPDATE_KIND_APP_ONLY", "UPDATE_KIND_FULL",
-    "PENDING_HEALTH_SCHEMA", "STAGED_UPDATE_SCHEMA", "RESTART_SESSION_SCHEMA", "UPDATE_STATE_SCHEMA", "UPDATE_STATE_FILE", "UPDATE_PHASES", "STABLE_UPDATE_REASON_CODES", "CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS", "CANDIDATE_BOOTSTRAP_PREFLIGHT_TIMEOUT_SECONDS", "UPDATE_SCHEMA", "app_update_service", "mark_startup_health", "reason_code_for", "update_error_projection", "_runtime_inventory_hash", "_safe_extract_app_archive", "_safe_update_contract", "_safe_update_manifest", "_read_staged_update", "_read_update_state", "_try_write_update_state", "_write_restart_session",
+    "AppUpdateError", "AppUpdateService", "BUILD_INFO_SCHEMA", "REPOSITORY", "UPDATE_ARTIFACT_NAME", "LEGACY_UPDATE_ARTIFACT_NAME", "COMPOSITE_UPDATE_ARTIFACT_NAME",
+    "UPDATE_CONTRACT_NAME", "UPDATE_CONTRACT_SCHEMA", "COMPOSITE_UPDATE_SCHEMA", "PRODUCT_UPDATE_CONTRACT_SCHEMA",
+    "UPDATE_KIND_APP_ONLY", "UPDATE_KIND_FULL", "UPDATE_KIND_APP_AND_LAUNCHER",
+    "PENDING_HEALTH_SCHEMA", "STAGED_UPDATE_SCHEMA", "RESTART_SESSION_SCHEMA", "RESTART_TRANSACTION_SCHEMA", "BOOTSTRAP_PENDING_SCHEMA", "BOOTSTRAP_PENDING_FILE", "UPDATE_STATE_SCHEMA", "UPDATE_STATE_FILE", "UPDATE_PHASES", "STABLE_UPDATE_REASON_CODES", "CANDIDATE_API_PREFLIGHT_TIMEOUT_SECONDS", "CANDIDATE_BOOTSTRAP_PREFLIGHT_TIMEOUT_SECONDS", "UPDATE_SCHEMA", "app_update_service", "mark_startup_health", "reason_code_for", "update_error_projection", "_runtime_inventory_hash", "_safe_extract_app_archive", "_safe_update_contract", "_safe_update_manifest", "_read_staged_update", "_read_bootstrap_pending", "_write_bootstrap_pending", "_read_update_state", "_try_write_update_state", "_write_restart_session",
 ]

@@ -38,7 +38,7 @@ OID = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 GATE_ID = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
 CHECK_ID = re.compile(r"^[a-z][a-z0-9_.-]{1,95}$")
-EVIDENCE_STATUSES = frozenset({"PASS", "FAIL", "BLOCKED", "NOT_RUN"})
+EVIDENCE_STATUSES = frozenset({"PASS", "FAIL", "BLOCKED", "NOT_RUN", "NOT_AVAILABLE_ON_TEST_HOST"})
 PROVENANCE_SCHEMA_VERSION = "v8-local-gate-provenance.v1"
 PROVENANCE_KINDS = frozenset({"RERUN_EXACT_HEAD", "REUSED_UNAFFECTED_EVIDENCE"})
 _WEBVIEW_CAPABILITY_SCHEMA = "v8-webview-dpi-evidence.v1"
@@ -116,13 +116,15 @@ _HIGH_RISK_UNCLASSIFIED_PREFIXES = (
 )
 
 
-def _path_impact_scope(path: str) -> str | None:
+def _path_impact_scope_single(path: str) -> str | None:
     normalized = path.replace("\\", "/")
     if normalized in {"src/services/runtime_registry.py", "src/services/local_registry_recovery.py"} or normalized.startswith("src/modules/airi/") or normalized.startswith("src/ui/features/airi/"):
         # AIRI's installer-managed application discovery/launch boundary is
         # distinct from AI runtime execution.  It must not invalidate a
         # reused runtime_smoke report, while remaining explicitly classified
         # instead of falling through to the unknown high-risk sentinel.
+        return "application_launch"
+    if normalized == "src/services/shortcut_migration.py":
         return "application_launch"
     if normalized.startswith("src/services/resource_scheduler/"):
         return "resource_scheduler"
@@ -165,6 +167,8 @@ def _path_impact_scope(path: str) -> str | None:
     if normalized == "scripts/generate_api_route_inventory.py":
         return "loopback_api"
     if normalized == "scripts/stage_stable_product.py":
+        return "updater"
+    if normalized in {"scripts/build_main_update.py", "scripts/assemble_product_update.py", "scripts/update_managed_shortcuts.ps1", ".github/workflows/ci.yml"}:
         return "updater"
     if normalized.startswith("src/services/api/"):
         return "loopback_api"
@@ -216,6 +220,41 @@ def _path_impact_scope(path: str) -> str | None:
     if normalized.startswith(_HIGH_RISK_UNCLASSIFIED_PREFIXES):
         return _UNCLASSIFIED_ACCEPTANCE_RELEVANT
     return None
+
+
+def _path_impact_scopes(path: str) -> frozenset[str]:
+    """Return every conservative acceptance scope affected by one path.
+
+    A path can be consumed by more than one physical gate.  The legacy helper
+    below remains as a compatibility projection for older reports/tests, while
+    source reuse decisions use this complete set so a primary mapping cannot
+    silently hide a downstream consumer.
+    """
+
+    normalized = path.replace("\\", "/")
+    primary = _path_impact_scope_single(normalized)
+    scopes = {primary} if primary is not None else set()
+    if normalized.startswith("src/ui/"):
+        scopes.add("product_experience")
+    if normalized.startswith("src/services/api/"):
+        scopes.update({"loopback_api", "product_experience"})
+    if normalized in {"src/app/main.py", "src/app/desktop_lifecycle.py", "src/app/payload_bootstrap.py"}:
+        scopes.update({"desktop_startup", "product_experience"})
+    if normalized.startswith("src/app/update_") or normalized in {"src/app/stable_launcher.py", "src/app/stable_shell.py"}:
+        scopes.update({"updater", "desktop_startup"})
+    if normalized in {"src/services/runtime_registry.py", "src/services/local_registry_recovery.py"} or normalized.startswith("src/modules/airi/") or normalized.startswith("src/ui/features/airi/"):
+        scopes.update({"application_launch", "product_experience"})
+    if normalized.startswith("src/services/component_"):
+        scopes.add("product_experience")
+    if normalized.startswith("src/services/storage"):
+        scopes.add("product_experience")
+    return frozenset(scopes)
+
+
+def _path_impact_scope(path: str) -> str | None:
+    """Compatibility projection retained for pre-set-based callers."""
+
+    return _path_impact_scope_single(path)
 
 
 class AcceptanceGateError(ValueError):
@@ -448,7 +487,10 @@ def source_change_scopes(repo_root: Path, *, origin_source_commit: str, final_so
         paths = result.stdout.decode("utf-8").splitlines()
     except UnicodeDecodeError:
         raise AcceptanceGateError("EVIDENCE_PROVENANCE_SCOPE_UNAVAILABLE") from None
-    return {scope for path in paths if (scope := _path_impact_scope(path)) is not None}
+    changed: set[str] = set()
+    for path in paths:
+        changed.update(_path_impact_scopes(path))
+    return changed
 
 
 def _validate_evidence(value: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
@@ -469,7 +511,7 @@ def _validate_evidence(value: Any, contract: Mapping[str, Any]) -> dict[str, Any
     normalized: dict[str, dict[str, Any]] = {}
     for gate_id in required_ids:
         item = gates.get(gate_id)
-        if not isinstance(item, dict) or set(item) != {"status", "report_sha256", "provenance"}:
+        if not isinstance(item, dict) or not {"status", "report_sha256", "provenance"}.issubset(item) or set(item) - {"status", "report_sha256", "provenance", "check_statuses"}:
             raise AcceptanceGateError("EVIDENCE_GATE_INVALID")
         status = item.get("status")
         report_sha256 = item.get("report_sha256")
@@ -479,10 +521,18 @@ def _validate_evidence(value: Any, contract: Mapping[str, Any]) -> dict[str, Any
             raise AcceptanceGateError("EVIDENCE_REPORT_DIGEST_INVALID")
         if status == "PASS" and not isinstance(report_sha256, str):
             raise AcceptanceGateError("EVIDENCE_PASS_WITHOUT_REPORT")
+        check_statuses = item.get("check_statuses")
+        if check_statuses is not None:
+            declared_checks = next(item["required_checks"] for item in contract["gates"] if item["gate_id"] == gate_id)
+            if not isinstance(check_statuses, dict) or set(check_statuses) != set(declared_checks) or any(value not in EVIDENCE_STATUSES for value in check_statuses.values()):
+                raise AcceptanceGateError("EVIDENCE_CHECK_STATUS_INVALID")
+            if status == "PASS" and any(value != "PASS" for value in check_statuses.values()):
+                raise AcceptanceGateError("EVIDENCE_CHECK_STATUS_INVALID")
         normalized[gate_id] = {
             "status": status,
             "report_sha256": report_sha256,
             "provenance": _validate_gate_provenance(item.get("provenance"), gate_id=gate_id, evidence_source_commit=source_commit),
+            "check_statuses": dict(check_statuses) if isinstance(check_statuses, dict) else None,
         }
     return {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
@@ -643,12 +693,21 @@ def evaluate(
         "present": evidence_path is not None,
         "valid": False,
         "reports_verified": False,
+        "report_integrity_verified": False,
         "source_commit_matches": None,
         "required": source["required_local_gates"],
         "passed": 0,
         "pending_gates": [item["gate_id"] for item in contract["gates"] if item["required"] is True],
+        "pending_checks": {
+            item["gate_id"]: list(item["required_checks"])
+            for item in contract["gates"] if item["required"] is True
+        },
     }
     evidence_blockers: list[str] = []
+    # Missing evidence is a missing execution, not proof that the host lacks
+    # native WebView2 capability.  Only an exact-head Windows capability report
+    # may produce NOT_AVAILABLE_ON_TEST_HOST.
+    native_unavailable = False
     if evidence_path is None:
         evidence_blockers.append("LOCAL_WINDOWS_EVIDENCE_REQUIRED")
     else:
@@ -656,13 +715,40 @@ def evaluate(
             evidence = _validate_evidence(_load_json(evidence_path), contract)
             _verify_pass_reports(evidence, evidence_path, contract, repo_root=repo_root)
             pending = [gate_id for gate_id, item in evidence["gates"].items() if item["status"] != "PASS"]
+            webview_evidence = evidence["gates"].get("webview2_product_ux", {})
+            native_unavailable = (
+                webview_evidence.get("status") == "NOT_AVAILABLE_ON_TEST_HOST"
+                or any(
+                    status == "NOT_AVAILABLE_ON_TEST_HOST"
+                    for status in (webview_evidence.get("check_statuses") or {}).values()
+                )
+            )
+            capability = webview_evidence.get("capabilities") if isinstance(webview_evidence, dict) else None
+            native_statuses = capability.get("native_host_dpi") if isinstance(capability, dict) else None
+            if isinstance(native_statuses, dict) and any(status == "NOT_AVAILABLE_ON_TEST_HOST" for status in native_statuses.values()):
+                native_unavailable = True
+            required_check_map = {
+                item["gate_id"]: list(item["required_checks"])
+                for item in contract["gates"] if item["required"] is True
+            }
+            pending_checks = {
+                gate_id: (
+                    [check_id for check_id, check_status in item["check_statuses"].items() if check_status != "PASS"]
+                    if isinstance(item.get("check_statuses"), dict)
+                    else required_check_map[gate_id]
+                )
+                for gate_id, item in evidence["gates"].items()
+                if item["status"] != "PASS"
+            }
             source_matches = evidence["source_commit"] == head
             evidence_summary.update({
                 "valid": True,
                 "reports_verified": True,
+                "report_integrity_verified": True,
                 "source_commit_matches": source_matches,
                 "passed": len(evidence["gates"]) - len(pending),
                 "pending_gates": pending,
+                "pending_checks": pending_checks,
             })
             if not source_matches:
                 evidence_blockers.append("EVIDENCE_SOURCE_COMMIT_MISMATCH")
@@ -683,11 +769,18 @@ def evaluate(
         status = "merge_ready" if merge_ready else ("technical_ready" if technical_ready else "blocked")
     else:
         status = "release_ready" if release_ready else "blocked"
+    report_integrity_verified = evidence_summary["report_integrity_verified"] is True
+    strict_acceptance = "PASS" if merge_ready else "BLOCKED"
     return {
         "schema_version": "v8-acceptance-preflight.v2",
         "status": status,
         "execution": "not_run",
         "dry_run": True,
+        "strict_acceptance": strict_acceptance,
+        "native_webview_automation": ("NOT_AVAILABLE_ON_TEST_HOST" if native_unavailable else "PASS") if evidence_summary["valid"] is True else "NOT_RUN",
+        "report_integrity_verified": report_integrity_verified,
+        "technical_merge_ready": technical_ready,
+        "full_acceptance_merge_ready": bool(merge_ready and not native_unavailable),
         "source_commit": head,
         "source_preflight": source,
         "local_evidence": evidence_summary,

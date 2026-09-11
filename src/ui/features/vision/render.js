@@ -27,6 +27,8 @@ const renderMediaStage = (_source, { vision = false } = {}) => `<div class="m3-m
   </div>
   ${vision ? '<svg class="vision-overlay" data-vision-overlay viewBox="0 0 1 1" preserveAspectRatio="none" aria-label="Bounding boxes"></svg>' : '<canvas class="sam2-overlay" data-sam2-overlay aria-hidden="true"></canvas>'}
   <div class="m3-media-empty" data-m3-preview-empty><strong>Chưa có tệp nguồn</strong><span>Chọn tệp để xem preview trong workspace.</span></div>
+  <div class="m3-media-loading" data-m3-preview-loading hidden><strong>Đang tải preview…</strong><span>Media vẫn ở trong Hub; chờ player xác nhận metadata.</span></div>
+  <div class="m3-media-error" data-m3-preview-error hidden><strong>Không thể tải preview</strong><span data-m3-preview-error-text>Kiểm tra artifact hoặc chọn tệp khác.</span></div>
 </div>`;
 
 const renderProgress = (job, { escapeHtml, formatStatus, statusPill, staleJob = null }) => {
@@ -79,10 +81,10 @@ const renderVisionPanel = (definition, model, deps) => {
   const note = definition.id === "groundingdino" ? "Prompt ngắn được gửi đến Grounding DINO; boxes có thể được dùng tiếp trong SAM2." : definition.id === "rfdetr" ? "RF-DETR nhận ảnh nguồn dùng chung và trả detection có score nếu worker cung cấp." : "OmniParser nhận screenshot/ảnh nguồn dùng chung và trả vùng tương tác khi worker hỗ trợ.";
   return `<section class="m3-tool-panel card" data-vision-tool-panel="${escapeHtml(definition.id)}" role="tabpanel" aria-label="${escapeHtml(definition.label)}">
     <div class="m3-tool-panel__head"><div><h2>${escapeHtml(definition.label)}</h2><p>${escapeHtml(note)}</p></div><span class="status-pill" data-status="${escapeHtml(definition.status)}">${escapeHtml(definition.statusLabel)}</span></div>
-    <form data-job-form data-m3-job-form data-tool="${escapeHtml(definition.tool)}" class="stack" data-workspace-form="vision" data-workspace-tool="${escapeHtml(definition.id)}">
+    <form id="vision-job-form-${escapeHtml(definition.id)}" data-job-form data-m3-job-form data-tool="${escapeHtml(definition.tool)}" class="stack" data-workspace-form="vision" data-workspace-tool="${escapeHtml(definition.id)}">
       ${controls}
       <p class="small m3-tool-readiness">${escapeHtml(definition.reason)} ${escapeHtml(definition.action)}</p>
-      <div class="form-actions">${button(definition.runLabel, "button--primary")}</div>${formResult(`vision-${definition.id}-form-result`)}
+      ${formResult(`vision-${definition.id}-form-result`)}
     </form>
   </section>`;
 };
@@ -104,23 +106,31 @@ export function createVisionRenderer(deps) {
     });
     const annotation = model.job?.result?.annotation || model.job?.result?.vision_annotation;
     const source = sourceFor(model);
-    const tabs = definitions.map((definition) => `<button class="tab ${definition.id === selected ? "is-selected" : ""}" type="button" role="tab" data-vision-tool="${escapeHtml(definition.id)}" aria-selected="${definition.id === selected}">${escapeHtml(definition.label)}<small>${escapeHtml(definition.statusLabel)}</small></button>`).join("");
+    const tabs = definitions.map((definition) => `<button class="tab ${definition.id === selected ? "is-selected" : ""}" type="button" role="tab" data-vision-tool="${escapeHtml(definition.id)}" data-vision-run-label="${escapeHtml(definition.runLabel)}" aria-selected="${definition.id === selected}">${escapeHtml(definition.label)}<small>${escapeHtml(definition.statusLabel)}</small></button>`).join("");
     const results = renderProgress(model.job, { escapeHtml, formatStatus, statusPill, staleJob: model.staleJob });
     const selectedDefinition = definitions.find((definition) => definition.id === selected) || definitions[0];
+    const settingsExpanded = model.settingsExpanded === true;
+    const primaryDisabled = String(selectedDefinition.status).toLowerCase() !== "operational" ? " disabled data-readiness-gate=\"true\" aria-disabled=\"true\"" : "";
     return heading("VISION", "Vision Studio", "Một workspace chung cho OmniParser, RF-DETR và Grounding DINO: chọn input, xem preview, theo dõi job và nhận artifact ngay tại đây.") + `
       <section class="m3-tool-workspace" data-m3-workspace="vision" data-m3-workspace-key="vision" data-active-tool="${escapeHtml(selected)}">
-        <div class="m3-workspace__inputs m3-workspace__toolbar">
-          ${card("Đầu vào dùng chung", `${file("Ảnh hoặc screenshot", "source_artifact_id", "image/*")}<p class="small">Upload đi qua Artifact Store; các tab Vision dùng cùng một artifact opaque và không sao chép output ngoài Store.</p>`)}
-          <section class="m3-tool-tabs" role="tablist" aria-label="Công cụ Vision">${tabs}</section>
-          <div class="m3-selected-tool-settings" data-vision-active-settings="${escapeHtml(selectedDefinition.id)}">${renderVisionPanel(selectedDefinition, model, { ...deps, formResult, escapeHtml })}</div>
+        <div class="m3-command-strip m3-workspace__inputs" data-m3-command-strip>
+          <div class="m3-command-strip__source">${file("Ảnh hoặc screenshot", "source_artifact_id", "image/*")}</div>
+          <div class="m3-command-strip__tool"><strong data-m3-active-tool-label>${escapeHtml(selectedDefinition.label)}</strong><div class="m3-command-strip__tools" role="tablist" aria-label="Công cụ Vision">${tabs}</div></div>
+          <div class="m3-command-strip__readiness"><strong data-m3-readiness>${escapeHtml(selectedDefinition.statusLabel)}</strong><span data-m3-readiness-reason>${escapeHtml(selectedDefinition.reason)}</span></div>
+          <div class="m3-command-strip__actions"><button class="button button--primary" type="submit" form="vision-job-form-${escapeHtml(selected)}" data-m3-primary-action${primaryDisabled}>${escapeHtml(selectedDefinition.runLabel)}</button><button class="button button--compact" type="button" data-m3-settings-toggle="vision" aria-controls="m3-vision-settings" aria-expanded="${String(settingsExpanded)}">${settingsExpanded ? "Thu gọn thiết lập" : "Thiết lập"}</button></div>
         </div>
-        <div class="m3-workspace__canvas">
-          ${card("Canvas / preview", `${renderMediaStage(source, { vision: true })}<p class="small m3-canvas-hint">Preview chỉ xem tại route hiện tại. Chọn detection để highlight box; click ảnh không mở file picker. Result contract: <code>vision.annotation.v1</code>.</p>`)}
-        </div>
-        <div class="m3-workspace__results">
-          ${card("Tiến trình, kết quả và artifact", `<div data-workspace-job-result>${results}</div>`)}
-          ${card("Detections", `<div data-vision-detection-result>${renderDetectionList(annotation, model, escapeHtml)}</div>`, "", "card--flat")}
-          ${annotation ? card("Projection opaque", `<dl class="m3-contract-summary"><div><dt>Contract</dt><dd>${escapeHtml(annotation.schema_version || "vision.annotation.v1")}</dd></div><div><dt>Source artifact</dt><dd>${escapeHtml(annotation.source_artifact_id || "—")}</dd></div><div><dt>Detections</dt><dd>${escapeHtml(String((annotation.detections || []).length))}</dd></div></dl>${artifactList(model.job?.result || {})}`) : ""}
+        <div class="m3-workspace__body" data-m3-scroll-region>
+          <div class="m3-workspace__canvas">
+            ${card("Canvas / preview", `${renderMediaStage(source, { vision: true })}<p class="small m3-canvas-hint">Preview chỉ xem tại route hiện tại. Chọn detection để highlight box; click ảnh không mở file picker. Result contract: <code>vision.annotation.v1</code>.</p>`)}
+          </div>
+          <div class="m3-workspace__results">
+            <section class="m3-workspace__settings" id="m3-vision-settings" data-m3-settings="vision"${settingsExpanded ? "" : " hidden"}>
+              <div class="m3-selected-tool-settings" data-vision-active-settings="${escapeHtml(selectedDefinition.id)}">${definitions.map((definition) => renderVisionPanel(definition, model, { ...deps, formResult, escapeHtml })).join("")}</div>
+            </section>
+            ${card("Tiến trình, kết quả và artifact", `<div data-workspace-job-result>${results}</div>`)}
+            ${card("Detections", `<div data-vision-detection-result>${renderDetectionList(annotation, model, escapeHtml)}</div>`, "", "card--flat")}
+            ${annotation ? card("Projection opaque", `<dl class="m3-contract-summary"><div><dt>Contract</dt><dd>${escapeHtml(annotation.schema_version || "vision.annotation.v1")}</dd></div><div><dt>Source artifact</dt><dd>${escapeHtml(annotation.source_artifact_id || "—")}</dd></div><div><dt>Detections</dt><dd>${escapeHtml(String((annotation.detections || []).length))}</dd></div></dl>${artifactList(model.job?.result || {})}`) : ""}
+          </div>
         </div>
       </section>`;
   };

@@ -121,6 +121,7 @@ api_key*
 *.bak
 *.swp
 *.lnk
+/update-state/
 .DS_Store
 Thumbs.db
 

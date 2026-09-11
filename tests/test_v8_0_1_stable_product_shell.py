@@ -12,7 +12,7 @@ from unittest.mock import patch
 import os
 
 from src.app.desktop_lifecycle import DesktopCloseController
-from src.app.stable_launcher import _wait_for_pending_health
+from src.app.stable_launcher import _run_onedir_cold_start_smoke, _wait_for_pending_health
 from src.app.stable_shell import (
     APP_USER_MODEL_ID,
     POINTER_SCHEMA,
@@ -80,6 +80,55 @@ class StableProductShellTests(unittest.TestCase):
         marker.unlink()
         self.assertTrue(_wait_for_pending_health(root, Process(None), timeout_seconds=1))
 
+    def test_onedir_smoke_waits_for_process_exit_after_owned_termination(self) -> None:
+        class Process:
+            def __init__(self):
+                self.returncode = None
+                self.wait_called = False
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.wait_called = True
+                self.returncode = 0
+                return self.returncode
+
+        with tempfile.TemporaryDirectory(prefix="lah-801-onedir-smoke-close-") as temp:
+            root = Path(temp)
+            app = root / "app"
+            app.mkdir()
+            result = root / "smoke-result.json"
+            stop = root / "smoke-stop"
+            stop.write_bytes(b"")
+            process = Process()
+            plan = type("Plan", (), {
+                "app_root": root,
+                "app_payload": app,
+                "runtime_pythonw": root / "pythonw.exe",
+                "environment": {
+                    "LOCALAIHUB_BUILD_SHA": "a" * 40,
+                    "LOCALAIHUB_BUILD_PAYLOAD": "main-" + "a" * 12,
+                },
+            })()
+            with (
+                patch.dict(os.environ, {
+                    "LOCALAIHUB_ONEDIR_SMOKE_RESULT": str(result),
+                    "LOCALAIHUB_ONEDIR_SMOKE_STOP": str(stop),
+                    "LOCALAIHUB_PORT": "28769",
+                }, clear=False),
+                patch("src.app.stable_launcher.subprocess.Popen", return_value=process),
+                patch("src.app.stable_launcher._smoke_read", side_effect=[
+                    json.dumps({"status": "healthy", "build_source_commit": "a" * 40, "build_payload_id": "main-" + "a" * 12}).encode(),
+                    b'<title>Local AI Hub</title><script src="/ui/app.js"></script>',
+                    json.dumps({"status": "completed"}).encode(),
+                ]),
+                patch("src.app.stable_launcher.terminate_owned_process"),
+            ):
+                self.assertEqual(_run_onedir_cold_start_smoke(plan), 0)
+            self.assertTrue(process.wait_called)
+            self.assertTrue(json.loads(result.read_text(encoding="utf-8"))["normal_close"])
+
     def test_stable_launcher_resolves_bundled_runtime_and_data_root(self) -> None:
         root, data, _pointer = self._fixture()
         plan = resolve_launch_plan(root, allow_test_root=True)
@@ -123,7 +172,11 @@ class StableProductShellTests(unittest.TestCase):
                 (bundle / "_internal" / "support.dll").write_bytes(b"support")
                 return type("Result", (), {"returncode": 0})()
 
-            with patch.object(build_stable_launcher.shutil, "which", return_value="pyinstaller.exe"), patch.object(build_stable_launcher.subprocess, "run", side_effect=run) as invoked:
+            with (
+                patch.object(build_stable_launcher, "resolve_source_commit", return_value="a" * 40),
+                patch.object(build_stable_launcher.shutil, "which", return_value="pyinstaller.exe"),
+                patch.object(build_stable_launcher.subprocess, "run", side_effect=run) as invoked,
+            ):
                 executable = build_stable_launcher.build(output_dir)
             command = invoked.call_args.args[0]
             self.assertIn("--onedir", command)

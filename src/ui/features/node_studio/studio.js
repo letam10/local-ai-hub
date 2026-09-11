@@ -481,7 +481,7 @@ const NODE_OUTPUT_STATE_HEADER_HEIGHT = 22;
 const NODE_OUTPUT_STATE_ROW_HEIGHT = 18;
 const NODE_INLINE_MIN_HEIGHT = 28;
 const NODE_INLINE_MULTILINE_MAX_HEIGHT = 92;
-const NODE_INLINE_EDITOR_MAX_HEIGHT = 240;
+const NODE_PROMPT_EDITOR_MAX_HEIGHT = "min(48vh, 520px)";
 
 const finiteOr = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
 
@@ -498,6 +498,38 @@ export function normalizeNodeSize(value, fallback = { width: NODE_MIN_WIDTH, hei
     width: Math.round(Math.max(NODE_MIN_WIDTH, Math.min(NODE_MAX_WIDTH, width))),
     height: Math.round(Math.max(NODE_MIN_HEIGHT, Math.min(NODE_MAX_HEIGHT, height))),
   };
+}
+
+/**
+ * Keep the Hub authoring contract stable across the bundled LiteGraph build.
+ * The upstream selection helpers leave deselected nodes in selected_nodes and
+ * collapse a multi-selection before a drag starts.  Both cases make the
+ * visible selection disagree with the nodes that would be moved.
+ */
+export function installLiteGraphSelectionCompatibility(canvas) {
+  if (!canvas || canvas.__hubSelectionCompatibilityInstalled) return canvas;
+  canvas.__hubSelectionCompatibilityInstalled = true;
+  const nativeDeselectNode = typeof canvas.deselectNode === "function" ? canvas.deselectNode.bind(canvas) : null;
+  if (nativeDeselectNode) {
+    canvas.deselectNode = (node) => {
+      const result = nativeDeselectNode(node);
+      if (node?.id !== undefined && canvas.selected_nodes) delete canvas.selected_nodes[node.id];
+      return result;
+    };
+  }
+  const nativeProcessNodeSelected = typeof canvas.processNodeSelected === "function" ? canvas.processNodeSelected.bind(canvas) : null;
+  if (nativeProcessNodeSelected) {
+    canvas.processNodeSelected = (node, event) => {
+      const additive = Boolean(event?.shiftKey || event?.ctrlKey || event?.metaKey || canvas.multi_select);
+      const selectedCount = Object.keys(canvas.selected_nodes || {}).length;
+      if (node?.is_selected && !additive && selectedCount > 1) {
+        canvas.current_node = node;
+        return;
+      }
+      return nativeProcessNodeSelected(node, event);
+    };
+  }
+  return canvas;
 }
 
 /**
@@ -1743,6 +1775,8 @@ class HubGraphEditor {
     const anchorX = canvasRect.left - shellRect.left + Number(offset[0] || 0) + (Number(state.node.pos?.[0] || 0) + 8) * scale;
     const anchorY = canvasRect.top - shellRect.top + Number(offset[1] || 0) + (Number(state.node.pos?.[1] || 0) + widgetY) * scale;
     const maxWidth = Math.max(220, Math.min(360, shell.clientWidth - 16));
+    state.panel.dataset.anchorNodeId = String(state.node.id ?? "");
+    state.panel.dataset.anchorPosition = `${Math.round(anchorX)},${Math.round(anchorY)}`;
     state.panel.style.width = `${maxWidth}px`;
     const panelWidth = state.panel.offsetWidth || maxWidth;
     const panelHeight = state.panel.offsetHeight || 160;
@@ -1828,11 +1862,14 @@ class HubGraphEditor {
     if (this.destroyed || !node || !control) return false;
     if (this.inlineEditor && !this.commitInlineEditor()) return false;
     const panel = document.createElement("div");
-    panel.className = "graph-inline-editor";
+    const anchoredPrompt = control.multiline || control.control === "prompt" || /prompt/i.test(String(property.name || ""));
+    panel.className = anchoredPrompt ? "graph-node-prompt-editor" : "graph-inline-editor";
     panel.setAttribute("data-graph-inline-editor", "true");
+    panel.setAttribute("data-prompt-editor-mode", anchoredPrompt ? "persistent-anchored" : "inline");
+    panel.setAttribute("data-outside-click", "commit");
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-label", control.label || property.name);
-    panel.style.maxHeight = `${NODE_INLINE_EDITOR_MAX_HEIGHT}px`;
+    panel.style.maxHeight = anchoredPrompt ? NODE_PROMPT_EDITOR_MAX_HEIGHT : "min(36vh, 360px)";
     const label = document.createElement("label");
     label.className = "graph-inline-editor__label";
     label.textContent = control.label || property.name;
@@ -1871,7 +1908,7 @@ class HubGraphEditor {
       field.append(row);
     } else if (control.multiline) {
       input = document.createElement("textarea");
-      input.rows = 4;
+      input.rows = 8;
       input.value = String(initial);
       input.maxLength = Number.isFinite(Number(control.maxLength)) ? Number(control.maxLength) : 20000;
       if (control.placeholder) input.placeholder = control.placeholder;
@@ -1948,11 +1985,20 @@ class HubGraphEditor {
     exactInput?.addEventListener("keydown", handleEditorKeydown);
     state.outsideHandler = (event) => {
       if (!this.inlineEditor || panel.contains(event.target)) return;
+      // A middle-button gesture is graph pan, not a deliberate outside click;
+      // keep the anchored prompt alive while the canvas viewport moves.
+      if (event.button !== undefined && event.button !== 0) return;
       const committed = this.commitInlineEditor();
       event.preventDefault();
       event.stopImmediatePropagation();
       if (!committed) input?.focus();
     };
+    // Pointer exit is not a close signal.  The prompt editor is anchored to
+    // the selected node and remains available while the graph, minimap or
+    // pointer focus moves elsewhere; only the documented outside pointerdown
+    // commit rule closes it.
+    panel.addEventListener("pointerleave", () => { state.pointerLeft = true; }, { signal: this.abort.signal });
+    panel.addEventListener("pointerenter", () => { state.pointerLeft = false; }, { signal: this.abort.signal });
     state.resizeHandler = () => this.positionInlineEditor();
     window.addEventListener("pointerdown", state.outsideHandler, true);
     window.addEventListener("resize", state.resizeHandler, true);
@@ -2681,6 +2727,7 @@ class HubGraphEditor {
     this.liteGraph = new globalThis.LiteGraph.LGraph();
     const pointereventsMethod = globalThis.LiteGraph.getPointerEventsMethod?.(this.canvasElement, "pointer") || "mouse";
     this.liteCanvas = new globalThis.LiteGraph.LGraphCanvas(this.canvasElement, this.liteGraph, { autoresize: false, pointerevents_method: pointereventsMethod });
+    installLiteGraphSelectionCompatibility(this.liteCanvas);
     this.liteCanvas.allow_dragcanvas = true;
     this.liteCanvas.allow_dragnodes = true;
     this.liteCanvas.allow_reconnect_links = true;
@@ -2703,7 +2750,7 @@ class HubGraphEditor {
       if (this.liteCanvas.node_dragged || this.liteCanvas.resizing_node || this.liteCanvas.dragging_canvas || this.liteCanvas.selected_group || this.liteCanvas.connecting_node) this.scheduleMinimapUpdate();
       if (this.inlineEditor) this.positionInlineEditor();
     };
-    this.liteCanvas.ds.onredraw = () => this.scheduleMinimapUpdate();
+    this.liteCanvas.ds.onredraw = () => { this.scheduleMinimapUpdate(); this.positionInlineEditor(); };
     // LiteGraph's default processContextMenu appends a document-level menu.
     // Keep LiteGraph as the only editor while routing both targets through the
     // Hub-owned, container-bounded menu below.
@@ -3826,9 +3873,17 @@ class HubGraphEditor {
     const nodes = this.liteGraph._nodes;
     if (!nodes.length) return;
     const bounds = graphBounds(nodes, 32);
-    const usableWidth = Math.max(240, this.canvasElement.width - 210);
+    // The minimap is an overlay, not a reserved column.  Reserving its width
+    // here pushes the left-most node outside the canvas at the native 1280px
+    // layout and makes Fit fail its promise to keep the graph usable.
+    const usableWidth = Math.max(240, this.canvasElement.width - 24);
     const usableHeight = Math.max(240, this.canvasElement.height - 150);
-    const zoom = Math.max(0.35, Math.min(1.15, Math.min(usableWidth / Math.max(1, bounds.width), usableHeight / Math.max(1, bounds.height))));
+    // At the native 1280px layout the five-node preset is wider than the
+    // canvas.  A 0.35 floor leaves the first node clipped even after reserving
+    // only a small overlay margin, so allow Fit to enter the compact semantic
+    // zoom band while keeping node dimensions and the readable normal zoom
+    // unchanged.
+    const zoom = Math.max(0.25, Math.min(1.15, Math.min(usableWidth / Math.max(1, bounds.width), usableHeight / Math.max(1, bounds.height))));
     this.liteCanvas.ds.scale = zoom;
     this.liteCanvas.ds.offset[0] = usableWidth / (2 * zoom) - (bounds.left + bounds.right) / 2;
     this.liteCanvas.ds.offset[1] = usableHeight / (2 * zoom) - (bounds.top + bounds.bottom) / 2;

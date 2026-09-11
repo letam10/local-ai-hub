@@ -49,6 +49,11 @@ def launch(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) 
     return ApiResponse(status, payload)
 
 
+def close(request: ApiRequest, context: ApiContext, params: Mapping[str, str]) -> ApiResponse:
+    status, payload = context.call("close_application", params["application_id"], params["instance_id"])
+    return ApiResponse(status, payload)
+
+
 def register(router: Router) -> None:
     owner = "src/services/api/routes/compatibility.py"
     router.register(route_id="compat.models", method="GET", path="/models", domain="models", owner=owner, handler=models)
@@ -65,4 +70,13 @@ def register(router: Router) -> None:
         owner=owner,
         handler=launch,
         status_codes=(202, 404, 409, 500, 503),
+    )
+    router.register(
+        route_id="applications.close",
+        method="POST",
+        path="/api/applications/{application_id}/instances/{instance_id}/close",
+        domain="applications",
+        owner=owner,
+        handler=close,
+        status_codes=(200, 400, 404, 409, 500, 503),
     )
