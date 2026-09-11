@@ -119,9 +119,10 @@ jobs:
           if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Stable launcher executable is missing" }
           $actual = (git rev-parse HEAD).Trim()
           if ($actual -ne $env:EXPECTED_SOURCE_SHA) { throw "Launcher checkout does not match expected source SHA" }
+          $workflow_run_id = [int64]$env:GITHUB_RUN_ID
           $metadata = Get-Content -LiteralPath "dist/stable-launcher/launcher-build.json" -Raw | ConvertFrom-Json
           if ($metadata.source_commit -ne $env:EXPECTED_SOURCE_SHA) { throw "Launcher metadata source SHA mismatch" }
-          if ([int64]$metadata.workflow_run_id -ne [int64]$env:GITHUB_RUN_ID) { throw "Launcher metadata workflow run mismatch" }
+          if ([int64]$metadata.workflow_run_id -ne $workflow_run_id) { throw "Launcher metadata workflow run mismatch" }
           if ($metadata.format -ne "onedir" -or [int]$metadata.file_count -lt 2 -or [int64]$metadata.total_bytes -le 0) { throw "Launcher metadata is incomplete" }
           # Include the LocalAIHub directory itself; the assembler requires
           # the archive root to remain the explicit onedir bundle identity.

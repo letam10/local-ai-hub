@@ -81,6 +81,12 @@ def _write_launcher_artifact(root: Path, *, source: str = PR_HEAD, workflow_run:
     })
 
 
+def _temp_root() -> Path:
+    root = REPO / "Temp"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 class Post124BuildProvenanceTests(unittest.TestCase):
     def test_pr_head_is_explicitly_selected_over_pull_request_merge_sha(self) -> None:
         with (
@@ -96,12 +102,12 @@ class Post124BuildProvenanceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "SOURCE_COMMIT_MISMATCH"):
                 build_main_update.build(REPO / "Temp" / "post124-provenance-no-build", expected_source_sha=OTHER_SOURCE)
         with patch.object(build_stable_launcher, "resolve_source_commit", side_effect=ValueError("SOURCE_COMMIT_MISMATCH")):
-            with tempfile.TemporaryDirectory(dir=REPO / "Temp", prefix="post124-launcher-provenance-") as temporary:
+            with tempfile.TemporaryDirectory(dir=_temp_root(), prefix="post124-launcher-provenance-") as temporary:
                 with self.assertRaisesRegex(ValueError, "SOURCE_COMMIT_MISMATCH"):
                     build_stable_launcher.build(Path(temporary), expected_source_sha=OTHER_SOURCE)
 
     def test_assembler_checks_expected_source_run_and_manifest_archive_integrity(self) -> None:
-        with tempfile.TemporaryDirectory(dir=REPO / "Temp", prefix="post124-assembler-provenance-") as temporary:
+        with tempfile.TemporaryDirectory(dir=_temp_root(), prefix="post124-assembler-provenance-") as temporary:
             root = Path(temporary)
             app = root / "app"
             launcher = root / "launcher"
