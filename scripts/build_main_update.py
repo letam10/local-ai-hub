@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 
 from src.shared.version import PRODUCT_VERSION
 from src.shared.runtime_identity import API_PROTOCOL_VERSION
+from src.shared.source_provenance import resolve_source_commit
 
 SCHEMA = "local-ai-hub-main-update.v1"
 UPDATE_CONTRACT_SCHEMA = "local-ai-hub-update-contract.v1"
@@ -37,6 +38,8 @@ MAX_FILES = 12_000
 MAX_RUNTIME_FILES = 50_000
 MAX_RUNTIME_BYTES = 1_000_000_000
 COMPOSITE_SCHEMA = "local-ai-hub-composite-update.v1"
+SOURCE_ATTESTATION_SCHEMA = "local-ai-hub-source-attestation.v1"
+SOURCE_ATTESTATION_NAME = "source-attestation.json"
 MAX_LAUNCHER_FILES = 10_000
 MAX_LAUNCHER_BYTES = 500 * 1024 * 1024
 
@@ -126,6 +129,22 @@ def _canonical(value: object) -> bytes:
     return (json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
 
 
+def _workflow_run_id(value: object, *, required: bool = False) -> int | None:
+    if value is None:
+        if not required:
+            return None
+        value = os.environ.get("GITHUB_RUN_ID")
+    if isinstance(value, bool):
+        raise RuntimeError("workflow_run_id_invalid")
+    try:
+        result = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise RuntimeError("workflow_run_id_required") from None
+    if result <= 0:
+        raise RuntimeError("workflow_run_id_invalid")
+    return result
+
+
 def build(
     output: Path,
     *,
@@ -133,6 +152,7 @@ def build(
     runtime_root: Path | None = None,
     launcher_bundle: Path | None = None,
     workflow_run_id: int | None = None,
+    expected_source_sha: str | None = None,
 ) -> dict[str, object]:
     if update_kind not in {"APP_ONLY", "FULL", "APP_AND_LAUNCHER"}:
         raise RuntimeError("update_kind_invalid")
@@ -140,22 +160,19 @@ def build(
         raise RuntimeError("runtime_root_required")
     if update_kind == "APP_AND_LAUNCHER" and launcher_bundle is None:
         raise RuntimeError("launcher_bundle_required")
-    source_commit = os.environ.get("GITHUB_SHA") or git("rev-parse", "HEAD")
-    if len(source_commit) != 40 or any(char not in "0123456789abcdef" for char in source_commit):
-        raise RuntimeError("source_commit_invalid")
+    try:
+        source_commit = resolve_source_commit(ROOT, expected_source_sha)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
     output.mkdir(parents=True, exist_ok=True)
     archive = output / ARCHIVE_NAME
     paths = tracked_files(ROOT)
     runtime = runtime_files(runtime_root) if update_kind == "FULL" and runtime_root is not None else []
     launcher = launcher_files(launcher_bundle) if update_kind == "APP_AND_LAUNCHER" and launcher_bundle is not None else []
-    if update_kind == "APP_AND_LAUNCHER":
-        raw_run_id = workflow_run_id if workflow_run_id is not None else os.environ.get("GITHUB_RUN_ID")
-        try:
-            workflow_run_id = int(raw_run_id)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            raise RuntimeError("workflow_run_id_required") from None
-        if workflow_run_id <= 0:
-            raise RuntimeError("workflow_run_id_invalid")
+    workflow_run_id = _workflow_run_id(
+        workflow_run_id,
+        required=update_kind == "APP_AND_LAUNCHER",
+    )
     runtime_version = os.environ.get("LOCALAIHUB_RUNTIME_VERSION") if update_kind == "FULL" else None
     if update_kind == "FULL" and not runtime_version:
         raise RuntimeError("runtime_version_required")
@@ -255,6 +272,20 @@ def build(
     contract_digest = hashlib.sha256(contract_raw).hexdigest()
     sums_raw = f"{digest}  {ARCHIVE_NAME}\n{contract_digest}  {UPDATE_CONTRACT_NAME}\n".encode("ascii")
     (output / "SHA256SUMS.txt").write_bytes(sums_raw)
+    if update_kind == "APP_ONLY" and workflow_run_id is not None:
+        (output / SOURCE_ATTESTATION_NAME).write_bytes(_canonical({
+            "schema_version": SOURCE_ATTESTATION_SCHEMA,
+            "artifact": "APP_ONLY",
+            "source_commit": source_commit,
+            "payload_id": f"main-{source_commit[:12]}",
+            "workflow_run_id": workflow_run_id,
+            "archive": ARCHIVE_NAME,
+            "archive_sha256": digest,
+            "manifest_sha256": sha256(output / "update-manifest.json"),
+            "contract_sha256": sha256(output / UPDATE_CONTRACT_NAME),
+            "file_count": len(paths),
+            "total_bytes": sum((ROOT / path).stat().st_size for path in paths),
+        }))
     return manifest
 
 
@@ -265,10 +296,12 @@ def main() -> int:
     parser.add_argument("--runtime-root", type=Path)
     parser.add_argument("--launcher-bundle", type=Path)
     parser.add_argument("--workflow-run-id", type=int)
+    parser.add_argument("--expected-source-sha")
     args = parser.parse_args()
     manifest = build(
         Path(args.output), update_kind=args.update_kind, runtime_root=args.runtime_root,
         launcher_bundle=args.launcher_bundle, workflow_run_id=args.workflow_run_id,
+        expected_source_sha=args.expected_source_sha,
     )
     print(json.dumps(manifest, sort_keys=True))
     return 0

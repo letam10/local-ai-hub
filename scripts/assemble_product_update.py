@@ -14,7 +14,15 @@ import hashlib
 import json
 from pathlib import Path
 import stat
+import sys
 import zipfile
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.shared.source_provenance import SOURCE_COMMIT_RE
 
 
 PRODUCT_ID = "LocalAIHub"
@@ -23,6 +31,10 @@ APP_ARCHIVE = "LocalAIHub-main-update.zip"
 OUTPUT_ARCHIVE = APP_ARCHIVE
 CONTRACT_NAME = "update-contract.json"
 MANIFEST_NAME = "update-manifest.json"
+SOURCE_ATTESTATION_NAME = "source-attestation.json"
+APP_UPDATE_SCHEMA = "local-ai-hub-main-update.v1"
+APP_CONTRACT_SCHEMA = "local-ai-hub-update-contract.v1"
+SOURCE_ATTESTATION_SCHEMA = "local-ai-hub-source-attestation.v1"
 SCHEMA = "local-ai-hub-composite-update.v1"
 CONTRACT_SCHEMA = "local-ai-hub-product-update-contract.v1"
 MAX_FILES = 22_000
@@ -87,49 +99,139 @@ def _read_launcher_zip(path: Path, *, metadata_path: Path | None = None) -> tupl
     total = sum(row["size"] for row in rows)
     if len(rows) > MAX_LAUNCHER_FILES or total > MAX_LAUNCHER_BYTES:
         raise RuntimeError("launcher_bounds_exceeded")
-    metadata.update({
-        "schema_version": "local-ai-hub-launcher-bundle.v1",
-        "format": "onedir",
-        "executable_sha256": _sha256_bytes(files["LocalAIHub.exe"]),
-        "tree_manifest_sha256": _sha256_bytes(_canonical(rows)),
-        "file_count": len(rows),
-        "total_bytes": total,
-        "files": rows,
-    })
+    expected_keys = {
+        "schema_version", "source_commit", "workflow_run_id", "format",
+        "executable_sha256", "tree_manifest_sha256", "file_count", "total_bytes", "files",
+    }
+    if set(metadata) != expected_keys:
+        raise RuntimeError("launcher_build_metadata_invalid")
+    if (
+        metadata.get("schema_version") != "local-ai-hub-stable-launcher-build.v1"
+        or metadata.get("format") != "onedir"
+        or not isinstance(metadata.get("source_commit"), str)
+        or SOURCE_COMMIT_RE.fullmatch(str(metadata.get("source_commit"))) is None
+        or isinstance(metadata.get("workflow_run_id"), bool)
+        or not isinstance(metadata.get("workflow_run_id"), int)
+        or metadata.get("workflow_run_id") <= 0
+        or metadata.get("executable_sha256") != _sha256_bytes(files["LocalAIHub.exe"])
+        or metadata.get("tree_manifest_sha256") != _sha256_bytes(_canonical(rows))
+        or metadata.get("file_count") != len(rows)
+        or metadata.get("total_bytes") != total
+        or metadata.get("files") != rows
+    ):
+        raise RuntimeError("launcher_manifest_mismatch")
     return metadata, files
 
 
-def assemble(app_artifact_dir: Path, launcher_artifact_dir: Path, output_dir: Path, *, workflow_run_id: int) -> dict[str, object]:
+def _read_app_artifact(
+    app_root: Path,
+    *,
+    expected_source_sha: str,
+    workflow_run_id: int,
+) -> dict[str, bytes]:
+    manifest_path = _find_file(app_root, MANIFEST_NAME)
+    contract_path = _find_file(app_root, CONTRACT_NAME)
+    attestation_path = _find_file(app_root, SOURCE_ATTESTATION_NAME)
+    archive_path = _find_file(app_root, APP_ARCHIVE)
+    manifest = _read_json(manifest_path)
+    contract = _read_json(contract_path)
+    attestation = _read_json(attestation_path)
+    if (
+        manifest.get("schema_version") != APP_UPDATE_SCHEMA
+        or manifest.get("product_id") != PRODUCT_ID
+        or manifest.get("product_version") != PRODUCT_VERSION
+        or manifest.get("channel") != "main"
+        or manifest.get("source_commit") != expected_source_sha
+        or manifest.get("payload_id") != f"main-{expected_source_sha[:12]}"
+        or manifest.get("runtime_strategy") != "reuse-current"
+        or manifest.get("archive") != APP_ARCHIVE
+        or not isinstance(manifest.get("archive_sha256"), str)
+        or manifest.get("archive_sha256") != _sha256_file(archive_path)
+        or isinstance(manifest.get("file_count"), bool)
+        or not isinstance(manifest.get("file_count"), int)
+        or manifest.get("file_count") < 1
+    ):
+        raise RuntimeError("app_manifest_mismatch")
+    if (
+        contract.get("schema_version") != APP_CONTRACT_SCHEMA
+        or contract.get("update_kind") != "APP_ONLY"
+        or contract.get("source_commit") != expected_source_sha
+    ):
+        raise RuntimeError("app_contract_mismatch")
+    attestation_keys = {
+        "schema_version", "artifact", "source_commit", "payload_id", "workflow_run_id",
+        "archive", "archive_sha256", "manifest_sha256", "contract_sha256", "file_count", "total_bytes",
+    }
+    if (
+        set(attestation) != attestation_keys
+        or attestation.get("schema_version") != SOURCE_ATTESTATION_SCHEMA
+        or attestation.get("artifact") != "APP_ONLY"
+        or attestation.get("source_commit") != expected_source_sha
+        or attestation.get("payload_id") != f"main-{expected_source_sha[:12]}"
+        or attestation.get("workflow_run_id") != workflow_run_id
+        or attestation.get("archive") != APP_ARCHIVE
+        or attestation.get("archive_sha256") != manifest.get("archive_sha256")
+        or attestation.get("manifest_sha256") != _sha256_file(manifest_path)
+        or attestation.get("contract_sha256") != _sha256_file(contract_path)
+    ):
+        raise RuntimeError("app_source_attestation_mismatch")
+    app_files: dict[str, bytes] = {}
+    with zipfile.ZipFile(archive_path, "r") as app_zip:
+        for info in app_zip.infolist():
+            name = info.filename.replace("\\", "/")
+            mode = (info.external_attr >> 16) & 0xFFFF
+            if info.is_dir():
+                continue
+            if (
+                not name.startswith("app/")
+                or name.startswith("/")
+                or "\\" in info.filename
+                or any(part in {"", ".", ".."} for part in name.split("/"))
+                or stat.S_ISLNK(mode)
+            ):
+                raise RuntimeError("app_archive_path_invalid")
+            app_files[name] = app_zip.read(info)
+    app_total = sum(len(data) for data in app_files.values())
+    if (
+        len(app_files) != manifest.get("file_count")
+        or len(app_files) != attestation.get("file_count")
+        or app_total != attestation.get("total_bytes")
+    ):
+        raise RuntimeError("app_archive_manifest_mismatch")
+    return app_files
+
+
+def assemble(
+    app_artifact_dir: Path,
+    launcher_artifact_dir: Path,
+    output_dir: Path,
+    *,
+    workflow_run_id: int,
+    expected_source_sha: str,
+) -> dict[str, object]:
     if type(workflow_run_id) is not int or workflow_run_id <= 0:
         raise RuntimeError("workflow_run_id_invalid")
+    if not isinstance(expected_source_sha, str) or SOURCE_COMMIT_RE.fullmatch(expected_source_sha) is None:
+        raise RuntimeError("expected_source_sha_invalid")
     app_root = app_artifact_dir.absolute()
     launcher_root = launcher_artifact_dir.absolute()
-    app_manifest = _read_json(_find_file(app_root, MANIFEST_NAME))
-    app_commit = app_manifest.get("source_commit")
-    if not isinstance(app_commit, str) or len(app_commit) != 40 or any(char not in "0123456789abcdef" for char in app_commit):
-        raise RuntimeError("source_commit_invalid")
-    app_archive_path = _find_file(app_root, APP_ARCHIVE)
+    app_files = _read_app_artifact(
+        app_root,
+        expected_source_sha=expected_source_sha,
+        workflow_run_id=workflow_run_id,
+    )
     launcher_zip = _find_file(launcher_root, "LocalAIHub-stable-launcher-onedir.zip")
     launcher_metadata_path = _find_file(launcher_root, "launcher-build.json")
     launcher_metadata, launcher_files = _read_launcher_zip(launcher_zip, metadata_path=launcher_metadata_path)
     launcher_commit = launcher_metadata.get("source_commit")
-    if launcher_commit != app_commit:
-        raise RuntimeError("cross_commit_mismatch")
+    if launcher_commit != expected_source_sha:
+        raise RuntimeError("launcher_source_mismatch")
     launcher_run = launcher_metadata.get("workflow_run_id")
-    if isinstance(launcher_run, bool) or not isinstance(launcher_run, int) or launcher_run != workflow_run_id:
-        raise RuntimeError("cross_run_mismatch")
-
-    app_files: dict[str, bytes] = {}
-    with zipfile.ZipFile(app_archive_path, "r") as app_zip:
-        for info in app_zip.infolist():
-            name = info.filename.replace("\\", "/")
-            if info.is_dir():
-                continue
-            if not name.startswith("app/") or name.startswith("/") or "\\" in info.filename or any(part in {"", ".", ".."} for part in name.split("/")):
-                raise RuntimeError("app_archive_path_invalid")
-            app_files[name] = app_zip.read(info)
+    if launcher_run != workflow_run_id:
+        raise RuntimeError("launcher_run_mismatch")
     if not app_files or len(app_files) + len(launcher_files) > MAX_FILES:
         raise RuntimeError("composite_file_count_invalid")
+    app_commit = expected_source_sha
     app_rows = [{"name": name.removeprefix("app/"), "size": len(data), "sha256": _sha256_bytes(data)} for name, data in sorted(app_files.items())]
     app_total = sum(row["size"] for row in app_rows)
     app_digest = _sha256_bytes(_canonical(app_rows))
@@ -208,8 +310,15 @@ def main() -> int:
     parser.add_argument("--launcher-artifact-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--workflow-run-id", type=int, required=True)
+    parser.add_argument("--expected-source-sha", required=True)
     args = parser.parse_args()
-    print(json.dumps(assemble(args.app_artifact_dir, args.launcher_artifact_dir, args.output, workflow_run_id=args.workflow_run_id), sort_keys=True))
+    print(json.dumps(assemble(
+        args.app_artifact_dir,
+        args.launcher_artifact_dir,
+        args.output,
+        workflow_run_id=args.workflow_run_id,
+        expected_source_sha=args.expected_source_sha,
+    ), sort_keys=True))
     return 0
 
 

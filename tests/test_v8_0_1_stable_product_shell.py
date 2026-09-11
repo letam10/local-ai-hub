@@ -172,7 +172,11 @@ class StableProductShellTests(unittest.TestCase):
                 (bundle / "_internal" / "support.dll").write_bytes(b"support")
                 return type("Result", (), {"returncode": 0})()
 
-            with patch.object(build_stable_launcher.shutil, "which", return_value="pyinstaller.exe"), patch.object(build_stable_launcher.subprocess, "run", side_effect=run) as invoked:
+            with (
+                patch.object(build_stable_launcher, "resolve_source_commit", return_value="a" * 40),
+                patch.object(build_stable_launcher.shutil, "which", return_value="pyinstaller.exe"),
+                patch.object(build_stable_launcher.subprocess, "run", side_effect=run) as invoked,
+            ):
                 executable = build_stable_launcher.build(output_dir)
             command = invoked.call_args.args[0]
             self.assertIn("--onedir", command)

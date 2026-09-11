@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import zipfile
 
+import scripts.build_main_update as build_main_update
 from scripts.build_main_update import build
 import src.app.launcher_migration as launcher_migration
 import src.app.update_watchdog as update_watchdog
@@ -228,7 +229,7 @@ class Post123ManagerCorrectionTests(unittest.TestCase):
             (bundle / "_internal").mkdir(parents=True)
             (bundle / "LocalAIHub.exe").write_bytes(b"candidate")
             (bundle / "_internal" / "support.dll").write_bytes(b"support")
-            with patch.dict(os.environ, {"GITHUB_SHA": "a" * 40}, clear=False):
+            with patch.object(build_main_update, "resolve_source_commit", return_value="a" * 40):
                 legacy_dir = root / "legacy"
                 composite_dir = root / "composite"
                 build(legacy_dir, update_kind="APP_ONLY")
@@ -284,7 +285,7 @@ class Post123ManagerCorrectionTests(unittest.TestCase):
             (launcher_source / "_internal").mkdir(parents=True)
             (launcher_source / "LocalAIHub.exe").write_bytes(b"candidate-shell")
             (launcher_source / "_internal" / "support.dll").write_bytes(b"candidate-support")
-            with patch.dict(os.environ, {"GITHUB_SHA": source_commit}, clear=False):
+            with patch.object(build_main_update, "resolve_source_commit", return_value=source_commit):
                 legacy_dir = Path(temporary) / "legacy-artifact"
                 composite_dir = Path(temporary) / "composite-artifact"
                 build(legacy_dir, update_kind="APP_ONLY")
@@ -682,7 +683,7 @@ class Post123ManagerCorrectionTests(unittest.TestCase):
             (bundle / "_internal").mkdir(parents=True)
             (bundle / "LocalAIHub.exe").write_bytes(b"candidate")
             (bundle / "_internal" / "support.dll").write_bytes(b"support")
-            with patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}, clear=False):
+            with patch.object(build_main_update, "resolve_source_commit", return_value="b" * 40):
                 legacy = build(root / "legacy", update_kind="APP_ONLY")
                 composite = build(root / "composite", update_kind=UPDATE_KIND_APP_AND_LAUNCHER, launcher_bundle=bundle, workflow_run_id=123)
             self.assertEqual(set(legacy), {
@@ -917,18 +918,59 @@ class Post123ManagerCorrectionTests(unittest.TestCase):
             launcher_root = root / "launcher-artifact"
             app_root.mkdir()
             (launcher_root / "stable-launcher").mkdir(parents=True)
-            with zipfile.ZipFile(app_root / "LocalAIHub-main-update.zip", "w") as archive:
+            app_archive_path = app_root / "LocalAIHub-main-update.zip"
+            with zipfile.ZipFile(app_archive_path, "w") as archive:
                 info = zipfile.ZipInfo("app/README.md", date_time=(1980, 1, 1, 0, 0, 0))
                 archive.writestr(info, b"app")
-            (app_root / "update-manifest.json").write_text(json.dumps({"source_commit": source_commit}), encoding="utf-8")
+            app_archive_sha = hashlib.sha256(app_archive_path.read_bytes()).hexdigest()
+            app_manifest = {
+                "schema_version": "local-ai-hub-main-update.v1", "product_id": "LocalAIHub",
+                "product_version": "8.0.1", "channel": "main", "source_commit": source_commit,
+                "payload_id": "main-" + source_commit[:12], "runtime_strategy": "reuse-current",
+                "archive": "LocalAIHub-main-update.zip", "archive_sha256": app_archive_sha, "file_count": 1,
+            }
+            app_manifest_path = app_root / "update-manifest.json"
+            app_manifest_path.write_text(json.dumps(app_manifest, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+            app_contract = {
+                "schema_version": "local-ai-hub-update-contract.v1", "update_kind": "APP_ONLY",
+                "source_commit": source_commit,
+            }
+            app_contract_path = app_root / "update-contract.json"
+            app_contract_path.write_text(json.dumps(app_contract, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+            (app_root / "source-attestation.json").write_text(json.dumps({
+                "schema_version": "local-ai-hub-source-attestation.v1", "artifact": "APP_ONLY",
+                "source_commit": source_commit, "payload_id": "main-" + source_commit[:12],
+                "workflow_run_id": 123, "archive": "LocalAIHub-main-update.zip", "archive_sha256": app_archive_sha,
+                "manifest_sha256": hashlib.sha256(app_manifest_path.read_bytes()).hexdigest(),
+                "contract_sha256": hashlib.sha256(app_contract_path.read_bytes()).hexdigest(),
+                "file_count": 1, "total_bytes": 3,
+            }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
             with zipfile.ZipFile(launcher_root / "LocalAIHub-stable-launcher-onedir.zip", "w") as archive:
                 for name, data in (("LocalAIHub/LocalAIHub.exe", b"exe"), ("LocalAIHub/_internal/support.dll", b"support")):
                     info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
                     archive.writestr(info, data)
+            launcher_rows = [
+                {"name": "LocalAIHub.exe", "size": 3, "sha256": hashlib.sha256(b"exe").hexdigest()},
+                {"name": "_internal/support.dll", "size": 7, "sha256": hashlib.sha256(b"support").hexdigest()},
+            ]
             (launcher_root / "stable-launcher" / "launcher-build.json").write_text(
-                json.dumps({"source_commit": source_commit, "workflow_run_id": 123}), encoding="utf-8"
+                json.dumps({
+                    "schema_version": "local-ai-hub-stable-launcher-build.v1", "source_commit": source_commit,
+                    "workflow_run_id": 123, "format": "onedir",
+                    "executable_sha256": launcher_rows[0]["sha256"], "files": launcher_rows,
+                    "file_count": 2, "total_bytes": 10,
+                    "tree_manifest_sha256": hashlib.sha256((json.dumps(
+                        launcher_rows, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+                    ) + "\n").encode("utf-8")).hexdigest(),
+                }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"
             )
-            result = assemble(app_root, launcher_root, root / "assembled", workflow_run_id=123)
+            result = assemble(
+                app_root,
+                launcher_root,
+                root / "assembled",
+                workflow_run_id=123,
+                expected_source_sha=source_commit,
+            )
             self.assertEqual(result["source_commit"], source_commit)
             self.assertEqual(result["workflow_run_id"], 123)
             self.assertEqual(result["launcher_format"], "onedir")

@@ -7,6 +7,7 @@ import unittest
 import zipfile
 from unittest.mock import patch
 
+import scripts.build_main_update as build_main_update
 from scripts.build_main_update import build
 from src.app.launcher_migration import (
     activate_launcher_bundle,
@@ -33,7 +34,7 @@ class CompositeProductContractTests(unittest.TestCase):
             (bundle / "_internal").mkdir(parents=True)
             (bundle / "LocalAIHub.exe").write_bytes(b"launcher")
             (bundle / "_internal" / "support.dll").write_bytes(b"support")
-            with patch.dict("os.environ", {"GITHUB_SHA": "a" * 40}, clear=False):
+            with patch.object(build_main_update, "resolve_source_commit", return_value="a" * 40):
                 manifest = build(root / "composite", update_kind=UPDATE_KIND_APP_AND_LAUNCHER, launcher_bundle=bundle, workflow_run_id=123)
             self.assertEqual(manifest["schema_version"], "local-ai-hub-composite-update.v1")
             self.assertEqual(manifest["workflow_run_id"], 123)
